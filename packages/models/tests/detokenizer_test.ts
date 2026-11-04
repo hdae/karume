@@ -1,17 +1,18 @@
-// 停止文字列フィルタ（`src/text/detokenizer.ts`）の**失敗の分類**だけを見る門。GPU も実資産も
-// 要らない。逐次復号そのものの挙動は `gemma4_chat_test.ts` が縛っており、ここで重ねない。
+// A check of only the **failure classification** of the stop-string filter (`src/text/detokenizer.ts`). Needs
+// neither a GPU nor real assets. The behaviour of incremental decoding itself is pinned by `gemma4_chat_test.ts`
+// and not repeated here.
 //
-// 縛るのは ADR 0107 の分類: 停止文字列の指定は呼び手が書いた値なので、空文字列も重複も
-// `ModelInputError`（HTTP サーバーなら 400）で落ちる。型が家族ごとに割れていると、複数家族を
-// 載せたホストは 400 を切り出すのに**メッセージの綴りを読む**しかなくなる。
+// It pins the classification of ADR 0107: the stop strings are a value the caller wrote, so both an empty string
+// and a duplicate fail with `ModelInputError` (400 for an HTTP server). If the type differed per family, a host
+// serving several families could only tell 400 apart by **reading the message text**.
 
 import { assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import { createStopStringFilter } from "../src/text/detokenizer.ts";
 
-describe("createStopStringFilter: 受理できない停止文字列は入力起因で落ちる", () => {
-  it("空文字列（常に一致する = 1 文字も出せない指定）", () => {
+describe("createStopStringFilter: unacceptable stop strings fail as caused by the input", () => {
+  it("empty string (always matches = a setting that can emit not a single character)", () => {
     assertThrows(
       () => createStopStringFilter(["END", ""]),
       ModelInputError,
@@ -19,7 +20,7 @@ describe("createStopStringFilter: 受理できない停止文字列は入力起�
     );
   });
 
-  it("重複（同じ条件を 2 度書いた以上の意味を持てない）", () => {
+  it("duplicate (cannot mean more than writing the same condition twice)", () => {
     assertThrows(
       () => createStopStringFilter(["END", "END"]),
       ModelInputError,
@@ -27,22 +28,22 @@ describe("createStopStringFilter: 受理できない停止文字列は入力起�
     );
   });
 
-  it("受理される指定は通る（門が恒真に落ちていないことの対）", () => {
+  it("an accepted setting passes (the counterpart showing the check does not always fail)", () => {
     createStopStringFilter([]);
     createStopStringFilter(["END", "\n\n"]);
   });
 });
 
-describe("createStopStringFilter: 型を外した指定は暗黙変換せずに入力起因で落ちる", () => {
-  /** 型を外した JS / JSON 由来の指定（TS の型検査を通らない値を門へ届ける）。 */
+describe("createStopStringFilter: a setting of the wrong type fails as caused by the input without implicit conversion", () => {
+  /** A setting of the wrong type from JS / JSON (delivers a value the TS type check would not pass to the check). */
   const untyped = (value: unknown): readonly string[] => value as readonly string[];
 
-  it("文字列そのもの（文字の配列に展開して最初の 1 文字で止めない）", () => {
-    // "END" を展開すると "E" / "N" / "D" の 3 本になり、"SENTENCE" を最初の E で止める。
+  it("a string itself (not spread into an array of characters that stops at the first character)", () => {
+    // Spreading "END" gives the 3 entries "E" / "N" / "D", which would stop "SENTENCE" at the first E.
     assertThrows(() => createStopStringFilter(untyped("END")), ModelInputError, "stopStrings");
   });
 
-  it("配列でない iterable（Set）", () => {
+  it("an iterable that is not an array (Set)", () => {
     assertThrows(
       () => createStopStringFilter(untyped(new Set(["END"]))),
       ModelInputError,
@@ -50,8 +51,8 @@ describe("createStopStringFilter: 型を外した指定は暗黙変換せずに�
     );
   });
 
-  it("文字列でない要素（indexOf の暗黙変換で別の位置に止めない）", () => {
-    // 123 は "123" として扱われ、"x123y" を "x" で止める。
+  it("an element that is not a string (does not stop at another position through indexOf's implicit conversion)", () => {
+    // 123 would be treated as "123" and stop "x123y" at "x".
     for (const element of [123, null, undefined]) {
       assertThrows(
         () => createStopStringFilter(untyped(["END", element])),
@@ -62,8 +63,8 @@ describe("createStopStringFilter: 型を外した指定は暗黙変換せずに�
     }
   });
 
-  it("疎な配列の穴（forEach のように飛ばして黙って捨てない）", () => {
-    // [, "END"] の 0 番は穴。穴を飛ばすと "END" だけの指定として受理されてしまう。
+  it("a hole in a sparse array (not silently skipped and dropped as forEach does)", () => {
+    // Index 0 of [, "END"] is a hole. Skipping holes would accept it as a setting of "END" alone.
     const sparse: (string | undefined)[] = [];
     sparse[1] = "END";
     assertThrows(

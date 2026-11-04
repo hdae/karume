@@ -1,10 +1,11 @@
-// Wan2.1 の前処理（src/wan/text/prompt-clean.ts）の乱択・掃引テストが共有する読み口と再生器。
+// The reader and the replay generator shared by the random and sweep tests of the Wan2.1
+// preprocessing (src/wan/text/prompt-clean.ts).
 //
-// 期待はフィクスチャ `wan-text/prompt-clean-sweep.json`（recipe
-// `tools/export-recipes/wan/umt5_tokenizer.py` が上流から採った digest）が持ち、ここは recipe と
-// **同じ手順**で同じ列を作って digest を取るだけ（`wan/prompt_clean.py` の `XorShift32` /
-// `fuzz_strings` / `digest` / `sweep_blocks` の写経）。手順がずれれば digest が全部外れる（緑のまま
-// 別の列を見ることはない）。
+// The expectations live in the fixture `wan-text/prompt-clean-sweep.json` (digests that the recipe
+// `tools/export-recipes/wan/umt5_tokenizer.py` took from upstream); this file only builds the same
+// sequences with **the same procedure** as the recipe and takes their digests (a copy of
+// `XorShift32` / `fuzz_strings` / `digest` / `sweep_blocks` of `wan/prompt_clean.py`). If the
+// procedure drifts, every digest misses (it never stays green while looking at other sequences).
 
 import { readTextFile } from "@karume/test-support/fs";
 import {
@@ -54,7 +55,10 @@ export const loadSweepFixture = async (): Promise<SweepFixture> =>
     await readTextFile(new URL("../fixtures/wan-text/prompt-clean-sweep.json", import.meta.url)),
   ) as SweepFixture;
 
-/** 前処理の表（parity フィクスチャの `promptClean` — 資産と同じ形の全体）。 */
+/**
+ * The preprocessing tables (`promptClean` of the parity fixture — the whole, in the same shape as
+ * the asset).
+ */
 export const loadPromptCleanTables = async (): Promise<PromptCleanTables> =>
   parsePromptCleanTables(
     (
@@ -65,10 +69,10 @@ export const loadPromptCleanTables = async (): Promise<PromptCleanTables> =>
     "promptClean",
   );
 
-/** 塊ごとの digest の桁数（recipe の `BLOCK_DIGEST_HEX`）。 */
+/** The number of hex digits of each block's digest (the recipe's `BLOCK_DIGEST_HEX`). */
 const BLOCK_DIGEST_HEX = 16;
 
-/** 32 ビットの xorshift（recipe の `XorShift32` と同じ列）。 */
+/** A 32-bit xorshift (the same sequence as the recipe's `XorShift32`). */
 export const xorshift32 = (seed: number): (() => number) => {
   let x = seed >>> 0;
   return () => {
@@ -87,7 +91,10 @@ export const expandRanges = (ranges: readonly (readonly [number, number])[]): nu
   return out;
 };
 
-/** 長さ 1..maxLength の乱択列（長さ → 各文字の順に引く — recipe の `fuzz_strings`）。 */
+/**
+ * Random strings of length 1..maxLength (drawn length first, then each character — the recipe's
+ * `fuzz_strings`).
+ */
 export function* fuzzStrings(
   pool: readonly number[],
   seed: number,
@@ -103,7 +110,10 @@ export function* fuzzStrings(
   }
 }
 
-/** 1 入力の決着（受理なら `A` + 出力・拒否なら `R` + 理由 — recipe の `record`）。 */
+/**
+ * The outcome of one input (`A` + output when accepted, `R` + reason when rejected — the recipe's
+ * `record`).
+ */
 export const recordOf = (tables: PromptCleanTables, text: string): string => {
   try {
     return "A" + cleanPrompt(tables, text);
@@ -118,18 +128,18 @@ const hex = (buffer: ArrayBuffer): string =>
 
 const encoder = new TextEncoder();
 
-/** 記録の列の SHA-256（各記録の後に U+0000 — recipe の `digest`）。 */
+/** The SHA-256 of a sequence of records (U+0000 after each record — the recipe's `digest`). */
 export const digestRecords = async (records: readonly string[]): Promise<string> => {
   let joined = "";
   for (const item of records) joined += item + "\u0000";
   return hex(await crypto.subtle.digest("SHA-256", encoder.encode(joined)));
 };
 
-/** `0` / `1` の列の SHA-256（recipe の `bits_digest`）。 */
+/** The SHA-256 of a `0` / `1` string (the recipe's `bits_digest`). */
 export const digestBits = async (bits: string): Promise<string> =>
   hex(await crypto.subtle.digest("SHA-256", encoder.encode(bits)));
 
-/** `chunk` 件ごとの digest（recipe の `chunked_digests`）。 */
+/** A digest per `chunk` records (the recipe's `chunked_digests`). */
 export const chunkedDigests = async (records: readonly string[], chunk: number) => {
   const out: string[] = [];
   for (let i = 0; i < records.length; i += chunk) {
@@ -138,14 +148,17 @@ export const chunkedDigests = async (records: readonly string[], chunk: number) 
   return out;
 };
 
-/** サロゲートを除く全コードポイント（recipe の `ALL_CODEPOINTS`）。 */
+/** Every code point except surrogates (the recipe's `ALL_CODEPOINTS`). */
 export const allCodePoints = (): number[] => {
   const out: number[] = [];
   for (let cp = 0; cp <= 0x10ffff; cp++) if (cp < 0xd800 || cp > 0xdfff) out.push(cp);
   return out;
 };
 
-/** `domain` を塊に分けた digest（空の塊も 1 本 — recipe の `sweep_blocks`）。 */
+/**
+ * Digests of `domain` split into blocks (an empty block also gets one — the recipe's
+ * `sweep_blocks`).
+ */
 export const sweepBlocks = async (
   domain: readonly number[],
   recordOfCodePoint: (cp: number) => string,
@@ -158,6 +171,8 @@ export const sweepBlocks = async (
   return out;
 };
 
-/** 期待と違う塊の位置（どこが割れたかをメッセージに出す）。 */
+/**
+ * The positions of blocks that differ from the expectation (shows in the message where it broke).
+ */
 export const mismatchedIndices = (actual: readonly string[], expected: readonly string[]) =>
   expected.flatMap((digest, index) => (actual[index] === digest ? [] : [index]));

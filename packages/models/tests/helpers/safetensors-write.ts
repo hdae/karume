@@ -1,22 +1,27 @@
 /**
- * safetensors の**書き出し**（テストとデモの dump 用の最小実装）。
+ * safetensors **writing** (a minimal implementation for the dumps of tests and demos).
  *
- * `@karume/runtime` の safetensors は読み取り専用（ランタイムに書き出しの用は無い）。デモは
- * torch 参照へ「離散入力と乱数列そのもの」を渡す必要があり、その運搬形式を新設せずに
- * 既存の資産形式へ揃えたいのでここに置く。ランタイムの公開面（ADR 0008）にも
- * `@karume/models` の公開面にも出ない（`deno.json` の `publish.exclude` が `tests/` を落とす）。
+ * The safetensors of `@karume/runtime` is read-only (the runtime has no use for writing). Demos
+ * have to hand "the discrete inputs and the random sequence itself" to the torch reference, and we
+ * want that transport to use the existing asset format rather than a new one, so it lives here. It
+ * is part of neither the runtime's public surface (ADR 0008) nor that of `@karume/models`
+ * (`publish.exclude` in `deno.json` drops `tests/`).
  *
- * MUST: 置き場はパッケージ側（ここ）。デモ側に置くと models のテストが `examples/` を import
- * する**逆向き依存**になる（CLAUDE.md の一方向依存）。デモ（`examples/sbv2/dump.ts`）は
- * examples → packages の正方向でここを借りる。
+ * MUST: it lives on the package side (here). Placed on the demo side, the models tests would
+ * import `examples/` — a **reverse dependency** (CLAUDE.md's one-directional dependencies). The
+ * demo (`examples/sbv2/dump.ts`) borrows it in the forward direction, examples → packages.
  *
- * レイアウト: `[u64 LE ヘッダ長][ヘッダ JSON][データ節]`。`data_offsets` はデータ節先頭からの
- * 相対で、データ節の開始が 8 バイト境界に乗るようヘッダを空白で詰める（参照実装と同じ）。
+ * Layout: `[u64 LE header length][header JSON][data section]`. `data_offsets` are relative to the
+ * start of the data section, and the header is padded with spaces so that the data section starts
+ * on an 8-byte boundary (the same as the reference implementation).
  */
 
 const ALIGNMENT = 8;
 
-/** 書き出せる要素型（意味論 dtype と 1 対 1 — bool は使わないので持たない）。 */
+/**
+ * The element types that can be written (one to one with the semantic dtypes — bool is not used, so
+ * it is absent).
+ */
 export type DumpTensor =
   | { readonly dtype: "F32"; readonly shape: readonly number[]; readonly data: Float32Array }
   | { readonly dtype: "I32"; readonly shape: readonly number[]; readonly data: Int32Array }
@@ -35,7 +40,7 @@ export const writeSafetensors = (
   for (const [name, tensor] of tensors) {
     if (elementCount(tensor.shape) !== tensor.data.length) {
       throw new Error(
-        `テンソル '${name}': shape [${tensor.shape}] の要素数が data 長 ${tensor.data.length} と違う`,
+        `tensor '${name}': the element count of shape [${tensor.shape}] differs from the data length ${tensor.data.length}`,
       );
     }
     const bytes = new Uint8Array(
@@ -54,7 +59,8 @@ export const writeSafetensors = (
 
   const encoder = new TextEncoder();
   const headerBytes = encoder.encode(JSON.stringify(header));
-  // データ節の開始（8 + ヘッダ長）を 8 バイト境界へ。詰めるのは JSON として無害な空白。
+  // Puts the start of the data section (8 + header length) on an 8-byte boundary. The padding is
+  // whitespace, harmless in JSON.
   const padding = (ALIGNMENT - ((headerBytes.byteLength + ALIGNMENT) % ALIGNMENT)) % ALIGNMENT;
   const headerLength = headerBytes.byteLength + padding;
 

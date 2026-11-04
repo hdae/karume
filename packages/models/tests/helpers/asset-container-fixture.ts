@@ -1,31 +1,32 @@
-// `assetComponentOpener` の門が使う最小の資産フィクスチャ
-// （asset_container_components_test.ts と asset_container_components_test.ts の共有）。
+// The minimal asset fixture the `assetComponentOpener` checks use (shared by
+// asset_container_components_test.ts and asset_container_components_test.ts).
 //
-// 容器の書き手は `container-fixture.ts` 経由（形式の道具 — 向こうの NOTE）。
+// The container is written through `container-fixture.ts` (the format tooling — see the NOTE
+// there).
 
 import { assetComponentOpener, type ComponentOpener } from "../../src/hub/components.ts";
 import { linearComponent, type TestContainer, writeContainer } from "./container-fixture.ts";
 
-/** 実行できる部品 1 本（`linear` 1 段）の容器。重みは part 2 にしか無い。 */
+/** A container of one runnable component (a single `linear`). Its weights are only in part 2. */
 const ditContainer: TestContainer = await writeContainer(linearComponent("dit"));
 
-/** 単一形（全量 1 本）。 */
+/** The single form (the whole container in one piece). */
 export const single = (): Uint8Array<ArrayBuffer> => ditContainer.single;
 
-/** 分割形の part 1 本（`index` は part 番号 — 0 が descriptor）。 */
+/** One part of the split form (`index` is the part number — 0 is the descriptor). */
 export const part = (index: number): Uint8Array<ArrayBuffer> => ditContainer.parts[index];
 
-/** 分割形の part 列を `<役割>[i]` のキーで並べる（長さ 0 の part も並べる）。 */
+/** The split form's parts under `<role>[i]` keys (zero-length parts are listed too). */
 export const parts = (key: string): Record<string, Uint8Array<ArrayBuffer>> =>
   Object.fromEntries(ditContainer.parts.map((bytes, index) => [`${key}[${index}]`, bytes]));
 
-/** 家族側の資産アクセサ（`assetBuffer`）と同じ姿の最小実装。 */
+/** A minimal implementation shaped like the families' asset accessor (`assetBuffer`). */
 const bufferOf =
   (assets: Readonly<Record<string, Uint8Array<ArrayBuffer>>>) =>
   (key: string): ArrayBuffer => {
     if (!Object.hasOwn(assets, key)) {
       throw new Error(
-        `test: 資産 '${key}' が無い（揃っているキー: ${Object.keys(assets).join(" / ")}）`,
+        `test: asset '${key}' is missing (keys present: ${Object.keys(assets).join(" / ")})`,
       );
     }
     return assets[key].buffer;

@@ -1,32 +1,36 @@
-// 母音検出のホスト層（`src/vowel-detector/` の特徴抽出と後処理）の Python 正本とのパリティ、
-// および挙動テスト。GPU も実資産も要らないので常時走る。
+// Parity of the vowel detector's host layer (the feature extraction and postprocessing of
+// `src/vowel-detector/`) with the Python reference, plus behaviour tests. Needs neither a GPU nor
+// real assets, so it always runs.
 //
-// フィクスチャ `vowel-detector/parity.json` は上流 `@hdae/vowel-detector`（MIT・同一著者）が
-// 持つ参照をそのまま畳んだもので、karume 側では 1 つも作り直していない（provenance は
-// フィクスチャ先頭の `_doc`）。正本は Python 実装
-// （`training/src/vowel_detector/{features,dsp,postprocess}.py`）で、上流の TS 実装はそこからの
-// 移植 = **正ではない**。
+// The fixture `vowel-detector/parity.json` folds in, as is, the references held by upstream
+// `@hdae/vowel-detector` (MIT, same author); karume regenerated none of them (the provenance is in
+// `_doc` at the top of the fixture). The reference is the Python implementation
+// (`training/src/vowel_detector/{features,dsp,postprocess}.py`); upstream's TS implementation is a
+// port of it = **not the reference**.
 //
-// 縛るのは振る舞い: 「同じ波形を入れたら Python と同じ 83 次元特徴が出る」「同じロジットを
-// 入れたら Python と同じ `.lab` が出る」。FFT の回し方も平滑化の内部表現も縛らない。
+// What is pinned is behaviour: "the same waveform yields the same 83-dimensional features as
+// Python" and "the same logits yield the same `.lab` as Python". Neither how the FFT is run nor the
+// internal representation of the smoothing is pinned.
 //
-// ## tolerance の導出（実測）
+// ## Deriving the tolerance (measured)
 //
-// 特徴の参照は **f32 で保存**されている（Python が `astype(np.float32)` した値の JSON）。
-// フィクスチャの参照特徴は絶対値 ≤ 3.7179 なので、その帯（[2,4)）の f32 ULP は 2.384e-7。
-// つまり**参照側に既に 1 ULP 級の丸めが載っている**のが下限で、これより細かい一致は原理的に
-// 測れない。実測:
+// The reference features are **stored as f32** (JSON of the values Python passed through
+// `astype(np.float32)`). The fixture's reference features have absolute values ≤ 3.7179, so the f32
+// ULP in that band ([2,4)) is 2.384e-7. That is, **the reference side already carries rounding of
+// the order of 1 ULP** as a floor, and agreement finer than that cannot be measured in principle.
+// Measured:
 //
-//  ・移植（f64 FFT）        max abs diff 4.768e-7 = **2 ULP**（log-mel 80 列で最大。
-//                           voiced 2.98e-8 / logEnergy 5.96e-8 / ZCR は完全一致）
-//  ・上流 TS（f32 FFT）     max abs diff 5.424e-6（同じフィクスチャ・同じ mel 基底）
+//  - the port (f64 FFT)      max abs diff 4.768e-7 = **2 ULP** (largest in the 80 log-mel columns;
+//                            voiced 2.98e-8 / logEnergy 5.96e-8 / ZCR matches exactly)
+//  - upstream TS (f32 FFT)   max abs diff 5.424e-6 (same fixture, same mel basis)
 //
-// 移植側が 1 桁良いのは `np.fft` が f64 で回ることに合わせたため（`src/vowel-detector/fft.ts`
-// の MUST）。したがって門は「2 ULP の 2 倍」= {@link FEATURE_ATOL} に置く。上流 TS 実装の
-// 5.42e-6 はこの門を**通らない** — f32 FFT へ書き戻す変更が黙って入らない幅である。
+// The port is an order of magnitude better because it follows `np.fft` running in f64 (the MUST in
+// `src/vowel-detector/fft.ts`). The check is therefore set at "twice 2 ULP" = {@link FEATURE_ATOL}.
+// The 5.42e-6 of upstream's TS implementation does **not pass** this check — the width keeps a change
+// back to an f32 FFT from slipping in silently.
 //
-// 後処理は tolerance を持たない（`.lab` の**完全一致**）。段 2 以降は離散的な区間割りなので、
-// 数値が僅かにずれても文字列は割れるか一致するかのどちらかにしかならない。
+// Postprocessing has no tolerance (**exact match** of the `.lab`). From stage 2 on it is a discrete
+// segmentation, so a slight numeric drift can only either split the string or leave it identical.
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -75,30 +79,30 @@ type Fixture = {
 const FIXTURE_PATH = new URL("./fixtures/vowel-detector/parity.json", import.meta.url);
 const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
-/** 参照 f32 の 2 ULP（|x| ≤ 3.72 の帯で 4.768e-7）の 2 倍。導出はファイル冒頭。 */
+/** Twice 2 ULP of the f32 reference (4.768e-7 in the |x| ≤ 3.72 band). Derived at the top of the file. */
 const FEATURE_ATOL = 1e-6;
 
 const melBasis = Float32Array.from(fixture.melBasis.flat());
 const audio = Float32Array.from(fixture.audio);
 
-// ---- フィクスチャ本体 -------------------------------------------------------
+// ---- The fixture itself -----------------------------------------------------
 
-test("フィクスチャが空でない（取り違えで全ケース素通しになっていない）", () => {
-  // 1 本目に置く。読み違い / 生成失敗で行数が 0 になると、以降のループが 0 回になって
-  // 「緑だが何も検証していない」状態が黙って成立する。
+test("the fixture is not empty (a mix-up does not let every case pass through)", () => {
+  // Kept first. If a misread or a failed generation leaves zero rows, the loops below run zero times
+  // and a "green but checking nothing" state passes silently.
   assertEquals(fixture.melBasis.length, N_MELS);
-  assertEquals(fixture.features.length, 108, "参照特徴のフレーム数");
-  assertEquals(fixture.logits.length, 54, "参照ロジットのフレーム数");
-  assert(fixture.lab.endsWith("\n"), "参照 .lab が改行で終わっていない");
-  assert(fixture.lab.trimEnd().split("\n").length >= 2, "参照 .lab が 1 行しかない");
+  assertEquals(fixture.features.length, 108, "frame count of the reference features");
+  assertEquals(fixture.logits.length, 54, "frame count of the reference logits");
+  assert(fixture.lab.endsWith("\n"), "the reference .lab does not end with a newline");
+  assert(fixture.lab.trimEnd().split("\n").length >= 2, "the reference .lab has only one line");
   for (const row of fixture.melBasis) assertEquals(row.length, MEL_BINS);
   for (const row of fixture.features) assertEquals(row.length, FEATURE_DIM);
   for (const row of fixture.logits) assertEquals(row.length, LIPSYNC_CLASSES.length);
 });
 
-test("学習時の定数が上流の配布 config と一致する", () => {
-  // モジュール定数は Python の module 定数の写し。再学習で幾何が変わったら、特徴が
-  // 「それらしい別の値」になる前にここで落ちる。
+test("the training-time constants match upstream's distributed config", () => {
+  // The module constants copy Python's module constants. If retraining changes the geometry, this
+  // fails before the features become "another plausible value".
   const { constants } = fixture;
   assertEquals(SAMPLE_RATE, constants.sampleRate);
   assertEquals(N_FFT, constants.nFft);
@@ -110,14 +114,15 @@ test("学習時の定数が上流の配布 config と一致する", () => {
   assertEquals(MEL_BINS, constants.nFft / 2 + 1);
   assertEquals(FRAME_SEC, constants.frameSec);
   assertEquals([...LIPSYNC_CLASSES], constants.classes);
-  // 平滑化の 2 定数はモジュール内に閉じているので、値そのものは挙動テスト側で固定する。
+  // The two smoothing constants are private to the module, so their values are pinned by the
+  // behaviour tests.
   assertEquals(constants.switchPenalty, 4);
   assertEquals(constants.minDurationFrames, 2);
 });
 
-// ---- ① 特徴抽出のパリティ ---------------------------------------------------
+// ---- (1) Parity of the feature extraction -----------------------------------
 
-test("特徴パリティ: 同じ波形から Python と同じ 83 次元が出る", () => {
+test("feature parity: the same waveform yields the same 83 dimensions as Python", () => {
   const { data, frames } = extractFeatures(audio, melBasis);
   assertEquals(frames, fixture.features.length);
   assertEquals(data.length, frames * FEATURE_DIM);
@@ -139,22 +144,23 @@ test("特徴パリティ: 同じ波形から Python と同じ 83 次元が出る
       }
     }
   }
-  // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
-  assertEquals(nonFinite, 0, "特徴に非有限の標本");
-  assert(worst <= FEATURE_ATOL, `特徴の max abs diff ${worst.toExponential(3)}（${worstAt}）`);
+  // MUST: NaN / ±Inf fail. A naive difference check turns NaN into "a difference of 0" and passes.
+  assertEquals(nonFinite, 0, "non-finite samples in the features");
+  assert(worst <= FEATURE_ATOL, `feature max abs diff ${worst.toExponential(3)} (${worstAt})`);
 });
 
-test("特徴: フレーム数は floor((n − N_FFT) / HOP) + 1（librosa の center=False）", () => {
+test("features: the frame count is floor((n − N_FFT) / HOP) + 1 (librosa's center=False)", () => {
   const at = (samples: number): number =>
     extractFeatures(new Float32Array(samples), melBasis).frames;
-  assertEquals(at(N_FFT), 1, "N_FFT ちょうどで 1 フレーム");
-  assertEquals(at(N_FFT + HOP - 1), 1, "hop に 1 サンプル足りなければ増えない");
+  assertEquals(at(N_FFT), 1, "exactly N_FFT gives 1 frame");
+  assertEquals(at(N_FFT + HOP - 1), 1, "one sample short of a hop adds no frame");
   assertEquals(at(N_FFT + HOP), 2);
   assertEquals(at(SAMPLE_RATE), Math.floor((SAMPLE_RATE - N_FFT) / HOP) + 1);
 });
 
-test("特徴: 1 フレームも取れない波形は fail loudly（NaN を撒かない）", () => {
-  // 波形は呼び手が渡した引数そのものなので入力起因（ADR 0107 決定 2 — 長く渡せば通る）。
+test("features: a waveform too short for a single frame fails loudly (no NaN spread)", () => {
+  // The waveform is the caller's own argument, so this is an input error (ADR 0107 decision 2 —
+  // passing a longer one succeeds).
   assertThrows(
     () => extractFeatures(new Float32Array(N_FFT - 1), melBasis),
     ModelInputError,
@@ -162,9 +168,10 @@ test("特徴: 1 フレームも取れない波形は fail loudly（NaN を撒か
   );
 });
 
-test("特徴: 非有限のサンプルは位置と値を添えて入力エラーで落とす（NaN の特徴を GPU へ渡さない）", () => {
-  // NaN 1 点で発話内 z 化の平均が NaN になり全 83 次元が汚れる。波形は呼び手の引数そのもの
-  // なので入力起因（ADR 0107 決定 2）。末尾に置いて「先頭だけ見る」検査も捕まえる。
+test("features: a non-finite sample fails as an input error naming its position and value (no NaN features reach the GPU)", () => {
+  // A single NaN makes the mean of the per-utterance z-normalisation NaN and taints all 83
+  // dimensions. The waveform is the caller's own argument, so this is an input error (ADR 0107
+  // decision 2). Placing it at the end also catches a check that "looks only at the start".
   for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
     const tainted = Float32Array.from(audio);
     const at = tainted.length - 1;
@@ -177,7 +184,7 @@ test("特徴: 非有限のサンプルは位置と値を添えて入力エラー
   }
 });
 
-test("特徴: mel 基底の要素数が違えば受け付けない", () => {
+test("features: a mel basis with the wrong element count is not accepted", () => {
   assertThrows(
     () => extractFeatures(audio, new Float32Array(N_MELS * MEL_BINS - 1)),
     Error,
@@ -188,43 +195,51 @@ test("特徴: mel 基底の要素数が違えば受け付けない", () => {
     Error,
     "the mel basis has",
   );
-  // 逆側: mel 基底は資産から来る数なので、呼び手が波形を直しても直らない = 入力起因ではない。
+  // The other side: the mel basis comes from the asset, so fixing the waveform does not fix it =
+  // not an input error.
   const basis = assertThrows(() => extractFeatures(audio, new Float32Array(N_MELS * MEL_BINS - 1)));
   assert(!(basis instanceof ModelInputError));
 });
 
-test("特徴: ZCR は np.signbit と同じで −0 を負と数える", () => {
-  // 交互に +0 / −0 を並べると、`value < 0` の実装では交差 0 本、`np.signbit` では
-  // 全サンプル境界が交差になる。log-mel は全ゼロで縮退するが、82 列目だけが割れる。
+test("features: ZCR counts −0 as negative, like np.signbit", () => {
+  // Alternating +0 / −0 gives zero crossings with a `value < 0` implementation, and a crossing at
+  // every sample boundary with `np.signbit`. The log-mel degenerates to all zeros, but column 82
+  // alone splits.
   const alternating = new Float32Array(N_FFT);
   for (let index = 0; index < alternating.length; index += 1) {
     alternating[index] = index % 2 === 0 ? 0 : -0;
   }
   const { data } = extractFeatures(alternating, melBasis);
-  assertEquals(data[N_MELS + 2], 1, "全サンプル境界が交差（ZCR = 1）");
+  assertEquals(data[N_MELS + 2], 1, "a crossing at every sample boundary (ZCR = 1)");
 
   const positive = new Float32Array(N_FFT);
-  assertEquals(extractFeatures(positive, melBasis).data[N_MELS + 2], 0, "全て +0 なら交差ゼロ");
+  assertEquals(
+    extractFeatures(positive, melBasis).data[N_MELS + 2],
+    0,
+    "all +0 gives zero crossings",
+  );
 });
 
-// ---- ② 後処理のパリティ -----------------------------------------------------
+// ---- (2) Parity of the postprocessing ---------------------------------------
 
-test("後処理パリティ: 同じロジットから Python と同じ .lab が出る（完全一致）", () => {
+test("postprocessing parity: the same logits yield the same .lab as Python (exact match)", () => {
   const logits = Float32Array.from(fixture.logits.flat());
   assertEquals(toLab(logitsToSegments(logits, fixture.logits.length)), fixture.lab);
 });
 
-test("後処理: ロジットの要素数がフレーム数と合わなければ受け付けない", () => {
+test("postprocessing: logits whose element count does not match the frame count are not accepted", () => {
   assertThrows(() => logitsToSegments(new Float32Array(8 * 3 + 1), 3), Error, "the logits have");
   assertThrows(() => logitsToSegments(new Float32Array(0), 0), Error, "frame count");
 });
 
-test("後処理: 非有限ロジットは座標を添えて落とす（全区間 a の .lab に化けない）", () => {
-  // 門が無いと NaN / +Infinity は log_softmax でその行を全て NaN にし、Viterbi の比較が
-  // 軒並み偽になって「発話全体が a」の**書式として正当な** `.lab` が返る（数値異常が
-  // どこにも表面化しない）。落ちること自体と、座標が名指しされることを縛る。
+test("postprocessing: a non-finite logit fails naming its coordinates (it does not turn into a .lab that is all a)", () => {
+  // Without the check, NaN / +Infinity make that row all NaN in log_softmax, nearly every Viterbi
+  // comparison becomes false, and a `.lab` that is **well-formed** with "the whole utterance is a" is
+  // returned (the numeric fault surfaces nowhere). Pinned: that it fails, and that the coordinates
+  // are named.
   const finite = Float32Array.from(fixture.logits.flat());
-  // 対: 汚していない同じ配列は参照どおりの `.lab` を返す（常に落ちる門になっていない）。
+  // Counterpart: the same array untainted returns the reference `.lab` (the check does not always
+  // fail).
   assertEquals(toLab(logitsToSegments(finite, fixture.logits.length)), fixture.lab);
   const at = 7 * LIPSYNC_CLASSES.length + 5; // frame 7 / class 5 = "N"
   for (const [poison, shown] of [
@@ -241,12 +256,13 @@ test("後処理: 非有限ロジットは座標を添えて落とす（全区間
   }
 });
 
-test("Viterbi: 非有限の log 事後確率は座標を添えて落とす", () => {
-  // `viterbiSmooth` は公開されていて単体で叩けるので、`logitsToSegments` の入口とは別に
-  // ここでも塞ぐ（−Infinity は「あり得ないクラス」に見えて、格子全体を凍らせる）。
+test("Viterbi: a non-finite log posterior fails naming its coordinates", () => {
+  // `viterbiSmooth` is public and callable on its own, so it is guarded here too, apart from the
+  // entry of `logitsToSegments` (−Infinity looks like "an impossible class" but freezes the whole
+  // lattice).
   const frames = 5;
   const logProbabilities = new Float64Array(frames * LIPSYNC_CLASSES.length);
-  assertEquals(viterbiSmooth(logProbabilities, frames).length, frames, "全て有限なら通る");
+  assertEquals(viterbiSmooth(logProbabilities, frames).length, frames, "all finite passes");
   logProbabilities[3 * LIPSYNC_CLASSES.length + 6] = Number.NEGATIVE_INFINITY;
   assertThrows(
     () => viterbiSmooth(logProbabilities, frames),
@@ -255,11 +271,11 @@ test("Viterbi: 非有限の log 事後確率は座標を添えて落とす", () 
   );
 });
 
-// ---- ③ 平滑化と区間化の挙動 -------------------------------------------------
+// ---- (3) Behaviour of the smoothing and segmentation ------------------------
 
 /**
- * 各フレームで指定クラスだけ +20 のロジット列（`overrides` は個別の上書き）。
- * 20 は切替ペナルティ 4 より十分大きいので、Viterbi は argmax に追随する。
+ * Logits with +20 on only the given class in each frame (`overrides` are individual overrides).
+ * 20 is well above the switch penalty 4, so Viterbi follows the argmax.
  */
 const logitsFor = (
   sequence: readonly (typeof LIPSYNC_CLASSES)[number][],
@@ -282,9 +298,9 @@ const labFor = (
   overrides?: Readonly<Record<number, Readonly<Record<string, number>>>>,
 ): string => toLab(logitsToSegments(logitsFor(sequence, overrides), sequence.length));
 
-test("Viterbi: 切替ペナルティ未満の 1 フレームの揺れでは乗り換えない", () => {
-  // クラス 0 が毎フレーム +3、frame 2 だけクラス 1 が +3。乗り換えは往復で 8 の損なので
-  // 3 の得では引き合わない = argmax（0,0,1,0,0）ではなく全て 0 になる。
+test("Viterbi: a one-frame wobble below the switch penalty does not switch", () => {
+  // Class 0 gets +3 in every frame, class 1 gets +3 only in frame 2. Switching there and back costs 8,
+  // which a gain of 3 does not pay for = all 0, not the argmax (0,0,1,0,0).
   const frames = 5;
   const logProbabilities = new Float64Array(frames * LIPSYNC_CLASSES.length);
   for (let frame = 0; frame < frames; frame += 1) {
@@ -293,7 +309,7 @@ test("Viterbi: 切替ペナルティ未満の 1 フレームの揺れでは乗�
   assertEquals([...viterbiSmooth(logProbabilities, frames)], [0, 0, 0, 0, 0]);
 });
 
-test("Viterbi: ペナルティを上回る優位が続けば乗り換える", () => {
+test("Viterbi: a lasting lead above the penalty switches", () => {
   const frames = 5;
   const logProbabilities = new Float64Array(frames * LIPSYNC_CLASSES.length);
   for (let frame = 0; frame < frames; frame += 1) {
@@ -302,7 +318,7 @@ test("Viterbi: ペナルティを上回る優位が続けば乗り換える", ()
   assertEquals([...viterbiSmooth(logProbabilities, frames)], [0, 0, 1, 1, 1]);
 });
 
-test("Viterbi: 格子の形が合わなければ受け付けない", () => {
+test("Viterbi: a lattice of the wrong shape is not accepted", () => {
   assertThrows(
     () => viterbiSmooth(new Float64Array(8 * 4 - 1), 4),
     Error,
@@ -310,44 +326,47 @@ test("Viterbi: 格子の形が合わなければ受け付けない", () => {
   );
 });
 
-test("短区間マージ: 最小継続長未満は事後確率の高い隣へ塗り替える", () => {
-  // frame 2 は i が突出（Viterbi は i を通る）が 1 フレームしかないので隣へ。隣接候補
-  // a / e のうち frame 2 での事後確率が高い e が勝つ（同点で先頭を採る形に落ちない）。
+test("short-segment merge: a segment below the minimum duration is relabelled to the neighbour with the higher posterior", () => {
+  // In frame 2, i stands out (Viterbi passes through i), but it lasts only one frame, so it goes to a
+  // neighbour. Of the neighbouring candidates a / e, e has the higher posterior in frame 2 and wins (it
+  // does not fall into taking the first on a tie).
   assertEquals(
     labFor(["a", "a", "i", "e", "e", "e"], { 2: { e: 1 } }),
     "0.0000000 0.0400000 a\n0.0400000 0.1200000 e\n",
   );
 });
 
-test("短区間マージ: pau は最小継続長未満でも残す", () => {
-  // 1 フレーム（20ms）の pau。塗り替えると無音が消えて口が閉じない = 知覚上の劣化。
+test("short-segment merge: pau is kept even below the minimum duration", () => {
+  // A pau of one frame (20ms). Relabelling it removes the silence and the mouth does not close = a
+  // perceptible degradation.
   assertEquals(
     labFor(["a", "a", "pau", "i", "i"]),
     "0.0000000 0.0400000 a\n0.0400000 0.0600000 pau\n0.0600000 0.1000000 i\n",
   );
 });
 
-test("cons 吸収: 後続が母音なら開始を前倒しして母音区間に畳む", () => {
+test("cons absorption: followed by a vowel, the vowel segment's start moves earlier to fold it in", () => {
   assertEquals(labFor(["cons", "cons", "a", "a"]), "0.0000000 0.0800000 a\n");
 });
 
-test("cons 吸収: 後続が母音/N でなければ先行区間を伸ばす", () => {
+test("cons absorption: not followed by a vowel/N, the preceding segment is extended", () => {
   assertEquals(
     labFor(["a", "a", "cons", "cons", "pau", "pau"]),
     "0.0000000 0.0800000 a\n0.0800000 0.1200000 pau\n",
   );
 });
 
-test("cons 吸収: 同じラベルに挟まれた cons は 1 区間へ連結する", () => {
-  // 前倒しした開始で新しい区間を作ると a が 2 本に割れる（口形は変わっていないのに）。
+test("cons absorption: a cons between two segments of the same label joins them into one", () => {
+  // Starting a new segment at the moved-up start would split a in two (although the mouth shape has
+  // not changed).
   assertEquals(labFor(["a", "a", "cons", "cons", "a", "a"]), "0.0000000 0.1200000 a\n");
 });
 
-test("cons 吸収: 吸収先がどちらも無ければ pau に落とす", () => {
+test("cons absorption: with nothing to absorb into on either side, it becomes pau", () => {
   assertEquals(labFor(["cons", "cons"]), "0.0000000 0.0400000 pau\n");
 });
 
-test("toLab: 秒は 7 桁固定で、行ごとに改行が付く", () => {
+test("toLab: seconds have a fixed 7 decimal places, and each line ends with a newline", () => {
   assertEquals(
     toLab([
       { start: 0, end: 0.02, label: "a" },

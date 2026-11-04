@@ -1,11 +1,12 @@
-// コンテナ経路のロード（`src/hub/components.ts`）の門が共有する疑似 HF 取得層と `karume/5` の
-// 配布形（container_loading_test.ts と container_loading_test.ts と
-// container_loading_test.ts）。
+// The fake HF fetch layer and the `karume/5` distribution form shared by the checks of
+// container-path loading (`src/hub/components.ts`) (container_loading_test.ts,
+// container_loading_test.ts and container_loading_test.ts).
 //
-// NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` と同じ
-// 規律）。唯一の例外が容器の**書き手**（`helpers/container-fixture.ts` 経由の
-// `packages/runtime/tests/helpers/container-write.ts`）で、これは形式の道具（Python の
-// `karume.container` と同じ位置づけ）— models 側に写しを持つと 2 実装がずれる。
+// NOTE: nothing **test-only** from hub / runtime is imported (the same rule as
+// `helpers/memory-cache.ts`). The one exception is the container **writer**
+// (`packages/runtime/tests/helpers/container-write.ts` through `helpers/container-fixture.ts`),
+// which is format tooling (the same standing as Python's `karume.container`) — a copy on the models
+// side would let the two implementations drift.
 
 import type { FileRef, LoadedManifest, ResolvedSelection } from "@karume/hub";
 import { loadManifest, resolveSelection } from "@karume/hub";
@@ -19,39 +20,46 @@ import {
   writeContainer,
 } from "./container-fixture.ts";
 
-/** 疑似 HF の取得層（叩かれた path を記録する `fetch`）。 */
+/** The fake HF fetch layer (a `fetch` that records the requested paths). */
 export type MockFetch = {
   readonly fetch: typeof globalThis.fetch;
-  /** 叩かれた path（リポを問わず宣言順）。 */
+  /** The requested paths (in request order, across repositories). */
   readonly paths: string[];
-  /** 叩かれた (リポ, path) の対（越境・差し替えの観測用）。 */
+  /**
+   * The requested (repository, path) pairs (for observing cross-repository references and
+   * replacements).
+   */
   readonly requests: { readonly repo: string; readonly path: string }[];
   /**
-   * 配信表を空にする（常駐量を測る台本のための口）。`fetch` の閉包は取得面が握り続けるので、
-   * 表を捨てないとフィクスチャのバイト列そのものが測定値へ乗る。
+   * Empties the serving table (a hook for scripts that measure resident memory). The fetch surface
+   * keeps holding the `fetch` closure, so unless the table is dropped the fixture bytes themselves
+   * show up in the measurement.
    */
   readonly clear: () => void;
 };
 
-/** `loadManifest` / `fromPretrained` へ渡す取得ノブ。 */
+/** The fetch options passed to `loadManifest` / `fromPretrained`. */
 export type HubOptions = {
   readonly fetch: typeof globalThis.fetch;
   readonly caches: MemoryCacheStorage;
 };
 
-/** 疑似リポ 1 つぶん（manifest まで解決済み）。 */
+/** One fake repository (resolved up to the manifest). */
 export type ContainerRig = {
   readonly loaded: LoadedManifest;
   readonly selection: ResolvedSelection;
-  /** 部品名 → 配信した part の 3 点セット（長さ 0 の part を含む・添字順）。 */
+  /**
+   * Component name → the path / size / sha256 of the served parts (zero-length parts included, in
+   * index order).
+   */
   readonly parts: Readonly<Record<string, readonly FileRef[]>>;
   readonly mock: MockFetch;
   readonly hubOptions: HubOptions;
 };
 
 /**
- * 家族 admission の席（この機構だけを見るテストは家族の門を 1 つも置かない）。実家族の門が
- * 席に載っていることは⑦が別に縛る。
+ * The family-admission slot (tests that look only at this mechanism put no family check in it).
+ * That the real families' checks are in the slot is pinned separately by ⑦.
  */
 export const NO_FAMILY_GATE = (): undefined => undefined;
 
@@ -64,10 +72,12 @@ const REVISION_RE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
 const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
 
 /**
- * HF の 2 経路（revision 解決 API・resolve URL）だけを喋る `fetch`。叩かれた path を記録する。
+ * A `fetch` that speaks only HF's two routes (the revision resolve API and the resolve URL). It
+ * records the requested paths.
  *
- * 表を**リポごと**に持つのは、差し替え席（別リポの同じ役割）を踏むテストが 2 リポを同時に
- * 名乗るため — `karume.json` は両方のリポで同じ path なので、1 枚の表では潰れる。
+ * The table is kept **per repository** because tests that reach the replacement slot (the same role
+ * from another repository) act as two repositories at once — `karume.json` has the same path in
+ * both, so a single table would collapse them.
  */
 const createMockFetch = (
   repos: ReadonlyMap<string, Map<string, Uint8Array<ArrayBuffer>>>,
@@ -96,27 +106,30 @@ const createMockFetch = (
   return { fetch, paths, requests, clear };
 };
 
-/** manifest の 3 点セット（path / size / sha256）を現物から作る。 */
+/** Builds the manifest's file triple (path / size / sha256) from the actual bytes. */
 export const fileRef = async (path: string, bytes: Uint8Array<ArrayBuffer>): Promise<FileRef> => ({
   path,
   size: bytes.byteLength,
   sha256: await sha256Hex(bytes),
 });
 
-/** 配信する容器 1 本（manifest の dtype エントリ + 疑似 HF の配信表）。 */
+/** One served container (the manifest's dtype entry + the fake HF's serving table). */
 export type ServedContainer = {
-  /** `weights.<部品>.<dtype>` に入る値。 */
+  /** The value for `weights.<component>.<dtype>`. */
   readonly entry: Record<string, unknown>;
-  /** part の 3 点セット（長さ 0 の part も並ぶ — 添字が part の id だから）。 */
+  /** The parts' file triples (zero-length parts are listed too — the index is the part id). */
   readonly parts: readonly FileRef[];
-  /** 疑似 HF が配るファイル（長さ 0 の part は配らない — 取得層も取りに来ない）。 */
+  /**
+   * The files the fake HF serves (zero-length parts are not served — the fetch layer does not
+   * request them either).
+   */
   readonly files: readonly (readonly [string, Uint8Array<ArrayBuffer>])[];
   readonly written: TestContainer;
 };
 
 /**
- * 容器を 1 本書いて、配布形の 1 エントリへ畳む。part の path は書き手の規約
- * （`<stem>-NNNNN-of-NNNNN.krm` — container-v1 §8）に倣う。
+ * Writes one container and folds it into one entry of the distribution form. The part paths follow
+ * the writer's convention (`<stem>-NNNNN-of-NNNNN.krm` — container-v1 §8).
  */
 export const serveContainer = async (
   stem: string,
@@ -144,7 +157,10 @@ export const serveContainer = async (
   };
 };
 
-/** 配布形（`karume.json`）のバイト列（疑似 HF のリポとメモリ上のディレクトリが共有する 1 本）。 */
+/**
+ * The bytes of the distribution form (`karume.json`) (shared by the fake HF repository and the
+ * in-memory directory).
+ */
 export const manifestBytes = (models: unknown): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(
     JSON.stringify({
@@ -155,14 +171,14 @@ export const manifestBytes = (models: unknown): Uint8Array<ArrayBuffer> =>
     }),
   );
 
-/** 疑似リポ 1 つの中身（配布形 + 配るファイル）。 */
+/** The contents of one fake repository (the distribution form + the served files). */
 export type RepoSpec = {
   readonly repo: string;
   readonly models: unknown;
   readonly files: Iterable<readonly [string, Uint8Array<ArrayBuffer>]>;
 };
 
-/** {@link RepoSpec} を疑似 HF の 1 枚の表へ畳む（`karume.json` はリポごとに別）。 */
+/** Folds {@link RepoSpec}s into the fake HF's table (each repository has its own `karume.json`). */
 export const serveRepos = (specs: readonly RepoSpec[]): MockFetch =>
   createMockFetch(
     new Map(
@@ -176,7 +192,9 @@ export const serveRepos = (specs: readonly RepoSpec[]): MockFetch =>
     ),
   );
 
-/** 疑似 HF に載せた配布形（主リポ 1 つ）を `loadManifest` まで通す。 */
+/**
+ * Takes a distribution form served from the fake HF (one main repository) through `loadManifest`.
+ */
 export const serveRepo = async (
   models: unknown,
   files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
@@ -189,9 +207,9 @@ export const serveRepo = async (
 };
 
 /**
- * 実行できる 1 部品（`linear` 1 段）の配布形。重み block は part 2 にしか無いので、Session が
- * 張れること自体が「重みの part が届いている」ことの証拠になる。`op` を差し替えると
- * capability 門で落ちる容器になる。
+ * The distribution form of one runnable component (a single `linear`). The weight block is only in
+ * part 2, so being able to build a Session is itself evidence that "the weight part arrived".
+ * Replacing `op` makes a container that fails the capability check.
  */
 export const prepareComponent = async (
   options: { readonly op?: string; readonly key?: string } = {},
@@ -217,7 +235,7 @@ export const prepareComponent = async (
   );
 };
 
-/** `models/karume-siglip2/karume.json` の `base` の `pipelineConfig` 実物（6 欄）。 */
+/** The actual `pipelineConfig` of `base` in `models/karume-siglip2/karume.json` (6 fields). */
 export const SIGLIP2_CONFIG: Record<string, unknown> = {
   imageWidth: 224,
   imageHeight: 224,
@@ -232,11 +250,13 @@ const IMAGE_SIZE = 224;
 const HIDDEN_DIM = 768;
 
 /**
- * siglip2 の家族 admission が読むグラフ**宣言**（入出力の名前と形）まで再現した最小の IR。
+ * The smallest IR that reproduces the graph **declaration** (input / output names and shapes) that
+ * siglip2's family admission reads.
  *
- * MUST: `admitSiglip2` の構造検査（`pixel_values` の 4 軸 / 出力の `hiddenDim`）を**通る**形で
- * 綴る — ここで落ちると、その後段に居る門（quant / GPU 前提）を踏んだことにならない。実行は
- * しない（Session を張るテストはこの rig を使わない）ので、`linear` の内側の整合は問わない。
+ * MUST: it is written so that it **passes** the structural check of `admitSiglip2` (the 4 axes of
+ * `pixel_values` / the output's `hiddenDim`) — failing here would mean the checks after it (quant /
+ * GPU prerequisites) were never reached. It is not run (tests that build a Session do not use this
+ * rig), so the internal consistency of the `linear` does not matter.
  */
 const siglip2Component = (): ModelInput => ({
   graphs: {
@@ -290,11 +310,11 @@ const siglip2Component = (): ModelInput => ({
 });
 
 /**
- * siglip2 の配布形（容器 1 本）を疑似 HF に載せる。`patch` で `models["test"]` の欄を
- * 差し替えて**家族 admission だけ**が落ちる形を作る。
+ * Serves siglip2's distribution form (one container) from the fake HF. `patch` replaces fields of
+ * `models["test"]` to make a form that fails **only family admission**.
  *
- * MUST: グラフは実行可能な `linear` 1 段のまま — 非対応 op にすると runtime の capability 門
- * （②が既に縛る側）で落ちてしまい、家族の門を通ったことの証明にならない。
+ * MUST: the graph stays a runnable single `linear` — an unsupported op would fail at runtime's
+ * capability check (which ② already pins), and would not prove that the family check was passed.
  */
 export const prepareSiglip2 = async (patch: Record<string, unknown>): Promise<ContainerRig> => {
   const served = await serveContainer("vision/model.f32", siglip2Component(), {
@@ -318,7 +338,7 @@ export const prepareSiglip2 = async (patch: Record<string, unknown>): Promise<Co
   );
 };
 
-/** ⑧⑨で使う quant 欄（`requiredLimits` だけが違う 2 通り）。 */
+/** The quant field used by ⑧ and ⑨ (two variants that differ only in `requiredLimits`). */
 export const quantsRequiring = (maxBufferSize: number): Record<string, unknown> => ({
   f32: { weights: { vision: "f32" }, session: {}, requiredLimits: { maxBufferSize } },
 });

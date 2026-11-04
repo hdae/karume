@@ -1,16 +1,21 @@
-// 家族 admission（`admitIrodori`）の**グラフ突合**の失敗経路。GPU も実資産も要らない。
+// The failure paths of the **graph check** of the family admission (`admitIrodori`). Needs neither
+// a GPU nor real assets.
 //
-// 突合の中身は `assertStaticDim` / `assertOutputScale` / `assertOutputDim` / `dit` の記号次元が
-// 1 本 / `dit_context` → `dit` の配線（記号次元なし・K / V の対・名前の集合・形と dtype —
-// ADR 0114）で、どれも doc に「MUST: 落とさない。…**沈黙誤値**が出る」と書かれた門
-// （shape は合ったまま別の位置の条件を読む形）。`irodori_pipeline_test.ts` は「合成の容器を
-// 組む器が無い」ため意図的にこの層を外しているが、器は `tests/helpers/container-fixture.ts`
-// に置いたので、いまは実資産なしで踏める。
+// The check covers `assertStaticDim` / `assertOutputScale` / `assertOutputDim` / exactly one
+// symbolic dimension in `dit` / the `dit_context` → `dit` wiring (no symbolic dimensions, K / V
+// pairs, the set of names, shapes and dtypes — ADR 0114), each a check whose doc says "MUST: do not
+// drop this. … a **silent wrong value** results" (the shape still matches while the condition is
+// read from another position). `irodori_pipeline_test.ts` deliberately leaves this layer out
+// because it "has no vehicle to build synthetic containers", but that vehicle now lives in
+// `tests/helpers/container-fixture.ts`, so the layer can be exercised without real assets.
 //
-// 観測の仕掛け: 資産は**グラフ 9 本だけ**を渡し、`tokenizer` を入れない。
-//  - 正しい 9 本 → 落ちるのは `資産 'tokenizer' が無い`（= 突合を全部通過して次の段へ進んだ）
-//  - 1 軸だけ壊す → その軸名・期待値・実測値を含む文言で reject
-// の対偶で、門そのものと門の位置（GPU を取りに行く前）を同時に縛る。GPU へは 1 度も触らない。
+// The observation setup: only **the 9 graphs** are passed as assets, without `tokenizer`.
+//  - the correct 9 → what fails is `asset 'tokenizer' is missing` (= every check passed and it
+//    moved on to the next stage)
+//  - breaking exactly one axis → rejected with a message containing that axis name, the expected
+//    value and the measured value
+// and this contrapositive pins both the checks themselves and their position (before going to
+// acquire the GPU). The GPU is never touched.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
@@ -39,10 +44,10 @@ import {
 } from "./helpers/container-loading-fixture.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
-/** 部品差し替え先の疑似リポ。 */
+/** The fake repo components are replaced from. */
 const OTHER_REPO = "karume-test/replacement";
 
-/** `models/karume-irodori-v4-small/karume.json` の `pipelineConfig` 実物（23 欄）。 */
+/** The real `pipelineConfig` of `models/karume-irodori-v4-small/karume.json` (23 fields). */
 const CONFIG = {
   maxTextLen: 256,
   maxCaptionLen: 512,
@@ -82,32 +87,44 @@ const COMPONENTS = [
 ] as const;
 
 type Component = (typeof COMPONENTS)[number];
-/** 出力 1 本の宣言で足りる部品（`dit_context` は K / V の対を出すので別の器 — {@link ContextSpec}）。 */
+/**
+ * The components a single-output declaration is enough for (`dit_context` outputs K / V pairs, so
+ * it has another vehicle — {@link ContextSpec}).
+ */
 type SingleOutput = Exclude<Component, "dit_context">;
 
 /**
- * 実物の DiT のブロック数（v4 系は 12）。**テストが実物の宣言を写すための数**で、実装は焼かない
- * （ブロック数は `dit_context` の出力列から導く — ADR 0114）。
+ * The real DiT's block count (12 for the v4 line). **A number for the test to copy the real
+ * declarations**; the implementation does not bake it in (the block count is derived from the
+ * outputs of `dit_context` — ADR 0114).
  */
 const BLOCKS = 12;
-/** 条件 3 本を連結した context の行数（text + speaker + caption = 1519）。 */
+/**
+ * The row count of the context concatenating the 3 conditions (text + speaker + caption = 1519).
+ */
 const CONTEXT_ROWS = CONFIG.maxTextLen + CONFIG.speakerRows + CONFIG.maxCaptionLen;
-/** context K / V 1 本の形（20 heads × 64 head_dim — reshape 後・transpose 前）。 */
+/** The shape of one context K / V (20 heads × 64 head_dim — after reshape, before transpose). */
 const CONTEXT_SHAPE = [1, CONTEXT_ROWS, 20, 64] as const;
-/** `dit_context` の出力 = `dit` の K / V 入力（ブロック順に K, V）。 */
+/** The outputs of `dit_context` = the K / V inputs of `dit` (K, V in block order). */
 const CONTEXT_NAMES: readonly string[] = Array.from({ length: BLOCKS }, (_, block) => [
   `context_k_${block}`,
   `context_v_${block}`,
 ]).flat();
 
-/** 宣言の 1 値（dtype を省略すると f32 — 突合の器 `TensorlessGraphSpec` と同じ既定）。 */
+/**
+ * One declared value (dtype f32 when omitted — the same default as the check's vehicle
+ * `TensorlessGraphSpec`).
+ */
 type ValueSpec = {
   readonly name: string;
   readonly shape: readonly (number | string)[];
   readonly dtype?: "f32" | "i32";
 };
 
-/** `dit_context` の宣言（出力が複数本 — `TensorlessGraphSpec` は出力 1 本の器なので別に持つ）。 */
+/**
+ * The declaration of `dit_context` (several outputs — `TensorlessGraphSpec` is a single-output
+ * vehicle, so it is kept separately).
+ */
 type ContextSpec = {
   readonly symbols?: readonly string[];
   readonly inputs: readonly ValueSpec[];
@@ -115,9 +132,10 @@ type ContextSpec = {
 };
 
 /**
- * `dit_context` の容器の入力（ノードは各出力につき「出力と同じ dtype の先頭入力を 2 口で受ける
- * `mul` 1 本」— `container-fixture.ts` の `declarationOf` と同じく、宣言の突合が目的で実行は
- * しない。dtype を合わせるのは IR の op 契約の検査を通すため）。
+ * The container inputs of `dit_context` (each output's node is "one `mul` taking the first input
+ * of the output's dtype through 2 ports" — like `declarationOf` of `container-fixture.ts`, the
+ * purpose is checking declarations, and it is never run. The dtypes match so that the IR's op
+ * contract checks pass).
  */
 const contextInput = (spec: ContextSpec): ModelInput => ({
   graphs: {
@@ -154,7 +172,7 @@ const contextInput = (spec: ContextSpec): ModelInput => ({
   provenance: { license: "test" },
 });
 
-/** 実物と同じ `dit_context` の宣言（条件 3 本 → K / V 24 本）。 */
+/** The same `dit_context` declaration as the real thing (3 conditions → 24 K / V). */
 const contextSpec = (): ContextSpec => ({
   inputs: [
     { name: "text_state", shape: [1, CONFIG.maxTextLen, CONFIG.textDim] },
@@ -164,9 +182,12 @@ const contextSpec = (): ContextSpec => ({
   outputs: CONTEXT_NAMES.map((name) => ({ name, shape: CONTEXT_SHAPE })),
 });
 
-/** 突合を全て通る最小グラフ 8 本（`CONFIG` の値がそのまま宣言に出る — `dit_context` は {@link contextSpec}）。 */
+/**
+ * The 8 minimal graphs that pass every check (the values of `CONFIG` appear in the declarations as
+ * they are — `dit_context` is {@link contextSpec}).
+ */
 const graphSpecs = (): Record<SingleOutput, TensorlessGraphSpec> => ({
-  // 突合の対象外（宣言は何でもよい）。
+  // Outside the check (any declaration will do).
   backbone: {
     inputs: [{ name: "input_ids", shape: [1, 4] }],
     output: { name: "hidden", shape: [1, 4, CONFIG.textDim] },
@@ -179,7 +200,7 @@ const graphSpecs = (): Record<SingleOutput, TensorlessGraphSpec> => ({
     inputs: [{ name: "hidden", shape: [1, 4, CONFIG.captionDim] }],
     output: { name: "caption_state", shape: [1, 4, CONFIG.captionDim] },
   },
-  // 参照 latent の patch 幅（latentDim × speakerPatchSize）。
+  // The patch width of the reference latent (latentDim × speakerPatchSize).
   speaker: {
     inputs: [{ name: "latent", shape: [1, 4, CONFIG.latentDim * CONFIG.speakerPatchSize] }],
     output: { name: "speaker_vec", shape: [1, CONFIG.speakerDim] },
@@ -192,7 +213,8 @@ const graphSpecs = (): Record<SingleOutput, TensorlessGraphSpec> => ({
     ],
     output: { name: "log_frames", shape: [1] },
   },
-  // 条件 state 3 本は持たず、`dit_context` の出力（K / V 24 本）を同名・同形で受ける。
+  // Holds no 3 condition states and receives the outputs of `dit_context` (24 K / V) under the same
+  // names and shapes.
   dit: {
     symbols: ["S"],
     inputs: [
@@ -203,7 +225,8 @@ const graphSpecs = (): Record<SingleOutput, TensorlessGraphSpec> => ({
     ],
     output: { name: "v", shape: [1, "S", CONFIG.latentDim] },
   },
-  // 1 latent フレーム → hopLength サンプル（出力の派生次元の**係数**まで見る）。
+  // 1 latent frame → hopLength samples (the check goes as far as the **coefficient** of the
+  // output's derived dimension).
   codec_decoder: {
     symbols: ["S"],
     inputs: [{ name: "latent", shape: [1, "S", CONFIG.latentDim] }],
@@ -216,12 +239,18 @@ const graphSpecs = (): Record<SingleOutput, TensorlessGraphSpec> => ({
   },
 });
 
-/** 部品の差し替え（出力 1 本の部品は `TensorlessGraphSpec`・`dit_context` は {@link ContextSpec}）。 */
+/**
+ * Replacing components (single-output components are `TensorlessGraphSpec`, `dit_context` is
+ * {@link ContextSpec}).
+ */
 type Patch = Partial<Record<SingleOutput, TensorlessGraphSpec>> & {
   readonly dit_context?: ContextSpec;
 };
 
-/** 1 本だけ差し替えた容器 9 本を組む（`tokenizer` は入れない — 観測の仕掛け）。 */
+/**
+ * Builds the 9 containers with exactly one replaced (`tokenizer` is not included — the observation
+ * setup).
+ */
 const assetsWith = async (patch: Patch = {}): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const specs = { ...graphSpecs(), ...patch };
   const context = patch.dit_context ?? contextSpec();
@@ -268,7 +297,10 @@ const build = async (patch: Patch = {}): Promise<unknown> =>
     assets: await assetsWith(patch),
   });
 
-/** 入力列の 1 本の 1 軸だけを壊す（部品の器の型に依らない）。 */
+/**
+ * Breaks exactly one axis of one entry of an input list (independent of the component vehicle's
+ * type).
+ */
 const breakAxis = <
   Input extends { readonly name: string; readonly shape: readonly (number | string)[] },
 >(
@@ -283,7 +315,7 @@ const breakAxis = <
       : input,
   );
 
-/** グラフ 1 本の入力 1 本の 1 軸だけを壊す。 */
+/** Breaks exactly one axis of one input of one graph. */
 const breakInput = (
   component: SingleOutput | "dit_context",
   inputName: string,
@@ -298,7 +330,7 @@ const breakInput = (
   return { [component]: { ...spec, inputs: breakAxis(spec.inputs, inputName, axis, value) } };
 };
 
-/** グラフ 1 本の出力の 1 軸だけを壊す。 */
+/** Breaks exactly one axis of one graph's output. */
 const breakOutput = (component: SingleOutput, axis: number, value: number | string): Patch => {
   const spec = graphSpecs()[component];
   return {
@@ -312,15 +344,15 @@ const breakOutput = (component: SingleOutput, axis: number, value: number | stri
   };
 };
 
-test("admitIrodori: 突合を全て満たすグラフは資産の段まで進む（門の位置の対偶）", async () => {
-  // `tokenizer` を渡していないので、突合を全部通れば落ちるのはその 1 本。ここが
-  // 「グラフ入力 '…' の軸 …」で落ちるなら、正常系のはずの宣言が門に引っかかっている。
+test("admitIrodori: a graph meeting every check proceeds to the asset stage (the contrapositive of the check position)", async () => {
+  // `tokenizer` is not passed, so once every check passes that is what fails. If this fails with
+  // "graph input '…' axis …", a declaration that should be valid is caught by a check.
   await assertRejects(() => build(), Error, "irodori: asset 'tokenizer' is missing");
 });
 
-test("admitIrodori: 壊した軸ごとに軸名・期待値・実測値を出して落ちる（12 点）", async () => {
-  // 各ケースは 1 軸だけを現行値の近傍へずらす（shape の rank は保つ）— rank を変えると
-  // 別の門に当たって「この軸の突合が生きている」ことを示せない。
+test("admitIrodori: each broken axis fails naming the axis, the expected value and the measured value (12 points)", async () => {
+  // Each case moves exactly one axis to near its current value (keeping the shape's rank) —
+  // changing the rank would hit another check and could not show that "this axis's check is alive".
   const cases: readonly {
     readonly where: string;
     readonly patch: Patch;
@@ -410,8 +442,8 @@ test("admitIrodori: 壊した軸ごとに軸名・期待値・実測値を出し
   assertEquals(cases.length, 12);
 });
 
-test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に見る", async () => {
-  // 入力幅（latentDim）。
+test("admitIrodori: checks codec_decoder's latent width and output scale separately", async () => {
+  // The input width (latentDim).
   const width = await assertRejects(
     () => build(breakInput("codec_decoder", "latent", 2, 31)),
     Error,
@@ -419,9 +451,9 @@ test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に見�
   );
   assertStringIncludes(width.message, "'latent' axis 2 is 31");
 
-  // 出力の**派生次元の係数**。shape は「それらしい長さの波形」のままなので、ここだけが
-  // 「1 フレーム → hopLength サンプル」の破れを捕まえる（秒指定の切り出しと末尾トリムが
-  // 静かに別のサンプル位置を指す形）。
+  // The **coefficient of the output's derived dimension**. The shape stays "a waveform of a
+  // plausible length", so only this catches a broken "1 frame → hopLength samples" (a form where
+  // the seconds-based cut and the tail trim silently point at other sample positions).
   const scale = await assertRejects(
     () => build(breakOutput("codec_decoder", 2, "960S")),
     Error,
@@ -431,7 +463,7 @@ test("admitIrodori: codec_decoder の latent 幅と出力倍率を別々に見�
   assertStringIncludes(scale.message, "expects '1920S'");
 });
 
-test("admitIrodori: codec_encoder の入力フレーム幅と出力 latent 幅を別々に見る", async () => {
+test("admitIrodori: checks codec_encoder's input frame width and output latent width separately", async () => {
   const frame = await assertRejects(
     () => build(breakInput("codec_encoder", "wav", 2, 1919)),
     Error,
@@ -447,10 +479,11 @@ test("admitIrodori: codec_encoder の入力フレーム幅と出力 latent 幅�
   assertStringIncludes(latent.message, "graph output 'latent' has axis 2 = 31");
 });
 
-test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経路に依らず同じ文言）", async () => {
-  // 常駐経路は毎 enqueue この記号名で S を束縛する。実行時に置くと ①重みを落とした後にしか
-  // 落ちない ②ホスト経路（`gpuTiming` 有効 device / `onEvent` 購読）では走らない、の 2 つが
-  // 起きる（同じ配布形が観測経路ごとに違う文言で落ちる）。
+test("admitIrodori: rejects dit unless it has exactly one symbolic dimension (the same message whatever the path)", async () => {
+  // The resident path binds S with this symbol name on every enqueue. Placing the check at run time
+  // would ① fail only after the weights were downloaded and ② not run on the host path (devices
+  // with `gpuTiming` enabled / `onEvent` subscriptions) (the same distribution would fail with a
+  // different message per observation path).
   const specs = graphSpecs();
   const twoSymbols: TensorlessGraphSpec = {
     ...specs.dit,
@@ -458,8 +491,9 @@ test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経�
     inputs: [{ name: "x_t", shape: ["B", "S", CONFIG.latentDim] }, ...specs.dit.inputs.slice(1)],
     output: { name: "v", shape: ["B", "S", CONFIG.latentDim] },
   };
-  // 並びが宣言順（`S, B`）でないのは、容器のグラフ記述が**正準形**（記号は符号位置順 —
-  // container-v1 / `canonicalIrDocument`）で焼かれるため。文言はその読み戻しを名乗る。
+  // The order is not the declaration order (`S, B`) because the container's graph description is
+  // written in **canonical form** (symbols in code-point order — container-v1 /
+  // `canonicalIrDocument`). The message names what was read back.
   await assertRejects(
     () => build({ dit: twoSymbols }),
     Error,
@@ -467,13 +501,15 @@ test("admitIrodori: dit の記号次元が 1 本でなければ落とす（経�
   );
 });
 
-// ---- dit_context → dit の配線（ADR 0114）---------------------------------------------------
+// ---- The dit_context → dit wiring (ADR 0114) ---------------------------------------------------
 //
-// 常駐入力は runtime 側で**大きさしか**検査されない（`RunInput` の doc）。形や dtype の食い違いは
-// バイト数が合う限り沈黙で通るので、admission の門がここでの唯一の検出器になる。
+// Resident inputs are checked by the runtime **only for size** (the doc of `RunInput`). A mismatch
+// of shape or dtype passes silently as long as the byte count matches, so the admission check is
+// the only detector here.
 
-test("admitIrodori: 実物と同じ宣言から K / V 24 本の名前と常駐バイト数を導く（178 MiB）", async () => {
-  // 資産の段（tokenizer）より前で止まる admission を直接呼ぶ — 導出値は公開面から見えない。
+test("admitIrodori: derives the names of the 24 K / V and the resident bytes from the same declarations as the real thing (178 MiB)", async () => {
+  // Calls the admission directly, which stops before the asset stage (tokenizer) — the derived
+  // values are not visible from the public surface.
   const admitted = await admitIrodori(
     parseManifest(manifestText()),
     await assetOpener(await assetsWith()),
@@ -484,14 +520,14 @@ test("admitIrodori: 実物と同じ宣言から K / V 24 本の名前と常駐�
     admitted.ditContextOutputs,
     CONTEXT_NAMES.map((name) => ({ name, byteLength: bytes })),
   );
-  // 設計の見積り（24 本 × [1,1519,20,64] f32 = 178.0 MiB）と同じ数になる。
+  // The same number as the design estimate (24 × [1,1519,20,64] f32 = 178.0 MiB).
   assertEquals(
     admitted.ditContextOutputs.reduce((total, output) => total + output.byteLength, 0),
     186_654_720,
   );
 });
 
-test("admitIrodori: dit_context が記号次元を持てば落とす（常駐テンソルは確保時に大きさが要る）", async () => {
+test("admitIrodori: rejects a dit_context with a symbolic dimension (a resident tensor needs its size at allocation)", async () => {
   const spec = contextSpec();
   const symbolic: ContextSpec = {
     ...spec,
@@ -505,9 +541,10 @@ test("admitIrodori: dit_context が記号次元を持てば落とす（常駐テ
   );
 });
 
-test("admitIrodori: dit_context の出力が K / V の対にならなければ落とす", async () => {
+test("admitIrodori: rejects dit_context outputs that do not form K / V pairs", async () => {
   const spec = contextSpec();
-  // 最後の V を落とした 23 本（dit 側も同じ 23 本にそろえ、名前の門より先にここで落ちることを見る）。
+  // 23 with the last V dropped (the dit side is aligned to the same 23, to see that it fails here
+  // before the name check).
   const odd = spec.outputs.slice(0, -1);
   const dit = graphSpecs().dit;
   await assertRejects(
@@ -521,9 +558,9 @@ test("admitIrodori: dit_context の出力が K / V の対にならなければ�
   );
 });
 
-test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の出力と違えば両側の差分を出して落ちる", async () => {
+test("admitIrodori: fails with the differences on both sides when dit's input names differ from {x_t, t_embed, mask} ∪ the outputs of dit_context", async () => {
   const dit = graphSpecs().dit;
-  // dit 側だけ V を 1 本取り違える（K / V の対の取り違え = 条件側の配線ずれ）。
+  // Mixes up one V on the dit side only (a mixed-up K / V pair = miswiring on the condition side).
   const renamed = await assertRejects(
     () =>
       build({
@@ -540,7 +577,8 @@ test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の
   assertStringIncludes(renamed.message, "missing from dit: [context_v_11]");
   assertStringIncludes(renamed.message, "only in dit: [context_v_12]");
 
-  // 旧形（dit が条件 state 3 本を直接受け、mask 以外に K / V を持たない）は名指しで落ちる。
+  // The old form (dit takes the 3 condition states directly and has no K / V besides mask) fails by
+  // name.
   const legacy = await assertRejects(
     () =>
       build({
@@ -558,9 +596,10 @@ test("admitIrodori: dit の入力名が {x_t, t_embed, mask} ∪ dit_context の
   assertStringIncludes(legacy.message, "context_k_0");
 });
 
-test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype が違えば落とす（大きさが同じでも）", async () => {
+test("admitIrodori: fails when the shape / dtype of a dit_context output and dit's input of the same name differ (even at the same size)", async () => {
   const spec = contextSpec();
-  // head と head_dim を入れ替えた形（要素数は同じ = 常駐入力の大きさ検査は通ってしまう形）。
+  // A shape with head and head_dim swapped (the same element count = a form that would pass the
+  // resident input's size check).
   const transposed: ContextSpec = {
     ...spec,
     outputs: spec.outputs.map((output) =>
@@ -574,8 +613,9 @@ test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype �
   );
   assertStringIncludes(shape.message, "the same static shape and the same dtype are required");
 
-  // dtype だけが違う（4 バイト同士なのでこれもバイト数では見えない）。i32 の出力を宣言として
-  // 成り立たせるために i32 の入力を 1 本足す（突合の門は条件 3 本の軸しか見ない）。
+  // Only the dtype differs (both 4 bytes, so this is invisible in the byte count too). To make an
+  // i32 output valid as a declaration, one i32 input is added (the graph check looks only at the
+  // axes of the 3 conditions).
   const retyped: ContextSpec = {
     ...spec,
     inputs: [...spec.inputs, { name: "ids", shape: [1], dtype: "i32" }],
@@ -590,9 +630,10 @@ test("admitIrodori: dit_context の出力と dit の同名入力の形・dtype �
   );
 });
 
-test("fromPretrained: components で差した dit の次元が違えば重みを取る前に落ちる（差し替え席が配線されている）", async () => {
-  // 差し替え先の dit だけ latentDim を 64 に焼く（元リポの 9 本は突合を全て通る）。
-  // 差し替え席を配線し忘れると、元リポのまま突合を通って資産の取得へ進み、別の文言で落ちる。
+test("fromPretrained: a dit replaced through components with a wrong dimension fails before fetching weights (the replacement slot is wired)", async () => {
+  // Only the replacement dit is built with latentDim 64 (the original repo's 9 pass every check).
+  // If the replacement slot were left unwired, the original repo would pass the checks, proceed to
+  // fetching assets and fail with another message.
   const specs = graphSpecs();
   let weights: Record<string, unknown> = {};
   let files: (readonly [string, Uint8Array<ArrayBuffer>])[] = [];
@@ -650,8 +691,9 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
     "the graph descriptor does not match the manifest's declaration",
   );
   assertStringIncludes(error.message, "dit");
-  // 差し替え先の manifest を引いた（= 席が loader まで届いた）。検査は 2 つの manifest の宣言
-  // だけで済むので、どちらのリポの容器も 1 本も取っていない（資産の tokenizer にも進んでいない）。
+  // The replacement's manifest was looked up (= the slot reached the loader). The check needs only
+  // the declarations of the 2 manifests, so no container of either repo was fetched (it did not
+  // reach the tokenizer asset either).
   assertEquals(
     mock.requests.filter((request) => request.repo === OTHER_REPO),
     [{ repo: OTHER_REPO, path: MANIFEST_PATH }],
@@ -662,17 +704,19 @@ test("fromPretrained: components で差した dit の次元が違えば重みを
   );
 });
 
-// ---- 実行ノブの明示指定（明示 > quant 宣言 > runtime 既定 — ADR 0058 追記 2026-09-26）----------
+// ---- Explicit execution knobs (explicit > quant declaration > runtime default — ADR 0058 addendum
+// 2026-09-26) ----------
 
-/** 型の外から来る呼び手（JS の消費者）の構築オプションを再現する。 */
+/** Reproduces the build options of callers that come from outside the types (JS consumers). */
 const optionsWith = (key: string, value: unknown): PipelineOptions => {
   const options: PipelineOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
   return options;
 };
 
-test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突合より前に ModelInputError", async () => {
-  // dit の宣言を 1 軸壊してある — 合成がグラフ突合より後ろなら、突合の文言で落ちる。
+test("admitIrodori: invalid explicit values and attention knobs are a ModelInputError before the graph check", async () => {
+  // dit's declaration has one axis broken — if the merge came after the graph check, it would fail
+  // with the check's message.
   const manifest = parseManifest(manifestText());
   const broken = await assetsWith(breakInput("dit", "x_t", 2, CONFIG.latentDim + 1));
   await assertRejects(
@@ -680,7 +724,8 @@ test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突�
     ModelInputError,
     "linearCompute is invalid",
   );
-  // dit の attention は融合 attention の契約に載らない（分解経路）ので、効く席が無い。
+  // dit's attention is not covered by the fused-attention contract (the decomposed path), so there
+  // is no slot for it to act on.
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: broken }, optionsWith("attentionCompute", "f16")),
     ModelInputError,
@@ -688,7 +733,7 @@ test("admitIrodori: 不正な明示値と attention 系のノブはグラフ突�
   );
 });
 
-test("admitIrodori: 受理される linearCompute の明示は突合を通って資産の段まで進む", async () => {
+test("admitIrodori: an accepted explicit linearCompute passes the checks and proceeds to the asset stage", async () => {
   await assertRejects(
     async () =>
       await Pipeline.fromAssets(
@@ -703,9 +748,10 @@ test("admitIrodori: 受理される linearCompute の明示は突合を通って
   );
 });
 
-test("admitIrodori: 明示の f16 を共有 GPU が持たなければ GPU 取得前に名指しで落ちる", async () => {
-  // quant 宣言は shader-f16 を要求しない。要求は実効設定から導く（黙って f32 へ落とさず、
-  // 重みを上げた後の Session 構築まで遅らせもしない）。
+test("admitIrodori: an explicit f16 the shared GPU does not support fails by name before acquiring the GPU", async () => {
+  // The quant declaration does not require shader-f16. The requirement is derived from the
+  // effective settings (it neither falls back to f32 silently nor waits until the Session build
+  // after the weights are uploaded).
   await assertRejects(
     async () =>
       await Pipeline.fromAssets(

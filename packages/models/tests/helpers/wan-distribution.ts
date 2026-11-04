@@ -1,19 +1,21 @@
 /**
- * Wan2.1 の配布形ミラー（`models/karume-wan2.1/`）を組むコマンド。配布形を読む e2e とホストのテストの SKIP 文言が同じ
- * コマンドを案内する（2.2 の {@link WAN_TI2V_ASSEMBLE_COMMAND} と同じ形 — `wan-ti2v-pipeline.ts`）。
+ * The command that builds the Wan2.1 distribution mirror (`models/karume-wan2.1/`). The e2e that read the distribution
+ * and the SKIP messages of the host tests point to the same command (the same form as 2.2's
+ * {@link WAN_TI2V_ASSEMBLE_COMMAND} — `wan-ti2v-pipeline.ts`).
  *
  * The mirror is local-only (not published) and is still the distribution form the tests read (ADR 0139 decision 1 —
  * an unpublished family reads its local mirror built by `dist.py`).
  *
- * 副作用ゼロ: 定数と、呼ばれたときだけ読む関数だけを持つ。
+ * Zero side effects: only constants and functions that read when called.
  */
 
 import type { OpenedContainer } from "@karume/runtime";
 import { mirrorRoot, openSelectedContainer, selectMirrorComponent } from "./mirror.ts";
 
 /**
- * 配布形を組むコマンド。umT5 の越境参照は仮の SHA（`--allow-placeholder-ref`）で焼く — ローカルのミラーを根にする e2e は
- * 取得元の `crossRepo` の mapping で `models/karume-umt5-xxl/` を渡すので、revision は読まない。
+ * The command that builds the distribution. umT5's cross-repository reference is written with a placeholder SHA
+ * (`--allow-placeholder-ref`) — the e2e rooted at the local mirror pass `models/karume-umt5-xxl/` through the source's
+ * `crossRepo` mapping, so the revision is not read.
  */
 export const WAN_ASSEMBLE_COMMAND =
   "cd tools/export-recipes && uv run python dist.py --pipeline wan --allow-placeholder-ref";

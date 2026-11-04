@@ -6,23 +6,24 @@ import {
   readTextFileSync,
 } from "@karume/test-support/fs";
 /**
- * この process の GPU メモリの使用量の標本化（診断 — Linux の DRM fdinfo）。
+ * Sampling of this process's GPU memory usage (diagnostics — Linux DRM fdinfo).
  *
- * `/proc/self/fdinfo/<renderD の fd>` の `drm-total-<領域>`（vram0 / gtt / system …）を領域ごとに足す。
- * xe は同じ接頭辞でエンジンのサイクル数（`drm-total-cycles-<engine>`）も出すので、それは数えない。
- * Linux の DRM でない環境（fdinfo が無い）は `undefined` を返し、呼び手は「観測なし」として扱う。
- * 10 ms ごとの標本なので短い山は取りこぼしうる（門ではなく観測に使う）。
+ * Sums `drm-total-<region>` (vram0 / gtt / system …) of `/proc/self/fdinfo/<renderD fd>` per
+ * region. xe also reports engine cycle counts under the same prefix (`drm-total-cycles-<engine>`);
+ * those are not counted. An environment without Linux DRM (no fdinfo) returns `undefined`, which
+ * callers treat as "no observation". Samples are taken every 10 ms, so short peaks can be missed
+ * (use it for observation, not as a check).
  */
 
 const RENDER_NODE = /^\/dev\/dri\/renderD\d+$/;
 const FDINFO_UNITS: Readonly<Record<string, number>> = { "": 1, KiB: 1024, MiB: 1024 ** 2 };
 
-/** 領域名（`vram0` / `gtt` / `system` …）→ バイト。 */
+/** Region name (`vram0` / `gtt` / `system` …) → bytes. */
 export type DrmUsage = ReadonlyMap<string, number>;
 
 /**
- * この process の DRM クライアントの `drm-total-<領域>` を領域ごとに足した値。同じクライアントを指す
- * fd は `drm-client-id` で 1 度だけ数える。
+ * The per-region sum of `drm-total-<region>` over this process's DRM clients. File descriptors that
+ * point to the same client are counted once, by `drm-client-id`.
  */
 export const sampleDrmUsage = (): DrmUsage | undefined => {
   let fds: DirEntry[];
@@ -39,7 +40,8 @@ export const sampleDrmUsage = (): DrmUsage | undefined => {
       if (!RENDER_NODE.test(readLinkSync(`/proc/self/fd/${name}`))) continue;
       info = readTextFileSync(`/proc/self/fdinfo/${name}`);
     } catch (cause) {
-      // 列挙と読みの間に閉じた fd（標本化の自分の readDir の fd など）は数えない。
+      // An fd closed between listing and reading (such as the sampler's own readDir fd) is not
+      // counted.
       if (isNotFound(cause)) continue;
       throw cause;
     }
@@ -62,17 +64,20 @@ export const sampleDrmUsage = (): DrmUsage | undefined => {
   return total;
 };
 
-/** {@link monitorDrmUsage} の決着。 */
+/** The result of {@link monitorDrmUsage}. */
 export type DrmTimeline = {
-  /** 区間名 → 領域ごとの最大（区間に入った時点と抜けた時点の標本を含む）。 */
+  /**
+   * Phase name → the maximum per region (including the samples taken on entering and leaving it).
+   */
   readonly peaks: ReadonlyMap<string, DrmUsage>;
-  /** 呼び手が名指しした時点の標本（`mark` の順）。 */
+  /** The samples at the points the caller named (in `mark` order). */
   readonly marks: readonly { readonly label: string; readonly usage: DrmUsage | undefined }[];
 };
 
 /**
- * 区間ごとの山を採る標本化を始める。`enter(区間名)` で区間を切り替え（切り替えの直前と直後に 1 回ずつ
- * 標本を採る）、`mark(名前)` でその時点の値を残し、`stop()` で止めて決着を返す。
+ * Starts sampling that records the peak of each phase. `enter(phase)` switches the phase (taking
+ * one sample just before and one just after the switch), `mark(label)` keeps the value at that
+ * point, and `stop()` stops sampling and returns the result.
  */
 export const monitorDrmUsage = (
   intervalMs = 10,
@@ -110,7 +115,7 @@ export const monitorDrmUsage = (
 
 const GIB = 1024 ** 3;
 
-/** `vram0=1.234 gtt=0.010 …`（GiB・小数 3 桁 — 観測が無ければ `n/a`）。 */
+/** `vram0=1.234 gtt=0.010 …` (GiB, 3 decimals — `n/a` when there is no observation). */
 export const formatDrmUsage = (usage: DrmUsage | undefined): string =>
   usage === undefined
     ? "n/a"

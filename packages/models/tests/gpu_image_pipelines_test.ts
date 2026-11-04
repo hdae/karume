@@ -1,25 +1,31 @@
 /**
- * 画像 3 家族（siglip2 / birefnet / depth-anything）の**公開動詞と dispose の契約**（実 GPU）。
+ * The **public verbs and the dispose contract** of the three image families (siglip2 / birefnet /
+ * depth-anything) (real GPU).
  *
- * 部品ごとの純関数（前処理・後処理）は各家族の単体テストが縛っているが、`fromAssets` → 動詞 →
- * 返り値の通しと、所有権・直列化の契約は実資産 e2e（Session を直接張る）も通らない。ここでは
- * 重みを持たない小さなグラフ（解像度 2×2）を容器に焼いて、3 家族を同じ表で回す:
+ * Each family's unit tests pin the per-component pure functions (preprocessing, postprocessing),
+ * but neither they nor the real-asset e2e tests (which build Sessions directly) go through
+ * `fromAssets` → verb → return value end to end, or through the ownership and serialization
+ * contracts. Here a small weightless graph (resolution 2×2) is baked into a container and the three
+ * families run through the same table:
  *
- * - 動詞（`embed` / `segment` / `estimate`）が「前処理 → グラフ 1 回 → 後処理」を結線し、
- *   `onRunDiagnostics` を 1 呼び出しにつき 1 回呼ぶ。birefnet / depth-anything は**入力画像の
- *   寸法**（焼いた解像度ではない）で返す。
- * - 並行に呼んでも両方が正しい値を返す（1 つの Session を順に使う）。
- * - `dispose` は in-flight の呼び出しを待ってから畳み（flush-before-destroy）、2 度目も同じ完了を
- *   返す。dispose 後の呼び出しは fail loudly で拒む。
- * - 渡した共有 GPU は dispose しても破棄しない（同じ GPU で次のパイプラインが動く）。
+ * - The verb (`embed` / `segment` / `estimate`) wires "preprocess → one graph run → postprocess"
+ *   and calls `onRunDiagnostics` once per call. birefnet / depth-anything return at the **input
+ *   image's size** (not the baked resolution).
+ * - Concurrent calls both return correct values (one Session used in turn).
+ * - `dispose` waits for in-flight calls before tearing down (flush-before-destroy), and a second
+ *   call returns the same completion. A call after dispose fails loudly.
+ * - A shared GPU that was passed in is not destroyed by dispose (the next pipeline runs on the
+ *   same GPU).
  *
- * 期待値はホスト側の同じ純関数（各家族の `preprocessPixelValues` と後処理）から組むので、ここが
- * 縛るのは結線と契約だけ（前後処理そのものの正しさは単体テストと Python 正本のフィクスチャ）。
- * グラフの演算は語彙内の `reshape` / `add` / `sum` だけで組む:
+ * The expected values are built from the same host-side pure functions (each family's
+ * `preprocessPixelValues` and postprocessing), so this file pins only the wiring and the contracts
+ * (the correctness of the pre- and postprocessing itself is covered by the unit tests and the
+ * fixtures from the Python source of truth). The graphs use only the in-vocabulary ops `reshape` /
+ * `add` / `sum`:
  *
- * - siglip2 `vision`: `pixel_values [1,3,2,2]` → reshape `[1,12]` → `x + x`（= `hiddenDim` 12）
- * - birefnet `matte`: チャネル軸の `sum` → `[1,2,2]` → reshape `[1,1,2,2]`
- * - depth-anything `depth`: チャネル軸の `sum` → `[1,2,2]`
+ * - siglip2 `vision`: `pixel_values [1,3,2,2]` → reshape `[1,12]` → `x + x` (= `hiddenDim` 12)
+ * - birefnet `matte`: `sum` over the channel axis → `[1,2,2]` → reshape `[1,1,2,2]`
+ * - depth-anything `depth`: `sum` over the channel axis → `[1,2,2]`
  */
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
@@ -52,14 +58,15 @@ import { preprocessPixelValues as siglip2PixelValues } from "../src/siglip2/pipe
 import { declaredContainer, partAssets, writeContainer } from "./helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** グラフに焼く解像度（正方 2×2）。 */
+/** The resolution baked into the graphs (square 2×2). */
 const SIZE = 2;
 const CHANNELS = 3;
 const PLANE = SIZE * SIZE;
 
 /**
- * 入力画像。焼いた解像度と違う**非正方**の寸法にする — 後処理が「入力画像の寸法へ戻す」ことと、
- * 幅と高さの取り違えを同時に見るため。
+ * The input image. Its size is **non-square** and differs from the baked resolution — to check both
+ * that postprocessing "returns to the input image's size" and that width and height are not
+ * swapped.
  */
 const IMAGE: Rgb8Image = {
   width: 4,
@@ -69,7 +76,7 @@ const IMAGE: Rgb8Image = {
 
 const f32 = (shape: readonly number[]) => ({ dtype: "f32", shape });
 
-/** `pixel_values [1,3,2,2]` を受ける 1 入力 1 出力の宣言。 */
+/** A one-input, one-output declaration that takes `pixel_values [1,3,2,2]`. */
 const declaration = (
   ops: readonly string[],
   output: string,
@@ -90,8 +97,9 @@ const declaration = (
   });
 
 /**
- * チャネル軸（dim 1）の総和。GPU 側は `sum` の縮約順なので CPU とは丸めが割れうる。比較は depth は
- * 許容差つき、birefnet は丸めの境目の前提の検査（{@link assertNoRoundingTie}）つきで厳密一致。
+ * The sum over the channel axis (dim 1). The GPU side follows `sum`'s reduction order, so its
+ * rounding can differ from the CPU's. depth is compared with a tolerance; birefnet matches exactly,
+ * with a check of the rounding-boundary premise ({@link assertNoRoundingTie}).
  */
 const channelSum = (pixelValues: Float32Array): Float32Array<ArrayBuffer> => {
   const out = new Float32Array(PLANE);
@@ -105,14 +113,14 @@ const channelSum = (pixelValues: Float32Array): Float32Array<ArrayBuffer> => {
   return out;
 };
 
-/** 家族を問わない動詞の返り値（寸法を返さない siglip2 は undefined）。 */
+/** A family-independent verb result (undefined size for siglip2, which returns none). */
 type Output = {
   readonly values: readonly number[];
   readonly width?: number;
   readonly height?: number;
 };
 
-/** 家族を問わないパイプラインの把手。 */
+/** A family-independent pipeline handle. */
 type Handle = {
   readonly run: (image: Rgb8Image) => Promise<Output>;
   readonly dispose: () => Promise<void>;
@@ -123,19 +131,19 @@ type BuildOptions = {
   readonly onRunDiagnostics: (diagnostics: SessionDiagnostics) => void;
 };
 
-/** 表の 1 行。 */
+/** One table row. */
 type Family = {
   readonly name: string;
   readonly build: (options: BuildOptions) => Promise<Handle>;
-  /** ホスト側の純関数で組んだ期待値。 */
+  /** The expected value built with the host-side pure functions. */
   readonly expected: (image: Rgb8Image) => Output;
-  /** 要素ごとの許容差（siglip2 は `x + x` なので厳密一致）。 */
+  /** The per-element tolerance (siglip2 is `x + x`, so it matches exactly). */
   readonly tolerance: number;
-  /** dispose 後の拒否の文言。 */
+  /** The message of the rejection after dispose. */
   readonly disposedMessage: string;
 };
 
-/** 配布形の骨格（部品 1 本・quant 1 つ）。 */
+/** The skeleton of a distribution form (one component, one quant). */
 const manifestOf = (pipeline: string, key: string, config: Record<string, unknown>) =>
   parseManifest(
     JSON.stringify({
@@ -155,7 +163,7 @@ const manifestOf = (pipeline: string, key: string, config: Record<string, unknow
     }),
   );
 
-/** 部品 1 本の容器を書いて、全量面のキー（`<部品>[i]`）へ畳む。 */
+/** Writes a one-component container and folds it into full-surface keys (`<component>[i]`). */
 const assetsOf = async (key: string, graph: IrDeclaration) =>
   partAssets(
     key,
@@ -187,9 +195,11 @@ const BIREFNET_CONFIG: Record<string, unknown> = {
 };
 
 /**
- * GPU と CPU の logit（チャネル 3 項の和）の差の上界（導出は birefnet 行の許容差の注記 1）。
+ * The upper bound of the difference between the GPU and CPU logits (the sum of the 3 channel terms)
+ * (derivation: note 1 on the tolerance of the birefnet row).
  *
- * 正規化後の |x| はチャネルごとに `max(mean, 1 − mean) / std` 以下（画素は [0, 1]）。
+ * After normalization, |x| per channel is at most `max(mean, 1 − mean) / std` (pixels are in [0,
+ * 1]).
  */
 const birefnetLogitDiffBound = (config: BirefnetPipelineConfig): number => {
   let absSum = 0;
@@ -201,19 +211,20 @@ const birefnetLogitDiffBound = (config: BirefnetPipelineConfig): number => {
 };
 
 /**
- * 許容差 0 の前提（birefnet 行の注記 4）: どの logit も、8bit の平面の丸めの境目（`255σ = k + 0.5`）
- * から GPU と CPU の差の上界より遠い。崩れたら許容差を広げずに落とす（入力を変えたなら導出をやり直す）。
+ * The premise of tolerance 0 (note 4 of the birefnet row): every logit is farther from the rounding
+ * boundary of the 8-bit plane (`255σ = k + 0.5`) than the upper bound of the GPU–CPU difference. If
+ * that breaks, fail without widening the tolerance (if the input changed, redo the derivation).
  */
 const assertNoRoundingTie = (logits: Float32Array, config: BirefnetPipelineConfig): void => {
-  // σ' ≤ 1/4 なので、255σ の差は logit の差の 255/4 倍以下（注記 2）。
+  // σ' ≤ 1/4, so the difference of 255σ is at most 255/4 times the logit difference (note 2).
   const bound = (255 / 4) * birefnetLogitDiffBound(config);
   for (const [index, logit] of logits.entries()) {
     const scaled = (1 / (1 + Math.exp(-logit))) * 255;
     const distance = Math.abs(scaled - (Math.floor(scaled) + 0.5));
     assert(
       distance > bound,
-      `logit ${index} の 255σ = ${scaled} が丸めの境目から ${distance}（上界 ${bound} 以内）— ` +
-        "GPU と CPU で 8bit の平面が割れうるので許容差 0 の前提が無い",
+      `logit ${index}: 255σ = ${scaled} is ${distance} from the rounding boundary (within the bound ${bound}) — ` +
+        "the 8-bit plane can differ between GPU and CPU, so the premise of tolerance 0 does not hold",
     );
   }
 };
@@ -311,21 +322,27 @@ const birefnetFamily: Family = {
     );
     return { values: Array.from(matte.data), width: matte.width, height: matte.height };
   },
-  // 許容差 0 の導出。このテストは配布形を読まない（2×2 の小グラフとその場の manifest）ので、
-  // 宣言する手順はここで選ぶ — HR の `u8-pil-bicubic`（8bit への丸めが resample の前にあり、丸めの
-  // 割れが bicubic の負のローブで広がりうる側）。
-  //  1. logit の差: 入力（`pixel_values` の f32）は GPU と CPU で同一。CPU は f64 で和を取って f32 へ
-  //     1 回丸め（誤差 ≤ u·|S|）、GPU は f32 の 3 項の和（順序を問わず誤差 ≤ 2u·Σ|x|）。u = 2^-24 なので
-  //     |Δlogit| ≤ 3u·Σ|x| ≤ 1.31e-6（{@link birefnetLogitDiffBound} — この定数で Σ|x| ≤ 7.32）。
-  //  2. 8bit の平面: σ' ≤ 1/4 なので |Δ(255σ)| ≤ 8.4e-5。σ は両辺とも同じホストの関数で計算する。
-  //     `Math.round(255σ)` が割れるのは 255σ が k + 0.5 からこれ以内のときだけで、割れても 1 段。
-  //  3. Pillow の BICUBIC の 2 パス（横 2 → 4・縦 2 → 3・パスの間で 8bit へ丸める）: 出力の変化は
-  //     「入力の変化 × 係数の絶対値の和」の切り上げ以下。係数の絶対値の和の最大は横 1.18
-  //     （1.088 / −0.088）・縦 1.13（1.066 / −0.066）なので、1 段 → 横で 2 段 → 縦で 3 段。前提なしの
-  //     最悪はこの式の上界で 3 段。
-  //  4. このテストの入力（`IMAGE` とその反転）は 8 標本とも 255σ が k + 0.5 から 0.105 以上離れていて
-  //     （2 の上界の 1,000 倍超）、平面は GPU と CPU で同一になる。resample は整数の演算なので出力も
-  //     ビット一致 → 許容差 0。前提は `expected` が毎回確かめる（{@link assertNoRoundingTie}）。
+  // Derivation of tolerance 0. This test does not read a distribution form (a 2×2 small graph and
+  // an in-place manifest), so the declared method is chosen here — HR's `u8-pil-bicubic` (the side
+  // where the rounding to 8 bits comes before the resample, and a rounding split can spread through
+  // bicubic's negative lobes).
+  //  1. Logit difference: the input (`pixel_values` in f32) is identical on GPU and CPU. The CPU
+  //     sums in f64 and rounds to f32 once (error ≤ u·|S|); the GPU sums the 3 terms in f32 (error
+  //     ≤ 2u·Σ|x| in any order). With u = 2^-24, |Δlogit| ≤ 3u·Σ|x| ≤ 1.31e-6
+  //     ({@link birefnetLogitDiffBound} — Σ|x| ≤ 7.32 with these constants).
+  //  2. 8-bit plane: σ' ≤ 1/4, so |Δ(255σ)| ≤ 8.4e-5. Both sides compute σ with the same host
+  //     function. `Math.round(255σ)` can split only when 255σ is within that of k + 0.5, and then
+  //     by one step.
+  //  3. Pillow's two BICUBIC passes (horizontal 2 → 4, vertical 2 → 3, rounding to 8 bits
+  //     between the passes): the output change is at most the ceiling of "input change × the sum of
+  //     the absolute coefficients". The maximum sum of the absolute coefficients is 1.18
+  //     horizontally (1.088 / −0.088) and 1.13 vertically (1.066 / −0.066), so 1 step → 2 steps
+  //     horizontally → 3 steps vertically. Without the premise, the worst case is this bound of 3
+  //     steps.
+  //  4. In this test's inputs (`IMAGE` and its inversion) 255σ is at least 0.105 from k + 0.5 in
+  //     all 8 samples (more than 1,000 times the bound of 2), so the plane is identical on GPU and
+  //     CPU. The resample is integer arithmetic, so the output is bit-identical too → tolerance 0.
+  //     The premise is checked every time by `expected` ({@link assertNoRoundingTie}).
   tolerance: 0,
   disposedMessage: "cannot segment after dispose",
 };
@@ -365,14 +382,14 @@ const depthAnythingFamily: Family = {
 };
 
 const assertOutput = (actual: Output, expected: Output, tolerance: number): void => {
-  assertEquals(actual.width, expected.width, "幅が入力画像と違う");
-  assertEquals(actual.height, expected.height, "高さが入力画像と違う");
+  assertEquals(actual.width, expected.width, "the width differs from the input image");
+  assertEquals(actual.height, expected.height, "the height differs from the input image");
   assertEquals(actual.values.length, expected.values.length);
   for (const [index, value] of actual.values.entries()) {
     const want = expected.values[index];
     assert(
       Math.abs(value - want) <= tolerance,
-      `要素 ${index}: 実測 ${value} / 期待 ${want}（許容 ${tolerance}）`,
+      `element ${index}: actual ${value} / expected ${want} (tolerance ${tolerance})`,
     );
   }
 };
@@ -387,8 +404,8 @@ const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> =>
 };
 
 for (const family of [siglip2Family, birefnetFamily, depthAnythingFamily]) {
-  describe.skipIf(!GPU_AVAILABLE)(`${family.name}（実 GPU・小グラフ）`, () => {
-    it("前処理 → グラフ 1 回 → 後処理を結線し、診断を 1 回渡す", async () => {
+  describe.skipIf(!GPU_AVAILABLE)(`${family.name} (real GPU, small graph)`, () => {
+    it("wires preprocess → one graph run → postprocess and hands over diagnostics once", async () => {
       await withGpu(async (gpu) => {
         const observed: SessionDiagnostics[] = [];
         const handle = await family.build({
@@ -398,14 +415,14 @@ for (const family of [siglip2Family, birefnetFamily, depthAnythingFamily]) {
         try {
           assertOutput(await handle.run(IMAGE), family.expected(IMAGE), family.tolerance);
           assertEquals(observed.length, 1);
-          assert(observed[0].lastRun !== undefined, "run の後の診断でない");
+          assert(observed[0].lastRun !== undefined, "not the diagnostics after the run");
         } finally {
           await handle.dispose();
         }
       });
     });
 
-    it("並行に呼んでも両方が正しい値を返す（1 つの Session を順に使う）", async () => {
+    it("concurrent calls both return correct values (one Session used in turn)", async () => {
       await withGpu(async (gpu) => {
         let calls = 0;
         const handle = await family.build({ gpu, onRunDiagnostics: () => (calls += 1) });
@@ -421,19 +438,20 @@ for (const family of [siglip2Family, birefnetFamily, depthAnythingFamily]) {
       });
     });
 
-    it("dispose は in-flight の呼び出しを待って畳み、2 度目も同じ完了を返す", async () => {
+    it("dispose waits for the in-flight call before tearing down, and a second call returns the same completion", async () => {
       await withGpu(async (gpu) => {
         const handle = await family.build({ gpu, onRunDiagnostics: () => {} });
         const running = handle.run(IMAGE);
         const disposal = handle.dispose();
         assertStrictEquals(handle.dispose(), disposal);
-        // 先に受けた呼び出しは dispose の巻き添えにならない（Session を畳むのはその後）。
+        // A call accepted earlier is not caught up in the dispose (the Session is torn down after
+        // it).
         assertOutput(await running, family.expected(IMAGE), family.tolerance);
         await disposal;
       });
     });
 
-    it("dispose 後の呼び出しは fail loudly で拒む", async () => {
+    it("a call after dispose fails loudly", async () => {
       await withGpu(async (gpu) => {
         const handle = await family.build({ gpu, onRunDiagnostics: () => {} });
         await handle.dispose();
@@ -441,11 +459,12 @@ for (const family of [siglip2Family, birefnetFamily, depthAnythingFamily]) {
       });
     });
 
-    it("渡した共有 GPU は dispose しても破棄しない", async () => {
+    it("dispose does not destroy the shared GPU that was passed in", async () => {
       await withGpu(async (gpu) => {
         const first = await family.build({ gpu, onRunDiagnostics: () => {} });
         await first.dispose();
-        // 同じ GPU で次のパイプラインが張れて動く = 前のパイプラインが device を壊していない。
+        // The next pipeline builds and runs on the same GPU = the previous pipeline did not break
+        // the device.
         const second = await family.build({ gpu, onRunDiagnostics: () => {} });
         try {
           assertOutput(await second.run(IMAGE), family.expected(IMAGE), family.tolerance);

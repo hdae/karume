@@ -1,12 +1,16 @@
-// `pipelineConfig`（irodori）のスキーマ検証の挙動テスト。GPU も実資産も要らない。
+// Behaviour tests of the schema validation of `pipelineConfig` (irodori). Needs neither a GPU nor
+// real assets.
 //
-// ここで押さえるのは 3 つ:
-//  ① 未知キー / 欠落 / 値域外は **parse 時**に落ちる（配布形の綴り違いが黙って既定へ縮退する
-//     経路を作らない — `src/irodori/config.ts` の doc）
-//  ② `speakerUncondMode` / `cfgGuidanceMode` は **受理集合が 1 値**（ADR 0047 決定 1）。
-//     対応外のモードは「値を保持して分岐」ではなく**拒否**で、型としても表せない
-//  ③ 区間の宣言（cfgMinT/cfgMaxT・minSeconds/maxSeconds）が逆順なら落とす — 逆順は
-//     「CFG が 1 度も掛からない」形で沈黙し、forward 数が減るだけで例外が出ない
+// Three things are pinned here:
+//  ① unknown keys / missing keys / out-of-range values fail **at parse time** (no path where a
+//     misspelling in the distribution silently degrades to a default — the doc of
+//     `src/irodori/config.ts`)
+//  ② `speakerUncondMode` / `cfgGuidanceMode` have **an accepted set of 1 value** (ADR 0047
+//     decision 1). An unsupported mode is **rejected** rather than "kept and branched on", and it
+//     cannot be expressed as a type either
+//  ③ a reversed range declaration (cfgMinT/cfgMaxT, minSeconds/maxSeconds) fails — a reversed
+//     range stays silent as "CFG is never applied", only reducing the forward count without any
+//     exception
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -16,7 +20,10 @@ import {
   parseIrodoriPipelineConfig,
 } from "../src/irodori/config.ts";
 
-/** 実重み v4-small が要求する値（配布形が書く想定の骨格）。 */
+/**
+ * The values the real v4-small weights require (the skeleton the distribution is expected to
+ * write).
+ */
 const BASE: Record<string, unknown> = {
   maxTextLen: 256,
   maxCaptionLen: 512,
@@ -53,12 +60,12 @@ const without = (key: string): Record<string, unknown> => {
   return rest;
 };
 
-test("契約名と major はこの実装が固定する（manifest 側の綴りと突き合わせる先）", () => {
+test("the contract name and major are fixed by this implementation (what the manifest's spelling is checked against)", () => {
   assertEquals(IRODORI_PIPELINE_NAME, "irodori");
   assertEquals(IRODORI_PIPELINE_MAJOR, 1);
 });
 
-test("parseIrodoriPipelineConfig: 実重みの値を読み切る", () => {
+test("parseIrodoriPipelineConfig: reads the real weights' values completely", () => {
   const config = parseIrodoriPipelineConfig(BASE);
   assertEquals(config.maxTextLen, 256);
   assertEquals(config.speakerRows, 751);
@@ -67,7 +74,7 @@ test("parseIrodoriPipelineConfig: 実重みの値を読み切る", () => {
   assertEquals(config.cfgGuidanceMode, "independent");
 });
 
-test("parseIrodoriPipelineConfig: 未知キーは落とす（綴り違いの黙認を作らない）", () => {
+test("parseIrodoriPipelineConfig: rejects unknown keys (no silent acceptance of misspellings)", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ step: 40 })),
     Error,
@@ -75,7 +82,7 @@ test("parseIrodoriPipelineConfig: 未知キーは落とす（綴り違いの黙�
   );
 });
 
-test("parseIrodoriPipelineConfig: cfgScales の未知キーも落とす", () => {
+test("parseIrodoriPipelineConfig: also rejects unknown keys of cfgScales", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ cfgScales: { text: 3, speaker: 5, style: 3 } })),
     Error,
@@ -83,7 +90,7 @@ test("parseIrodoriPipelineConfig: cfgScales の未知キーも落とす", () => 
   );
 });
 
-test("parseIrodoriPipelineConfig: 欠落は欄名を添えて落とす", () => {
+test("parseIrodoriPipelineConfig: a missing key fails naming the field", () => {
   for (const key of Object.keys(BASE)) {
     assertThrows(
       () => parseIrodoriPipelineConfig(without(key)),
@@ -93,7 +100,7 @@ test("parseIrodoriPipelineConfig: 欠落は欄名を添えて落とす", () => {
   }
 });
 
-test("parseIrodoriPipelineConfig: 対応外の speakerUncondMode は拒否する（ADR 0047 決定 1）", () => {
+test("parseIrodoriPipelineConfig: rejects an unsupported speakerUncondMode (ADR 0047 decision 1)", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ speakerUncondMode: "noise" })),
     Error,
@@ -101,7 +108,7 @@ test("parseIrodoriPipelineConfig: 対応外の speakerUncondMode は拒否する
   );
 });
 
-test("parseIrodoriPipelineConfig: 対応外の cfgGuidanceMode は拒否する（ADR 0047 決定 1）", () => {
+test("parseIrodoriPipelineConfig: rejects an unsupported cfgGuidanceMode (ADR 0047 decision 1)", () => {
   for (const mode of ["joint", "alternating"]) {
     assertThrows(
       () => parseIrodoriPipelineConfig(withPatch({ cfgGuidanceMode: mode })),
@@ -111,10 +118,12 @@ test("parseIrodoriPipelineConfig: 対応外の cfgGuidanceMode は拒否する�
   }
 });
 
-test("parseIrodoriPipelineConfig: 幅と長さの値域を見る", () => {
-  // token 列は BOS を必ず 1 本置くので、本文の予算が残らない 1 は組めない。
+test("parseIrodoriPipelineConfig: checks the value ranges of widths and lengths", () => {
+  // The token sequence always places one BOS, so 1, which leaves no budget for the text, cannot be
+  // built.
   assertThrows(() => parseIrodoriPipelineConfig(withPatch({ maxTextLen: 1 })), Error, ">= 2");
-  // t_embed は前半 cos / 後半 sin に割るので奇数幅は組めない。
+  // t_embed splits into cos in the first half and sin in the second, so an odd width cannot be
+  // built.
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ timestepEmbedDim: 511 })),
     Error,
@@ -138,20 +147,22 @@ test("parseIrodoriPipelineConfig: 幅と長さの値域を見る", () => {
   );
 });
 
-test("parseIrodoriPipelineConfig: initScale は f32 へ丸めても有限な値だけを受ける", () => {
-  // 倍精度では有限でも f32 の最大値（約 3.4e38）を超えると、t 列の先頭側が ±Inf のまま GPU へ
-  // 渡り、DiT を回し切った後の出力検査まで表面化しない（t 列の各値は f32(initScale) 以下）。
+test("parseIrodoriPipelineConfig: initScale accepts only values that stay finite when rounded to f32", () => {
+  // Finite in double precision but above f32's maximum (about 3.4e38), the head of the t sequence
+  // would reach the GPU as ±Inf and surface only at the output check after the DiT has run to the
+  // end (each value of the t sequence is at most f32(initScale)).
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ initScale: 1e39 })),
     Error,
     "not finite in f32",
   );
-  // f32 の最大値そのものは有限なので通る（境界は「丸めた結果が有限か」）。
+  // f32's maximum itself is finite, so it passes (the boundary is "whether the rounded result is
+  // finite").
   const largest = 3.4028234663852886e38;
   assertEquals(parseIrodoriPipelineConfig(withPatch({ initScale: largest })).initScale, largest);
 });
 
-test("parseIrodoriPipelineConfig: CFG の窓が逆順なら落とす（沈黙で CFG が消える）", () => {
+test("parseIrodoriPipelineConfig: fails when the CFG window is reversed (CFG would vanish silently)", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ cfgMinT: 1, cfgMaxT: 0.5 })),
     Error,
@@ -159,7 +170,7 @@ test("parseIrodoriPipelineConfig: CFG の窓が逆順なら落とす（沈黙で
   );
 });
 
-test("parseIrodoriPipelineConfig: 秒の範囲が逆順なら落とす", () => {
+test("parseIrodoriPipelineConfig: fails when the seconds range is reversed", () => {
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ minSeconds: 30, maxSeconds: 0.5 })),
     Error,
@@ -167,7 +178,7 @@ test("parseIrodoriPipelineConfig: 秒の範囲が逆順なら落とす", () => {
   );
 });
 
-test("parseIrodoriPipelineConfig: codec の 3 欄は正の整数（0 も小数も落とす）", () => {
+test("parseIrodoriPipelineConfig: the 3 codec fields are positive integers (0 and fractions fail)", () => {
   for (const key of ["sampleRate", "hopLength", "codecHaloFrames"]) {
     for (const value of [0, -1, 1.5, "48000"]) {
       assertThrows(
@@ -179,8 +190,9 @@ test("parseIrodoriPipelineConfig: codec の 3 欄は正の整数（0 も小数�
   }
 });
 
-test("parseIrodoriPipelineConfig: sampleRate ÷ hopLength が frameRate と違えば落とす", () => {
-  // 秒 → フレームと 秒 → サンプル → フレームの 2 系統が独立に動く形を作らない。
+test("parseIrodoriPipelineConfig: fails when sampleRate ÷ hopLength differs from frameRate", () => {
+  // No form where the two paths, seconds → frames and seconds → samples → frames, move
+  // independently.
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ hopLength: 1000 })),
     Error,
@@ -193,50 +205,55 @@ test("parseIrodoriPipelineConfig: sampleRate ÷ hopLength が frameRate と違�
   );
 });
 
-test("parseIrodoriPipelineConfig: speakerRows 1 は落とす（参照 latent が 0 行になる）", () => {
-  // speaker 条件は「平均トークン 1 本 + patch した参照」なので、1 行では参照が 1 行も載らない。
-  // 素通しすると参照音声の上限サンプル数が 0 になり、`integratedLoudness` の「波形が空」という
-  // **無関係な文言**で生成の途中に落ちる。maxTextLen / maxCaptionLen と同じ理屈・同じ受理集合。
+test("parseIrodoriPipelineConfig: rejects speakerRows 1 (the reference latent would have 0 rows)", () => {
+  // The speaker condition is "1 mean token + the patched reference", so with 1 row no reference row
+  // fits. Passed through, the reference audio's maximum sample count becomes 0, and generation
+  // fails part-way with `integratedLoudness`'s **unrelated message** "the waveform is empty". The
+  // same reasoning and the same accepted set as maxTextLen / maxCaptionLen.
   assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 1 })), Error, ">= 2");
   assertThrows(() => parseIrodoriPipelineConfig(withPatch({ speakerRows: 0 })), Error, ">= 2");
 });
 
-test("parseIrodoriPipelineConfig: maxSeconds から到達しうる S が ditSymMax を超えたら落とす", () => {
-  // 素通しすると、長い発話のときだけ「決まった latent 長が dit の宣言上限を超えている」で
-  // duration 段まで走ってから落ちる（短い発話では永久に露見しない）。
+test("parseIrodoriPipelineConfig: fails when the S reachable from maxSeconds exceeds ditSymMax", () => {
+  // Passed through, only long utterances would run up to the duration stage before failing with
+  // "the decided latent length exceeds the dit's declared limit" (short utterances never reveal
+  // it).
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ maxSeconds: 30.5 })),
     Error,
     "can reach latent length 763",
   );
-  // 手動秒経路（`ceil(trunc(秒×sampleRate) / hopLength)`）だけが 1 フレーム上に出る宣言。
-  // duration 経路の `floor(秒×frameRate)` だけを見る式ではここを取りこぼす。
+  // A declaration where only the manual-seconds path
+  // (`ceil(trunc(seconds×sampleRate) / hopLength)`) comes out 1 frame higher. A formula that looks
+  // only at the duration path's `floor(seconds×frameRate)` misses it.
   assertThrows(
     () => parseIrodoriPipelineConfig(withPatch({ maxSeconds: 30.02 })),
     Error,
     "can reach latent length 751",
   );
-  // 実配布の 30 秒 / ditSymMax 750 はちょうど成立する（境界を締めすぎていない）。
+  // The real distribution's 30 seconds / ditSymMax 750 holds exactly (the boundary is not too
+  // tight).
   assertEquals(parseIrodoriPipelineConfig(withPatch({})).ditSymMax, 750);
 });
 
-test("parseIrodoriPipelineConfig: cfgScales 0 は正規の値（その条件の CFG を回さない）", () => {
+test("parseIrodoriPipelineConfig: cfgScales 0 is a valid value (no CFG for that condition)", () => {
   const config = parseIrodoriPipelineConfig(
     withPatch({ cfgScales: { text: 3, speaker: 0, caption: 0 } }),
   );
   assertEquals(config.cfgScales.speaker, 0);
 });
 
-test("parseIrodoriPipelineConfig: f32 で厳密に表せない cfgScale は宣言段で落とす", () => {
-  // 1.3 は f64 と f32 で値が違う。ホスト経路（f64 乗算）と常駐経路（f32 乗算）が 1〜2 ulp
-  // 割れ、「2 経路の出力は同じ」MUST が条件付きになるので、配布形の宣言側で落とす。
+test("parseIrodoriPipelineConfig: a cfgScale not exactly representable in f32 fails at the declaration stage", () => {
+  // 1.3 differs between f64 and f32. The host path (f64 multiplication) and the resident path (f32
+  // multiplication) would split by 1–2 ulp and make the MUST "the 2 paths give the same output"
+  // conditional, so it is rejected on the distribution's declaration side.
   assertThrows(
     () =>
       parseIrodoriPipelineConfig(withPatch({ cfgScales: { text: 1.3, speaker: 5, caption: 3 } })),
     Error,
     "not exactly representable in f32",
   );
-  // 実配布の 3 / 5 / 3 と、f32 厳密な非整数（2 の冪の和）は通る。
+  // The real distribution's 3 / 5 / 3, and non-integers exact in f32 (sums of powers of 2), pass.
   const config = parseIrodoriPipelineConfig(
     withPatch({ cfgScales: { text: 1.25, speaker: 5, caption: 3 } }),
   );

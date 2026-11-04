@@ -1,14 +1,17 @@
 /**
- * 画像 3 家族（siglip2 / birefnet / depth-anything）の構築前検査が、軸の寸法だけでなく
- * **入力 dtype** と **SigLIP2 の出力の形**も見ること。GPU も実資産も要らない。
+ * The pre-build checks of the 3 image families (siglip2 / birefnet / depth-anything) look not only
+ * at axis sizes but also at **the input dtype** and **the shape of SigLIP2's output**. Needs
+ * neither a GPU nor real assets.
  *
- * 軸の寸法だけを見る検査は、同じ形で dtype が違うグラフ（i32 の `pixel_values`）や batch 2 で
- * 焼いた SigLIP2 の出力（`[2, hiddenDim]`）を通す。そのまま進むと GPU と Session を作って重みを
- * 読んだ後（SigLIP2 の出力は 1 回実行した後）に、資産の取り違えを指さない文言で落ちる。
+ * A check that looks only at axis sizes lets through a graph with the same shape but another dtype
+ * (an i32 `pixel_values`) and a SigLIP2 output built with batch 2 (`[2, hiddenDim]`). Going on from
+ * there, it fails after creating the GPU and Session and reading the weights (for SigLIP2's output,
+ * after one run), with a message that does not point at the mixed-up asset.
  *
- * 観測の仕掛け: グラフ宣言だけの容器を `fromAssets` に渡し、`gpu` は渡さない。家族の門は GPU を
- * 取る**前**の admission で見るので、ここで落ちれば GPU に触れない。門をすり抜けると構築が
- * `acquireGpu` へ進み、別の文言（GPU 不在・Session の検査）で落ちるか通ってしまう。
+ * The observation setup: a container with graph declarations only is passed to `fromAssets`, and no
+ * `gpu` is passed. The family checks run in the admission **before** the GPU is acquired, so a
+ * failure here never touches the GPU. A graph that slips past the checks makes the build proceed to
+ * `acquireGpu` and either fail with another message (no GPU, the Session's checks) or pass.
  */
 
 import { assertRejects } from "@std/assert";
@@ -20,13 +23,14 @@ import * as depthAnything from "../depth-anything.ts";
 import * as siglip2 from "../siglip2.ts";
 import { declaredContainer, partAssets, writeContainer } from "./helpers/container-fixture.ts";
 
-/** 焼いた解像度（正方 2×2）。 */
+/** The built resolution (square, 2×2). */
 const SIZE = 2;
 
 /**
- * 入力 1 本・出力 1 本の宣言（実行しないので演算の中身は問わない）。入力 dtype を変えても IR の
- * op 契約を満たすよう、先頭で f32 へ `cast` してから出力の形へ `reshape` する。出力 dtype が
- * f32 でないときは、末尾でその dtype へ `cast` する。
+ * A declaration with one input and one output (it is never run, so what it computes does not
+ * matter). So that the IR's op contracts hold whatever the input dtype, it first `cast`s to f32 and
+ * then `reshape`s to the output shape. When the output dtype is not f32, it `cast`s to that dtype
+ * at the end.
  */
 const declaration = (
   inputDtype: string,
@@ -59,7 +63,9 @@ const declaration = (
   });
 };
 
-/** 部品 1 本の容器を書いて、全量面のキー（`<部品>[i]`）へ畳む。 */
+/**
+ * Writes a single-component container and folds it into the full-surface key (`<component>[i]`).
+ */
 const assetsOf = async (key: string, graph: IrDeclaration) =>
   partAssets(
     key,
@@ -117,9 +123,9 @@ const buildSiglip2 = async (
     ),
   });
 
-describe("画像 3 家族の構築前検査", () => {
-  describe("pixel_values が f32 でないグラフを受けたとき", () => {
-    it("SigLIP2 は GPU を取る前に入力 dtype を名指しで落とす", async () => {
+describe("pre-build checks of the 3 image families", () => {
+  describe("when the graph's pixel_values is not f32", () => {
+    it("SigLIP2 rejects the input dtype by name before acquiring the GPU", async () => {
       await assertRejects(
         () => buildSiglip2("i32", [1, HIDDEN]),
         Error,
@@ -127,7 +133,7 @@ describe("画像 3 家族の構築前検査", () => {
       );
     });
 
-    it("BiRefNet は GPU を取る前に入力 dtype を名指しで落とす", async () => {
+    it("BiRefNet rejects the input dtype by name before acquiring the GPU", async () => {
       await assertRejects(
         async () =>
           await birefnet.Pipeline.fromAssets({
@@ -143,7 +149,7 @@ describe("画像 3 家族の構築前検査", () => {
       );
     });
 
-    it("Depth Anything は GPU を取る前に入力 dtype を名指しで落とす", async () => {
+    it("Depth Anything rejects the input dtype by name before acquiring the GPU", async () => {
       await assertRejects(
         async () =>
           await depthAnything.Pipeline.fromAssets({
@@ -198,8 +204,8 @@ describe("画像 3 家族の構築前検査", () => {
     });
   });
 
-  describe("SigLIP2 の出力が [1, hiddenDim] でないグラフを受けたとき", () => {
-    it("batch 2 で焼いた出力は GPU を取る前に落とす", async () => {
+  describe("when SigLIP2's output is not [1, hiddenDim]", () => {
+    it("rejects an output built with batch 2 before acquiring the GPU", async () => {
       await assertRejects(
         () => buildSiglip2("f32", [2, HIDDEN]),
         Error,
@@ -207,9 +213,10 @@ describe("画像 3 家族の構築前検査", () => {
       );
     });
 
-    // 軸 1 を hiddenDim に揃え、既存の軸検査（assertOutputDim）を通る形にする。こうしないと
-    // rank の検査が無くても軸検査で落ち、rank の検査を縛れない。
-    it("rank 3 の出力は GPU を取る前に落とす", async () => {
+    // Axis 1 is set to hiddenDim so that it passes the existing axis check (assertOutputDim).
+    // Otherwise it would fail at the axis check even without the rank check, and the rank check
+    // could not be pinned.
+    it("rejects a rank-3 output before acquiring the GPU", async () => {
       await assertRejects(
         () => buildSiglip2("f32", [1, HIDDEN, 1]),
         Error,
@@ -217,7 +224,7 @@ describe("画像 3 家族の構築前検査", () => {
       );
     });
 
-    it("f32 でない出力は GPU を取る前に落とす", async () => {
+    it("rejects a non-f32 output before acquiring the GPU", async () => {
       await assertRejects(
         () => buildSiglip2("f32", [1, HIDDEN], "i32"),
         Error,

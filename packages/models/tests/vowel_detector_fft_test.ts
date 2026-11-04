@@ -1,25 +1,32 @@
-// 母音検出の FFT（`src/vowel-detector/fft.ts`）の門。GPU も実資産も要らない。
+// Checks of the vowel detector's FFT (`src/vowel-detector/fft.ts`). Needs neither a GPU nor real
+// assets.
 //
-// 現状この class を踏むのは `extractFeatures` 経由の Python パリティ 1 本だけで、4 つの
-// `RangeError` はどれも通っていない。加えて「値が合っている」ことも特徴抽出の合成結果としてしか
-// 見ておらず、`powerSpectrum` / `autocorrelation` 単体の定義（`np.fft` と同じ並び・同じ
-// 正規化）は縛られていない。ここで押さえるのは 3 点:
+// Today the only path that reaches this class is the one Python parity test through
+// `extractFeatures`, and none of the four `RangeError`s is exercised. Moreover "the values are right"
+// is only seen through the composed result of the feature extraction; the definitions of
+// `powerSpectrum` / `autocorrelation` on their own (the same layout and the same normalisation as
+// `np.fft`) are not pinned. This file pins three things:
 //
-// ① **受理集合の外側**（2 冪でない変換長 / 入力が変換長超過 / 出力が rfft ビン数に不足 /
-//    自己相関の変換長不足 / 自己相関の lag が信号長以上）が全部 `RangeError` で落ちる。
-// ② **素朴 DFT との一致**（rtol 1e-12）。バタフライ・ビット反転・回転因子の符号が壊れると、
-//    特徴は「それらしい別の値」になるだけで shape も値域も合ったまま最後まで通る。
-// ③ **ゼロ詰め後も値が正しい**（信号長 < 変換長でパワーと線形自己相関が定義どおり）。
-//    NOTE: 詰める**向き**（末尾 / 先頭）はここでは縛れない。先頭へ詰めても巡回シフトになるだけで、
-//    パワースペクトルも自己相関も変わらない（`[1,2,0,0]` と `[0,0,1,2]` はパワーが共に
-//    `[9,5,1]`、先頭 2 lag の自己相関が共に `[5,2]`）。向きは公開 API から観測できないので、
-//    そのための API は足さない。
+// (1) **Outside the accepted set** (a transform length that is not a power of 2 / an input longer than
+//     the transform / an output smaller than the rfft bin count / a transform too short for the
+//     autocorrelation / an autocorrelation lag at or past the signal length) everything fails with
+//     `RangeError`.
+// (2) **Agreement with a naive DFT** (rtol 1e-12). If the butterfly, the bit reversal or the sign of
+//     the twiddle factors breaks, the features just become "another plausible value" and pass to the
+//     end with the right shape and range.
+// (3) **The values stay right after zero padding** (signal length < transform length: power and
+//     linear autocorrelation as defined).
+//     NOTE: the **direction** of the padding (at the end / at the start) cannot be pinned here.
+//     Padding at the start is only a cyclic shift and changes neither the power spectrum nor the
+//     autocorrelation (`[1,2,0,0]` and `[0,0,1,2]` both have power `[9,5,1]` and both have the
+//     autocorrelation `[5,2]` over the first 2 lags). The direction is not observable through the
+//     public API, so no API is added for it.
 
 import { test } from "vite-plus/test";
 import { assertAlmostEquals, assertThrows } from "@std/assert";
 import { Fft } from "../src/vowel-detector/fft.ts";
 
-/** 素朴 DFT の `|X[k]|²`（末尾ゼロ詰め・k = 0..size/2）。 */
+/** `|X[k]|²` of a naive DFT (zero padding at the end, k = 0..size/2). */
 const naivePowerSpectrum = (input: Float32Array, size: number): number[] => {
   const bins: number[] = [];
   for (let k = 0; k <= size / 2; k += 1) {
@@ -36,7 +43,7 @@ const naivePowerSpectrum = (input: Float32Array, size: number): number[] => {
   return bins;
 };
 
-/** 素朴な線形自己相関 `sum_n x[n]·x[n+lag]`（ゼロ詰めの外は 0）。 */
+/** Naive linear autocorrelation `sum_n x[n]·x[n+lag]` (0 outside the zero padding). */
 const naiveAutocorrelation = (input: Float32Array, lags: number): number[] => {
   const out: number[] = [];
   for (let lag = 0; lag < lags; lag += 1) {
@@ -47,7 +54,7 @@ const naiveAutocorrelation = (input: Float32Array, lags: number): number[] => {
   return out;
 };
 
-/** 決定的な擬似乱数（seed 固定 — グローバル乱数に依存しない）。 */
+/** Deterministic pseudo-random values (fixed seed — independent of the global RNG). */
 const pseudoRandom = (length: number, seed: number): Float32Array<ArrayBuffer> => {
   const values = new Float32Array(length);
   let state = seed;
@@ -58,13 +65,13 @@ const pseudoRandom = (length: number, seed: number): Float32Array<ArrayBuffer> =
   return values;
 };
 
-test("Fft: 2 冪でない変換長は作れない", () => {
+test("Fft: a transform length that is not a power of 2 cannot be constructed", () => {
   for (const size of [3, 1, 0, -4, 2.5]) {
     assertThrows(() => new Fft(size), RangeError, "is not a power of 2 >= 2", `size=${size}`);
   }
 });
 
-test("Fft.powerSpectrum: 入力が変換長を超えたら落ちる（黙って切り詰めない）", () => {
+test("Fft.powerSpectrum: an input longer than the transform length fails (no silent truncation)", () => {
   assertThrows(
     () => new Fft(8).powerSpectrum(new Float32Array(9), new Float64Array(5)),
     RangeError,
@@ -72,8 +79,8 @@ test("Fft.powerSpectrum: 入力が変換長を超えたら落ちる（黙って�
   );
 });
 
-test("Fft.powerSpectrum: 出力が rfft のビン数に足りなければ落ちる", () => {
-  // `bins = size/2 + 1` = 5（`np.fft.rfft` と同じ並び）。
+test("Fft.powerSpectrum: an output smaller than the rfft bin count fails", () => {
+  // `bins = size/2 + 1` = 5 (the same layout as `np.fft.rfft`).
   assertThrows(
     () => new Fft(8).powerSpectrum(new Float32Array(4), new Float64Array(4)),
     RangeError,
@@ -81,7 +88,7 @@ test("Fft.powerSpectrum: 出力が rfft のビン数に足りなければ落ち�
   );
 });
 
-test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ちる（巡回相関に化ける条件）", () => {
+test("Fft.autocorrelation: a transform length below twice the signal length fails (the condition under which it turns into a cyclic correlation)", () => {
   assertThrows(
     () => new Fft(8).autocorrelation(new Float32Array(5), new Float64Array(4)),
     RangeError,
@@ -89,29 +96,32 @@ test("Fft.autocorrelation: 変換長が信号長の 2 倍未満なら落ちる�
   );
 });
 
-test("Fft.autocorrelation: 信号長以上の lag を求めたら落ちる（線形では 0 か、負の lag が回り込む添字）", () => {
-  // `[1, 2]` を変換長 4 で通すと逆変換は [5, 2, 0, 2] で、添字 2 は線形どおり 0、添字 3 は
-  // lag −1 の値（線形なら 0）。両者を区別せず、lag 2 の時点で落とす。
+test("Fft.autocorrelation: asking for a lag at or past the signal length fails (linearly 0, or an index a negative lag wraps into)", () => {
+  // Running `[1, 2]` through transform length 4 gives the inverse transform [5, 2, 0, 2]: index 2 is 0
+  // as in the linear case, index 3 is the value of lag −1 (0 if linear). The two are not told apart;
+  // it fails at lag 2.
   assertThrows(
     () => new Fft(4).autocorrelation(Float32Array.from([1, 2]), new Float64Array(3)),
     RangeError,
     "lag 2 is >= the signal length 2",
   );
-  // 境界: lag が信号長 − 1 まで（out.length = 信号長）は線形自己相関として通る。
+  // Boundary: lags up to signal length − 1 (out.length = signal length) pass as a linear
+  // autocorrelation.
   const out = new Float64Array(2);
   new Fft(4).autocorrelation(Float32Array.from([1, 2]), out);
   assertAlmostEquals(out[0], 5, 1e-12);
   assertAlmostEquals(out[1], 2, 1e-12);
 });
 
-test("Fft.powerSpectrum: 素朴 DFT と一致する（長さ 8 の実信号）", () => {
+test("Fft.powerSpectrum: matches a naive DFT (a real signal of length 8)", () => {
   const size = 8;
   const input = pseudoRandom(size, 20260904);
   const out = new Float64Array(size / 2 + 1);
   new Fft(size).powerSpectrum(input, out);
   const expected = naivePowerSpectrum(input, size);
   for (let bin = 0; bin < expected.length; bin += 1) {
-    // 相対 1e-12 — f64 のバタフライと素朴 DFT の丸め差だけが残る幅。
+    // Relative 1e-12 — a width that leaves only the rounding difference between the f64 butterfly
+    // and the naive DFT.
     assertAlmostEquals(
       out[bin],
       expected[bin],
@@ -121,7 +131,7 @@ test("Fft.powerSpectrum: 素朴 DFT と一致する（長さ 8 の実信号）",
   }
 });
 
-test("Fft.autocorrelation: 素朴な線形自己相関と一致する（長さ 4・変換長 8）", () => {
+test("Fft.autocorrelation: matches a naive linear autocorrelation (length 4, transform length 8)", () => {
   const input = pseudoRandom(4, 20260905);
   const out = new Float64Array(4);
   new Fft(8).autocorrelation(input, out);
@@ -136,15 +146,16 @@ test("Fft.autocorrelation: 素朴な線形自己相関と一致する（長さ 4
   }
 });
 
-test("Fft: 変換長に足りない信号をゼロ詰めしてもパワーと線形自己相関が正しい", () => {
-  // `[1, 0]` を変換長 4 で通すと全ビンが 1（単位インパルスのパワー）。
+test("Fft: power and linear autocorrelation stay right when a signal shorter than the transform is zero-padded", () => {
+  // Running `[1, 0]` through transform length 4 gives 1 in every bin (the power of a unit impulse).
   const out = new Float64Array(3);
   new Fft(4).powerSpectrum(Float32Array.from([1, 0]), out);
   for (let bin = 0; bin < out.length; bin += 1) {
     assertAlmostEquals(out[bin], 1, 1e-12, `bin ${bin}`);
   }
 
-  // `[1, 2]` の線形自己相関は lag 0 = 5・lag 1 = 2（詰める向きには依らない — 冒頭③の NOTE）。
+  // The linear autocorrelation of `[1, 2]` is lag 0 = 5, lag 1 = 2 (independent of the padding
+  // direction — the NOTE under (3) at the top).
   const lags = new Float64Array(2);
   new Fft(4).autocorrelation(Float32Array.from([1, 2]), lags);
   assertAlmostEquals(lags[0], 5, 1e-12);

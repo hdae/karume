@@ -1,7 +1,9 @@
-// manifest の `session`（manifest 所有語彙）→ runtime `SessionOptions` の写像。
-// ADR 0038 §3 の綴りの契約そのもので、抜けは**沈黙劣化**（未知キーは runtime が黙って無視する）
-// になる。8 家族全部が同じ 1 本を使うので、門もここ 1 本に集約する（元は anima / sbv2 の
-// pipeline テストへ 2 本に割れていて、残り 5 家族は写像を直接叩く門を持っていなかった）。
+// The mapping from the manifest's `session` (manifest-owned vocabulary) to runtime
+// `SessionOptions`. It is the spelling contract of ADR 0038 §3 itself, and a gap is a **silent
+// degradation** (runtime silently ignores unknown keys). All eight families use the same function,
+// so its checks are gathered here in one place too (originally they were split into two, in the
+// anima / sbv2 pipeline tests, and the other five families had no check that called the mapping
+// directly).
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
@@ -26,7 +28,7 @@ import { UMT5_ENCODER_SESSION_POLICY } from "../src/umt5/encoder.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../src/vowel-detector/pipeline.ts";
 import { WAN_SESSION_POLICY } from "../src/wan/family.ts";
 
-test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定は欄ごと作らない）", () => {
+test("toSessionOptions: maps the declared keys one by one (an unspecified key creates no field at all)", () => {
   assertEquals(toSessionOptions({}), {});
   assertEquals(toSessionOptions({ linearGemvReduce: "parallel" }), {
     linearGemvReduce: "parallel",
@@ -39,8 +41,8 @@ test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定は�
   assertEquals(toSessionOptions({ attentionScoreStorage: "f16" }), {
     attentionScoreStorage: "f16",
   });
-  // 配布物の既定 quant（f16+dit8-a8-attn8-s16）の 3 キーが全て通ること。1 キーでも落とすと
-  // 「名前だけ s16」の沈黙劣化になる。
+  // All three keys of the distribution's default quant (f16+dit8-a8-attn8-s16) must pass. Dropping
+  // even one is the silent degradation "s16 in name only".
   assertEquals(
     toSessionOptions({
       linearCompute: "a8",
@@ -55,19 +57,21 @@ test("toSessionOptions: 宣言したキーを 1 つずつ写す（未指定は�
   );
 });
 
-test("toSessionOptions: manifest 側に無いノブ（submitPolicy）は写さない", () => {
-  // `SessionOptions.submitPolicy` は TDR 予算 = **ホスト政策**なので配布者に書かせない
-  // （ADR 0038 §3 の理由 ③）。スプレッド素通しに書き換えるとここが素通りしうる。
+test("toSessionOptions: does not map a knob the manifest side does not have (submitPolicy)", () => {
+  // `SessionOptions.submitPolicy` is the TDR budget = **host policy**, so distributors do not get
+  // to write it (reason ③ of ADR 0038 §3). Rewriting the mapping as a pass-through spread could let
+  // it slip through here.
   const mapped = toSessionOptions({ linearCompute: "a8" }) as Record<string, unknown>;
   assertEquals(Object.hasOwn(mapped, "submitPolicy"), false);
   assertEquals(Object.keys(mapped), ["linearCompute"]);
 });
 
-test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取り残しを検出）", () => {
-  // 写像の網羅は `src/session/options.ts` の `WRITERS`（`Required<SessionSpec>` の網羅表）が
-  // 型で固定しており、キーが増えれば**コンパイルエラー**になる。ここはその型門が生きている
-  // ことを実行時からも見る対（型を緩めた改変は型検査を通ってしまうため）—
-  // 全キーを埋めた spec を渡し、出てくるキー集合が入力と一致することを確かめる。
+test("toSessionOptions: maps every key of SessionSpec (detects a key left behind when one is added)", () => {
+  // The mapping's coverage is pinned by type through `WRITERS` in `src/session/options.ts` (the
+  // exhaustive table of `Required<SessionSpec>`), so a new key is a **compile error**. This is the
+  // counterpart that checks at run time that this type check is alive (a change that loosens the
+  // type would pass the type check) — it passes a spec with every key filled and confirms that the
+  // resulting key set equals the input's.
   const full: Required<SessionSpec> = {
     linearCompute: "f16",
     convCompute: "a8",
@@ -86,7 +90,7 @@ test("toSessionOptions: SessionSpec の全キーを写す（キー追加の取�
   assertEquals(Object.keys(mapped).sort(), Object.keys(full).sort());
 });
 
-test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
+test("toSessionOptions: keeps explicit false and true for the fusions", () => {
   for (const value of [false, true]) {
     const spec = {
       fuseRmsNormAdd: value,
@@ -100,9 +104,13 @@ test("toSessionOptions: 融合の明示falseとtrueを保持する", () => {
   }
 });
 
-// ---- 合成（明示 > quant 宣言 > runtime 既定）— ADR 0058 追記 2026-09-26 ------------------
+// ---- Composition (explicit > quant declaration > runtime default) — ADR 0058 addendum 2026-09-26
+// ----
 
-/** 8 キーを全て受ける受理表（規則そのものを家族の表から切り離して見るため）。 */
+/**
+ * A policy table that accepts all 8 keys (to look at the rules themselves, apart from any family's
+ * table).
+ */
 const ALL: FamilySessionPolicy = {
   linearCompute: true,
   convCompute: true,
@@ -118,7 +126,7 @@ const ALL: FamilySessionPolicy = {
   linearGemvPlanes: true,
 };
 
-/** linear の実行形だけを受ける表（irodori / sbv2 と同じ形）。 */
+/** A table that accepts only the linear execution form (the same shape as irodori / sbv2). */
 const LINEAR_ONLY: FamilySessionPolicy = {
   ...ALL,
   convCompute: false,
@@ -134,7 +142,7 @@ const LINEAR_ONLY: FamilySessionPolicy = {
   linearGemvPlanes: false,
 };
 
-/** 全キーを埋めた spec（キーが増えればこの宣言が型検査で落ちる）。 */
+/** A spec with every key filled (a new key fails this declaration's type check). */
 const FULL: Required<SessionSpec> = {
   linearCompute: "f32",
   convCompute: "f32",
@@ -150,15 +158,18 @@ const FULL: Required<SessionSpec> = {
   linearGemvPlanes: false,
 };
 
-/** 型の外から来る呼び手（JS の消費者）の明示指定を再現する — TS の型はこの経路を守らない。 */
+/**
+ * Reproduces an explicit setting from a caller outside the types (a JS consumer) — TS types do not
+ * guard this path.
+ */
 const overridesWith = (key: string, value: unknown): SessionOverrides => {
   const overrides: SessionOverrides = {};
   Object.defineProperty(overrides, key, { value, enumerable: true });
   return overrides;
 };
 
-describe("resolveSessionOptions: キーごとの優先順位", () => {
-  it("明示があれば明示・無ければ宣言・どちらも無ければ欄を作らない", () => {
+describe("resolveSessionOptions: precedence per key", () => {
+  it("uses the explicit value if present, otherwise the declaration, and creates no field if neither exists", () => {
     assertEquals(resolveSessionOptions(ALL, {}, {}, "test"), {});
     assertEquals(resolveSessionOptions(ALL, { linearCompute: "a8" }, {}, "test"), {
       linearCompute: "a8",
@@ -179,7 +190,7 @@ describe("resolveSessionOptions: キーごとの優先順位", () => {
     });
   });
 
-  it("明示の false は宣言の true に勝ち、undefined は「指定なし」として宣言が残る", () => {
+  it("an explicit false wins over a declared true, and undefined means 'not specified' so the declaration stays", () => {
     const declared = { linearGemvReduce: "parallel", fuseRmsNormAdd: true } as const;
     assertEquals(resolveSessionOptions(ALL, declared, { fuseRmsNormAdd: false }, "test"), {
       linearGemvReduce: "parallel",
@@ -191,7 +202,7 @@ describe("resolveSessionOptions: キーごとの優先順位", () => {
     );
   });
 
-  it("GPU の能力に依る値（f16 計算・subgroup 変種）はこの層では落とさない", () => {
+  it("does not reject values that depend on GPU capabilities (f16 compute, subgroup variants) at this layer", () => {
     assertEquals(resolveSessionOptions(ALL, {}, { linearCompute: "f16" }, "test"), {
       linearCompute: "f16",
     });
@@ -202,8 +213,8 @@ describe("resolveSessionOptions: キーごとの優先順位", () => {
   });
 });
 
-describe("resolveSessionOptions: 受理できない指定", () => {
-  it("不正な明示値は宣言へ戻さず ModelInputError・値の変換も呼ばない", () => {
+describe("resolveSessionOptions: settings that cannot be accepted", () => {
+  it("an invalid explicit value does not fall back to the declaration, throws ModelInputError and never converts the value", () => {
     let conversions = 0;
     const object = {
       [Symbol.toPrimitive](): string {
@@ -227,7 +238,8 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     };
     for (const [key, message] of Object.entries(messages)) {
       for (const value of [null, 0, "bogus", [], object]) {
-        // 宣言は受理される値で埋めておく — `??` で宣言へ戻す退行はここで通ってしまう。
+        // The declaration is filled with accepted values — a regression that falls back to it with
+        // `??` would pass here.
         assertThrows(
           () => resolveSessionOptions(ALL, FULL, overridesWith(key, value), "test"),
           ModelInputError,
@@ -238,7 +250,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     assertEquals(conversions, 0);
   });
 
-  it("受理表が拒否するキーの宣言は取得前に素の Error（明示で隠しても同じ）", () => {
+  it("a declared key the policy table rejects is a plain Error before fetching (even when hidden by an explicit value)", () => {
     for (const key of ["attentionCompute", "linearGemvReduce", "packedStaticQuantize"] as const) {
       const declared = { [key]: FULL[key] } satisfies SessionSpec;
       const error = assertThrows(
@@ -246,9 +258,13 @@ describe("resolveSessionOptions: 受理できない指定", () => {
         Error,
         `test: session.${key} is not supported`,
       );
-      assert(!(error instanceof ModelInputError), "資産の齟齬が入力起因の型で飛んでいる");
+      assert(
+        !(error instanceof ModelInputError),
+        "an asset inconsistency was thrown as an input-error type",
+      );
     }
-    // 明示指定は宣言の不備を隠さない（受けない宣言は、上書きの有無に依らず資産の齟齬）。
+    // An explicit setting does not hide a faulty declaration (a declaration that is not accepted is
+    // an asset inconsistency whether or not it is overridden).
     assertThrows(
       () =>
         resolveSessionOptions(
@@ -264,26 +280,28 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     );
   });
 
-  it("受理表が拒否するキーの明示は ModelInputError（黙って捨てない）", () => {
+  it("an explicit key the policy table rejects is a ModelInputError (not silently dropped)", () => {
     assertThrows(
       () => resolveSessionOptions(LINEAR_ONLY, {}, { attentionCompute: "f16" }, "test"),
       ModelInputError,
       "test: attentionCompute cannot be specified for this family",
     );
-    // undefined は「指定なし」なので受理表に依らず通る。
+    // undefined means "not specified", so it passes whatever the policy table says.
     assertEquals(
       resolveSessionOptions(LINEAR_ONLY, {}, { attentionCompute: undefined }, "test"),
       {},
     );
   });
 
-  it("組合せ違反は runtime と同じ判定・文言で、出所で送出型を分ける", () => {
-    // 宣言だけで成立 = 資産の齟齬（呼び手が指定を直しても直らない）→ 素の Error。
+  it("a combination violation uses runtime's verdict and message, with the thrown type chosen by origin", () => {
+    // Arising from the declaration alone = an asset inconsistency (the caller cannot fix it by
+    // changing settings) → plain Error.
     const declaredOnly = { attentionCompute: "f16", attentionScoreStorage: "f16" } as const;
     const fromAsset = assertThrows(() => resolveSessionOptions(ALL, declaredOnly, {}, "test"));
     assert(fromAsset instanceof Error && !(fromAsset instanceof ModelInputError));
     assertEquals(fromAsset.message, `test: ${sessionOptionsViolation(declaredOnly)}`);
-    // 明示が関与して初めて成立 = 入力起因 → ModelInputError（文言は同じ runtime の 1 本）。
+    // Arising only with an explicit setting involved = an input error → ModelInputError (the
+    // message comes from the same single runtime function).
     const fromInput = assertThrows(
       () =>
         resolveSessionOptions(
@@ -299,9 +317,10 @@ describe("resolveSessionOptions: 受理できない指定", () => {
     assertEquals(fromInput.message, fromAsset.message);
   });
 
-  it("宣言の違反を明示が解消する形は通す", () => {
-    // 宣言だけでは runtime が受けない組合せ（並列 GEMV × a8）でも、実効設定が受理されれば通す
-    // （受理集合は実効設定 1 本で決める）。
+  it("passes when an explicit setting resolves a violation in the declaration", () => {
+    // Even a combination runtime rejects from the declaration alone (parallel GEMV × a8) passes if
+    // the effective settings are accepted (the accepted set is decided by the effective settings
+    // alone).
     const declared = { linearCompute: "a8", linearGemvReduce: "parallel" } as const;
     assertThrows(
       () => resolveSessionOptions(ALL, declared, {}, "test"),
@@ -354,7 +373,7 @@ describe("resolveSessionOptions: 受理できない指定", () => {
 });
 
 describe("assertSessionOverrides", () => {
-  it("宣言 {} を相手にした resolveSessionOptions と同じ判定を下す", () => {
+  it("gives the same verdict as resolveSessionOptions against the declaration {}", () => {
     const cases: readonly SessionOverrides[] = [
       {},
       { linearCompute: "f16" },
@@ -367,7 +386,10 @@ describe("assertSessionOverrides", () => {
         run();
         return undefined;
       } catch (error) {
-        assert(error instanceof ModelInputError, "明示指定だけの違反は入力起因");
+        assert(
+          error instanceof ModelInputError,
+          "a violation from explicit settings alone is an input error",
+        );
         return error.message;
       }
     };
@@ -380,10 +402,11 @@ describe("assertSessionOverrides", () => {
   });
 });
 
-describe("家族の受理表", () => {
-  it("10 家族の表が SessionSpec の全キーを持つ（型の網羅の実行時の対）", () => {
-    // 表の型は `Required<SessionSpec>` の網羅なのでキーが増えれば型検査で落ちる。ここは型を
-    // 緩めた改変（`Partial` 化など）が型検査を通ってしまう場合の対。
+describe("the families' policy tables", () => {
+  it("the tables of all 10 families have every key of SessionSpec (the run-time counterpart of the type's exhaustiveness)", () => {
+    // The tables' type is the exhaustive `Required<SessionSpec>`, so a new key fails the type
+    // check. This is the counterpart for a change that loosens the type (making it `Partial`, for
+    // example) and so passes the type check.
     const policies = {
       anima: ANIMA_SESSION_POLICY,
       birefnet: BIREFNET_SESSION_POLICY,

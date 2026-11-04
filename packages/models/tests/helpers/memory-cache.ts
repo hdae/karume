@@ -1,12 +1,15 @@
 /**
- * メモリ上の Cache Storage（e2e が**実 Cache Storage を汚さない**ための差し替え）。
+ * An in-memory Cache Storage (the replacement that keeps e2e from **polluting the real Cache
+ * Storage**).
  *
- * MUST: 実キャッシュへ数 GB を書くと、端末のディスクを食うだけでなく、次の run が
- * 「キャッシュヒットで network を叩かない」別経路に化ける（integrity 検証の `source` も
- * `network` → `cache` に変わり、何を検証したのかが run ごとに変わる）。
+ * MUST: writing several GB into the real cache not only eats the machine's disk but also turns the
+ * next run into a different path — "a cache hit that never touches the network" (the `source` of
+ * the integrity check also changes from `network` to `cache`, so what was checked changes from run
+ * to run).
  *
- * NOTE: hub のテスト helper（`packages/hub/tests/helpers/mock.ts`）と同型だが import しない —
- * パッケージのテストが他パッケージのテスト内部に依存すると、向こうの都合がこちらへ漏れる。
+ * NOTE: the same shape as the hub test helper (`packages/hub/tests/helpers/mock.ts`) but not
+ * imported — when a package's tests depend on another package's test internals, that side's
+ * concerns leak into this one.
  */
 export class MemoryCache implements Cache {
   readonly entries = new Map<string, { bytes: Uint8Array<ArrayBuffer>; headers: Headers }>();
@@ -18,8 +21,9 @@ export class MemoryCache implements Cache {
   }
 
   async put(request: RequestInfo | URL, response: Response): Promise<void> {
-    // MUST: ヘッダごと保持する — 取得層は記録ハッシュをレスポンスヘッダへ載せるので、落とすと
-    // 「記録が毎回消えるキャッシュ」になり、実環境では起きない全量再ハッシュ経路を測ることになる。
+    // MUST: keep the headers — the fetch layer puts the recorded hash in the response headers, so
+    // dropping them gives "a cache whose record vanishes every time", and we would measure a
+    // full-rehash path that never happens in a real environment.
     const headers = new Headers(response.headers);
     this.entries.set(urlOf(request), {
       bytes: new Uint8Array(await response.arrayBuffer()),
@@ -37,15 +41,15 @@ export class MemoryCache implements Cache {
   }
 
   add(): Promise<void> {
-    throw new Error("memory-cache: add は使わない");
+    throw new Error("memory-cache: add is not used");
   }
 
   addAll(): Promise<void> {
-    throw new Error("memory-cache: addAll は使わない");
+    throw new Error("memory-cache: addAll is not used");
   }
 
   matchAll(): Promise<readonly Response[]> {
-    throw new Error("memory-cache: matchAll は使わない");
+    throw new Error("memory-cache: matchAll is not used");
   }
 }
 
@@ -73,7 +77,7 @@ export class MemoryCacheStorage implements CacheStorage {
   }
 
   match(): Promise<Response | undefined> {
-    throw new Error("memory-cache: CacheStorage.match は使わない");
+    throw new Error("memory-cache: CacheStorage.match is not used");
   }
 }
 

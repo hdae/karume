@@ -26,11 +26,11 @@ import type { Gemma4PleHandle } from "./gemma-mirror.ts";
 export const SERIES_MODEL_FILE = "model.krm";
 
 /**
- * 既に開いている容器から PLE の索引と block の読み口を組む。
+ * Builds the PLE index and the block reader from an already opened container.
  *
- * `readGemma4PleIndex` は索引と容器の資産を**両方向で**突き合わせる（索引が指す資産が在るか /
- * 容器の PLE 資産が索引に載っているか / 役割と論理長）ので、片方だけ焼き直した容器は
- * ここで落ちる。
+ * `readGemma4PleIndex` checks the index and the container's assets **in both directions** (whether
+ * the assets the index points to exist / whether the container's PLE assets are in the index /
+ * their roles and logical lengths), so a container where only one side was rebuilt fails here.
  */
 export const seriesPleHandle = async (
   opened: OpenedContainer,

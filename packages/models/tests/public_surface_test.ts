@@ -1,21 +1,26 @@
-// `@karume/models` の公開面のスナップショット門（ADR
-// [0008](../../../docs/decisions/0008-public-api.md) 追記 2026-09-20）。GPU も実資産も要らない。
+// Snapshot check of the public surface of `@karume/models` (ADR
+// [0008](../../../docs/decisions/0008-public-api.md) addendum 2026-09-20). Needs neither a GPU nor
+// real assets.
 //
-// 同じディレクトリの `models_barrel_surface_test.ts` とは役割が違う:
+// Its role differs from `models_barrel_surface_test.ts` in the same directory:
 //
-// - 名指しの門（あちら）= **意図の宣言**。「`gemma.Pipeline` は出す」「`createGemma4Ple` は
-//   出さない」を人が書く。書いていない綴りの増減は素通りする。
-// - この門 = **増減の検出**。何が正しいかは言わず、barrel（`.`）と 11 サブパスそれぞれについて
-//   前回との差だけを見る。型 export も採るので、`Object.keys` では観測できない
-//   `export type` の再輸出もここで縛れる（あちらの冒頭 NOTE の穴）。
+// - The named check (that file) = a **declaration of intent**. A person writes "`gemma.Pipeline` is
+//   exported" and "`createGemma4Ple` is not". Additions or removals of names nobody wrote pass
+//   through.
+// - This check = **detection of additions and removals**. It does not say what is correct; it only
+//   looks at the difference from the previous snapshot for the barrel (`.`) and each of the 11
+//   subpaths. It also captures type exports, so it can pin `export type` re-exports that
+//   `Object.keys` cannot observe (the gap named in that file's opening NOTE).
 //
-// 両建て（ADR 0037）の面が 11 もあるので、1 面だけが痩せた・太った形は目視では拾えない。
+// With 11 surfaces (the barrel plus per-family subpaths — ADR 0037), one surface alone shrinking or
+// growing is not caught by eye.
 //
-// 門の実体は runtime 側に 1 本だけ置く（`container-files.ts` 等と同じパッケージ跨ぎ相対 import）。
+// The check itself lives once on the runtime side (the same cross-package relative import as
+// `container-files.ts` and others).
 
 import { test } from "vite-plus/test";
 import { assertPublicSurface } from "../../runtime/tests/helpers/public-surface.ts";
 
-test("公開面: models の exports（barrel + 11 サブパス）がスナップショットと一致する", async () => {
+test("public surface: the models exports (barrel + 11 subpaths) match the snapshot", async () => {
   await assertPublicSurface(new URL("../", import.meta.url));
 });

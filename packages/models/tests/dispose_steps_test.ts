@@ -1,25 +1,26 @@
-// 後始末の段並べ（`src/session/dispose-steps.ts` の `disposeSteps`）の門 — 常駐 Session を
-// 持つ家族の `dispose()` が共有する 1 本。GPU も資産も要らない。
+// A check of the cleanup step sequencing (`disposeSteps` in `src/session/dispose-steps.ts`) — the single helper
+// shared by the `dispose()` of families that hold resident Sessions. Needs neither a GPU nor assets.
 //
-// 縛るのは 3 点:
+// Three things are pinned:
 //
-// ① **前段が失敗しても後段は必ず走る**。各家族の `openXState` は catch で「内部で取った GPU は
-//    必ず返す」を掲げているが、`dispose()` が `await session.dispose(); gpu.destroy();` の直列
-//    2 段だと `Session.dispose()` の reject（`RunArena` が flush の失敗を伝播させる）で後段へ
-//    到達しない。しかも `#disposal` に rejected promise が居座るので 2 度目も再試行にならない。
-// ② **失敗 1 件はその例外そのもの**が投げられる（呼び手が原因で分岐できる形を壊さない）。
-// ③ **失敗 2 件以上は `AggregateError`** で全部運ぶ（`finally` で後段の例外が前段を上書きする
-//    形＝どの段が最初に壊れたかが消える形へ戻さない）。
+// ① **Later steps always run even if an earlier step fails.** Each family's `openXState` promises in its catch
+//    that "a GPU acquired internally is always released", but if `dispose()` were the two serial steps
+//    `await session.dispose(); gpu.destroy();`, a reject from `Session.dispose()` (`RunArena` propagates a flush
+//    failure) would never reach the later step. Worse, a rejected promise would sit in `#disposal`, so a second
+//    call would not retry either.
+// ② **A single failure is thrown as that exception itself** (does not break the shape the caller branches on).
+// ③ **Two or more failures are carried together as an `AggregateError`** (no return to the shape where `finally`
+//    lets a later step's exception overwrite an earlier one = the shape that loses which step broke first).
 //
-// NOTE: 家族側の `dispose()` が「内部取得の GPU だけを破棄する」「2 度目も同じ完了を返す」ことは
-// `#disposal ??= #chain(...)` の側の性質で、実 GPU の e2e が踏む（内部取得の GPU をスタブに
-// 差し替える口が無いため、ここでは helper の振る舞いだけを縛る）。
+// NOTE: that the family's `dispose()` "destroys only an internally acquired GPU" and "returns the same completion
+// on a second call" is a property of `#disposal ??= #chain(...)`, exercised by the real-GPU e2e (there is no way
+// to stub the internally acquired GPU, so only the helper's behaviour is pinned here).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { disposeSteps } from "../src/session/dispose-steps.ts";
 
-test("disposeSteps: 全段が成功すれば宣言順に 1 回ずつ走って解決する", async () => {
+test("disposeSteps: when every step succeeds, each runs once in declaration order and it resolves", async () => {
   const order: string[] = [];
   await disposeSteps([
     async () => {
@@ -33,7 +34,7 @@ test("disposeSteps: 全段が成功すれば宣言順に 1 回ずつ走って解
   assertEquals(order, ["session", "gpu"]);
 });
 
-test("disposeSteps: 前段が reject しても後段は必ず 1 回走り、元の失敗がそのまま投げられる", async () => {
+test("disposeSteps: a later step still runs exactly once when an earlier one rejects, and the original failure is thrown as is", async () => {
   const lost = new Error("device lost");
   let destroyCount = 0;
   const caught = await assertRejects(
@@ -47,24 +48,24 @@ test("disposeSteps: 前段が reject しても後段は必ず 1 回走り、元�
     Error,
     "device lost",
   );
-  // 「元の失敗そのもの」= 包み直していない（呼び手が原因で分岐できる）。
+  // "The original failure itself" = not rewrapped (the caller can branch on the cause).
   assertStrictEquals(caught, lost);
-  assertEquals(destroyCount, 1, "後段（gpu.destroy 相当）へ到達していない");
+  assertEquals(destroyCount, 1, "the later step (the gpu.destroy equivalent) was not reached");
 });
 
-test("disposeSteps: 後段が投げても前段の失敗を上書きしない（2 件は AggregateError）", async () => {
+test("disposeSteps: a throwing later step does not overwrite the earlier failure (two failures are an AggregateError)", async () => {
   const lost = new Error("device lost");
   const destroyFailed = new Error("destroy failed");
   const caught = await assertRejects(
     () => disposeSteps([() => Promise.reject(lost), () => Promise.reject(destroyFailed)]),
     AggregateError,
   );
-  assert(caught instanceof AggregateError, `AggregateError でない: ${caught}`);
-  // 2 件とも運ぶ（`try/finally` 版はここで前段が消える）。順序は宣言順。
+  assert(caught instanceof AggregateError, `not an AggregateError: ${caught}`);
+  // Both are carried (the `try/finally` version loses the earlier one here). The order is the declaration order.
   assertEquals(caught.errors, [lost, destroyFailed]);
 });
 
-test("disposeSteps: 同期 throw の段も後段を止めない", async () => {
+test("disposeSteps: a step that throws synchronously does not stop later steps", async () => {
   let destroyCount = 0;
   await assertRejects(
     () =>

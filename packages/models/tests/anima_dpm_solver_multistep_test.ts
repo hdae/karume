@@ -1,28 +1,32 @@
-// DPM++ 2M（`src/generation/dpm-solver-multistep.ts`）の挙動テスト。GPU も資産も要らない純関数。
+// Behaviour tests of DPM++ 2M (`src/generation/dpm-solver-multistep.ts`). Pure functions that need
+// neither a GPU nor assets.
 //
-// 期待値の由来は `tools/export-recipes/anima/dpmsolver_ref.py` —— diffusers 0.39.0 の
-// `DPMSolverMultistepScheduler` **実クラス**に karume の sigma 梯子を差し込み、合成 model 出力
-// （シード固定）を食わせて印字した golden をそのまま inline している。再生成は
+// The expected values come from `tools/export-recipes/anima/dpmsolver_ref.py` — it plugs karume's
+// sigma ladder into the **real class** `DPMSolverMultistepScheduler` of diffusers 0.39.0, feeds it
+// a synthetic model output (fixed seed) and prints a golden, which is inlined here as is. To
+// regenerate:
 //
 //     cd tools/export-recipes
 //     uv run --no-sync python -m anima.dpmsolver_ref --steps 8 --elements 4   # SERIES_8
 //     uv run --no-sync python -m anima.dpmsolver_ref --steps 2 --elements 3   # SERIES_2
 //
-// tolerance（{@link TOLERANCE}）の導出根拠はモジュール側の doc（「参照とビット一致しない」の
-// MUST 節）が正本 —— ここに数値の由来を二重に書かない。
+// The source of truth for how the tolerance ({@link TOLERANCE}) is derived is the module's doc (the
+// MUST section "not bit-identical to the reference") — the origin of the number is not written
+// twice here.
 
 import { test } from "vite-plus/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { dpmSolverMultistepStep, needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 
 /**
- * パリティの許容差。モジュール doc の MUST 節の実測から導出（フィクスチャ実測最悪
- * 3.576e-07 の約 11 倍・掃引最悪 1.192e-06 の約 3.4 倍）。実装バグの差は最小でも 1.36e-01
- * （= この閾値の 4.5 桁上）なので、丸め差を許しても検出力は残る。
+ * The parity tolerance. Derived from the measurements in the MUST section of the module doc (about
+ * 11× the worst fixture measurement 3.576e-07, about 3.4× the worst sweep measurement 1.192e-06).
+ * The smallest difference an implementation bug produces is 1.36e-01 (= 4.5 orders of magnitude
+ * above this threshold), so allowing rounding differences keeps the detection power.
  */
 const TOLERANCE = 4e-6;
 
-/** `models/karume-anima/karume.json` の `pipelineConfig.scheduler.shift` と同じ値。 */
+/** The same value as `pipelineConfig.scheduler.shift` in `models/karume-anima/karume.json`. */
 const SHIFT = 3;
 
 type Series = {
@@ -35,7 +39,10 @@ type Series = {
   }[];
 };
 
-/** `--steps 8 --elements 4`（既定 seed）。1 次 → 2 次 ×6 → 1 次 の全分岐を 1 本で踏む。 */
+/**
+ * `--steps 8 --elements 4` (default seed). One series walks every branch: 1st order → 2nd order ×6
+ * → 1st order.
+ */
 const SERIES_8: Series = {
   sigmas: [
     1, 0.9545454382896423, 0.8999999761581421, 0.8333333134651184, 0.75, 0.6428571343421936, 0.5,
@@ -90,7 +97,10 @@ const SERIES_8: Series = {
   ],
 };
 
-/** `--steps 2 --elements 3`（既定 seed）。梯子の最小長 — 2 step とも 1 次に落ちる。 */
+/**
+ * `--steps 2 --elements 3` (default seed). The minimum ladder length — both steps fall to 1st
+ * order.
+ */
 const SERIES_2: Series = {
   sigmas: [1, 0.75, 0],
   initial: [0.6157209873199463, -1.2011234760284424, 0.2345673143863678],
@@ -109,11 +119,12 @@ const SERIES_2: Series = {
 };
 
 /**
- * 系列を最後まで回して、各 step の `sample` / `x0` と golden の**最大絶対差**を返す。
+ * Runs the series to the end and returns the **maximum absolute difference** between each step's
+ * `sample` / `x0` and the golden.
  *
- * `velocityOrder` は step 順序の故障注入口 — 与えた並びで velocity を食わせる（既定は素直な
- * 0,1,2,… の順）。**状態（x と直前 x0）は素直に繋ぐ**ので、注入した誤りは以降の step へ
- * そのまま伝播する。
+ * `velocityOrder` is the fault-injection point for the step order — it feeds the velocities in the
+ * given order (the default is the plain 0,1,2,… order). **The state (x and the previous x0) is
+ * chained plainly**, so an injected error propagates as is to the following steps.
  */
 const worstDeviation = (series: Series, velocityOrder?: readonly number[]): number => {
   const sigmas = Float32Array.from(series.sigmas);
@@ -142,8 +153,9 @@ const worstDeviation = (series: Series, velocityOrder?: readonly number[]): numb
   return worst;
 };
 
-test("dpmSolverMultistepStep: リグ golden とパリティする（steps=8・1 次/2 次/1 次 の全分岐）", () => {
-  // step ごとに突き合わせるので「最後だけ合っている」では通らない（途中の x0 も見る）。
+test("dpmSolverMultistepStep: parity with the rig golden (steps=8, every branch of 1st/2nd/1st order)", () => {
+  // It compares step by step, so "only the last one matches" does not pass (the intermediate x0 is
+  // checked too).
   const sigmas = Float32Array.from(SERIES_8.sigmas);
   let sample = Float32Array.from(SERIES_8.initial);
   let previousX0: Float32Array<ArrayBuffer> | undefined = undefined;
@@ -163,13 +175,13 @@ test("dpmSolverMultistepStep: リグ golden とパリティする（steps=8・1 
         update.x0[element],
         expected.x0[element],
         TOLERANCE,
-        `x0 が参照と割れた（step=${index} element=${element}）`,
+        `x0 diverged from the reference (step=${index} element=${element})`,
       );
       assertAlmostEquals(
         update.sample[element],
         expected.sample[element],
         TOLERANCE,
-        `状態が参照と割れた（step=${index} element=${element}）`,
+        `the state diverged from the reference (step=${index} element=${element})`,
       );
     }
     sample = update.sample;
@@ -177,8 +189,9 @@ test("dpmSolverMultistepStep: リグ golden とパリティする（steps=8・1 
   }
 });
 
-test("dpmSolverMultistepStep: 最終 step は x0 をそのまま返す（終端 σ=0 の 1 次落ち）", () => {
-  // `final_sigmas_type="zero"` の帰結。係数が (0, −1) になるのでビット同一で一致する。
+test("dpmSolverMultistepStep: the final step returns x0 as is (1st-order fallback at the terminal σ=0)", () => {
+  // A consequence of `final_sigmas_type="zero"`. The coefficients become (0, −1), so it matches bit
+  // for bit.
   const sigmas = Float32Array.from(SERIES_8.sigmas);
   const last = SERIES_8.steps.length - 1;
   const update = dpmSolverMultistepStep({
@@ -193,17 +206,17 @@ test("dpmSolverMultistepStep: 最終 step は x0 をそのまま返す（終端 
   assertEquals([...update.sample], [...update.x0]);
 });
 
-test("dpmSolverMultistepStep: 境界 — 梯子が最小長（steps=2）でも参照と一致する", () => {
-  // 2 step しか無いと 2 次の分岐に一度も入らない（step 0 と最終 step が全て）。この経路が
-  // 落ちていると 2 次側だけ見ているテストは素通りする。
+test("dpmSolverMultistepStep: boundary — matches the reference even at the minimum ladder length (steps=2)", () => {
+  // With only two steps the 2nd-order branch is never entered (step 0 and the final step are all
+  // there is). If this path broke, a test that looks only at the 2nd-order side would pass anyway.
   assert(
     worstDeviation(SERIES_2) <= TOLERANCE,
-    `steps=2 の系列が参照と割れた（最大差 ${worstDeviation(SERIES_2)}）`,
+    `the steps=2 series diverged from the reference (max difference ${worstDeviation(SERIES_2)})`,
   );
 });
 
-test("dpmSolverMultistepStep: 境界 — guidance=1 は cond を速度としてそのまま使う", () => {
-  // σ0=1・σ1=0 の 1 step 梯子なら更新は x0 = x − 1·v そのもの。
+test("dpmSolverMultistepStep: boundary — guidance=1 uses cond as the velocity as is", () => {
+  // With a one-step ladder σ0=1, σ1=0 the update is exactly x0 = x − 1·v.
   const sigmas = Float32Array.from([1, 0]);
   const update = dpmSolverMultistepStep({
     sample: Float32Array.from([1, 2, 3]),
@@ -218,7 +231,7 @@ test("dpmSolverMultistepStep: 境界 — guidance=1 は cond を速度として�
   assertEquals([...update.sample], [0.75, 2.5, 2.875]);
 });
 
-test("dpmSolverMultistepStep: guidance≠1 は uncond + scale·(cond − uncond) を速度にする", () => {
+test("dpmSolverMultistepStep: guidance≠1 uses uncond + scale·(cond − uncond) as the velocity", () => {
   const update = dpmSolverMultistepStep({
     sample: Float32Array.from([0]),
     cond: Float32Array.from([1]),
@@ -232,13 +245,13 @@ test("dpmSolverMultistepStep: guidance≠1 は uncond + scale·(cond − uncond)
   assertEquals([...update.x0], [-2.5]);
 });
 
-test("needsUncond: CFG=1 だけが uncond 不要", () => {
+test("needsUncond: only CFG=1 needs no uncond", () => {
   assertEquals(needsUncond(1), false);
   assertEquals(needsUncond(4), true);
   assertEquals(needsUncond(0), true);
 });
 
-test("dpmSolverMultistepStep: uncond の有無が needsUncond と食い違ったら落とす", () => {
+test("dpmSolverMultistepStep: rejects a presence of uncond that disagrees with needsUncond", () => {
   const common = {
     sample: Float32Array.from([0, 0]),
     cond: Float32Array.from([1, 1]),
@@ -258,8 +271,9 @@ test("dpmSolverMultistepStep: uncond の有無が needsUncond と食い違った
   );
 });
 
-test("dpmSolverMultistepStep: 直前 x0 の有無が step 0 かどうかと食い違ったら落とす", () => {
-  // 状態の受け渡しが切れたまま黙って 1 次へ落ちるのを禁じる（1 次と 2 次は別の絵になる）。
+test("dpmSolverMultistepStep: rejects a presence of the previous x0 that disagrees with whether this is step 0", () => {
+  // Forbids silently falling to 1st order when the state hand-off is broken (1st and 2nd order give
+  // different images).
   const sigmas = Float32Array.from(SERIES_8.sigmas);
   const common = {
     sample: Float32Array.from([0, 0, 0, 0]),
@@ -285,7 +299,7 @@ test("dpmSolverMultistepStep: 直前 x0 の有無が step 0 かどうかと食�
   );
 });
 
-test("dpmSolverMultistepStep: 梯子と step 添字の受理集合", () => {
+test("dpmSolverMultistepStep: the accepted set of ladders and step indices", () => {
   const sample = Float32Array.from([0]);
   const cond = Float32Array.from([1]);
   const common = { sample, cond, uncond: undefined, guidance: 1, previousX0: undefined };
@@ -294,7 +308,8 @@ test("dpmSolverMultistepStep: 梯子と step 添字の受理集合", () => {
     RangeError,
     "there is not a single step",
   );
-  // 終端が 0 でない梯子は最終 step の 1 次落ちが成り立たない（`final_sigmas_type="zero"` 前提）。
+  // A ladder whose end is not 0 cannot use the 1st-order fallback at the final step (it assumes
+  // `final_sigmas_type="zero"`).
   assertThrows(
     () => dpmSolverMultistepStep({ ...common, sigmas: Float32Array.from([1, 0.5]), index: 0 }),
     RangeError,
@@ -312,34 +327,41 @@ test("dpmSolverMultistepStep: 梯子と step 添字の受理集合", () => {
   );
 });
 
-test("dpmSolverMultistepStep: 故障注入 — step 順序の入れ替えはパリティ閾値を大きく超える", () => {
-  // 検出力の証明。閾値（4e-6）に丸め差を吸わせても、順序を 1 組入れ替えるだけで
-  // 最大絶対差は 2.03e+00（実測）まで跳ね、5.7 桁の余裕で赤くなる。
+test("dpmSolverMultistepStep: fault injection — swapping the step order far exceeds the parity threshold", () => {
+  // Proof of detection power. Even with the threshold (4e-6) absorbing rounding differences,
+  // swapping a single pair in the order makes the maximum absolute difference jump to 2.03e+00
+  // (measured), red with a margin of 5.7 orders of magnitude.
   const flipped = [0, 2, 1, 3, 4, 5, 6, 7];
   const deviation = worstDeviation(SERIES_8, flipped);
   assert(
     deviation > TOLERANCE * 1e4,
-    `step 順序の入れ替えが検出できていない（最大差 ${deviation}）`,
+    `swapping the step order was not detected (max difference ${deviation})`,
   );
 });
 
-test("dpmSolverMultistepStep: 故障注入 — shift の取り違えはパリティ閾値を大きく超える", () => {
-  // 梯子そのものの取り違え（`sigmaSchedule` の shift 違い）も同じ閾値で割れることの確認。
-  // 中身の係数は全て梯子から導くので、梯子が 1 段ずれれば全 step の係数がずれる。
-  // 実測（shift 3 → 4）: 最大絶対差 1.568e-01 = 閾値の 4.6 桁上。
+test("dpmSolverMultistepStep: fault injection — a wrong shift far exceeds the parity threshold", () => {
+  // Confirms that a wrong ladder itself (a different shift in `sigmaSchedule`) breaks at the same
+  // threshold. Every coefficient inside is derived from the ladder, so if the ladder shifts by one
+  // rung the coefficients of every step shift. Measured (shift 3 → 4): maximum absolute difference
+  // 1.568e-01 = 4.6 orders of magnitude above the threshold.
   const wrongLadder: Series = {
     ...SERIES_8,
     sigmas: sigmaLadder(SERIES_8.steps.length, SHIFT + 1),
   };
   const deviation = worstDeviation(wrongLadder);
-  assert(deviation > TOLERANCE * 1e4, `shift の取り違えが検出できていない（最大差 ${deviation}）`);
+  assert(
+    deviation > TOLERANCE * 1e4,
+    `a wrong shift was not detected (max difference ${deviation})`,
+  );
 });
 
 /**
- * 故障注入用に別 shift の梯子を組む（`sigmaSchedule` の写し — テストの中だけで使う）。
+ * Builds a ladder with another shift for fault injection (a copy of `sigmaSchedule` — used only
+ * inside the test).
  *
- * MUST: ファミリ側（`src/anima/sampler.ts`）から import しない。テスト対象のモジュールは
- * ファミリ非依存で、その依存の向きをテストが先に作ると規約の破れが検出できなくなる。
+ * MUST: do not import it from the family side (`src/anima/sampler.ts`). The module under test is
+ * family-independent, and if the test created that dependency direction first, a violation of the
+ * rule could no longer be detected.
  */
 function sigmaLadder(steps: number, shift: number): number[] {
   const f32 = Math.fround;
@@ -354,9 +376,10 @@ function sigmaLadder(steps: number, shift: number): number[] {
   return ladder;
 }
 
-test("dpmSolverMultistepStep: f32 で表せない倍率は先に f32 へ丸めてから掛ける（torch と最終桁まで一致）", () => {
-  // `cfgEulerStep` と同じ組（torch 2.13.0 の CPU で f32 テンソルの合成 = −0.03790003061294556）。
-  // x0 = 0 − 1·v なので、合成の符号を返した値になる。f64 のまま掛けると 0.03789997100830078。
+test("dpmSolverMultistepStep: a factor not representable in f32 is rounded to f32 before multiplying (matches torch to the last digit)", () => {
+  // The same pair as `cfgEulerStep` (combined f32 tensors on the CPU with torch 2.13.0 =
+  // −0.03790003061294556). x0 = 0 − 1·v, so the result is the combined value with its sign flipped.
+  // Multiplying in f64 gives 0.03789997100830078.
   const update = dpmSolverMultistepStep({
     sample: Float32Array.from([0]),
     cond: Float32Array.from([0.011]),

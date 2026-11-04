@@ -1,44 +1,52 @@
-// gemma4 の見積り（`Pipeline.estimateSessionMemory`）が `estimateGraphMemory` へ渡す
-// generation の指定（`gemma4EstimateGenerations`）の配線。GPU は使わない。
+// The wiring of the generation settings (`gemma4EstimateGenerations`) that the gemma4 estimate
+// (`Pipeline.estimateSessionMemory`) passes to `estimateGraphMemory`. Uses no GPU.
 //
-// 実資産の gemma4 E2B ではバケット形がピークを支配しないので、`peakAccountedBytes` を見る門
-// （`e2e_gemma4_drafter_test.ts` ②）はバケットの配線を外しても割れない。配線はここで直接固定する。
+// On the real gemma4 E2B assets the bucket shapes do not dominate the peak, so the check on `peakAccountedBytes`
+// (`e2e_gemma4_drafter_test.ts` ②) does not break even if the bucket wiring is removed. The wiring is pinned here directly.
 
 import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { gemma4EstimateGenerations } from "../src/gemma/pipeline.ts";
 import { fakeSession, programOf } from "./helpers/generation-fake.ts";
 
-/** pipeline の chunk 長 16・バケット梯子 [4, 8]（容量記号 `C`・行数記号 `R`）。 */
+/** A pipeline with chunk length 16 and bucket ladder [4, 8] (capacity symbol `C`, row symbol `R`). */
 const wiring = () =>
   programOf(fakeSession(), { chunkLength: 16, chunkBuckets: [4, 8], capacity: 64 });
 
-describe("gemma4 の見積りが本体へ渡す generation の指定", () => {
-  it("pipeline の chunkBuckets のうち見積る chunkLength 未満の段を渡す", () => {
+describe("the generation settings the gemma4 estimate passes to the main model", () => {
+  it("passes the pipeline's chunkBuckets that are below the estimated chunkLength", () => {
     const at = (chunkLength: number) =>
       gemma4EstimateGenerations(wiring(), { capacity: 64, chunkLength }).target.chunkBuckets;
-    assertEquals(at(16), [4, 8], "pipeline と同じ chunk 長では梯子をそのまま渡す");
-    assertEquals(at(8), [4], "chunk 長と同じ段は受理集合（chunk 長未満）に入らない");
-    assertEquals(at(4), [], "受理集合が空なら 1 段も渡さない");
+    assertEquals(
+      at(16),
+      [4, 8],
+      "at the same chunk length as the pipeline the ladder is passed as is",
+    );
+    assertEquals(
+      at(8),
+      [4],
+      "a bucket equal to the chunk length is not in the accepted set (below the chunk length)",
+    );
+    assertEquals(at(4), [], "an empty accepted set passes no bucket");
   });
 
-  it("仮定の chunkLength を pipeline の値より大きくしても、渡す段は pipeline の梯子のまま", () => {
+  it("even with an assumed chunkLength larger than the pipeline's, the buckets passed stay the pipeline's ladder", () => {
     const { target } = gemma4EstimateGenerations(wiring(), { capacity: 64, chunkLength: 32 });
     assertEquals(target.chunkBuckets, [4, 8]);
   });
 
-  it("見積る chunk 長と容量をそのまま渡す", () => {
+  it("passes the estimated chunk length and capacity as is", () => {
     const { target } = gemma4EstimateGenerations(wiring(), { capacity: 48, chunkLength: 16 });
     assertEquals(target.chunkLength, 16);
     assertEquals(target.bindings, { C: 48 });
   });
 
-  it("drafter の無い pipeline では追加シナリオを足さない", () => {
+  it("adds no extra scenario for a pipeline without a drafter", () => {
     const { target } = gemma4EstimateGenerations(wiring(), { capacity: 64, chunkLength: 16 });
     assertEquals(target.scenarios, undefined);
   });
 
-  it("投機ありでは verify を k+1 行・物理行数はバケットへ丸めた行数で足す", () => {
+  it("with speculation, adds verify with k+1 rows and physical rows rounded up to a bucket", () => {
     const { target } = gemma4EstimateGenerations(wiring(), {
       capacity: 64,
       chunkLength: 16,
@@ -47,9 +55,9 @@ describe("gemma4 の見積りが本体へ渡す generation の指定", () => {
     assertEquals(target.scenarios, [{ name: "verify", chunkLength: 4, bindings: { R: 3 } }]);
   });
 
-  it("仮定の chunkLength が pipeline の値より大きく k+1 が梯子の最大段を超えると、verify は仮定の chunk 長で流す", () => {
-    // pipeline の chunk 長 16 で丸めると、見積る context（chunk 長 32・梯子 [4, 8]）の許可集合
-    // {1, 4, 8, 32} に無い 16 を渡し、見積りが ExecutionError になる。
+  it("with an assumed chunkLength larger than the pipeline's and k+1 beyond the ladder's largest bucket, verify runs at the assumed chunk length", () => {
+    // Rounding with the pipeline's chunk length 16 would pass 16, which is not in the allowed set {1, 4, 8, 32} of
+    // the estimated context (chunk length 32, ladder [4, 8]), and the estimate would become an ExecutionError.
     const { target } = gemma4EstimateGenerations(wiring(), {
       capacity: 64,
       chunkLength: 32,
@@ -59,8 +67,8 @@ describe("gemma4 の見積りが本体へ渡す generation の指定", () => {
   });
 });
 
-describe("gemma4 の見積りが drafter（借り手 context）へ渡す generation の指定", () => {
-  it("chunk 長 1・貸し手と同じ容量で、バケットは渡さない", () => {
+describe("the generation settings the gemma4 estimate passes to the drafter (the borrowing context)", () => {
+  it("chunk length 1, the same capacity as the lender, and no buckets", () => {
     const { borrower } = gemma4EstimateGenerations(wiring(), {
       capacity: 48,
       chunkLength: 16,

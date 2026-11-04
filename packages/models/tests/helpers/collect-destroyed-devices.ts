@@ -1,48 +1,55 @@
 /**
- * 新しい device を取る前に、破棄済みの device を V8 に回収させる（テストの GPU の取得口が呼ぶ）。
+ * Has V8 collect destroyed devices before a new device is acquired (called by the tests' GPU
+ * acquisition entry point).
  *
- * NOTE: これは**対症療法**である（利用者の裁定 2026-10-05 — 根本の対処は後回し）。Deno 2.9.6 の
- * `GPUDevice.destroy()` は device に無効の印を立てるだけで VRAM を返さず、device とその資源が返るのは
- * V8 の GC が device のラッパを回収したとき。テストは 1 本ごとに device を作って捨てるので、GC まで
- * 残った破棄済みの device が同じ process の VRAM を食い、後のテストの大きな確保を OOM にする
- * （docs/known-issues.md「Deno: `GPUDevice.destroy()` が VRAM を返さず…」）。
+ * NOTE: this is a **symptomatic workaround** (maintainer's ruling 2026-10-05 — the root-cause fix
+ * is deferred). Deno 2.9.6's `GPUDevice.destroy()` only marks the device invalid and does not
+ * return its VRAM; the device and its resources are released only when V8's GC collects the
+ * device's wrapper. The tests create and drop one device per test, so destroyed devices that
+ * survive until the GC eat the process's VRAM and make a later test's large allocation OOM
+ * (docs/known-issues.md "Deno: `GPUDevice.destroy()` does not return VRAM…").
  *
- * NOTE: 保証しないこと:
- * - 回収の時点は V8 / cppgc の実装の挙動で、仕様の保証ではない。2 回の `gc()` で返ることは B570 の
- *   実測（下の {@link GC_SETTLE_MS}）で見ただけで、版が変われば回数も待ちも変わりうる。
- * - 回収されたかは検査しない（DRM クライアントの数を見る門は後回し）。返っていなくても黙って進む。
- * - `gc` は `--v8-flags=--expose-gc` を付けた走行にだけ生える。deno.json の `deno test` のタスクは
- *   全てこのフラグを渡す（`packages/runtime/tests/verify_lanes_test.ts` が門）が、フラグ無しで直に
- *   `deno test` を回した走行では何もしない（緩和が無いだけで、テストの意味は変わらない）。
- * - まだ到達できる GpuContext（変数・closure が握っているもの）は回収されない。
+ * NOTE: what this does not guarantee:
+ * - When collection happens is V8 / cppgc implementation behaviour, not a spec guarantee. That
+ *   two `gc()` calls release it was only observed on a B570 (see {@link GC_SETTLE_MS} below);
+ *   another version may need a different count or wait.
+ * - Whether collection happened is not checked (a check on the DRM client count is deferred). It
+ *   proceeds silently even when nothing was released.
+ * - `gc` exists only in runs with `--v8-flags=--expose-gc`. Every `deno test` task in deno.json
+ *   passes that flag (checked by `packages/runtime/tests/verify_lanes_test.ts`), but a direct
+ *   `deno test` run without the flag does nothing here (only the mitigation is missing; the tests
+ *   mean the same).
+ * - A GpuContext that is still reachable (held by a variable or a closure) is not collected.
  */
 
 /**
- * `gc()` の後の待ち（ms）。
+ * The wait after each `gc()` (ms).
  *
- * probe（`outputs/diag/dead-device-probe.ts` の段 d — `gc()` → 100 ms → 観測）の実測
- * （`outputs/bench/2026-10-05_dead-device/p1-settle-gc.log`）: 1 回目の後の 100 ms では何も返らず、
- * 2 回目の後の 100 ms で破棄済みの device の DRM クライアントと vram0 / gtt が全て返った（クライアントは
- * 物理デバイスの fd の 1 本だけに戻った）。
- * 待ちは cppgc の finalizer が macrotask を跨いで走る機会を与えるためのもので、100 ms より短い値で
- * 返るかは測っていないので、実測した値より短くしない。
+ * Measured with the probe (step d of `outputs/diag/dead-device-probe.ts` — `gc()` → 100 ms →
+ * observe; `outputs/bench/2026-10-05_dead-device/p1-settle-gc.log`): nothing was released in the
+ * 100 ms after the first call, and in the 100 ms after the second call the destroyed devices' DRM
+ * clients and all of vram0 / gtt were released (the clients went back to the single fd of the
+ * physical device). The wait gives cppgc's finalizers a chance to run across macrotasks; values
+ * shorter than 100 ms were not measured, so do not go below the measured value.
  */
 export const GC_SETTLE_MS = 100;
 
 const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * `host.gc` を 2 回呼び、それぞれの後に {@link GC_SETTLE_MS} 待つ。`gc` が無ければ何もしない。
+ * Calls `host.gc` twice and waits {@link GC_SETTLE_MS} after each call. Does nothing without `gc`.
  *
- * `host` は `gc` を持つ物（既定は `globalThis`）。関数そのものではなく持ち主を受けるのは、既定引数が
- * `undefined` を「既定を使う」と読むため — 「gc が無い」を注入で表せるように、無い形は `{}` で渡す。
+ * `host` is the object that owns `gc` (default `globalThis`). It takes the owner rather than the
+ * function itself because a default parameter reads `undefined` as "use the default" — so that "no
+ * gc" can be injected, the absent case is passed as `{}`.
  */
 export const collectDestroyedDevices = async (host: object = globalThis): Promise<void> => {
   const gc = "gc" in host ? host.gc : undefined;
   if (typeof gc !== "function") return;
-  // 2 回: probe の実測では 1 回目では返らない。1 回目で GPUDevice が finalize されて GPUQueue への
-  // 強参照が外れ、fd を閉じる GPUQueue の回収は次の GC になる、という連鎖で説明がつく（上流のソース
-  // からの推論 — 回数だけが実測）。
+  // Twice: in the probe's measurement the first call releases nothing. The chain that explains it:
+  // the first call finalizes the GPUDevice, which drops its strong reference to the GPUQueue, and
+  // the GPUQueue (which closes the fd) is collected by the next GC (inferred from the upstream
+  // source — only the count is measured).
   gc();
   await wait(GC_SETTLE_MS);
   gc();

@@ -1,16 +1,19 @@
-// `Pipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る（実 GPU の突合は
-// example の dump 経路と golden E2E が持つ）。
+// **Construction guards** of `Pipeline`. Only what needs neither a GPU nor real assets (the
+// real-GPU comparison belongs to the example's dump path and the golden E2E).
 //
-// ここで押さえるのは 3 つ:
-//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反を落とす（未知 model /
-//     pipeline 名 / 未知 major / 未知 quant / pipelineConfig のスキーマ）。落とす位置が
-//     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
-//  ② `styles` / `speakers` は「名前 → **表の行番号**」で、値が `0..件数-1` の順列であること。
-//     行番号がずれても `style_vec` / `g` の shape は合ったままなので、**別のスタイル・別の
-//     話者の声が出る**だけで沈黙する（`src/sbv2/config.ts` の doc）。既定が受理集合の外を
-//     指すのも同じクラスで、どちらも parse 時に落とす。
-//  ③ 運用上限（`maxTokens` / `maxFrames`）は配布形が宣言する — 欠けていれば読めない。
-//     ホスト側の `(T, T)` 表は 8·T² bytes 級なので、上限の無い配布形は無制限に膨らむ。
+// Three things are pinned here:
+//  ① `fromAssets` rejects manifest contract violations **before** acquiring a GPU (unknown model /
+//     pipeline name / unknown major / unknown quant / the pipelineConfig schema). If the rejection
+//     moved, an environment without a GPU would see a different exception and the reader would not
+//     learn what was wrong.
+//  ② `styles` / `speakers` map "name → **table row index**", and the values are a permutation of
+//     `0..count-1`. A shifted row index keeps the shapes of `style_vec` / `g` valid, so it fails
+//     silently: **a different style's or a different speaker's voice comes out** (the doc of
+//     `src/sbv2/config.ts`). A default pointing outside the accepted set is the same
+//     class; both are rejected at parse time.
+//  ③ The operating limits (`maxTokens` / `maxFrames`) are declared by the distribution — without
+//     them it cannot be read. The host-side `(T, T)` table is on the order of 8·T² bytes, so a
+//     distribution without limits grows without bound.
 
 import { assert, assertEquals, assertFalse, assertRejects, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
@@ -41,12 +44,16 @@ import { tileBertToPhoneLevel, type TiledBert } from "../src/sbv2/text/bert-tile
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
-/** この系列の weights 部品（`src/sbv2/pipeline.ts` の `COMPONENT_KEYS` と同じ 3 本）。 */
+/**
+ * The weight components of this series (the same three as `COMPONENT_KEYS` in
+ * `src/sbv2/pipeline.ts`).
+ */
 const WEIGHT_NAMES = ["front", "voice", "text_encoder"] as const;
 
 /**
- * 開ける容器 3 本（宣言は最小 — グラフ幅の突合は下の門を直接叩く節が見る）。`fromAssets` は
- * 供給口を作る時点で 3 本とも開くので、manifest の門を踏むケースでも容器は揃えておく。
+ * Three containers that can be opened (minimal declarations — the graph-width comparisons are
+ * covered by the section below that calls the checks directly). `fromAssets` opens all three when
+ * it builds the supply, so the containers are present even for the cases that hit a manifest check.
  */
 const COMPONENTS: Record<string, Uint8Array<ArrayBuffer>> = {};
 for (const name of WEIGHT_NAMES) {
@@ -62,7 +69,7 @@ for (const name of WEIGHT_NAMES) {
   );
 }
 
-/** `models/karume-sbv2-jvnv/karume.json` の骨格（検査に要る欄だけ）。 */
+/** Skeleton of `models/karume-sbv2-jvnv/karume.json` (only the fields the checks need). */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/5",
@@ -104,13 +111,13 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-/** `pipelineConfig` だけを差し替えた manifest（残りは骨格のまま）。 */
+/** A manifest with only `pipelineConfig` replaced (the rest is the skeleton). */
 const withConfig = (config: Record<string, unknown>): string =>
   manifestText({ pipelineConfig: config });
 
-test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 容器が揃っていない Record では**部品の不在**で落ちる（manifest の文言では落ちない）=
-  // 下の門が資産の不在に巻き添えられていないことの対偶。
+test("fromAssets: fails with both spellings when a component's container is missing (the entry diagnostic)", async () => {
+  // A Record without the containers fails on **the missing component** (not with a manifest
+  // message) = the contrapositive showing that the checks below are not tripped by missing assets.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
@@ -119,7 +126,7 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   );
 });
 
-test("fromAssets: pipeline の契約名が sbv2 でない manifest を落とす", async () => {
+test("fromAssets: rejects a manifest whose pipeline contract name is not sbv2", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/1" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -128,9 +135,10 @@ test("fromAssets: pipeline の契約名が sbv2 でない manifest を落とす"
   );
 });
 
-test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: an unknown major fails loudly (models owns the check — ADR 0038 §1)", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/2" }));
-  // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
+  // hub does not check the major of `pipeline` (only the pipeline implementation knows what it can
+  // read).
   assertEquals(manifest.models["FN4"].pipeline, { name: "sbv2", major: 2 });
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -139,7 +147,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   );
 });
 
-test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: an unknown quant fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16" }),
@@ -148,8 +156,9 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
-  // v2 で増えた軸（ファミリーリポの別話者を打ち間違えたときの一次情報 — ADR 0041 §8）。
+test("fromAssets: an unknown model fails with the list of available ones", async () => {
+  // The axis added in v2 (the first-hand information when another speaker of a family repository is
+  // mistyped — ADR 0041 §8).
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "FN1" }),
@@ -158,9 +167,10 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落としても、admission が共有 GPU の shader-f16 不足を名指しで落とす", async () => {
-  // 要求する feature は「宣言 ∪ 実効設定が要る feature」（`sessionGpuFeatures`）。`gpuFeatures` だけを
-  // 見ると、この配布形は admission を素通りし、重みを上げた後の Session 構築まで落ちない。
+test("fromAssets: a quant that declares f16 compute but omits gpuFeatures is still rejected by admission, naming the shared GPU's missing shader-f16", async () => {
+  // The required features are "declared ∪ the features the effective settings need"
+  // (`sessionGpuFeatures`). Looking at `gpuFeatures` alone, this distribution would pass admission
+  // and fail only at Session construction, after the weights were uploaded.
   const f16Compute = parseManifest(
     manifestText({
       quants: {
@@ -177,8 +187,8 @@ test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落�
     Error,
     "sbv2.Pipeline: quant 'i8' requires shader-f16, but",
   );
-  // 対照: f16 計算を言わない quant は同じ共有 GPU で admission を通り、資産の段まで進む
-  // （門が恒真でないことの対）。
+  // Control: a quant that does not ask for f16 compute passes admission on the same shared GPU and
+  // gets as far as the assets (the counterpart showing the check is not always true).
   const error = await assertRejects(
     () =>
       Pipeline.fromAssets({ manifest: parseManifest(manifestText()), assets: COMPONENTS }, shared),
@@ -187,14 +197,15 @@ test("fromAssets: f16 計算を宣言した quant は gpuFeatures を書き落�
   assertFalse(error.message.includes("shader-f16"), error.message);
 });
 
-test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
+test("fromAssets: an unknown pipelineConfig key fails at construction", async () => {
   const manifest = parseManifest(
     withConfig({
       styles: { Neutral: 0 },
       speakers: { FN4: 0 },
       maxTokens: 512,
       maxFrames: 4096,
-      // 配布形に無い節。綴り違いが黙って既定へ縮退する経路を作らない。
+      // A section the distribution does not have. No path where a misspelling silently falls back
+      // to the default.
       sampleRate: 44100,
       defaults: {
         speaker: "FN4",
@@ -214,7 +225,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   );
 });
 
-test("fromAssets: defaults.style が styles に無ければ構築時に落ちる", async () => {
+test("fromAssets: fails at construction when defaults.style is not in styles", async () => {
   const manifest = parseManifest(
     withConfig({
       styles: { Neutral: 0, high: 1 },
@@ -232,7 +243,8 @@ test("fromAssets: defaults.style が styles に無ければ構築時に落ちる
       },
     }),
   );
-  // 「生成を 1 回走らせて初めて分かる」を作らない — 既定は受理集合の内側であること。
+  // Do not create a fault that shows up only after one generation — the default must be inside the
+  // accepted set.
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
     Error,
@@ -240,7 +252,7 @@ test("fromAssets: defaults.style が styles に無ければ構築時に落ちる
   );
 });
 
-test("fromAssets: defaults.speaker が speakers に無ければ構築時に落ちる", async () => {
+test("fromAssets: fails at construction when defaults.speaker is not in speakers", async () => {
   const manifest = parseManifest(
     withConfig({
       styles: { Neutral: 0 },
@@ -265,9 +277,9 @@ test("fromAssets: defaults.speaker が speakers に無ければ構築時に落�
   );
 });
 
-test("fromAssets: 行番号が順列でない styles は構築時に落ちる（沈黙誤値クラス）", async () => {
-  // 件数 2 に対して行番号が {0, 5}。表の行数（2）に対して 5 行目は無いので、通せば
-  // 「範囲外の行を引く」か「別の行を引く」のどちらかになる。
+test("fromAssets: styles whose row indices are not a permutation fail at construction (silent wrong-value class)", async () => {
+  // Two entries with row indices {0, 5}. The table has two rows and no row 5, so letting it through
+  // would either read a row out of range or read a different row.
   const manifest = parseManifest(
     withConfig({
       styles: { Neutral: 0, high: 5 },
@@ -292,8 +304,9 @@ test("fromAssets: 行番号が順列でない styles は構築時に落ちる（
   );
 });
 
-test("parseSbv2PipelineConfig: 行番号の重複を落とす（名前と行が 1 対 1 でない）", () => {
-  // 範囲内に収まっていても重複していれば表の 1 行が誰からも指されない = 別のスタイルの声。
+test("parseSbv2PipelineConfig: rejects duplicate row indices (names and rows not one to one)", () => {
+  // Even within range, a duplicate leaves one table row pointed at by nobody = a different style's
+  // voice.
   assertThrows(
     () =>
       parseSbv2PipelineConfig({
@@ -316,8 +329,9 @@ test("parseSbv2PipelineConfig: 行番号の重複を落とす（名前と行が 
   );
 });
 
-test("parseSbv2PipelineConfig: 配布形の pipelineConfig を読み切る", () => {
-  // `models/karume-sbv2-jvnv/karume.json` の実物と同じ形。名前 → 行番号が Map で引けること。
+test("parseSbv2PipelineConfig: reads the distribution's pipelineConfig completely", () => {
+  // The same shape as the real `models/karume-sbv2-jvnv/karume.json`. Name → row index can be
+  // looked up in a Map.
   const config = parseSbv2PipelineConfig({
     styles: { Neutral: 0, high: 1, low: 2, NSFW: 3 },
     speakers: { FN4: 0 },
@@ -349,7 +363,7 @@ test("parseSbv2PipelineConfig: 配布形の pipelineConfig を読み切る", () 
   assertEquals(config.maxFrames, 4096);
 });
 
-test("parseSbv2PipelineConfig: lengthScale 0 は落とす（総フレーム数が 0 になる）", () => {
+test("parseSbv2PipelineConfig: rejects lengthScale 0 (the total frame count would be 0)", () => {
   assertThrows(
     () =>
       parseSbv2PipelineConfig({
@@ -372,12 +386,13 @@ test("parseSbv2PipelineConfig: lengthScale 0 は落とす（総フレーム数�
   );
 });
 
-// ---- 運用上限（`maxTokens` / `maxFrames`）--------------------------------
+// ---- Operating limits (`maxTokens` / `maxFrames`) ------------------------
 //
-// 相対位置表は ADR 0045 でホストへ外出しされ、`(T, T)` の確保（8·T² bytes 級）がホスト側の
-// 責務になった。上限の正本は配布形（exporter の `dist.py`）で、TS 側は定数を持たない —
-// だから**欠けている配布形は読めない**（既定へ縮退させると、上限を持たない配布形が黙って
-// 無制限のまま走る）。
+// ADR 0045 moved the relative-position tables out to the host, so allocating `(T, T)` (on the order
+// of 8·T² bytes) became the host's responsibility. The source of truth for the limits is the
+// distribution (the exporter's `dist.py`); the TS side holds no constants — so **a distribution
+// without them cannot be read** (falling back to a default would let a distribution without limits
+// run silently unbounded).
 
 const LIMIT_KNOBS = {
   speaker: "FN4",
@@ -389,7 +404,7 @@ const LIMIT_KNOBS = {
   lengthScale: 1,
 };
 
-/** 上限 2 欄だけを差し替えた（あるいは落とした）`pipelineConfig`。 */
+/** A `pipelineConfig` with only the two limit fields replaced (or dropped). */
 const configWithLimits = (limits: Record<string, unknown>): Record<string, unknown> => ({
   styles: { Neutral: 0 },
   speakers: { FN4: 0 },
@@ -397,7 +412,7 @@ const configWithLimits = (limits: Record<string, unknown>): Record<string, unkno
   defaults: LIMIT_KNOBS,
 });
 
-test("parseSbv2PipelineConfig: maxTokens / maxFrames が無い配布形は読めない", () => {
+test("parseSbv2PipelineConfig: a distribution without maxTokens / maxFrames cannot be read", () => {
   assertThrows(
     () => parseSbv2PipelineConfig(configWithLimits({ maxFrames: 4096 })),
     Error,
@@ -410,20 +425,22 @@ test("parseSbv2PipelineConfig: maxTokens / maxFrames が無い配布形は読め
   );
 });
 
-test("parseSbv2PipelineConfig: 上限が正の安全整数でなければ落とす", () => {
-  // 0 / 負 / 小数 / 安全整数の外。どれも「確保サイズの比較に使える数」ではない。
+test("parseSbv2PipelineConfig: rejects limits that are not positive safe integers", () => {
+  // 0 / negative / fractional / beyond the safe integers. None is a number usable for comparing
+  // allocation sizes.
   for (const bad of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 2, Infinity, "512"]) {
     assertThrows(
       () => parseSbv2PipelineConfig(configWithLimits({ maxTokens: bad, maxFrames: 4096 })),
       Error,
       "pipelineConfig.maxTokens: not a positive safe integer",
-      `maxTokens=${String(bad)} が通った`,
+      `maxTokens=${String(bad)} was accepted`,
     );
   }
 });
 
-test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通る", () => {
-  // `generate` はこの門を **buildRelPosTables（各 4·T² bytes）と Session 確保の前**に呼ぶ。
+test("assertTokenLimit: rejects counts above the limit and passes exactly the limit", () => {
+  // `generate` calls this check **before buildRelPosTables (4·T² bytes each) and the Session
+  // allocation**.
   assertTokenLimit(512, 512);
   assertThrows(
     () => assertTokenLimit(513, 512),
@@ -432,22 +449,24 @@ test("assertTokenLimit: 上限超過は落とし、ちょうど上限は通る",
   );
 });
 
-test("assertPhonemeLimit: 上限超過は落とし、ちょうど上限は通る", () => {
-  // 音素次元 P は front の記号次元で、上限は T と同じ 1 つ（`maxTokens`）。P と T のどちらが
-  // 大きいかは発話依存（0 配分が出る記号語がある）なので、片方の門では超過を通す。
+test("assertPhonemeLimit: rejects counts above the limit and passes exactly the limit", () => {
+  // The phoneme dimension P is a symbolic dimension of front, and its limit is the same single one
+  // as T (`maxTokens`). Whether P or T is larger depends on the utterance (some symbol words get
+  // zero phonemes), so a check on only one of them lets an excess through.
   assertPhonemeLimit(512, 512);
   assertThrows(
     () => assertPhonemeLimit(513, 512),
     Error,
     "sbv2.Pipeline: phoneme count 513 exceeds the distribution's maximum maxTokens=512",
   );
-  // 文言は T 側と別（診断でどちらの門か分かる形）。
+  // The message differs from the T side (so the diagnostic says which check fired).
   assertThrows(() => assertTokenLimit(513, 512), Error, "token count 513");
 });
 
-test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件・型は InputError）", () => {
-  // `generate` はこの門を他のノブと同じ段（Session を張る前）で呼ぶ。唯一の検査が `Randn`
-  // のコンストラクタだけだと、text_encoder（DeBERTa）を 1 run 払ってから落ちる。
+test("assertSeed: the accepted set is the non-negative safe integers (the same condition as Randn; the type is InputError)", () => {
+  // `generate` calls this check at the same stage as the other knobs (before setting up a Session).
+  // If the only check were `Randn`'s constructor, it would fail after paying for one text_encoder
+  // (DeBERTa) run.
   assertSeed(0);
   assertSeed(42);
   assertSeed(Number.MAX_SAFE_INTEGER);
@@ -457,56 +476,64 @@ test("assertSeed: 受理集合は非負の安全整数（Randn と同一条件�
       InputError,
       `seed ${bad} is not a non-negative safe integer`,
     );
-    // 包み直しは所有者の例外を捨てない（cause が所有者 `request-gates.ts` の送出そのもの）。
-    assert(thrown.cause instanceof ModelInputError, "所有者の例外を cause に残していない");
-    // 受理集合は `Randn` と 1 ビットも動かさない（緩めれば BigInt 変換が壊れ、締めれば
-    // 既存の呼び出しが落ちる）。どちらも所有者 `request-gates.ts` の 1 本を通るので、
-    // 型は入口が `InputError`・生成器が親の `ModelInputError` という差だけになる。
+    // Re-wrapping does not drop the owner's exception (the cause is exactly what the owner
+    // `request-gates.ts` threw).
+    assert(thrown.cause instanceof ModelInputError, "the owner's exception was not kept as cause");
+    // The accepted set does not move by one bit from `Randn`'s (loosening it breaks the BigInt
+    // conversion; tightening it breaks existing calls). Both go through the single function of the
+    // owner `request-gates.ts`, so the only difference is the type: `InputError` at the entry
+    // point, the parent `ModelInputError` in the generator.
     assertThrows(() => new Randn(bad), ModelInputError);
   }
 });
 
-test("assertFiniteNoise: f32 で溢れる z_noise は出どころで型を分けて落とす", () => {
-  // noiseScaleW は倍精度で有限なだけで通っていたので、1e39 では乱数が ±Inf のまま front へ渡った。
+test("assertFiniteNoise: rejects a z_noise that overflows f32, with the type chosen by where the value came from", () => {
+  // noiseScaleW used to pass merely by being finite in double precision, so at 1e39 the random
+  // values reached front as ±Inf.
   const overflowing = new Randn(0).normals(4, 1e39);
-  assert(!overflowing.every(Number.isFinite), "前提: 1e39 倍の乱数は f32 で ±Inf になる");
-  // 呼び手が渡した値なら入力起因（400）。
+  assert(!overflowing.every(Number.isFinite), "premise: random values times 1e39 are ±Inf in f32");
+  // A value the caller passed is an input error (400).
   assertThrows(
     () => assertFiniteNoise(overflowing, 1e39, true),
     InputError,
     "noiseScaleW 1e+39 makes z_noise non-finite in f32",
   );
-  // 配布形の既定値なら資産の不正（入力起因の分岐に乗せない）。
+  // A default from the distribution is an asset fault (it does not go to the input-error branch).
   const fromAsset = assertThrows(
     () => assertFiniteNoise(overflowing, 1e39, false),
     Error,
     "pipelineConfig.defaults: noiseScaleW 1e+39",
   );
-  assertFalse(fromAsset instanceof ModelInputError, "資産由来が入力起因に分類された");
-  // 正常域は通る。
+  assertFalse(
+    fromAsset instanceof ModelInputError,
+    "an asset fault was classified as an input error",
+  );
+  // The normal range passes.
   assertFiniteNoise(new Randn(0).normals(4, 0.8), 0.8, true);
 });
 
 /**
- * {@link synthesizeSbv2} へ直に渡す偽物の状態。部品 3 本の `createSession` は呼ばれた部品名を
- * 記録し、印の例外で止める（GPU には触れない — `gpu` も偽物）。text_encoder より前の検査を
- * 通ったかどうかを、記録が空かどうかで見る。
+ * A fake state passed directly to {@link synthesizeSbv2}. The `createSession` of each of the three
+ * components records the component name and stops with a marker exception (nothing touches a GPU —
+ * `gpu` is fake too). Whether the checks before text_encoder passed is read from whether the record
+ * is empty.
  *
- * 規則・トークナイザは形だけの最小構成（本物の値ではない）。発話は記号 1 つ（"."）だけ。
+ * The rules and the tokenizer are a minimal shape-only setup (not real values). The utterance is a
+ * single symbol (".").
  */
 const noiseWiringState = (calls: string[], defaultNoiseScaleW: number) => {
   const component = (key: string): ModelComponent => ({
     ...stubModel({ inputs: [], outputs: [], values: {} }),
     createSession: () => {
       calls.push(key);
-      return Promise.reject(new Error(`印: ${key} の createSession`));
+      return Promise.reject(new Error(`marker: createSession of ${key}`));
     },
     assets: {},
     asset: () => {
-      throw new Error("未使用");
+      throw new Error("unused");
     },
     estimate: () => {
-      throw new Error("未使用");
+      throw new Error("unused");
     },
     maxPartBytes: 0,
   });
@@ -546,7 +573,7 @@ const noiseWiringState = (calls: string[], defaultNoiseScaleW: number) => {
         bertRelPos: { positionBuckets: 256, maxPosition: 512 },
         defaults: { sdpRatio: 0.2, noiseScale: 0.6, noiseScaleW: 0.8, lengthScale: 1 },
       },
-      "テスト規則",
+      "test rules",
     ),
     tokenizer: DebertaTokenizer.fromVocabText(
       ["[PAD]", "[CLS]", "[SEP]", "[UNK]", "."].join("\n"),
@@ -569,8 +596,8 @@ const PUNCTUATION_ONLY = {
   words: [{ surface: ".", phones: ["."] }],
 };
 
-describe("synthesizeSbv2: z_noise の有限性の検査の結線", () => {
-  it("呼び手の noiseScaleW が f32 で溢れるなら、text_encoder の Session を張る前に入力起因で落とす", async () => {
+describe("synthesizeSbv2: wiring of the z_noise finiteness check", () => {
+  it("fails as an input error before setting up the text_encoder Session when the caller's noiseScaleW overflows f32", async () => {
     const calls: string[] = [];
     await assertRejects(
       () => synthesizeSbv2(noiseWiringState(calls, 0.8), PUNCTUATION_ONLY, { noiseScaleW: 1e39 }),
@@ -580,35 +607,40 @@ describe("synthesizeSbv2: z_noise の有限性の検査の結線", () => {
     assertEquals(calls, []);
   });
 
-  it("配布形の既定値が f32 で溢れるなら、Session を張る前に資産の不正として落とす", async () => {
+  it("fails as an asset fault before setting up a Session when the distribution's default overflows f32", async () => {
     const calls: string[] = [];
     const error = await assertRejects(
       () => synthesizeSbv2(noiseWiringState(calls, 1e39), PUNCTUATION_ONLY),
       Error,
       "pipelineConfig.defaults: noiseScaleW 1e+39",
     );
-    assertFalse(error instanceof ModelInputError, "資産由来が入力起因に分類された");
+    assertFalse(
+      error instanceof ModelInputError,
+      "an asset fault was classified as an input error",
+    );
     assertEquals(calls, []);
   });
 
-  // 対: 同じ偽物の状態でも、溢れない値なら text_encoder の Session まで進む（上の 2 本が
-  // 偽物の組み立てそのものの失敗で落ちているのではないことの確認）。
-  it("溢れない noiseScaleW なら text_encoder の Session を張りに行く", async () => {
+  // Counterpart: with the same fake state, a value that does not overflow gets as far as the
+  // text_encoder Session (confirming that the two cases above do not fail because the fake itself
+  // is broken).
+  it("goes on to set up the text_encoder Session for a noiseScaleW that does not overflow", async () => {
     const calls: string[] = [];
     await assertRejects(
       () => synthesizeSbv2(noiseWiringState(calls, 0.8), PUNCTUATION_ONLY, { noiseScaleW: 0.8 }),
       Error,
-      "印: text_encoder の createSession",
+      "marker: createSession of text_encoder",
     );
     assertEquals(calls, ["text_encoder"]);
   });
 });
 
 /**
- * 故障注入シム: 各トークンの複製を 1 回ぶん取りこぼす tile。
+ * Fault-injection shim: a tile that drops one copy of each token.
  *
- * 確保サイズは正しい `sum(word2ph)` のままで、**書いた列だけ**が足りない — `tileBertToPhoneLevel`
- * の repeat 上限を 1 ずらすと出る形で、`data.length` しか見ない門はこれを通す。
+ * The allocation stays the correct `sum(word2ph)` and **only the written columns** fall short — the
+ * shape an off-by-one in the repeat bound of `tileBertToPhoneLevel` produces, which a check that
+ * looks only at `data.length` lets through.
  */
 const tileWithShortRepeat = (
   hidden: Float32Array,
@@ -628,21 +660,27 @@ const tileWithShortRepeat = (
   return { data: out, dim, columns: column };
 };
 
-test("assertTiledBert: 故障注入 — 走査が取りこぼした tile を確保サイズとの差で捕まえる", () => {
+test("assertTiledBert: fault injection — catches a tile whose walk dropped columns by the difference from the allocation", () => {
   const hidden = new Float32Array([1, 2, 3, 10, 20, 30]);
   const word2ph = [1, 2];
   const good = tileBertToPhoneLevel(hidden, 2, word2ph);
   assertTiledBert(good, 3);
 
   const broken = tileWithShortRepeat(hidden, 2, word2ph);
-  // 前提の固定: 確保サイズは正しいまま（= 旧「展開長 === 音素数」の 1 本では緑で通る形）。
-  assertEquals(broken.data.length, good.data.length, "確保サイズが違うなら別の門の話になる");
+  // Pinning the premise: the allocation is still correct (= the old single check "expanded length
+  // === phoneme count" passes it green).
+  assertEquals(
+    broken.data.length,
+    good.data.length,
+    "a different allocation would be a matter for another check",
+  );
   assertThrows(
     () => assertTiledBert(broken, 3),
     Error,
     "The 1 columns × dim 3 written by the BERT expansion do not match the allocated 9 elements",
   );
-  // 音素数との不一致（analysis と tile の齟齬）は従来どおり別の文言で落ちる。
+  // A mismatch with the phoneme count (analysis and tile disagree) fails with a separate message as
+  // before.
   assertThrows(
     () => assertTiledBert(good, 4),
     Error,
@@ -650,47 +688,50 @@ test("assertTiledBert: 故障注入 — 走査が取りこぼした tile を確�
   );
 });
 
-describe("SBV2 の throw の分類軸（家族横断の分岐に乗るか）", () => {
-  // 複数家族を同じホストに載せた側は `instanceof ModelInputError` だけで 400 / 500 を分ける。
-  // SBV2 の型が `InputError` のままでも、親が同じである限りその分岐は成立する。
+describe("classification axis of SBV2 throws (do they fit the cross-family branch?)", () => {
+  // A host that serves several families splits 400 / 500 by `instanceof ModelInputError` alone.
+  // Even though SBV2's type stays `InputError`, the branch holds as long as the parent is the same.
 
-  it("入力起因の門は家族横断の ModelInputError で捕まる", () => {
+  it("input checks are caught by the cross-family ModelInputError", () => {
     const seed = assertThrows(() => assertSeed(-1));
-    assert(seed instanceof ModelInputError, "seed の不受理は 400 相当");
+    assert(seed instanceof ModelInputError, "a rejected seed is 400-like");
     const tokens = assertThrows(() => assertTokenLimit(513, 512));
-    assert(tokens instanceof ModelInputError, "トークン上限の超過は 400 相当");
+    assert(tokens instanceof ModelInputError, "exceeding the token limit is 400-like");
     const phonemes = assertThrows(() => assertPhonemeLimit(513, 512));
-    assert(phonemes instanceof ModelInputError, "音素上限の超過は 400 相当");
+    assert(phonemes instanceof ModelInputError, "exceeding the phoneme limit is 400-like");
   });
 
-  it("内部不変条件の破れは ModelInputError ではない", () => {
-    // tile 走査の破れは呼び手が text も seed も直しようがない = 500 相当。入力起因と同じ型に
-    // なると、配線の故障を「入力を直せ」と呼び手へ返すことになる。
+  it("a broken internal invariant is not a ModelInputError", () => {
+    // A broken tile walk is something the caller cannot fix by changing text or seed = 500-like. If
+    // it had the same type as input errors, a wiring fault would be returned to the caller as "fix
+    // your input".
     const broken = tileWithShortRepeat(new Float32Array([1, 2, 3, 10, 20, 30]), 2, [1, 2]);
     const error = assertThrows(() => assertTiledBert(broken, 3), Error, "the tile walk is broken");
     assertFalse(error instanceof ModelInputError);
   });
 });
 
-// ---- 構築時の資産 × グラフ突合（沈黙誤値クラスの門）------------------------
+// ---- Asset × graph comparison at construction (checks for the silent wrong-value class) ----
 //
-// どれも `buildSbv2State` が **GPU を取りに行く前**に通す門。実行時まで残すと、配布形で
-// text_encoder（DeBERTa）を張って 1 run 払ってから、家族も資産も名指ししない汎用文言で落ちる。
+// All of these are checks `buildSbv2State` runs **before acquiring a GPU**. Left until run time, a
+// distribution would set up text_encoder (DeBERTa), pay for one run and then fail with a generic
+// message that names neither the family nor the asset.
 
-/** 名前 → 行番号の表（行番号は表の物理行そのもの）。 */
+/** A name → row index table (the row index is the table's physical row). */
 const rowNames = (count: number): Map<string, number> =>
   new Map(Array.from({ length: count }, (_, index) => [`s${index}`, index]));
 
-test("assertTableFits: 名前表の件数とグラフ入力の幅の両方に合う表だけを通す", () => {
+test("assertTableFits: passes only a table that matches both the name table's count and the graph input's width", () => {
   const names = rowNames(7);
-  // 正常系（この形が通ることを先に固定 — 下の門が「常に落ちる」形になっていないように）。
+  // Normal case (pin first that this shape passes — so the checks below cannot be "always fails").
   assertTableFits(
     { data: new Float32Array(7 * 256), rows: 7, cols: 256 },
     names,
     "style_vectors",
     256,
   );
-  // 行数がずれても shape は合ったままなので、**別のスタイルの声が出る**だけで沈黙する。
+  // A shifted row count keeps the shapes valid, so it fails silently: **a different style's voice
+  // comes out**.
   assertThrows(
     () =>
       assertTableFits(
@@ -715,7 +756,10 @@ test("assertTableFits: 名前表の件数とグラフ入力の幅の両方に合
   );
 });
 
-/** front の実形（4 出力・`bert` は `[1, 幅, P]`）。出力本数と bert 幅だけ差し替えられる。 */
+/**
+ * The real shape of front (4 outputs; `bert` is `[1, width, P]`). Only the output count and bert
+ * width can be changed.
+ */
 const frontStub = (
   options: { readonly outputs?: number; readonly bertWidth?: number } = {},
 ): ReturnType<typeof stubModel> =>
@@ -726,7 +770,9 @@ const frontStub = (
     values: {},
   });
 
-/** text_encoder の実形（出力名は torch のノード名・hidden は `[1, T, 幅]`）。 */
+/**
+ * The real shape of text_encoder (output names are torch node names; hidden is `[1, T, width]`).
+ */
 const textEncoderStub = (
   options: { readonly width?: number | string; readonly outputs?: number } = {},
 ): ReturnType<typeof stubModel> => {
@@ -741,16 +787,17 @@ const textEncoderStub = (
   });
 };
 
-test("assertFrontOutputs: front の出力は 4 本ちょうど（位置引きの前提）", () => {
-  // 正常系（陰性対照）。
+test("assertFrontOutputs: front has exactly 4 outputs (the premise of positional lookup)", () => {
+  // Normal case (negative control).
   assertFrontOutputs(frontStub());
-  // 不足は `outputAt` が run の後に落とす — 構築時に前倒しする。
+  // Too few would fail in `outputAt` after the run — moved forward to construction.
   assertThrows(
     () => assertFrontOutputs(frontStub({ outputs: 3 })),
     Error,
     "front has 3 graph outputs",
   );
-  // MUST「4 本以上」で妥協しない: 余分な出力は位置 0..3 しか読まれず静かに無視される。
+  // MUST NOT settle for "4 or more": only positions 0..3 are read, so extra outputs would be
+  // silently ignored.
   assertThrows(
     () => assertFrontOutputs(frontStub({ outputs: 5 })),
     Error,
@@ -758,24 +805,27 @@ test("assertFrontOutputs: front の出力は 4 本ちょうど（位置引きの
   );
 });
 
-test("assertBertWidth: text_encoder の hidden 幅と front の 'bert' 入力幅を構築時に突き合わせる", () => {
-  // 正常系（陰性対照）。
+test("assertBertWidth: compares text_encoder's hidden width with front's 'bert' input width at construction", () => {
+  // Normal case (negative control).
   assertBertWidth(textEncoderStub(), frontStub(), 1);
-  // 幅の食い違い = 別の BERT で焼いた 2 本を組み合わせた配布形。実行時まで残すと
-  // `Session.run` の要素数検査（家族を名指ししない汎用文言）で落ちる。
+  // A width mismatch = a distribution combining two graphs exported with different BERTs. Left
+  // until run time, it fails in `Session.run`'s element-count check (a generic message that names
+  // no family).
   const error = assertThrows(
     () => assertBertWidth(textEncoderStub({ width: 768 }), frontStub(), 1),
     Error,
     "has width 768, which differs from the width of front's graph input 'bert', 1024",
   );
   assertEquals(error.message.includes("layer_norm_0"), true, error.message);
-  // 見るのは最終軸だけ（`[1, T, dim]` の T は記号次元）。最終軸が記号なら幅が読めない。
+  // Only the last axis is examined (T in `[1, T, dim]` is symbolic). A symbolic last axis has no
+  // readable width.
   assertThrows(
     () => assertBertWidth(textEncoderStub({ width: "D" }), frontStub(), 1),
     Error,
     "the last axis of text_encoder output 'layer_norm_0' is not a static dimension (D)",
   );
-  // 出力の選び方は末尾からの相対（`bertHiddenFromEnd`）— 本数が足りない資産はそこで落ちる。
+  // The output is chosen relative to the end (`bertHiddenFromEnd`) — an asset with too few outputs
+  // fails there.
   assertThrows(
     () => assertBertWidth(textEncoderStub(), frontStub(), 3),
     Error,
@@ -783,13 +833,13 @@ test("assertBertWidth: text_encoder の hidden 幅と front の 'bert' 入力幅
   );
 });
 
-// ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------
+// ---- Decoding asset JSON (invalid UTF-8 is not silently replaced) --------
 //
-// `assetJson` は `openSbv2State` の中で IR コンテナ 3 本を開いた**後**に来るので、
-// `fromAssets` 経由では届かない（合成 IR コンテナを組む器が `tests/helpers/` に無い）。
-// 門を直接叩く。
+// `assetJson` runs inside `openSbv2State` **after** the three IR containers are opened, so it
+// cannot be reached through `fromAssets` (`tests/helpers/` has no builder for synthetic IR
+// containers). The check is called directly.
 
-/** JSON としては閉じているが、文字列値に不正 UTF-8（0xff）を 1 バイト混ぜた資産。 */
+/** An asset that is complete as JSON but has one byte of invalid UTF-8 (0xff) in a string value. */
 const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
   Uint8Array.from([
     ...new TextEncoder().encode('{"unkId":'),
@@ -799,14 +849,15 @@ const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
     ...new TextEncoder().encode("}"),
   ]);
 
-test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
+test("assetJson: an asset with invalid UTF-8 fails with the decode-stage message (never reaches the JSON stage)", () => {
   const broken = brokenUtf8Asset();
-  // 前提の固定: 既定の TextDecoder は 0xff を U+FFFD へ置換するので、置換して読むと
-  // **内容の違う valid JSON** が黙って通ってしまう。塞いだのはこの経路。
+  // Pinning the premise: the default TextDecoder replaces 0xff with U+FFFD, so reading with
+  // replacement silently passes **valid JSON with different content**. That is the path that was
+  // closed.
   assertEquals(
     JSON.parse(new TextDecoder().decode(broken)),
     { unkId: "�" },
-    "置換 decode が valid JSON にならない前提が崩れた（このテストの主題が消える）",
+    "premise broken: decoding with replacement no longer gives valid JSON (the subject of this test is gone)",
   );
   assertThrows(
     () => assetJson({ tokenizer: broken }, "tokenizer"),
@@ -815,32 +866,34 @@ test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSO
   );
 });
 
-test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
+test("assetJson: a JSON syntax error fails with a message separate from decoding (the normal range is unchanged)", () => {
   const truncated = new TextEncoder().encode('{"unkId":');
   assertThrows(
     () => assetJson({ symbols: truncated }, "symbols"),
     Error,
     "sbv2: asset 'symbols' cannot be read as JSON",
   );
-  // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
+  // Valid UTF-8 passes as is, even with multi-byte characters.
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
   assertEquals(assetJson({ symbols: valid }, "symbols"), { unkId: 0, space: "あ" });
 });
 
-// ---- トークナイザ資産の特殊 id（Int32Array で沈黙切り捨てになる前に落とす）--------
+// ---- Special ids of the tokenizer asset (rejected before Int32Array silently truncates them) ----
 
-/** `deberta-tokenizer.json` の骨格（`patch` が `special` を上書きする）。 */
+/** Skeleton of `deberta-tokenizer.json` (`patch` overrides `special`). */
 const tokenizerAsset = (special: Record<string, unknown>): Record<string, unknown> => ({
   special: { clsId: 1, sepId: 2, unkId: 3, ...special },
   vocabText: "[PAD]\n[CLS]\n[SEP]\n[UNK]\nあ",
   cleanRanges: { removed: [], spaced: [] },
 });
 
-test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満", () => {
-  // 正常系（この形が通ることを先に固定 — 下の 3 本が「常に落ちる」門にならないように）。
+test("parseTokenizerAsset: special ids are integers below the vocabulary row count", () => {
+  // Normal case (pin first that this shape passes — so the three below cannot be "always fails"
+  // checks).
   parseTokenizerAsset(tokenizerAsset({}), "tokenizer");
-  // 非整数は `Int32Array` 代入で切り捨てられ、範囲外は wrap する。どちらも「別のトークンを
-  // 指す」沈黙誤値で、BERT 特徴が静かに無意味になるまで表面化しない。
+  // A non-integer is truncated on assignment to `Int32Array`, and an out-of-range value wraps. Both
+  // are silent wrong values that "point at a different token", and they do not surface until the
+  // BERT features have quietly become meaningless.
   assertThrows(
     () => parseTokenizerAsset(tokenizerAsset({ clsId: 1.5 }), "tokenizer"),
     Error,
@@ -851,7 +904,7 @@ test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満", () =
     Error,
     "tokenizer.special.sepId: not an integer in 0..2147483647 (-1)",
   );
-  // 語彙 5 行に対する id 5 = 1 つ外側（gather が範囲外添字を引く）。
+  // id 5 for a 5-row vocabulary = one past the end (the gather reads an out-of-range index).
   assertThrows(
     () => parseTokenizerAsset(tokenizerAsset({ unkId: 5 }), "tokenizer"),
     Error,
@@ -859,16 +912,17 @@ test("parseTokenizerAsset: 特殊 id は整数かつ語彙の行数未満", () =
   );
 });
 
-// ---- トークナイザ資産の区間表（二分探索の前提を壊す形で沈黙誤値になる前に落とす）----
+// ---- Range tables of the tokenizer asset (rejected before they break the binary search's premise
+// and turn into silent wrong values) ----
 
-/** `cleanRanges` だけ差し替えた骨格（`special` は正常系のまま）。 */
+/** The skeleton with only `cleanRanges` replaced (`special` stays the normal case). */
 const tokenizerRanges = (clean: Record<string, unknown>): Record<string, unknown> => ({
   ...tokenizerAsset({}),
   cleanRanges: clean,
 });
 
-test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなければ受け付けない", () => {
-  // 正常系（この形が通ることを先に固定 — 下の門が「常に落ちる」形になっていないように）。
+test("parseTokenizerAsset: accepts range tables only as ascending, non-overlapping closed ranges", () => {
+  // Normal case (pin first that this shape passes — so the checks below cannot be "always fails").
   parseTokenizerAsset(
     tokenizerRanges({
       removed: [
@@ -879,9 +933,10 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
     }),
     "tok",
   );
-  // `inRanges` は二分探索なので、前提が破れても例外は出ず**黙って外す**。除去/空白化の規則
-  // だけが変わった bertText から input_ids と baseWord2ph が同じ壊れ方で作られるため、
-  // `text/model-input.ts` の長さ突合門も通り、別の BERT 埋め込みで合成した音がそのまま出る。
+  // `inRanges` is a binary search, so a broken premise throws nothing and **silently misses**.
+  // input_ids and baseWord2ph are both built, broken the same way, from a bertText whose removal /
+  // spacing rules alone changed, so the length check of `text/model-input.ts` passes too, and audio
+  // synthesised from different BERT embeddings comes out as is.
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [[31, 8]], spaced: [] }), "tok"),
     Error,
@@ -902,7 +957,8 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
     Error,
     "tok.cleanRanges.removed[1]: range [8, 31] starts at or below the previous end 159",
   );
-  // 端点を共有するだけの重複でも探索は外しうる（境界を 1 つ緩めていない）。
+  // Even an overlap that only shares an endpoint can make the search miss (the boundary is not
+  // loosened by one).
   assertThrows(
     () =>
       parseTokenizerAsset(
@@ -918,7 +974,8 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
     Error,
     "tok.cleanRanges.removed[1]: range [31, 40] starts at or below the previous end 31",
   );
-  // 非整数はコードポイント比較の意味を失い、範囲外は資産の生成規則から外れる。
+  // A non-integer makes the code-point comparison meaningless, and an out-of-range value is outside
+  // the asset's generation rules.
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [[0.5, 3]], spaced: [] }), "tok"),
     Error,
@@ -929,7 +986,7 @@ test("parseTokenizerAsset: 区間表は昇順・非重複の閉区間でなけ�
     Error,
     "tok.cleanRanges.removed[0]: range [0, 1114112] is not a pair of integers in 0..1114111",
   );
-  // spaced 側も同じ門を通る（removed だけ塞いだ形になっていない）。
+  // The spaced side goes through the same check (not only removed is covered).
   assertThrows(
     () => parseTokenizerAsset(tokenizerRanges({ removed: [], spaced: [[5, 4]] }), "tok"),
     Error,

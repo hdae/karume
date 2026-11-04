@@ -1,18 +1,24 @@
-// 1 会話ぶんの生成面（`src/generation/sequence.ts`）の挙動テスト。GPU も実資産も要らない。
+// Behaviour tests of the generation surface for one conversation (`src/generation/sequence.ts`).
+// Neither a GPU nor real assets are needed.
 //
-// ここで縛るのは ADR 0083 決定 1〜5・10 の契約:
+// What this pins is the contract of ADR 0083 decisions 1–5 and 10:
 //
-// - **多ターンで token を 1 個も落とさない**（`pendingToken` 連結 prefill — 決定 4）。落ちても
-//   例外は出ず「直前 assistant の最後の 1 token が履歴から消える」だけなので、実 GPU の
-//   parity 門では気づけない。EOS 停止後 / max-tokens 停止後 / `break` 中断後の **3 経路**を見る。
-// - 可変状態は context と `pendingToken` の 2 つだけ（位置は `context.pastLength` から都度導出）。
-//   観測口（`used` / `GenerationStop.tokens` / 容量例外の欄）も**同じ 2 つからの導出**であること。
-// - 「generate 1 回ぶん」の直列化・`AbortSignal` の素通し・容量超過の専用型。
-// - **分岐（`fork`）**: frontier と論理長を引き継いだ独立の sequence・鎖の順序・寿命（ADR 0083
-//   追記 2026-10-11 — drafter とゲートの引き継ぎは `generation_speculation_test.ts` の T18）。
+// - **Not a single token is lost across turns** (the prefill that prepends `pendingToken` —
+//   decision 4). A loss raises no exception; "the previous assistant turn's last token disappears
+//   from the history" is all that happens, so the parity check on a real GPU would not notice. The
+//   **three paths** are checked: after an EOS stop / after a max-tokens stop / after a `break`
+//   interruption.
+// - The only mutable state is the context and `pendingToken` (the position is derived from
+//   `context.pastLength` each time). The observation points (`used` / `GenerationStop.tokens` / the
+//   fields of the capacity exception) must also **derive from those same two**.
+// - Serialization per "one generate call", passing `AbortSignal` through, and the dedicated type
+//   for exceeding capacity.
+// - **Forking (`fork`)**: an independent sequence that inherits the frontier and the logical
+//   length, the order of the chain, and lifetimes (ADR 0083 addendum 2026-10-11 — handing over the
+//   drafter and the gate is T18 in `generation_speculation_test.ts`).
 //
-// Session と context は narrow interface（`GenerationSession` / `GenerationContextFace`）で
-// 受けるので、fake は素の object 1 個で足りる。
+// The Session and the context are taken through narrow interfaces (`GenerationSession` /
+// `GenerationContextFace`), so a fake is just one plain object.
 
 import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -41,7 +47,7 @@ import {
   VOCAB,
 } from "./helpers/generation-fake.ts";
 
-test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対値、decode は 1 行", async () => {
+test("GenerationSequence: prefill uses fixed-length chunks, pad 0 and absolute positions; decode is one row", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -49,11 +55,12 @@ test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対�
   });
   const { events, stop } = await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 }));
 
-  // 容量記号の束縛点は context 生成だけ（ADR 0066 追記 7）。
+  // The only binding point of the capacity symbol is context creation (ADR 0066 addendum 7).
   assertEquals(fake.specs.length, 1);
   assertEquals(fake.specs[0].bindings, { C: 64 });
   assertEquals(fake.specs[0].chunkLength, CHUNK_LENGTH);
-  // バケットを宣言しない配線は空配列を渡す（context の実行形は prefill 1 本 + decode の 2 本）。
+  // A wiring that declares no buckets passes an empty array (the context's execution shapes are one
+  // prefill + the decode, two in all).
   assertEquals(fake.specs[0].chunkBuckets, []);
   assertEquals(
     fake.calls.map((call) => call.bindings),
@@ -64,7 +71,8 @@ test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対�
     true,
   );
 
-  // prefill: 物理 4 行に有効 3 行 + pad 0・位置は絶対値・last_row は最終有効行。
+  // prefill: 3 valid rows in 4 physical rows + pad 0, absolute positions, last_row is the last
+  // valid row.
   assertEquals(fake.calls[0].idsShape, [1, CHUNK_LENGTH]);
   assertEquals(fake.calls[0].ids, [1, 2, 3, 0]);
   assertEquals(fake.calls[0].positions, [0, 1, 2, 0]);
@@ -72,7 +80,7 @@ test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対�
   assertEquals(fake.calls[0].lastRowShape, [1]);
   assertEquals(fake.calls[0].queryLength, 3);
 
-  // decode: 1 行固定・前 step の token をそのまま食う・位置は続き。
+  // decode: always 1 row, eats the previous step's token as is, positions continue.
   assertEquals(fake.calls[1].idsShape, [1, 1]);
   assertEquals(fake.calls[1].ids, [5]);
   assertEquals(fake.calls[1].positions, [3]);
@@ -89,7 +97,7 @@ test("GenerationSequence: prefill は固定長 chunk・pad 0・位置は絶対�
   assertEquals(stop, { reason: "max-tokens", tokens: 3 });
 });
 
-test("GenerationSequence: 長い prompt は chunk ごとに prefill イベントを出す", async () => {
+test("GenerationSequence: a long prompt emits one prefill event per chunk", async () => {
   const fake = fakeSession({ tokens: [1, 2, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -105,7 +113,8 @@ test("GenerationSequence: 長い prompt は chunk ごとに prefill イベント
   assertEquals(fake.calls[1].ids, [5, 6, 0, 0]);
   assertEquals(fake.calls[1].positions, [4, 5, 0, 0]);
   assertEquals(fake.calls[1].lastRow, 1);
-  // 生成の起点は**最終 chunk の最終有効行**（途中 chunk の出力は捨てる）。
+  // Generation starts from the **last valid row of the last chunk** (the output of the intermediate
+  // chunks is discarded).
   assertEquals(events, [
     { kind: "prefill", chunk: 1, chunks: 2 },
     { kind: "prefill", chunk: 2, chunks: 2 },
@@ -113,10 +122,11 @@ test("GenerationSequence: 長い prompt は chunk ごとに prefill イベント
   ]);
 });
 
-test("GenerationSequence: 頼んだ行数と返った行数の食い違いは run の直後に落ちる", async () => {
-  // 出口の行数 R はグラフでは記号なので、「1 行頼んで 2 行返る」形は**宣言としては正しい**
-  // （形の検査を素通りする）。この経路が渡す添字は常に 1 本なので、返り値の行数との突合だけが
-  // 「program が検証したのとは別のグラフで組まれた Session」の検出線である。
+test("GenerationSequence: a mismatch between the rows requested and the rows returned fails right after the run", async () => {
+  // The exit row count R is symbolic in the graph, so "ask for 1 row, get 2 back" is **correct as a
+  // declaration** (it passes the shape check). This path always passes a single index, so checking
+  // the returned row count is the only line that detects "a Session built from a different graph
+  // than the one the program verified".
   const fake = fakeSession({ logitsRows: 2 });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -129,45 +139,48 @@ test("GenerationSequence: 頼んだ行数と返った行数の食い違いは ru
   );
 });
 
-// ---- prefill バケット（ADR 0066 追記〈バケット〉）------------------------------
+// ---- prefill buckets (ADR 0066 addendum, buckets) -------------------------------
 //
-// pad 行は出力にも KV にも寄与しないのに、行局所な op の仕事だけは物理行数に比例する。短い
-// chunk をバケット行で流す選択が外れても**値は正しいまま**（pad 行は 0 で無害）なので、
-// 退行は性能にしか出ない = ここが唯一の門である。
+// Pad rows contribute neither to the output nor to the KV, yet the work of row-local ops scales
+// with the physical row count. If the choice to run a short chunk at a bucket's rows goes wrong,
+// **the values stay correct** (pad rows are 0 and harmless), so a regression shows up only in
+// performance = this is the only check.
 
-/** バケット付きの配線（chunkLength 8 / バケット 4 — 1 / 4 / 8 の 3 形が出る）。 */
+/** A wiring with buckets (chunkLength 8 / bucket 4 — the three shapes 1 / 4 / 8 appear). */
 const BUCKET_CHUNK_LENGTH = 8;
 const BUCKETS = [4] as const;
 
 const bucketProgram = (fake: FakeSession): GenerationWiring =>
   programOf(fake, { chunkLength: BUCKET_CHUNK_LENGTH, chunkBuckets: [...BUCKETS] });
 
-test("physicalChunkRows: 有効行 1 は decode 形・他は queryLength 以上の最小バケット", () => {
+test("physicalChunkRows: 1 valid row is the decode shape; otherwise the smallest bucket ≥ queryLength", () => {
   const fake = fakeSession();
   const program = bucketProgram(fake);
-  // 1 行は decode 形（バケットがあっても変わらない — 多ターン再開のビット同一性の要）。
+  // 1 row is the decode shape (buckets do not change it — the key to bit-identical multi-turn
+  // resumption).
   assertEquals(physicalChunkRows(1, program), 1);
-  // バケットに収まる chunk はバケット行（2..4 は 4 行）。
+  // A chunk that fits a bucket gets the bucket's rows (2..4 get 4 rows).
   assertEquals(physicalChunkRows(2, program), 4);
   assertEquals(physicalChunkRows(4, program), 4);
-  // はみ出したら次の形へ（バケットが尽きたら chunkLength）。
+  // Overflowing goes to the next shape (chunkLength once the buckets run out).
   assertEquals(physicalChunkRows(5, program), BUCKET_CHUNK_LENGTH);
   assertEquals(physicalChunkRows(BUCKET_CHUNK_LENGTH, program), BUCKET_CHUNK_LENGTH);
-  // 宣言の無い配線は従来どおり 1 か chunkLength の 2 形だけ。
+  // A wiring without the declaration has only the two shapes 1 or chunkLength, as before.
   const plain = programOf(fake);
   assertEquals(physicalChunkRows(1, plain), 1);
   assertEquals(physicalChunkRows(2, plain), CHUNK_LENGTH);
 });
 
-test("GenerationSequence: chunkBuckets を宣言すると短い chunk がバケット行で流れる", async () => {
-  /** prompt 長 → その生成が出した run の物理行数（`[1, rows]`）。 */
+test("GenerationSequence: declaring chunkBuckets runs short chunks at the bucket's rows", async () => {
+  /** Prompt length → the physical row counts of the runs that generation issued (`[1, rows]`). */
   const rowsFor = async (promptLength: number): Promise<readonly number[]> => {
     const fake = fakeSession();
     const sequence = await createGenerationSequence({
       session: fake.session,
       program: bucketProgram(fake),
     });
-    // 宣言は context 生成時にそのまま渡る（run 前検査が許す集合はここで決まる）。
+    // The declaration is passed as is at context creation (it sets the set the pre-run check
+    // allows).
     assertEquals(fake.specs[0].chunkBuckets, [...BUCKETS]);
     assertEquals(fake.specs[0].chunkLength, BUCKET_CHUNK_LENGTH);
     await drain(
@@ -182,8 +195,8 @@ test("GenerationSequence: chunkBuckets を宣言すると短い chunk がバケ�
     });
   };
 
-  // 2..4 行はバケットに載り、5 行からは chunkLength へ上がる。9 行は chunk が 2 本に割れ、
-  // 有効行 1 本の末尾 chunk は decode 形（バケットではなく 1 行）。
+  // 2..4 rows go on the bucket, and from 5 rows it goes up to chunkLength. 9 rows split into 2
+  // chunks, and the last chunk with 1 valid row is the decode shape (1 row, not the bucket).
   assertEquals(await rowsFor(2), [4]);
   assertEquals(await rowsFor(3), [4]);
   assertEquals(await rowsFor(4), [4]);
@@ -192,7 +205,7 @@ test("GenerationSequence: chunkBuckets を宣言すると短い chunk がバケ�
   assertEquals(await rowsFor(9), [BUCKET_CHUNK_LENGTH, 1]);
 });
 
-test("GenerationSequence: バケット行でも pad は id 0 / 位置 0 のまま", async () => {
+test("GenerationSequence: pad stays id 0 / position 0 at bucket rows too", async () => {
   const fake = fakeSession({ tokens: [5] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -200,7 +213,8 @@ test("GenerationSequence: バケット行でも pad は id 0 / 位置 0 のま�
   });
   await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 1 }));
 
-  // 有効 2 行 + pad 2 行（pad の値契約は物理行数が縮んでも同じ — ADR 0066 追記 6 / 8）。
+  // 2 valid rows + 2 pad rows (the value contract of pad is the same when the physical row count
+  // shrinks — ADR 0066 addendum 6 / 8).
   assertEquals(fake.calls[0].idsShape, [1, 4]);
   assertEquals(fake.calls[0].ids, [1, 2, 0, 0]);
   assertEquals(fake.calls[0].positions, [0, 1, 0, 0]);
@@ -208,9 +222,10 @@ test("GenerationSequence: バケット行でも pad は id 0 / 位置 0 のま�
   assertEquals(fake.calls[0].queryLength, 2);
 });
 
-// ---- 多ターン: 「直前 assistant の最後の token が落ちない」直接門（3 経路） ----
+// ---- multi-turn: direct check that "the previous assistant turn's last token is not lost" (3
+// paths) ----
 
-test("多ターン: max-tokens 停止後の pendingToken が次ターン prompt の先頭に連結される", async () => {
+test("multi-turn: the pendingToken after a max-tokens stop is prepended to the next turn's prompt", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 9] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -218,18 +233,20 @@ test("多ターン: max-tokens 停止後の pendingToken が次ターン prompt 
   });
   const first = await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 }));
   assertEquals(tokenIds(first.events), [5, 6, 7]);
-  // K token 生成後の pastLength は T + K − 1（最後の 7 は未 commit の frontier）。
+  // After generating K tokens pastLength is T + K − 1 (the last one, 7, is the uncommitted
+  // frontier).
   assertEquals(fake.pastLength(), 5);
 
   await drain(sequence.generate({ prompt: [8, 9], maxNewTokens: 1 }));
-  // 直前の 7 が先頭へ連結され、位置も途切れない（落とすと会話から 1 token 消える）。
+  // The previous 7 is prepended and the positions do not break (dropping it would remove a token
+  // from the conversation).
   assertEquals(fake.calls[3].ids, [7, 8, 9, 0]);
   assertEquals(fake.calls[3].positions, [5, 6, 7, 0]);
   assertEquals(fake.calls[3].queryLength, 3);
   assertEquals(fake.calls[3].pastBefore, 5);
 });
 
-test("多ターン: EOS 停止でも停止 token は会話に残る（イベントには出さない）", async () => {
+test("multi-turn: on an EOS stop the stop token stays in the conversation (but is not emitted as an event)", async () => {
   const fake = fakeSession({ tokens: [5, 11, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -237,20 +254,21 @@ test("多ターン: EOS 停止でも停止 token は会話に残る（イベン�
   });
   const first = await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 4 }));
 
-  // 停止 token 自体は本文でなく終端記号なので `token` イベントに出さない。
+  // The stop token is a terminator, not body text, so it is not emitted as a `token` event.
   assertEquals(tokenIds(first.events), [5]);
-  // 停止 token 自体も 1 個として数える（抽選 1 回 = run 1 回 — `GenerationStop.tokens` の doc）。
+  // The stop token itself counts as one (one draw = one run — the doc of `GenerationStop.tokens`).
   assertEquals(first.stop, { reason: "eos", token: 11, tokens: 2 });
-  // 停止で decode を打ち切る（maxNewTokens まで回さない）。
+  // The stop ends decode (it does not run up to maxNewTokens).
   assertEquals(fake.calls.length, 2);
 
   await drain(sequence.generate({ prompt: [4], maxNewTokens: 1 }));
-  // 停止 token は次ターンの prefill 先頭へ（chat の `<turn|>` を落とすと会話が壊れる）。
+  // The stop token goes to the head of the next turn's prefill (dropping chat's `<turn|>` breaks
+  // the conversation).
   assertEquals(fake.calls[2].ids, [11, 4, 0, 0]);
   assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
 });
 
-test("要求の stopTokens: 配布形の集合が空でも、そのターンだけ停止 token を足せる", async () => {
+test("request stopTokens: even when the distribution's set is empty, stop tokens can be added for that turn alone", async () => {
   const fake = fakeSession({ tokens: [5, 11, 3] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -260,20 +278,24 @@ test("要求の stopTokens: 配布形の集合が空でも、そのターンだ�
     sequence.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [11] }),
   );
 
-  // 停止 token 自体は本文でないので `token` イベントに出さない（EOS 停止と同じ扱い）。
+  // The stop token is not body text, so it is not emitted as a `token` event (the same as an EOS
+  // stop).
   assertEquals(tokenIds(first.events), [5]);
-  // 理由だけが EOS と別（配布形の終端記号ではなく、この要求の都合で止めた）。
+  // Only the reason differs from EOS (it stopped for this request's needs, not on the
+  // distribution's terminator).
   assertEquals(first.stop, { reason: "stop-token", token: 11, tokens: 2 });
-  assertEquals(fake.calls.length, 2, "停止で decode を打ち切る");
+  assertEquals(fake.calls.length, 2, "the stop ends decode");
 
-  // 会話には残る = 次ターンの prefill 先頭へ連結される（EOS 停止後と同じ後始末）。
+  // It stays in the conversation = it is prepended to the next turn's prefill (the same cleanup as
+  // after an EOS stop).
   await drain(sequence.generate({ prompt: [4], maxNewTokens: 1 }));
   assertEquals(fake.calls[2].ids, [11, 4, 0, 0]);
   assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
 });
 
-test("要求の stopTokens: 配布形の EOS 集合との和集合で判定する（EOS は常に効く）", async () => {
-  // 要求が停止集合を渡しても、配布形の EOS を上書きはしない（両方が効く = 和集合）。
+test("request stopTokens: the decision uses the union with the distribution's EOS set (EOS always applies)", async () => {
+  // A stop set passed by the request does not override the distribution's EOS (both apply = the
+  // union).
   const eosFake = fakeSession({ tokens: [5, 11, 3] });
   const eos = await createGenerationSequence({
     session: eosFake.session,
@@ -282,10 +304,10 @@ test("要求の stopTokens: 配布形の EOS 集合との和集合で判定す�
   assertEquals(
     (await drain(eos.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [9] }))).stop,
     { reason: "eos", token: 11, tokens: 2 },
-    "配布形の EOS で止まったターン",
+    "a turn that stopped on the distribution's EOS",
   );
 
-  // 両方に居る id は `eos` で閉じる（配布形の終端記号としての意味が優先する）。
+  // An id in both closes as `eos` (its meaning as the distribution's terminator takes precedence).
   const bothFake = fakeSession({ tokens: [5, 11, 3] });
   const both = await createGenerationSequence({
     session: bothFake.session,
@@ -294,13 +316,14 @@ test("要求の stopTokens: 配布形の EOS 集合との和集合で判定す�
   assertEquals(
     (await drain(both.generate({ prompt: [1, 2], maxNewTokens: 4, stopTokens: [11] }))).stop,
     { reason: "eos", token: 11, tokens: 2 },
-    "両方の集合に居る停止 token",
+    "a stop token in both sets",
   );
 });
 
-test("要求の stopTokens: 語彙外・重複は同期に落ちる（効かない停止条件を残さない）", async () => {
-  // 停止 token は「出力に現れない id」なので、間違っていても生成は普通に完走する（その id が
-  // 抽選されないだけ）— 出力が伸び続けることでしか気づけないので、入口で落とす。
+test("request stopTokens: out-of-vocabulary ids and duplicates fail synchronously (no stop condition that never applies)", async () => {
+  // A stop token is "an id that does not appear in the output", so a wrong one still lets
+  // generation run to completion normally (that id is just never drawn) — the only symptom is
+  // output that keeps growing, so it fails at the entry.
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -324,25 +347,26 @@ test("要求の stopTokens: 語彙外・重複は同期に落ちる（効かな�
   assertEquals(fake.calls.length, 0);
 });
 
-test("要求の stopTokens: 発行後に配列へ足しても走行中の生成には効かない", async () => {
+test("request stopTokens: appending to the array after the call has no effect on the running generation", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
   });
-  // 呼び手が握ったままの可変な停止集合（発行時は空 = 止まらない指定）。
+  // A mutable stop set the caller keeps holding (empty at the call = a spec that never stops).
   const stopTokens: number[] = [];
   const stream = sequence.generate({ prompt: [1, 2], maxNewTokens: 3, stopTokens });
-  // 本体は最初の `next()` まで走らないので、汲む前がいちばん広い書き換えの窓である。
+  // The body does not run until the first `next()`, so before draining is the widest window for
+  // changes.
   stopTokens.push(6);
 
   const { events, stop } = await drain(stream);
-  // 後付けが効いていれば 6 で止まって [5] になる。
+  // If the late addition took effect, it would stop at 6 and give [5].
   assertEquals(tokenIds(events), [5, 6, 7]);
   assertEquals(stop, { reason: "max-tokens", tokens: 3 });
 });
 
-test("多ターン: break 中断後も pendingToken が残り、次ターンが 1 token も落とさない", async () => {
+test("multi-turn: after a break interruption the pendingToken remains and the next turn loses no token", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -354,7 +378,7 @@ test("多ターン: break 中断後も pendingToken が残り、次ターンが 
   for await (const event of stream) {
     if (event.kind !== "token") continue;
     seen.push(event.id);
-    // 2 個目を受け取ったところで打ち切る（`return()` 経由で finally へ入る経路）。
+    // Stop after receiving the second one (the path that enters finally through `return()`).
     if (seen.length === 2) break;
   }
   assertEquals(seen, [5, 6]);
@@ -368,9 +392,10 @@ test("多ターン: break 中断後も pendingToken が残り、次ターンが 
   assertEquals(fake.calls[2].positions, [3, 4, 0, 0]);
 });
 
-test("多ターン: 続きだけのターン（prompt 空）は pendingToken を decode 形で流す", async () => {
-  // 有効行 1 本の chunk は物理 1 行 = decode 形。中断からの再開が「中断しなかった走り」と
-  // **同じ形の run** になり、prefill 形（M=chunkLength）を余分に踏まない。
+test("multi-turn: a continuation-only turn (empty prompt) runs the pendingToken in the decode shape", async () => {
+  // A chunk with one valid row is one physical row = the decode shape. Resuming from an
+  // interruption becomes **a run of the same shape** as "the run that was not interrupted" and does
+  // not take the prefill shape (M=chunkLength) needlessly.
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -390,9 +415,10 @@ test("多ターン: 続きだけのターン（prompt 空）は pendingToken を
   assertEquals(fake.calls[1].queryLength, 1);
 });
 
-test("GenerationSequence: prompt が空で pendingToken も無ければ fail loudly", async () => {
-  // prompt は公開要求そのもので、打つ手は「token を入れる」1 つ = 入力起因（ADR 0107 決定 2）。
-  // 逆側（pendingToken があれば空 prompt を受理する）は直前の「続きだけのターン」が固定する。
+test("GenerationSequence: an empty prompt with no pendingToken fails loudly", async () => {
+  // The prompt is the public request itself, and the one remedy is "put tokens in" = an input error
+  // (ADR 0107 decision 2). The other side (an empty prompt is accepted when there is a
+  // pendingToken) is pinned by the "continuation-only turn" just above.
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -406,16 +432,16 @@ test("GenerationSequence: prompt が空で pendingToken も無ければ fail lou
   assertEquals(fake.calls.length, 0);
 });
 
-// ---- 中断（AbortSignal）と直列化 ----
+// ---- interruption (AbortSignal) and serialization ----
 
-test("GenerationSequence: abort は signal.reason を包まずそのまま throw する", async () => {
+test("GenerationSequence: abort throws signal.reason as is, unwrapped", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
   });
   const controller = new AbortController();
-  const reason = new Error("呼び手が止めた");
+  const reason = new Error("the caller stopped it");
   const stream = sequence.generate({
     prompt: [1, 2],
     maxNewTokens: 5,
@@ -433,27 +459,30 @@ test("GenerationSequence: abort は signal.reason を包まずそのまま throw
   } catch (error) {
     caught = error;
   }
-  // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
-  assert(caught === reason, `中断の例外が包まれている: ${String(caught)}`);
+  // Not wrapped (the consumer can identify its own interruption by
+  // `error === controller.signal.reason`).
+  assert(caught === reason, `the interruption's exception is wrapped: ${String(caught)}`);
   assertEquals(seen, [5]);
   assertEquals(await stream.done, { reason: "aborted", tokens: 1 });
-  // 中断は段の境目（次の run の直前）で効く — 走行中の run を殺しはしない。
+  // The interruption takes effect at a stage boundary (just before the next run) — it does not kill
+  // a running run.
   assertEquals(fake.calls.length, 1);
 
-  // 中断でも会話は「成功した run のぶんだけ」進み、frontier は残る。
+  // Even on an interruption the conversation advances "by the successful runs", and the frontier
+  // remains.
   assertEquals(fake.pastLength(), 2);
   await drain(sequence.generate({ prompt: [3], maxNewTokens: 1 }));
   assertEquals(fake.calls[1].ids, [5, 3, 0, 0]);
 });
 
-test("GenerationSequence: 発行済みの signal は 1 本も run を出さずに落ちる", async () => {
+test("GenerationSequence: an already-aborted signal fails without issuing a single run", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
   });
   const controller = new AbortController();
-  const reason = new Error("最初から中断");
+  const reason = new Error("aborted from the start");
   controller.abort(reason);
   const stream = sequence.generate({
     prompt: [1, 2],
@@ -463,7 +492,7 @@ test("GenerationSequence: 発行済みの signal は 1 本も run を出さず�
   let caught: unknown;
   try {
     for await (const _event of stream) {
-      /* 1 個も来ない */
+      /* none arrive */
     }
   } catch (error) {
     caught = error;
@@ -473,14 +502,16 @@ test("GenerationSequence: 発行済みの signal は 1 本も run を出さず�
   assertEquals(await stream.done, { reason: "aborted", tokens: 0 });
 });
 
-describe("GenerationSequence: 最終 prefill の後に届いた中断でも、計算済みの logits から token が 1 個届く", () => {
-  // 中断は run を発行する前（段の境目）にだけ見る（ADR 0083 決定 5）。最終 prefill の run は
-  // 既に logits を返しているので、その後に届いた中断でも最初の token は抽選されて届き、新しい
-  // run は走らない（by-design — docs/limitations.md「生成 sequence」節）。
+describe("GenerationSequence: an interruption that arrives after the last prefill still delivers one token from the computed logits", () => {
+  // The interruption is checked only before a run is issued (at a stage boundary — ADR 0083
+  // decision 5). The last prefill's run has already returned its logits, so even with an
+  // interruption arriving after it the first token is drawn and delivered, and no new run starts
+  // (by design — docs/limitations.md, section "Generation sequence").
   for (const [name, maxNewTokens, done] of [
-    // 残りが無ければ中断を観測する境目が来ないので、正常完了で閉じる。
+    // With nothing left, no boundary comes at which to observe the interruption, so it closes as a
+    // normal completion.
     ["maxNewTokens 1", 1, { reason: "max-tokens", tokens: 1 }],
-    // 残りがあれば次の decode の run の前で中断が効く。
+    // With something left, the interruption takes effect before the next decode run.
     ["maxNewTokens 3", 3, { reason: "aborted", tokens: 1 }],
   ] as const) {
     it(name, async () => {
@@ -490,7 +521,7 @@ describe("GenerationSequence: 最終 prefill の後に届いた中断でも、�
         program: programOf(fake),
       });
       const controller = new AbortController();
-      const reason = new Error("最終 prefill の後に止めた");
+      const reason = new Error("stopped after the last prefill");
       const stream = sequence.generate({
         prompt: [1, 2],
         maxNewTokens,
@@ -510,17 +541,18 @@ describe("GenerationSequence: 最終 prefill の後に届いた中断でも、�
       assertEquals(await stream.done, done);
       assert(
         done.reason === "aborted" ? caught === reason : caught === undefined,
-        `${name}: 例外の運び方が違う（${String(caught)}）`,
+        `${name}: the exception is carried the wrong way (${String(caught)})`,
       );
-      // 中断の後に run は 1 本も出ていない（最終 prefill の 1 本だけ）。
+      // Not a single run was issued after the interruption (only the one of the last prefill).
       assertEquals(fake.calls.length, 1);
     });
   }
 });
 
-test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本も出さずに閉じる", async () => {
-  // 待っている間に abort されたリクエストは、順番が回ってきても**何も判定せずに**閉じる。
-  // 予算超過を先に返すと「止めたのに容量エラーが出た」になり、呼び手は自分の中断を識別できない。
+test("GenerationSequence: an interruption that arrives while queued closes without issuing a single run", async () => {
+  // A request aborted while waiting closes **without deciding anything** when its turn comes.
+  // Returning the budget overrun first would mean "I stopped it and got a capacity error", and the
+  // caller could not identify its own interruption.
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -532,8 +564,9 @@ test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本�
   await iterator.next();
 
   const controller = new AbortController();
-  const reason = new Error("順番待ちの間に止めた");
-  // past 4 + prompt(連結 1 + 6) + K 4 − 1 = 14 > 容量 8 = 自分の番が来れば必ず容量超過。
+  const reason = new Error("stopped while queued");
+  // past 4 + prompt (1 prepended + 6) + K 4 − 1 = 14 > capacity 8 = a sure capacity overrun once
+  // its turn comes.
   const queued = sequence.generate({
     prompt: [1, 2, 3, 4, 5, 6],
     maxNewTokens: 4,
@@ -541,15 +574,15 @@ test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本�
   });
   const consumed = (async () => {
     for await (const _event of queued) {
-      /* 1 個も来ない */
+      /* none arrive */
     }
   })();
-  // 順番待ちに入らせてから中断する。
+  // Interrupt after it has entered the queue.
   await new Promise((resolve) => setTimeout(resolve, 0));
   controller.abort(reason);
 
   while (!(await iterator.next()).done) {
-    /* 席を空ける */
+    /* free the slot */
   }
   const callsAfterFirst = fake.calls.length;
   let caught: unknown;
@@ -558,12 +591,12 @@ test("GenerationSequence: 順番待ちの間に届いた中断は run を 1 本�
   } catch (error) {
     caught = error;
   }
-  assert(caught === reason, `中断ではなく別の失敗で閉じた: ${String(caught)}`);
+  assert(caught === reason, `closed on another failure, not the interruption: ${String(caught)}`);
   assertEquals(await queued.done, { reason: "aborted", tokens: 0 });
   assertEquals(fake.calls.length, callsAfterFirst);
 });
 
-test("GenerationSequence: 2 本の generate は直列化される（run が混ざらない）", async () => {
+test("GenerationSequence: two generate calls are serialized (their runs do not interleave)", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8, 9, 10] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -578,9 +611,9 @@ test("GenerationSequence: 2 本の generate は直列化される（run が混�
   };
   await Promise.all([consume("a", [1, 2]), consume("b", [3])]);
 
-  // 片方の全イベントがもう片方より前に並ぶ（混ざったら鎖が効いていない）。
+  // All events of one come before the other's (interleaving would mean the chain is not working).
   const boundary = log.findIndex((entry) => entry.startsWith("b:"));
-  assert(boundary > 0, `直列化されていない: ${log.join(" ")}`);
+  assert(boundary > 0, `not serialized: ${log.join(" ")}`);
   assertEquals(
     log.slice(0, boundary).every((entry) => entry.startsWith("a:")),
     true,
@@ -589,20 +622,24 @@ test("GenerationSequence: 2 本の generate は直列化される（run が混�
     log.slice(boundary).every((entry) => entry.startsWith("b:")),
     true,
   );
-  // b は a の frontier（6）を連結した prompt で始まる = 順番待ちの間に状態が進んでいる。
+  // b starts with a prompt that prepends a's frontier (6) = the state advanced while it was queued.
   assertEquals(fake.calls[2].ids, [6, 3, 0, 0]);
 });
 
-// ---- 容量（ADR 0083 決定 10 / 可変 capacity 波の実行時ノブ） ----
+// ---- capacity (ADR 0083 decision 10 / the runtime knob of the variable-capacity work) ----
 
-test("capacity ノブ: 既定は program の宣言・渡した値が context の束縛になる", async () => {
+test("capacity knob: the default is the program's declaration, and a passed value becomes the context's binding", async () => {
   const declared = fakeSession();
   const byDefault = await createGenerationSequence({
     session: declared.session,
     program: programOf(declared),
   });
-  assertEquals(byDefault.capacity, 64, "省略時は配布形の既定");
-  assertEquals(declared.specs[0].bindings, { C: 64 }, "容量記号の束縛も既定");
+  assertEquals(byDefault.capacity, 64, "the distribution's default when omitted");
+  assertEquals(
+    declared.specs[0].bindings,
+    { C: 64 },
+    "the capacity symbol's binding is the default too",
+  );
 
   const chosen = fakeSession();
   const narrowed = await createGenerationSequence({
@@ -610,35 +647,38 @@ test("capacity ノブ: 既定は program の宣言・渡した値が context の
     program: programOf(chosen),
     capacity: 16,
   });
-  // 束縛点は context 生成だけ（ADR 0066 追記 7）— state スロットの物理確保がこの値で決まる。
+  // The only binding point is context creation (ADR 0066 addendum 7) — this value sets the physical
+  // allocation of the state slots.
   assertEquals(narrowed.capacity, 16);
   assertEquals(chosen.specs[0].bindings, { C: 16 });
-  assertEquals(chosen.specs[0].chunkLength, CHUNK_LENGTH, "chunk 長は program のまま");
+  assertEquals(chosen.specs[0].chunkLength, CHUNK_LENGTH, "the chunk length stays the program's");
 });
 
-test("capacity ノブ: 予算検査は program の既定ではなく選んだ容量で行う", async () => {
+test("capacity knob: the budget check uses the chosen capacity, not the program's default", async () => {
   const fake = fakeSession({ tokens: [5] });
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
     capacity: 8,
   });
-  // peak = 0 + 6 + 4 − 1 = 9 > 8（program の既定 64 なら通ってしまう形）。
+  // peak = 0 + 6 + 4 − 1 = 9 > 8 (a shape that would pass with the program's default of 64).
   const error = await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4 })),
     GenerationCapacityError,
     "exceeds the state capacity",
   );
-  assertEquals(error.limit, 8, "例外が運ぶ上限も選んだ容量");
+  assertEquals(error.limit, 8, "the limit the exception carries is the chosen capacity too");
   assertEquals(fake.calls.length, 0);
 });
 
-test("capacity ノブ: 関係を破る値は sequence を作る時点で fail loudly", async () => {
-  // 型まで縛るのは、公開入口 `sequence({ capacity })` と `chat({ capacity })` が**同じ指定**を
-  // 別の分類で返さないため。`gemma4_chat_session_test.ts` の同名 3 条件も `ModelInputError` を
-  // 期待しているので、片方だけ素の Error へ戻ればどちらかが赤になる（ADR 0107 決定 2）。
+test("capacity knob: a value that breaks the relations fails loudly when the sequence is created", async () => {
+  // The type is pinned too so that the public entry points `sequence({ capacity })` and
+  // `chat({ capacity })` do not return **the same spec** under different classifications. The three
+  // conditions of the same name in `gemma4_chat_session_test.ts` also expect `ModelInputError`, so
+  // if only one side went back to a plain Error one of them would turn red (ADR 0107 decision 2).
   const fake = fakeSession();
-  // 1 chunk すら入らない容量（run を 1 本も出せない context を作らせない）。
+  // A capacity that cannot hold even one chunk (do not let a context that cannot issue a single run
+  // be created).
   await assertRejects(
     () =>
       createGenerationSequence({
@@ -649,7 +689,8 @@ test("capacity ノブ: 関係を破る値は sequence を作る時点で fail lo
     ModelInputError,
     `capacity ${CHUNK_LENGTH - 1} is below chunkLength ${CHUNK_LENGTH}`,
   );
-  // モデルの位置上限の外まで容量を取る形（容量いっぱいの会話が学習外の位置を踏む）。
+  // A capacity reaching beyond the model's position limit (a conversation filling it would touch
+  // positions outside training).
   await assertRejects(
     () =>
       createGenerationSequence({
@@ -670,57 +711,58 @@ test("capacity ノブ: 関係を破る値は sequence を作る時点で fail lo
     ModelInputError,
     "capacity 8.5 is not a positive integer",
   );
-  assertEquals(fake.specs.length, 0, "context を 1 本も確保していない");
+  assertEquals(fake.specs.length, 0, "not a single context was allocated");
 });
 
-test("GenerationSequence: 容量超過は GenerationCapacityError（run の前に落ちる）", async () => {
+test("GenerationSequence: exceeding the capacity is a GenerationCapacityError (it fails before the run)", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake, { capacity: 8 }),
   });
-  // peak = past 0 + prompt 6 + maxNewTokens 4 − 1 = 9 > 8。
+  // peak = past 0 + prompt 6 + maxNewTokens 4 − 1 = 9 > 8.
   await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3, 4, 5, 6], maxNewTokens: 4 })),
     GenerationCapacityError,
     "exceeds the state capacity",
   );
   assertEquals(fake.calls.length, 0);
-  // ちょうど収まる形は通る（peak = 8）。
+  // A shape that fits exactly passes (peak = 8).
   await drain(sequence.generate({ prompt: [1, 2, 3, 4, 5], maxNewTokens: 4 }));
   assertEquals(fake.pastLength(), 8);
 });
 
-test("GenerationSequence: used は pastLength + 未 commit frontier から都度導出する", async () => {
-  // 独立 counter を持たない（ADR 0066 決定 6 の二重簿記の禁止）ので、走行中に読めば
-  // 「その時点で成功済みの run まで」が出る。切り詰めの判断は生成の合間に読んだ値で行う。
+test("GenerationSequence: used is derived each time from pastLength + the uncommitted frontier", async () => {
+  // There is no independent counter (ADR 0066 decision 6 forbids double bookkeeping), so reading it
+  // mid-run gives "up to the runs that have succeeded so far". Truncation decisions use a value
+  // read between generations.
   const fake = fakeSession({ tokens: [5, 6, 7, 9] });
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
   });
-  assertEquals(sequence.used, 0, "生成前");
+  assertEquals(sequence.used, 0, "before generation");
 
   const stream = sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 });
   const iterator = stream[Symbol.asyncIterator]();
-  await iterator.next(); // prefill イベント（frontier は KV に入り、pendingToken は空）。
-  assertEquals(sequence.used, 3, "prefill 直後");
-  await iterator.next(); // 最初の token（未 commit の frontier が 1 つ立つ）。
-  assertEquals(sequence.used, 4, "1 token 目の直後");
+  await iterator.next(); // The prefill event (the frontier is in the KV, pendingToken is empty).
+  assertEquals(sequence.used, 3, "right after prefill");
+  await iterator.next(); // The first token (one uncommitted frontier appears).
+  assertEquals(sequence.used, 4, "right after the first token");
   while (!(await iterator.next()).done) {
-    /* 汲み切る */
+    /* drain it */
   }
 
-  // pastLength は T + K − 1（最後の 1 個は未 commit）だが、会話が占めているのは T + K。
+  // pastLength is T + K − 1 (the last one is uncommitted), but the conversation occupies T + K.
   assertEquals(fake.pastLength(), 5);
-  assertEquals(sequence.used, 6, "1 ターン目の後");
+  assertEquals(sequence.used, 6, "after turn 1");
 
-  // 次ターンは used を起点に積み上がる（連結される pendingToken を二重に数えない）。
+  // The next turn builds on used (the prepended pendingToken is not counted twice).
   await drain(sequence.generate({ prompt: [8, 9], maxNewTokens: 1 }));
-  assertEquals(sequence.used, 9, "2 ターン目の後（6 + 新規 2 + 生成 1）");
+  assertEquals(sequence.used, 9, "after turn 2 (6 + 2 new + 1 generated)");
 });
 
-test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文言を読み解かせない）", async () => {
+test("GenerationCapacityError: carries the actual values needed for truncation in fields (no parsing of the message)", async () => {
   const fake = fakeSession({ tokens: [5] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -729,7 +771,7 @@ test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文�
   await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 1 }));
   assertEquals(sequence.used, 3);
 
-  // past 2 + prompt(連結 1 + 4) 5 + K 4 − 1 = 10 > 容量 8。
+  // past 2 + prompt (1 prepended + 4) 5 + K 4 − 1 = 10 > capacity 8.
   const error = await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: 4 })),
     GenerationCapacityError,
@@ -737,15 +779,20 @@ test("GenerationCapacityError: 切り詰めに要る実値を欄で運ぶ（文�
   );
   assertEquals(error.constraint, "capacity");
   assertEquals(error.pastLength, 2);
-  assertEquals(error.promptLength, 5, "pendingToken の連結後の実効長（呼び手の 4 ではない）");
+  assertEquals(
+    error.promptLength,
+    5,
+    "the effective length after prepending pendingToken (not the caller's 4)",
+  );
   assertEquals(error.requestedNewTokens, 4);
   assertEquals(error.limit, 8);
   assertEquals(error.maxNewTokens, 2);
-  // 欄どおりに縮めれば本当に通る（この 1 本が「導ける」を恒真でなくする）。
+  // Shrinking per the fields really passes (this one line keeps "derivable" from being a
+  // tautology).
   await drain(sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: error.maxNewTokens }));
 });
 
-test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（constraint だけが違う）", async () => {
+test("GenerationCapacityError: the position-table limit is carried in the same fields (only constraint differs)", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -761,30 +808,31 @@ test("GenerationCapacityError: 位置表の上限も同じ欄で運ぶ（constra
   assertEquals(error.pastLength, 0);
   assertEquals(error.promptLength, 3);
   assertEquals(error.requestedNewTokens, 4);
-  // 排他上限だが式は容量側と同じ形に畳める（5 − 0 − 3 + 1 = 3）。
+  // An exclusive limit, but the formula folds into the same shape as the capacity side (5 − 0 − 3 +
+  // 1 = 3).
   assertEquals(error.maxNewTokens, 3);
   await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: error.maxNewTokens }));
 });
 
-test("GenerationSequence: 位置表の上限超過も同じ型で落とす", async () => {
+test("GenerationSequence: exceeding the position-table limit fails with the same type", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake, { maxPosition: 5, capacity: 5 }),
   });
-  // 最終位置 = 0 + 3 + 4 − 2 = 5（排他的上限 5 の外）。
+  // Last position = 0 + 3 + 4 − 2 = 5 (outside the exclusive limit 5).
   await assertRejects(
     () => drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 4 })),
     GenerationCapacityError,
     "leaves the position table",
   );
   assertEquals(fake.calls.length, 0);
-  // 最終位置 4 はぎりぎり適法。
+  // Last position 4 is just legal.
   await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 3 }));
   assertEquals(fake.calls.length, 3);
 });
 
-test("GenerationSequence: 容量は自分の順番が来てから見る（先行ターンの進行を含める）", async () => {
+test("GenerationSequence: the capacity is checked when its own turn comes (including the progress of earlier turns)", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -792,7 +840,7 @@ test("GenerationSequence: 容量は自分の順番が来てから見る（先行
   });
   await drain(sequence.generate({ prompt: [1, 2, 3, 4], maxNewTokens: 4 }));
   assertEquals(fake.pastLength(), 7);
-  // past 7 + prompt(1 連結 + 2) 3 + K 2 − 1 = 11 > 10。発行時点では past を知らない。
+  // past 7 + prompt (1 prepended + 2) 3 + K 2 − 1 = 11 > 10. At the call, past is not known.
   await assertRejects(
     () => drain(sequence.generate({ prompt: [5, 6], maxNewTokens: 2 })),
     GenerationCapacityError,
@@ -800,9 +848,9 @@ test("GenerationSequence: 容量は自分の順番が来てから見る（先行
   );
 });
 
-// ---- ホスト由来の per-chunk 入力（PLE の席） ----
+// ---- host-derived per-chunk inputs (the PLE slot) ----
 
-test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力として結線される", async () => {
+test("DerivedRunInputs: receives the id and position sequences including pad rows, and is wired as an input", async () => {
   const fake = fakeSession({ tokens: [5, 6] });
   const seen: { readonly ids: readonly number[]; readonly positions: readonly number[] }[] = [];
   const sequence = await createGenerationSequence({
@@ -825,8 +873,9 @@ test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力と
   });
   await drain(sequence.generate({ prompt: [1, 2, 3], maxNewTokens: 2 }));
 
-  // prefill は物理行数ぶん（pad 行にも `input_ids` と同じ 0 が入る）・decode は 1 行。位置も
-  // 同じ規約（pad 行は 0）で、絶対位置が prompt の続きから 1 ずつ進む。
+  // prefill covers the physical rows (pad rows get the same 0 as `input_ids`), decode one row. The
+  // positions follow the same convention (pad rows are 0), and absolute positions advance by 1 from
+  // where the prompt left off.
   assertEquals(seen, [
     { ids: [1, 2, 3, 0], positions: [0, 1, 2, 0] },
     { ids: [5], positions: [3] },
@@ -837,9 +886,10 @@ test("DerivedRunInputs: pad 行込みの id 列と位置列が渡り、入力と
   );
 });
 
-test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effort の材料）", async () => {
-  // 派生入力の材料は配布形によっては GB 級の遅延ロード（gemma4 の PLE — `model` 容器の資産の
-  // block）。降ろさないと「停止を押しても block を読み終わるまで返らない」区間ができる。
+test("DerivedRunInputs: the generation's signal reaches derive (material for best effort)", async () => {
+  // Depending on the distribution, the material of a derived input is a GB-class lazy load
+  // (gemma4's PLE — blocks of the `model` container's asset). Without passing it down there would
+  // be a stretch where "pressing stop does not return until the block has been read".
   const fake = fakeSession({ tokens: [5, 6] });
   const seen: (AbortSignal | undefined)[] = [];
   const controller = new AbortController();
@@ -865,10 +915,10 @@ test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effor
   assertEquals(seen.length, 2);
   assert(
     seen.every((signal) => signal === controller.signal),
-    "derive に別の signal が渡っている",
+    "derive received a different signal",
   );
 
-  // 購読していない要求には捏造しない。
+  // None is invented for a request that did not subscribe.
   const bareFake = fakeSession();
   const bare = await createGenerationSequence({
     session: bareFake.session,
@@ -878,16 +928,17 @@ test("DerivedRunInputs: 生成の signal が derive まで降りる（best-effor
   assertEquals(seen[2], undefined);
 });
 
-test("DerivedRunInputs: derive の await 明けに届いた中断は run を出さない", async () => {
-  // 中断の観測点が「ループ先頭」だけだと、派生入力を作っている間に届いた中断の後に run が
-  // 1 本まるごと進む（prefill 先頭は常に cold miss なので、送信直後の停止で必ず踏む）。
+test("DerivedRunInputs: an interruption that arrives as derive's await resumes issues no run", async () => {
+  // If the interruption were observed only at "the top of the loop", a whole run would go ahead
+  // after an interruption that arrived while the derived input was being built (the head of prefill
+  // is always a cold miss, so stopping right after sending always hits it).
   for (const [name, maxNewTokens, tokensBefore] of [
     ["prefill", 2, 0],
     ["decode", 3, 1],
   ] as const) {
     const fake = fakeSession({ tokens: [5, 6, 7] });
     const controller = new AbortController();
-    const reason = new Error(`${name} の派生入力の途中で止めた`);
+    const reason = new Error(`stopped in the middle of the ${name} derived input`);
     let derives = 0;
     const sequence = await createGenerationSequence({
       session: fake.session,
@@ -896,7 +947,7 @@ test("DerivedRunInputs: derive の await 明けに届いた中断は run を出�
           names: [DERIVED],
           derive: async (ids) => {
             derives += 1;
-            // この derive の「読み」の最中に中断が届く形。
+            // The interruption arrives in the middle of this derive's "read".
             if (derives > tokensBefore) {
               controller.abort(reason);
               await new Promise((resolve) => setTimeout(resolve, 0));
@@ -925,19 +976,24 @@ test("DerivedRunInputs: derive の await 明けに届いた中断は run を出�
     } catch (error) {
       caught = error;
     }
-    assert(caught === reason, `${name}: 中断が包まれている（${String(caught)}）`);
+    assert(caught === reason, `${name}: the interruption is wrapped (${String(caught)})`);
     assertEquals(await stream.done, { reason: "aborted", tokens: tokensBefore }, name);
-    // 中断が届いた後の run は 1 本も出ていない = token も 1 個も余分に届いていない。
-    assertEquals(fake.calls.length, tokensBefore, `${name}: 中断後に run が進んだ`);
-    assertEquals(tokenIds(events).length, tokensBefore === 0 ? 0 : 1, `${name}: 余分な token`);
+    // Not a single run was issued after the interruption arrived = not a single extra token arrived
+    // either.
+    assertEquals(
+      fake.calls.length,
+      tokensBefore,
+      `${name}: a run went ahead after the interruption`,
+    );
+    assertEquals(tokenIds(events).length, tokensBefore === 0 ? 0 : 1, `${name}: extra token`);
   }
 });
 
-test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", async () => {
+test("DerivedRunInputs: returning keys other than the declared ones fails loudly", async () => {
   const cases: readonly (readonly [string, RunInputs, string])[] = [
-    ["欠け", {}, "missing: per_layer_inputs"],
+    ["missing", {}, "missing: per_layer_inputs"],
     [
-      "余り",
+      "extra",
       {
         [DERIVED]: { dtype: "f32", shape: [1, 4, 2], data: new Float32Array(8) },
         other: { dtype: "f32", shape: [1], data: new Float32Array(1) },
@@ -962,9 +1018,9 @@ test("DerivedRunInputs: 宣言と違うキーを返したら fail loudly", async
   }
 });
 
-// ---- 受理集合・失敗・寿命 ----
+// ---- accepted set, failures, lifetime ----
 
-test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも GPU にも入らない）", async () => {
+test("GenerationSequence: the accepted set fails synchronously (it enters neither the queue nor the GPU)", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -980,7 +1036,8 @@ test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも
     ModelInputError,
     "maxNewTokens 1.5",
   );
-  // `Int32Array` の wrap も語彙外も黙って別 token に化ける（後者は範囲外 gather = NaN 汚染）。
+  // An `Int32Array` wrap and an out-of-vocabulary id both silently turn into another token (the
+  // latter is an out-of-range gather = NaN poisoning).
   assertThrows(
     () => sequence.generate({ prompt: [1, VOCAB], maxNewTokens: 1 }),
     ModelInputError,
@@ -991,7 +1048,8 @@ test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも
     ModelInputError,
     "prompt[0] 4294967297",
   );
-  // sampler の指定も発行時に落とす（抽選は decode の途中で走るので、遅らせると深く潜る）。
+  // The sampler spec fails at the call too (drawing runs in the middle of decode, so delaying it
+  // would bury the failure deep).
   assertThrows(
     () => sequence.generate({ prompt: [1], maxNewTokens: 1, sampler: { temperature: -1 } }),
     ModelInputError,
@@ -1000,11 +1058,12 @@ test("GenerationSequence: 受理集合は同期に落ちる（順番待ちにも
   assertEquals(fake.calls.length, 0);
 });
 
-describe("受理集合の値域検査は 1 本の純関数（高レベル面と generate が同じ式を見る）", () => {
-  // 高レベル面（`gemma.Pipeline.chat` / `gemma.ChatSession.send`）は `generate` を async
-  // generator の本体で呼ぶので、発行時に落とすにはこの関数を自分で呼ぶしかない。式を写して
-  // 2 本持つと片方だけが古くなるので、正本が 1 本であること自体をここで縛る。
-  it("受理される要求は通る（門が恒真に落ちていないことの対）", () => {
+describe("the range check of the accepted set is one pure function (the high-level surface and generate see the same expression)", () => {
+  // The high-level surface (`gemma.Pipeline.chat` / `gemma.ChatSession.send`) calls `generate` in
+  // the body of an async generator, so the only way to fail at the call is to call this function
+  // itself. Two copies of the expression would let one go stale, so that there is one source of
+  // truth is itself pinned here.
+  it("an acceptable request passes (the counterpart showing the check has not collapsed into a tautology)", () => {
     assertGenerationRequestValues(VOCAB, { maxNewTokens: 1 });
     assertGenerationRequestValues(VOCAB, {
       maxNewTokens: 8,
@@ -1013,7 +1072,7 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
     });
   });
 
-  it("maxNewTokens の値域", () => {
+  it("the range of maxNewTokens", () => {
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 0 }),
       ModelInputError,
@@ -1026,7 +1085,7 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
     );
   });
 
-  it("stopTokens の語彙外と重複", () => {
+  it("out-of-vocabulary and duplicate stopTokens", () => {
     assertThrows(
       () => assertGenerationRequestValues(VOCAB, { maxNewTokens: 1, stopTokens: [VOCAB] }),
       ModelInputError,
@@ -1039,7 +1098,7 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
     );
   });
 
-  it("sampler の指定（抽選は decode の途中で走るので発行時に落とす）", () => {
+  it("the sampler spec (drawing runs in the middle of decode, so it fails at the call)", () => {
     assertThrows(
       () =>
         assertGenerationRequestValues(VOCAB, {
@@ -1051,8 +1110,9 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
     );
   });
 
-  it("generate は同じ関数を通る（片方だけ緩む形を作らない）", async () => {
-    // 故障注入: 関数が受理する値は generate も受理し、拒む値は generate も拒む。
+  it("generate goes through the same function (no shape where only one side loosens)", async () => {
+    // Fault injection: a value the function accepts generate accepts too, and a value it rejects
+    // generate rejects too.
     const fake = fakeSession();
     const sequence = await createGenerationSequence({
       session: fake.session,
@@ -1069,14 +1129,15 @@ describe("受理集合の値域検査は 1 本の純関数（高レベル面と 
   });
 });
 
-test("GenerationSequence: 受理できない要求は 1 つの型で捕まる（ADR 0107）", async () => {
+test("GenerationSequence: unacceptable requests are caught with one type (ADR 0107)", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
   });
-  // 値域 / 語彙 / 組合せ / sampler の 4 経路。型が 1 本でないと、複数家族を載せたホストは
-  // 400 を切り出すのに**メッセージの綴りを読む**しかなくなる（文言を変えた瞬間に黙って壊れる）。
+  // The four paths: range / vocabulary / combination / sampler. Without a single type, a host
+  // serving several families could only carve out the 400s by **reading the message's spelling**
+  // (which silently breaks the moment the wording changes).
   const rejected: readonly GenerationRequest[] = [
     { prompt: [1], maxNewTokens: 0 },
     { prompt: [1, VOCAB], maxNewTokens: 1 },
@@ -1084,52 +1145,58 @@ test("GenerationSequence: 受理できない要求は 1 つの型で捕まる（
     { prompt: [1], maxNewTokens: 1, sampler: { topK: 0 } },
   ];
   for (const request of rejected) {
-    // ホストが書く形（`catch` して `instanceof` で 400 / 500 を割る）をそのまま置く。
+    // The form a host writes (`catch`, then split 400 / 500 by `instanceof`), as is.
     let caught: unknown;
     try {
       sequence.generate(request);
     } catch (error) {
       caught = error;
     }
-    assert(caught instanceof ModelInputError, `入力起因で捕まらない: ${JSON.stringify(request)}`);
+    assert(
+      caught instanceof ModelInputError,
+      `not caught as an input error: ${JSON.stringify(request)}`,
+    );
   }
   assertEquals(fake.calls.length, 0);
 });
 
-/** 発行後に書き換えるための可変版（公開型は全欄 readonly）。 */
+/** A mutable version for changing after the call (every field of the public type is readonly). */
 type MutableRequest = { -readonly [Field in keyof GenerationRequest]: GenerationRequest[Field] };
 
-test("GenerationSequence: 要求は発行時に写す（発行後の書き換えは走行中の生成に効かない）", async () => {
+test("GenerationSequence: the request is snapshotted at the call (changes after it have no effect on the running generation)", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
   });
-  // 呼び手が握ったままの可変な要求（配列も sampler の bias も後から触れる形）。
+  // A mutable request the caller keeps holding (both the arrays and the sampler's bias can be
+  // touched later).
   const prompt = [1, 2];
   const bias: [number, number][] = [];
   const request: MutableRequest = { prompt, maxNewTokens: 2, sampler: { logitBias: bias } };
 
   const stream = sequence.generate(request);
-  // 本体は最初の `next()` まで走らないので、汲む前がいちばん広い書き換えの窓である。
-  prompt.push(VOCAB + 5); // 受理集合の検査を通った後で語彙外 id を足す
-  request.prompt = [3, 4]; // 別の配列へ差し替える
-  request.maxNewTokens = 4; // 走行中に上限を伸ばす
-  bias.push([6, Number.NEGATIVE_INFINITY]); // 2 個目に出るはずの token を禁止する
+  // The body does not run until the first `next()`, so before draining is the widest window for
+  // changes.
+  prompt.push(VOCAB + 5); // add an out-of-vocabulary id after the accepted-set check passed
+  request.prompt = [3, 4]; // swap in another array
+  request.maxNewTokens = 4; // raise the limit mid-run
+  bias.push([6, Number.NEGATIVE_INFINITY]); // ban the token that should come second
   const controller = new AbortController();
-  request.signal = controller.signal; // 発行時に無かった中断を後から挿す
+  request.signal = controller.signal; // insert an interruption that was not there at the call
   controller.abort();
 
   const { events, stop } = await drain(stream);
-  // 流れたのは発行時の prompt（長さ 2 = 有効 2 行 + pad 2 行）。
+  // What ran is the prompt at the call (length 2 = 2 valid rows + 2 pad rows).
   assertEquals(fake.calls.length, 2);
   assertEquals(fake.calls[0].ids, [1, 2, 0, 0]);
-  // token も停止も発行時の指定どおり（bias の後付けが効けば 6 は別 id に化ける）。
+  // Tokens and stop follow the spec at the call (if the late bias took effect, 6 would become
+  // another id).
   assertEquals(tokenIds(events), [5, 6]);
   assertEquals(stop, { reason: "max-tokens", tokens: 2 });
 });
 
-test("GenerationSequence: run の失敗は iterable と done の両方へ同じ例外で届く", async () => {
+test("GenerationSequence: a run failure reaches both the iterable and done with the same exception", async () => {
   const fake = fakeSession({ failAt: 1 });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1140,7 +1207,7 @@ test("GenerationSequence: run の失敗は iterable と done の両方へ同じ�
   await assertRejects(() => stream.done, Error, "run が落ちた");
 });
 
-test("GenerationSequence: done を読まない失敗が unhandled rejection にならない", async () => {
+test("GenerationSequence: a failure whose done is never read does not become an unhandled rejection", async () => {
   const fake = fakeSession({ failAt: 0 });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1150,17 +1217,17 @@ test("GenerationSequence: done を読まない失敗が unhandled rejection に�
   await assertRejects(
     async () => {
       for await (const _event of stream) {
-        /* 例外だけ受ける */
+        /* only receive the exception */
       }
     },
     Error,
     "run が落ちた",
   );
-  // `done` は握らない。ここでプロセスが落ちなければ、内部で 1 度握られている。
+  // `done` is not held. If the process does not crash here, it is held once internally.
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
 
-test("GenerationSequence: dispose は走行中の生成の後に走り、2 度目も同じ完了を返す", async () => {
+test("GenerationSequence: dispose runs after the running generation, and a second call returns the same completion", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1171,10 +1238,10 @@ test("GenerationSequence: dispose は走行中の生成の後に走り、2 度�
   await iterator.next();
 
   const disposal = sequence.dispose();
-  assertEquals(fake.disposals(), 0, "走行中の生成を追い越して dispose した");
-  // 残りを汲み切ると席が空き、dispose が走る。
+  assertEquals(fake.disposals(), 0, "dispose overtook the running generation");
+  // Draining the rest frees the slot and dispose runs.
   while (!(await iterator.next()).done) {
-    /* 汲み切る */
+    /* drain it */
   }
   await disposal;
   assertEquals(fake.disposals(), 1);
@@ -1182,9 +1249,10 @@ test("GenerationSequence: dispose は走行中の生成の後に走り、2 度�
   assertEquals(fake.disposals(), 1);
 });
 
-test("GenerationSequence: dispose 済みの generate は同期に落ちる（自分の文言で）", async () => {
-  // context は外へ出さない（決定 3）ので、呼び手が寿命を確かめる術はこの検査しかない。遅らせると
-  // 初反復まで落ちず、しかも `GenerationContext` 側の汎用文言になって真因が読めない。
+test("GenerationSequence: generate after dispose fails synchronously (with its own message)", async () => {
+  // The context is not exposed (decision 3), so this check is the caller's only way to learn about
+  // the lifetime. Delayed, it would not fail until the first iteration, and with the generic
+  // message of `GenerationContext` the real cause could not be read.
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1197,7 +1265,8 @@ test("GenerationSequence: dispose 済みの generate は同期に落ちる（自
     "GenerationSequence: cannot generate after dispose",
   );
   assertEquals(fake.calls.length, 0);
-  // dispose 発行直後（完了前）も同じ — `disposal` が立った時点で新しい生成は受けない。
+  // The same right after the dispose call (before it completes) — once `disposal` is set, no new
+  // generation is accepted.
   const running = await createGenerationSequence({
     session: fake.session,
     program: programOf(fake),
@@ -1211,37 +1280,45 @@ test("GenerationSequence: dispose 済みの generate は同期に落ちる（自
   await disposal;
 });
 
-test("GenerationSession: 実 Session の面を型で満たす（綴りのドリフト検出）", () => {
-  // 型検査だけの門（実行時は何もしない）。runtime 側で `run` /
-  // `createGenerationContext` / `pastLength` の綴りが変わるとコンパイルエラーになる。
+test("GenerationSession: the real Session's surface satisfies the type (detects spelling drift)", () => {
+  // A type-check-only check (it does nothing at run time). If the spelling of `run` /
+  // `createGenerationContext` / `pastLength` changes on the runtime side, it is a compile error.
   const asGenerationSession = (session: Session): GenerationSession => session;
   assertEquals(typeof asGenerationSession, "function");
 });
 
-// ---- 抽選器へ渡す履歴（repetition penalty の実効性）--------------------------
+// ---- the history passed to the sampler (whether the repetition penalty takes effect) -----------
 //
-// `sampler.next(logits, history)` の第 2 引数は「連結後の prompt + そのターンで抽選済みの
-// token」である（`sampler.ts` の doc — HF が `input_ids` 全体に掛けるのと同じ）。ここを
-// `[]` へ退行させても全テストが緑だったため、repetition penalty は「効かないノブ」として
-// 静かに残りうる。逆に**過去 turn まで**含める退行（ADR 0066 決定 6 の二重簿記）も検出されない。
+// The second argument of `sampler.next(logits, history)` is "the prompt after prepending + the
+// tokens already drawn this turn" (the doc of `sampler.ts` — the same as HF applying it to the
+// whole `input_ids`). Every test stayed green when this regressed to `[]`, so the repetition
+// penalty could quietly remain "a knob with no effect". Conversely, a regression that includes
+// **past turns** too (ADR 0066 decision 6's double bookkeeping) was not detected either.
 //
-// 観測は温度 0（argmax）で採る。第 1 候補 10 / 対抗馬 6 に penalty 2 を掛けると
-// 10 → 5 で順位が**決定論的に**反転するので、seed 依存の抽選に賭けずに期待値を手で書ける。
+// Observations are taken at temperature 0 (argmax). Applying penalty 2 to a first candidate of 10 /
+// a runner-up of 6 turns 10 into 5 and flips the ranking **deterministically**, so the expected
+// values can be written by hand without betting on a seed-dependent draw.
 
 const PENALTY = { temperature: 0, repetitionPenalty: 2 } as const;
 const RUNNER_UP = { id: 6, logit: 6 } as const;
 
-test("GenerationSequence: prompt の token に repetition penalty が掛かる", async () => {
-  // prompt に含まれる 3 が第 1 候補（logit 10）。履歴が届いていれば 10/2 = 5 < 6 で 6 へ移る。
+test("GenerationSequence: the repetition penalty applies to the prompt's tokens", async () => {
+  // 3, contained in the prompt, is the first candidate (logit 10). If the history arrives, 10/2 = 5
+  // < 6 moves it to 6.
   const penalized = fakeSession({ tokens: [3], runnerUp: RUNNER_UP });
   const withPenalty = await createGenerationSequence({
     session: penalized.session,
     program: programOf(penalized),
   });
   const hit = await drain(withPenalty.generate({ prompt: [3], maxNewTokens: 1, sampler: PENALTY }));
-  assertEquals(tokenIds(hit.events), [RUNNER_UP.id], "prompt の token に penalty が掛かっていない");
+  assertEquals(
+    tokenIds(hit.events),
+    [RUNNER_UP.id],
+    "the penalty does not apply to the prompt's tokens",
+  );
 
-  // 対（penalty を外すと第 1 候補がそのまま出る = 上の反転が penalty 由来であることの実証）。
+  // The counterpart (without the penalty the first candidate comes out as is = proof that the flip
+  // above comes from the penalty).
   const plain = fakeSession({ tokens: [3], runnerUp: RUNNER_UP });
   const withoutPenalty = await createGenerationSequence({
     session: plain.session,
@@ -1253,9 +1330,10 @@ test("GenerationSequence: prompt の token に repetition penalty が掛かる",
   assertEquals(tokenIds(control.events), [3]);
 });
 
-test("GenerationSequence: 抽選済み token が次 step の履歴に入る", async () => {
-  // 1 token 目は 5（履歴に無い）。2 token 目も fake の第 1 候補は 5 だが、直前に抽選した
-  // ぶんが履歴へ入っていれば penalty が掛かって対抗馬へ移る。
+test("GenerationSequence: drawn tokens enter the next step's history", async () => {
+  // The first token is 5 (not in the history). For the second token the fake's first candidate is 5
+  // again, but if the one just drawn entered the history the penalty applies and it moves to the
+  // runner-up.
   const fake = fakeSession({ tokens: [5, 5], runnerUp: RUNNER_UP });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1264,11 +1342,11 @@ test("GenerationSequence: 抽選済み token が次 step の履歴に入る", as
   const { events } = await drain(
     sequence.generate({ prompt: [1], maxNewTokens: 2, sampler: PENALTY }),
   );
-  assertEquals(tokenIds(events), [5, RUNNER_UP.id], "生成済み token が履歴へ入っていない");
+  assertEquals(tokenIds(events), [5, RUNNER_UP.id], "generated tokens do not enter the history");
 });
 
-test("GenerationSequence: 履歴は 1 ターンぶん（過去 turn は引きずらない）", async () => {
-  // 1 ターン目に 7 → 5 を出す（停止は max-tokens なので 5 が未 commit frontier に残る）。
+test("GenerationSequence: the history covers one turn (past turns are not dragged along)", async () => {
+  // Turn 1 emits 7 → 5 (the stop is max-tokens, so 5 remains as the uncommitted frontier).
   const fake = fakeSession({ tokens: [7, 5, 7], runnerUp: RUNNER_UP });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1277,15 +1355,17 @@ test("GenerationSequence: 履歴は 1 ターンぶん（過去 turn は引きず
   const first = await drain(sequence.generate({ prompt: [1], maxNewTokens: 2, sampler: PENALTY }));
   assertEquals(tokenIds(first.events), [7, 5]);
 
-  // 2 ターン目の第 1 候補は 7（前ターンで生成した token）。過去 turn を履歴へ引きずっていれば
-  // penalty が掛かって 6 へ移るので、7 が出ることが「引きずっていない」の観測になる。
+  // Turn 2's first candidate is 7 (a token generated in the previous turn). If past turns were
+  // dragged into the history, the penalty would apply and move it to 6, so 7 coming out is the
+  // observation of "not dragged along".
   const second = await drain(sequence.generate({ prompt: [1], maxNewTokens: 1, sampler: PENALTY }));
-  assertEquals(tokenIds(second.events), [7], "過去 turn の履歴が残っている");
+  assertEquals(tokenIds(second.events), [7], "the history of a past turn remains");
 });
 
-test("GenerationSequence: 連結される未 commit frontier はそのターンの prompt として掛かる", async () => {
-  // 上の対。前ターンの最後の token（5）は次ターンの prompt へ**連結される**ので、履歴には
-  // 入る（過去 turn を引きずるのとは別の事実 — ADR 0083 決定 4 の未 commit frontier）。
+test("GenerationSequence: the prepended uncommitted frontier is penalized as part of that turn's prompt", async () => {
+  // The counterpart of the above. The previous turn's last token (5) is **prepended** to the next
+  // turn's prompt, so it does enter the history (a different fact from dragging past turns along —
+  // ADR 0083 decision 4's uncommitted frontier).
   const fake = fakeSession({ tokens: [7, 5, 5], runnerUp: RUNNER_UP });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1296,11 +1376,11 @@ test("GenerationSequence: 連結される未 commit frontier はそのターン�
   assertEquals(
     tokenIds(second.events),
     [RUNNER_UP.id],
-    "連結された未 commit frontier に penalty が掛かっていない",
+    "the penalty does not apply to the prepended uncommitted frontier",
   );
 });
 
-test("GenerationSequence: 未開始 return は run を発行せず done を閉じる", async () => {
+test("GenerationSequence: a return before starting issues no run and closes done", async () => {
   const fake = fakeSession();
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1314,20 +1394,24 @@ test("GenerationSequence: 未開始 return は run を発行せず done を閉�
   await sequence.dispose();
 });
 
-// ---- 分岐（`fork` — ADR 0066 / 0083 の追記 2026-10-11・裁定 8）-----------------------
+// ---- forking (`fork` — the 2026-10-11 addenda of ADR 0066 / 0083, ruling 8) ------------------
 //
-// 分岐は「同じ会話の続きを持つ独立の sequence」で、写すのは context（複製）と `pendingToken`。
-// 偽物の context は論理長を context ごとに持つ（`generation-fake.ts`）ので、「どの context に
-// 書いたか」と「frontier を連結したか」が呼び出し列から読める。drafter とゲートの引き継ぎは
-// `generation_speculation_test.ts` の fork の節が見る。
+// A fork is "an independent sequence that holds the continuation of the same conversation"; what is
+// copied is the context (duplicated) and `pendingToken`. The fake context keeps the logical length
+// per context (`generation-fake.ts`), so "which context it wrote to" and "whether it prepended the
+// frontier" can be read from the call sequence. Handing over the drafter and the gate is covered by
+// the fork section of `generation_speculation_test.ts`.
 
-/** 入力 token → 次の token（行の入力だけで決まる決定的な target — 分岐と元を同じ規則で回す）。 */
+/**
+ * Input token → next token (a deterministic target set by the row's input alone — the fork and the
+ * original run under the same rule).
+ */
 const FORK_SUCCESSOR: readonly number[] = Array.from(
   { length: VOCAB },
   (_unused, token) => (token * 5 + 3) % VOCAB,
 );
 
-test("GenerationSequence.fork: 分岐は frontier と論理長を引き継ぎ、元と独立に続く", async () => {
+test("GenerationSequence.fork: a fork inherits the frontier and the logical length and continues independently of the original", async () => {
   const fake = fakeSession({ successor: FORK_SUCCESSOR });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1335,45 +1419,56 @@ test("GenerationSequence.fork: 分岐は frontier と論理長を引き継ぎ、
   });
   const first = await drain(sequence.generate({ prompt: [1, 2], maxNewTokens: 3 }));
   const frontier = tokenIds(first.events).at(-1);
-  assert(frontier !== undefined, "前提: 1 ターン目が token を出していない");
-  // prefill 2 行 + decode 2 回 = 論理長 4、未 commit の frontier 1 個 = 会話が占める位置 5。
+  assert(frontier !== undefined, "premise: turn 1 emitted no token");
+  // 2 prefill rows + 2 decodes = logical length 4, one uncommitted frontier = 5 positions occupied
+  // by the conversation.
   assertEquals([fake.pastLength(), sequence.used], [4, 5]);
 
   const forked = await sequence.fork();
-  assertEquals(fake.forks.length, 1, "context を 1 回だけ複製した");
+  assertEquals(fake.forks.length, 1, "the context was duplicated exactly once");
   assertEquals(forked.capacity, sequence.capacity);
-  assertEquals(forked.used, 5, "分岐は会話が占める位置をそのまま引き継ぐ");
+  assertEquals(forked.used, 5, "the fork inherits the positions the conversation occupies as is");
 
-  // 分岐のターン: 元の frontier が先頭に連結され（決定 4）、位置は元の論理長から続き、
-  // 分岐の context で走る。元の論理長は動かない。
+  // The fork's turn: the original frontier is prepended (decision 4), positions continue from the
+  // original's logical length, and it runs in the fork's context. The original's logical length
+  // does not move.
   const atBranch = fake.calls.length;
   await drain(forked.generate({ prompt: [7], maxNewTokens: 2 }));
   const branchCalls = fake.calls.slice(atBranch);
-  assertEquals(branchCalls[0].ids.slice(0, 2), [frontier, 7], "分岐が frontier を連結していない");
+  assertEquals(
+    branchCalls[0].ids.slice(0, 2),
+    [frontier, 7],
+    "the fork did not prepend the frontier",
+  );
   assertEquals(branchCalls[0].positions.slice(0, 2), [4, 5]);
   assert(
     fake.runContexts.slice(atBranch).every((context) => context === fake.forks[0]),
-    "分岐のターンが分岐の context 以外で走った",
+    "the fork's turn ran in a context other than the fork's",
   );
-  assertEquals(fake.pastLength(), 4, "分岐のターンが元の論理長を動かした");
+  assertEquals(fake.pastLength(), 4, "the fork's turn moved the original's logical length");
 
-  // 元のターン: 同じ frontier を自分の側でも連結し、分岐の進み具合に関係なく位置 4 から続く
-  // （frontier を「分岐へ渡した」ことにして元から落とす実装は、ここで 1 token 欠ける）。
+  // The original's turn: it prepends the same frontier on its own side too and continues from
+  // position 4 regardless of how far the fork went (an implementation that drops the frontier from
+  // the original as "handed to the fork" loses one token here).
   const atMain = fake.calls.length;
   await drain(sequence.generate({ prompt: [9], maxNewTokens: 2 }));
   const mainCalls = fake.calls.slice(atMain);
-  assertEquals(mainCalls[0].ids.slice(0, 2), [frontier, 9], "元が frontier を連結していない");
+  assertEquals(
+    mainCalls[0].ids.slice(0, 2),
+    [frontier, 9],
+    "the original did not prepend the frontier",
+  );
   assertEquals(mainCalls[0].positions.slice(0, 2), [4, 5]);
   assert(
     fake.runContexts.slice(atMain).every((context) => context === fake.context),
-    "元のターンが元の context 以外で走った",
+    "the original's turn ran in a context other than the original's",
   );
   assertEquals([sequence.used, forked.used], [8, 8]);
   await forked.dispose();
   await sequence.dispose();
 });
 
-test("GenerationSequence.fork: 本体は走行中の generate の後に走り、その時点の状態を写す", async () => {
+test("GenerationSequence.fork: the body runs after the running generate and copies the state at that point", async () => {
   const fake = fakeSession({ tokens: [5, 6, 7, 8] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1389,20 +1484,29 @@ test("GenerationSequence.fork: 本体は走行中の generate の後に走り、
     return forked;
   });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assertEquals(settled, false, "走行中の生成を追い越して fork した");
-  assertEquals(fake.forks.length, 0, "走行中の生成の途中で context を複製した");
-  // 残りを汲み切ると席が空き、fork が走る（生成の後の確定値を写す）。
+  assertEquals(settled, false, "fork overtook the running generation");
+  assertEquals(
+    fake.forks.length,
+    0,
+    "the context was duplicated in the middle of the running generation",
+  );
+  // Draining the rest frees the slot and fork runs (it copies the settled values after the
+  // generation).
   while (!(await iterator.next()).done) {
-    /* 汲み切る */
+    /* drain it */
   }
   const forked = await forking;
   assertEquals(forked.used, 5);
-  assertEquals(forked.used, sequence.used, "分岐が生成の途中の状態を写した");
+  assertEquals(
+    forked.used,
+    sequence.used,
+    "the fork copied a state from the middle of the generation",
+  );
   await forked.dispose();
   await sequence.dispose();
 });
 
-test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispose の前に発行した fork は先に走る", async () => {
+test("GenerationSequence.fork: after dispose it fails synchronously, and a fork issued before dispose runs first", async () => {
   const fake = fakeSession({ tokens: [5, 6] });
   const sequence = await createGenerationSequence({
     session: fake.session,
@@ -1410,28 +1514,33 @@ test("GenerationSequence.fork: dispose 済みでは同期に落ち、dispose の
   });
   await drain(sequence.generate({ prompt: [1], maxNewTokens: 2 }));
 
-  // fork → dispose の順に発行すると、同じ鎖なので fork が先に走る。dispose 発行の後は同期に落ちる。
+  // Issued in the order fork → dispose, fork runs first since it is the same chain. After the
+  // dispose call it fails synchronously.
   const forking = sequence.fork();
   const disposal = sequence.dispose();
   assertThrows(() => sequence.fork(), Error, "GenerationSequence: cannot fork after dispose");
   const forked = await forking;
   await disposal;
-  assertEquals(fake.disposals(), 1, "元の context が畳まれていない");
-  assertEquals(fake.forks.length, 1, "拒否された fork が複製を出した");
+  assertEquals(fake.disposals(), 1, "the original context was not torn down");
+  assertEquals(fake.forks.length, 1, "a rejected fork produced a duplicate");
 
-  // 元を先に dispose してよい（親子の依存を持たない）— 分岐はそのまま使え、畳むのは自分の
-  // context だけ。
+  // The original may be disposed first (there is no parent–child dependency) — the fork stays
+  // usable and tears down only its own context.
   const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 1 }));
   assertEquals(branch.stop.reason, "max-tokens");
-  assert(fake.runContexts.at(-1) === fake.forks[0], "分岐のターンが分岐の context で走っていない");
+  assert(
+    fake.runContexts.at(-1) === fake.forks[0],
+    "the fork's turn did not run in the fork's context",
+  );
   await forked.dispose();
   assertEquals(fake.disposalsOf(fake.forks[0]), 1);
-  assertEquals(fake.disposals(), 1, "分岐の dispose が元の context を畳んだ");
+  assertEquals(fake.disposals(), 1, "the fork's dispose tore down the original context");
 });
 
-test("ForkableContextFace: 実 GenerationContext は自分と同じ型を返す fork を持つ（型の門）", () => {
-  // 型検査だけの門（実行時は何もしない）。runtime 側で `fork` の綴りや戻りの型が変わると
-  // コンパイルエラーになる（`createGenerationSequence` の F-bound が実 Session で解けなくなる）。
+test("ForkableContextFace: the real GenerationContext has a fork that returns its own type (a type check)", () => {
+  // A type-check-only check (it does nothing at run time). If the spelling of `fork` or its return
+  // type changes on the runtime side, it is a compile error (the F-bound of
+  // `createGenerationSequence` no longer resolves with a real Session).
   const asForkable = (context: GenerationContext): ForkableContextFace<GenerationContext> =>
     context;
   assertEquals(typeof asForkable, "function");

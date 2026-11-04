@@ -1,6 +1,7 @@
-// umT5 のグラフの入出力を組む純関数（src/umt5/session-io.ts — ADR 0119 決定 3・4）の挙動。
-// GPU も実資産も要らない。グラフ入力の名前は recipe（`wan/umt5_patch.py` の `INPUT_NAMES`）が
-// fixture `wan-umt5/relative-position.json` に書いた綴りと突き合わせる。
+// Behaviour of the pure functions that build umT5's graph inputs and outputs
+// (src/umt5/session-io.ts — ADR 0119 decisions 3 and 4). Needs neither a GPU nor real assets. The
+// graph input names are compared with the spelling the recipe (`INPUT_NAMES` in
+// `wan/umt5_patch.py`) wrote into the fixture `wan-umt5/relative-position.json`.
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -21,11 +22,11 @@ const meta = JSON.parse(
 
 const idsOf = (...values: number[]): Int32Array<ArrayBuffer> => Int32Array.from(values);
 
-test("umT5 のグラフ入力の名前が recipe の宣言（export の入力の並び）と一致", () => {
+test("umT5's graph input names match the recipe's declaration (the export's input order)", () => {
   assertEquals([UMT5_INPUT_IDS, UMT5_RELATIVE_POSITION_BUCKETS], meta.input_names);
 });
 
-test("umt5SessionInputs: id 列 [L] を [1, L] に・バケット表はそのまま渡す（写さない）", () => {
+test("umt5SessionInputs: makes the id sequence [L] into [1, L] and passes the bucket table as is (no copy)", () => {
   const ids = idsOf(289, 748, 1);
   const buckets = buildUmt5RelativePositionBuckets(ids.length);
 
@@ -38,14 +39,14 @@ test("umt5SessionInputs: id 列 [L] を [1, L] に・バケット表はそのま
   assertStrictEquals(inputs[UMT5_RELATIVE_POSITION_BUCKETS], buckets);
 });
 
-test("umt5SessionInputs: 表の長さが id 列と違えば落とす（L は 2 本の入力で 1 つ）", () => {
+test("umt5SessionInputs: fails when the table length differs from the id sequence (L is one value across both inputs)", () => {
   const ids = idsOf(289, 748, 1);
   for (const length of [2, 4]) {
     assertThrows(
       () => umt5SessionInputs(ids, buildUmt5RelativePositionBuckets(length)),
       Error,
       "is not",
-      `表の長さ ${length}`,
+      `table length ${length}`,
     );
   }
   const flat: I32Tensor = { dtype: "i32", shape: [9], data: new Int32Array(9) };
@@ -54,20 +55,23 @@ test("umt5SessionInputs: 表の長さが id 列と違えば落とす（L は 2 �
   assertThrows(() => umt5SessionInputs(ids, short), Error, "element count");
 });
 
-test("umt5SessionInputs: id 列の長さが 2〜512 の外なら落とす", () => {
+test("umt5SessionInputs: fails when the id sequence length is outside 2 to 512", () => {
   const buckets = buildUmt5RelativePositionBuckets(2);
   assertThrows(() => umt5SessionInputs(idsOf(1), buckets), Error, "outside");
   assertThrows(() => umt5SessionInputs(new Int32Array(513), buckets), Error, "outside");
 });
 
-/** `[1, tokens, width]` の出力（値 = 1 始まりの通し番号 — 位置の取り違えが値で見える）。 */
+/**
+ * An output of `[1, tokens, width]` (values = serial numbers from 1 — a position mix-up shows in
+ * the values).
+ */
 const outputOf = (tokens: number, width: number): Tensor => ({
   dtype: "f32",
   shape: [1, tokens, width],
   data: Float32Array.from({ length: tokens * width }, (_, index) => index + 1),
 });
 
-test("umt5HiddenStates: [1, tokens, width] の中身を写さずに [tokens, width] として返す", () => {
+test("umt5HiddenStates: returns the contents of [1, tokens, width] as [tokens, width] without copying", () => {
   const output = outputOf(3, 4);
 
   const states = umt5HiddenStates(output, 3, 4);
@@ -75,11 +79,12 @@ test("umt5HiddenStates: [1, tokens, width] の中身を写さずに [tokens, wid
   assertStrictEquals(states, output.data);
 });
 
-test("umt5HiddenStates: 形・dtype・要素数の食い違いを落とす（詰めはしないので行数の上限は無い）", () => {
+test("umt5HiddenStates: rejects mismatched shape, dtype and element count (no padding, so no row limit)", () => {
   const output = outputOf(3, 4);
-  // 入力に渡した長さと出力の行数が違う（別の run の出力の取り違えなど）。
+  // The output row count differs from the length passed as input (an output mixed up with another
+  // run's, for example).
   assertThrows(() => umt5HiddenStates(output, 2, 4), Error, "is not");
-  // グラフ宣言の幅と違う。
+  // Differs from the width of the graph declaration.
   assertThrows(() => umt5HiddenStates(output, 3, 8), Error, "is not");
   const integer: Tensor = { dtype: "i32", shape: [1, 3, 4], data: new Int32Array(12) };
   assertThrows(() => umt5HiddenStates(integer, 3, 4), Error, "f32");
@@ -87,7 +92,7 @@ test("umt5HiddenStates: 形・dtype・要素数の食い違いを落とす（詰
   assertThrows(() => umt5HiddenStates(short, 3, 4), Error, "element count");
 });
 
-test("padUmt5Context: 有効長の行はそのまま・後ろの行はゼロ", () => {
+test("padUmt5Context: rows within the valid length stay as is, and the rows after them are zero", () => {
   const tokens = 3;
   const width = 4;
   const rows = 6;
@@ -102,7 +107,7 @@ test("padUmt5Context: 有効長の行はそのまま・後ろの行はゼロ", (
   assertEquals([...padded.subarray(tokens * width)], new Array((rows - tokens) * width).fill(0));
 });
 
-test("padUmt5Context: 有効長が文脈の行数と同じなら詰めずに全行", () => {
+test("padUmt5Context: when the valid length equals the context's row count, every row without padding", () => {
   const padded = padUmt5Context(outputOf(5, 2), 5, 5, 2);
 
   assertEquals(
@@ -111,13 +116,14 @@ test("padUmt5Context: 有効長が文脈の行数と同じなら詰めずに全�
   );
 });
 
-test("padUmt5Context: 形・dtype・行数の食い違いを落とす", () => {
+test("padUmt5Context: rejects mismatched shape, dtype and row count", () => {
   const output = outputOf(3, 4);
-  // 入力に渡した長さと出力の行数が違う（positive / negative の取り違えなど）。
+  // The output row count differs from the length passed as input (positive / negative mixed up, for
+  // example).
   assertThrows(() => padUmt5Context(output, 2, 6, 4), Error, "is not");
-  // DiT の文脈の幅と違う。
+  // Differs from the DiT's context width.
   assertThrows(() => padUmt5Context(output, 3, 6, 8), Error, "is not");
-  // 文脈の行数を超える。
+  // Exceeds the context's row count.
   assertThrows(() => padUmt5Context(output, 3, 2, 4), Error, "exceeds");
   const integer: Tensor = { dtype: "i32", shape: [1, 3, 4], data: new Int32Array(12) };
   assertThrows(() => padUmt5Context(integer, 3, 6, 4), Error, "f32");

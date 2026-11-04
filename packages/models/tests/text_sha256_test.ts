@@ -1,7 +1,9 @@
-// 同期の SHA-256（`src/text/sha256.ts`）— Web 標準の `crypto.subtle.digest` と全ビット一致すること。
+// The synchronous SHA-256 (`src/text/sha256.ts`) — must agree bit for bit with the Web-standard
+// `crypto.subtle.digest`.
 //
-// パディングの境界（1 ブロックに長さが収まる最後の 55 バイト・収まらない 56 バイト・ブロック境界の
-// 63 / 64 / 65 バイト・2 ブロック目の境界）を全て踏む。
+// Exercises every padding boundary (55 bytes, the last length that fits the length into one block;
+// 56 bytes, which does not; 63 / 64 / 65 bytes around the block boundary; and the second block's
+// boundary).
 
 import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -13,7 +15,7 @@ const subtleHex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     .join("");
 
 describe("sha256HexSync", () => {
-  it("FIPS 180-4 の例 'abc' と空のバイト列の digest を返す", () => {
+  it("returns the digests of the FIPS 180-4 example 'abc' and of empty bytes", () => {
     const encoder = new TextEncoder();
     assertEquals(
       sha256HexSync(encoder.encode("abc")),
@@ -25,11 +27,11 @@ describe("sha256HexSync", () => {
     );
   });
 
-  it("パディングの境界の全ての長さで crypto.subtle.digest と一致する", async () => {
+  it("matches crypto.subtle.digest at every length around the padding boundaries", async () => {
     for (const length of [1, 55, 56, 57, 63, 64, 65, 119, 120, 128, 1000, 70_000]) {
-      // 値は長さごとに変える（全ゼロだとバイトの取り違えが digest に出にくい）。
+      // The values vary with the length (with all zeros a byte mix-up hardly shows in the digest).
       const bytes = new Uint8Array(length).map((_, index) => (index * 131 + length) & 0xff);
-      assertEquals(sha256HexSync(bytes), await subtleHex(bytes), `${length} バイト`);
+      assertEquals(sha256HexSync(bytes), await subtleHex(bytes), `${length} bytes`);
     }
   });
 });

@@ -1,19 +1,27 @@
-// `fromPretrained` の取得元指定（`src/hub/repo-ref.ts`）の門。**ネットワークには一切出ない**。
+// Checks of the source argument of `fromPretrained` (`src/hub/repo-ref.ts`). **Never touches the
+// network.**
 //
-// 0.5.0 で `ref` は全ファミリ必須になった（既定ソースの廃止）。TS 側は引数必須なので型検査が
-// 受け持つが、型を持たない JS からの引数なし呼び出しは実行時にしか止まらない。そこで落とせないと
-// `undefined` が hub まで滑り、「repo が undefined の URL を叩いた」という**原因の遠い**失敗に
-// 化ける。ここで押さえるのは 4 つ:
-//  ① 取得元が無い呼び出しは「repo が必須」で落ちる。
-//  ② その文言に**正しい記述例**が載る（`{ repo, revision }` の綴りと、そのファミリの
-//     取得元対応表を引く綴りの 2 択）— 読んだ人がそのまま直せない診断は「落ちた」だけで
-//     役に立たない。
-//  ③ 公開配布リポを持たないファミリには存在しない識別子を案内しない。
-//  ④ **綴りが HF の `owner/name` であること**（パスにしか見えない文字列を URL へ綴り込まない）。
-//     救えない綴り（`models/karume-gemma4` のような合法な `owner/name`）も対で固定する。
-//  ⑤ **取得元ハンドル**（`localDirectory` / `nodeDirectory`）はこの門を通さず素通りし、かつ
-//     素通りの席を作ったことで HF 側の門が緩んでいないこと。
-// 正常系（文字列 = main 追従 / オブジェクトはそのまま）も同じ 1 本が担うので合わせて縛る。
+// Since 0.5.0, `ref` is required for every family (the default source was removed). On the TS side
+// the argument is required, so the type check covers it, but a call without arguments from untyped
+// JS can only be stopped at run time. If it is not rejected here, `undefined` slides down to hub
+// and turns into a failure **far from its cause**: "fetched a URL whose repo is undefined". Four
+// things are pinned here:
+//  ① A call without a source fails with "repo is required".
+//  ② That message carries **a correct example** (two choices: the `{ repo, revision }` spelling,
+//   and the
+//     spelling that looks up the family's source table) — a diagnostic the reader cannot act on
+//     directly says only "it failed" and is of no use.
+//  ③ A family without a public distribution repository is not pointed at an identifier that does
+//   not exist.
+//  ④ **The spelling is an HF `owner/name`** (a string that can only be a path is not spelled into a
+//   URL).
+//     The spelling that cannot be rescued (a legal `owner/name` such as `models/karume-gemma4`) is
+//     pinned alongside.
+//  ⑤ **Source handles** (`localDirectory` / `nodeDirectory`) pass through without this check, and
+//   adding
+//     that pass-through did not loosen the check on the HF side.
+// The normal cases (a string = tracks main / an object passes as is) go through the same function,
+// so they are pinned too.
 
 import { test } from "vite-plus/test";
 import {
@@ -37,22 +45,23 @@ import * as moss from "../moss.ts";
 const describeRequest = (input: RequestInfo | URL): string =>
   typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 
-test("toRepoRef: 取得元が無ければ『repo が必須』+ 記述例 2 択で落ちる", () => {
-  // JS からの引数なし呼び出しの形（TS では型検査が先に落とす）。
+test("toRepoRef: without a source it fails with 'repo is required' + two example spellings", () => {
+  // The shape of a call without arguments from JS (in TS the type check rejects it first).
   const error = assertThrows(
     () => toRepoRef(undefined, "anima.Pipeline.fromPretrained", 'SOURCES["anima"]'),
     Error,
     "repo is required",
   );
-  // 主語（どの入口が落ちたか）と記述例 2 択が揃っていること。
+  // Both the subject (which entry point failed) and the two example spellings are present.
   assertStringIncludes(error.message, "anima.Pipeline.fromPretrained");
   assertStringIncludes(error.message, '{ repo: "owner/name", revision: "<40-digit commit SHA>" }');
   // Anchored: a prefixed table name (`ANIMA_SOURCES[…]`, the 0.14 spelling) must not match.
   assertMatch(error.message, /(?<![\w.])SOURCES\["anima"\]/);
 });
 
-test("toRepoRef: 公開配布リポを持たないファミリには対応表を案内しない", () => {
-  // 存在しない識別子を案内すると、読んだ人は import できないものを探しに行く。
+test("toRepoRef: a family without a public distribution repository is not pointed at a source table", () => {
+  // Pointing at an identifier that does not exist sends the reader looking for something they
+  // cannot import.
   const error = assertThrows(
     () => toRepoRef(undefined, "vowelDetector.Pipeline.fromPretrained"),
     Error,
@@ -63,7 +72,7 @@ test("toRepoRef: 公開配布リポを持たないファミリには対応表を
   assertEquals(error.message.includes("SOURCES"), false);
 });
 
-test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組み立てない）", () => {
+test("toRepoRef: an empty repo fails the same check (no URL is built from an empty string)", () => {
   assertThrows(() => toRepoRef("", "sbv2.Pipeline.fromPretrained"), Error, "repo is required");
   assertThrows(
     () => toRepoRef({ repo: "" }, "sbv2.Pipeline.fromPretrained"),
@@ -72,19 +81,20 @@ test("toRepoRef: 空の repo も同じ門で落ちる（空文字の URL を組�
   );
 });
 
-test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落ちる", () => {
-  // ローカルのディレクトリを渡した呼び出しは、門が無いとその文字列が URL へ綴り込まれ、
-  // 返るのは 401 / 404 —「取得先が存在しない」という原因の遠い診断になる。
+test("toRepoRef: a spelling that can only be a path fails before anything is sent to HF", () => {
+  // Without this check, a call that passes a local directory has that string spelled into a URL,
+  // and what comes back is 401 / 404 — a diagnostic far from its cause: "the source does not
+  // exist".
   const paths = [
-    "./models/karume-gemma4", // 先頭 './'
-    "../karume-gemma4", // 先頭 '../'
-    "/home/me/models/dist", // 絶対パス
-    "hdae/karume-anima/", // 末尾 '/'
-    "a/b/c", // スラッシュ 2 個以上
-    "hdae//karume-anima", // 空セグメント
-    "hdae/karume anima", // 許可外の文字
-    ".hidden/name", // 先頭ドット
-    "karume-gemma4", // セグメント 1 つ（`owner/name` でない）
+    "./models/karume-gemma4", // leading './'
+    "../karume-gemma4", // leading '../'
+    "/home/me/models/dist", // absolute path
+    "hdae/karume-anima/", // trailing '/'
+    "a/b/c", // two or more slashes
+    "hdae//karume-anima", // empty segment
+    "hdae/karume anima", // disallowed character
+    ".hidden/name", // leading dot
+    "karume-gemma4", // a single segment (not `owner/name`)
   ];
   for (const repo of paths) {
     assertThrows(
@@ -96,40 +106,43 @@ test("toRepoRef: パスにしか見えない綴りは HF へ投げる前に落�
   }
 });
 
-test("toRepoRef: `owner/name` に見えるローカルパスは救えない（仕様）", () => {
-  // 綴りとして完全に合法な HF repo 名なので、この引数の中に区別できる情報が無い。
-  // 「実在するか」は取得層の仕事で、ここが見るのは綴りだけである。
+test("toRepoRef: a local path that looks like `owner/name` cannot be rescued (by design)", () => {
+  // It is a fully legal HF repo name, so the argument carries nothing to tell them apart.
+  // Whether it exists is the fetch layer's job; this function looks only at the spelling.
   assertEquals(toRepoRef("models/karume-gemma4", "gemma.Pipeline.fromPretrained"), {
     repo: "models/karume-gemma4",
   });
 });
 
-test("toRepoRef: 文字列は `{ repo }`（= main 追従）・オブジェクトはそのまま通す", () => {
-  // 文字列 ref の意味は ref 必須化でも変えない（revision を書かない = main 追従）。
+test("toRepoRef: a string becomes `{ repo }` (= tracks main) and an object passes as is", () => {
+  // Making ref required did not change what a string ref means (no revision = tracks main).
   assertEquals(toRepoRef("someone/karume-fork", "X.fromPretrained"), {
     repo: "someone/karume-fork",
   });
-  // revision / hubUrl は hub の語彙なので、ここで削らない・足さない。
+  // revision / hubUrl are hub's vocabulary, so nothing is removed or added here.
   const pinned = { repo: "someone/karume-fork", revision: "a".repeat(40), hubUrl: "https://m" };
   assertEquals(toRepoRef(pinned, "X.fromPretrained"), pinned);
 });
 
-test("toManifestSource: 取得元ハンドルは綴りの門を通さずそのまま渡る", () => {
-  // ローカルの配布形は HF の repo ではないので、`owner/name` を要求する門に掛けてはならない
-  // （掛けると「repo が必須」で落ち、手元のディレクトリからは 1 バイトも読めない）。
-  // 実体は 1 度も読まないので、アダプターは読まれたら落ちる形で十分。
+test("toManifestSource: a source handle is passed through without the spelling check", () => {
+  // A local distribution is not an HF repo, so it must not go through the check that requires
+  // `owner/name` (it would fail with "repo is required" and not one byte could be read from the
+  // local directory). Nothing is ever read, so an adapter that fails when read is enough.
   const source = localDirectory(
     {
-      readFile: () => Promise.reject(new Error("repo_ref_test: 判別だけで実体を読んだ")),
+      readFile: () =>
+        Promise.reject(
+          new Error("repo_ref_test: read the contents when only telling the kind apart"),
+        ),
     },
     { label: "./models/karume-test" },
   );
   assertStrictEquals(toManifestSource(source, "gemma.Pipeline.fromPretrained"), source);
 });
 
-test("toManifestSource: 取得元ハンドルでない値は従来どおり綴りの門を通る", () => {
-  // union を足しても HF 側の門が緩まないこと（取得元ハンドルの判別は同一性なので、
-  // 「repo を持つオブジェクト」が取得元として素通りする形にはならない）。
+test("toManifestSource: a value that is not a source handle goes through the spelling check as before", () => {
+  // Widening the union does not loosen the check on the HF side (a source handle is recognised by
+  // identity, so "an object with a repo" cannot pass through as a source).
   assertEquals(toManifestSource("someone/karume-fork", "X.fromPretrained"), {
     repo: "someone/karume-fork",
   });
@@ -141,14 +154,15 @@ test("toManifestSource: 取得元ハンドルでない値は従来どおり綴�
   assertThrows(() => toManifestSource(undefined, "X.fromPretrained"), Error, "repo is required");
 });
 
-test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばずに落ちる", async () => {
-  // 公開面から見た対。門が取得層より**前**にあることを、fetch 席へ「呼ばれたら失敗する」
-  // スタブを置いて見る（呼ばれてしまうと文言がネットワーク側の失敗に化ける）。
+test("fromPretrained: an empty source fails without calling fetch even once", async () => {
+  // The counterpart seen from the public surface. A stub that fails when called is put in the fetch
+  // option to see that the check sits **before** the fetch layer (if it were called, the message
+  // would turn into a network-side failure).
   let calls = 0;
   const fetchStub: typeof globalThis.fetch = (input) => {
     calls += 1;
     return Promise.reject(
-      new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`),
+      new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`),
     );
   };
   await assertRejects(
@@ -159,12 +173,12 @@ test("fromPretrained: 取得元の綴りが空なら fetch を 1 度も呼ばず
   assertEquals(calls, 0);
 });
 
-test("fromPretrained: birefnet も ref 欠落時に対応表（birefnet.SOURCES）を案内する", async () => {
-  // 0.10.0 で公開 pin（当時の `BIREFNET_SOURCES`、今の `birefnet.SOURCES`）が入ったのに、案内
-  // だけが「公開リポを持たない」時代のままだった（下流の報告）。他家族と同じ文言に揃っている
-  // ことを公開面から見る。
+test("fromPretrained: birefnet also points at its source table (birefnet.SOURCES) when ref is missing", async () => {
+  // 0.10.0 added the public pins (then `BIREFNET_SOURCES`, now `birefnet.SOURCES`), but the hint
+  // stayed as it was when there was no public repository (a downstream report). This checks from
+  // the public surface that the message matches the other families.
   const fetchStub: typeof globalThis.fetch = (input) =>
-    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
+    Promise.reject(new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`));
   const error = await assertRejects(
     () => birefnet.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
@@ -173,12 +187,13 @@ test("fromPretrained: birefnet も ref 欠落時に対応表（birefnet.SOURCES�
   assertMatch(error.message, /(?<![\w.])SOURCES\["birefnet-hr"\] \(@karume\/models\/birefnet\)/);
 });
 
-test("fromPretrained: umT5 と Wan2.2 は ref 欠落時に対応表を案内し、未公開の Wan2.1 は案内しない", async () => {
-  // 0.14.0 で対応表（当時の `UMT5_SOURCES` / `WAN_SOURCES`）が入った（家族の初公開）。Wan2.1 と
-  // 2.2 は取得の本体（`loadWanFromPretrained`）を共有するが、表に Wan2.1 のキーは無い — 2.1 に
-  // だけ存在しないキーを案内しない（③）ことを、共有の本体を通る公開面から見る。
+test("fromPretrained: umT5 and Wan2.2 point at their source tables when ref is missing; the unpublished Wan2.1 does not", async () => {
+  // 0.14.0 added the source tables (then `UMT5_SOURCES` / `WAN_SOURCES`) with the families' first
+  // publication. Wan2.1 and 2.2 share the load body (`loadWanFromPretrained`), but the table has no
+  // Wan2.1 key — this checks, through the public surface that goes through the shared body, that
+  // 2.1 alone is not pointed at a key that does not exist (③).
   const fetchStub: typeof globalThis.fetch = (input) =>
-    Promise.reject(new Error(`repo_ref_test: 取得層まで進んだ（${describeRequest(input)}）`));
+    Promise.reject(new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`));
   const umt5Error = await assertRejects(
     () => umt5.Encoder.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
@@ -215,7 +230,8 @@ test("fromPretrained: MOSS-Image points at its source table when ref is missing"
 
 test("fromPretrained: Gemma 4 mobile QAT points at its source table when ref is missing", async () => {
   // The table came back with the renamed distribution's publication (0.16.0). It shares the load
-  // body with regular Gemma (`GemmaPipeline.loadPretrained`), so each family must name its own table.
+  // body with regular Gemma (`GemmaPipeline.loadPretrained`), so each family must name its own
+  // table.
   const fetchStub: typeof globalThis.fetch = (input) =>
     Promise.reject(new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`));
   const error = await assertRejects(

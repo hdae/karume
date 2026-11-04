@@ -1,16 +1,19 @@
-// Anima の DiT 常駐（ADR 0112）の決定と状態機械の門（GPU も実資産も要らない）。
+// The check of the decisions and the state machine of Anima's DiT residency (ADR 0112) (needs
+// neither a GPU nor real assets).
 //
-// 実 GPU の e2e（`e2e_anima_test.ts` の「DiT 常駐」節）が縛るのは「常駐しても出る画素が 1 bit も
-// 動かない」ことと寿命の観測で、OOM の退避・格下げ・失敗時の破棄は**実機では狙って起こせない**。
-// そこでここは `residency.ts` の純関数と状態機械を、pipeline の `#generate` と同じ呼び順
-// （text 段 → DiT 段 → VAE 段）で回す偽の generate に載せ、故障（OOM / 失敗 / 後始末の失敗）を
-// 注入して遷移を固定する。
+// What the e2e on a real GPU (the "DiT residency" section of `e2e_anima_test.ts`) pins is that
+// "residency moves not a single bit of the output pixels" and the observation of lifetimes; OOM
+// eviction, downgrade and disposal on failure **cannot be provoked on purpose on a real machine**.
+// So this file puts the pure functions and the state machine of `residency.ts` on a fake generate
+// that calls them in the same order as the pipeline's `#generate` (text stage → DiT stage → VAE
+// stage), injects faults (OOM / failure / cleanup failure) and pins the transitions.
 //
-// NOTE: `Pipeline.generate` そのものは偽の GPU では回せない — 段の Session は実容器の
-// グラフを device へ上げて組むので、`fake-gpu.ts` の device では構築が通らない。pipeline 側の
-// 結線（段の順序・イベントへの写し）は e2e が見る。GPU 側の小物の dispose の順序
-// `disposeResidencyThenGpu`〈pipeline.ts〉は偽の GpuContext で直接縛る。解放待ちの
-// `settleReleasedMemory`（共通層）の門は `settle_released_memory_test.ts`（core のレーン）にある。
+// NOTE: `Pipeline.generate` itself cannot run on a fake GPU — a stage's Session uploads the real
+// container's graph to the device, so construction does not pass on the device of `fake-gpu.ts`.
+// The pipeline-side wiring (stage order, mapping to events) is checked by the e2e. The disposal
+// order of the small GPU-side objects, `disposeResidencyThenGpu` (pipeline.ts), is pinned directly
+// with a fake GpuContext. The check of the release wait `settleReleasedMemory` (shared layer) is in
+// `settle_released_memory_test.ts` (the core lane).
 
 import {
   assert,
@@ -38,43 +41,58 @@ import { HEADROOM_MARGIN_BYTES } from "../src/session/headroom-margin.ts";
 import { disposeResidencyThenGpu } from "../src/anima/pipeline.ts";
 import { ModelInputError } from "../src/errors.ts";
 
-/** 偽の DiT Session（破棄されたかと、どの構築で作られたかだけを持つ）。 */
+/** A fake DiT Session (holds only whether it was disposed and which construction created it). */
 type FakeSession = { readonly id: number; disposed: boolean };
 
-/** 注入する故障（段ごとに 1 回ずつ消費する）。 */
+/** A fault to inject (each consumed once per stage). */
 type Fault = "oom" | "failure";
 
-/** 偽の generate 1 回ぶんの要求。 */
+/** The request of one fake generate. */
 type FakeRequest = {
   readonly residency: Residency;
-  /** 段ごとの故障の列（先頭から試行ごとに 1 つ消費・尽きたら成功）。 */
+  /** The faults per stage (one consumed from the front per attempt; success once they run out). */
   readonly faults?: Partial<Record<"text" | "transformer" | "vae", Fault[]>>;
-  /** 試し確保が「入らない」を返す量る点（pipeline の先回りの退避の引き金 — 既定は全点で入る）。 */
+  /**
+   * The measuring points at which the trial allocation answers "does not fit" (the trigger of the
+   * pipeline's pre-emptive eviction — by default everything fits).
+   */
   readonly headroomShort?: readonly HeadroomPoint[];
 };
 
-/** pipeline が先回りの退避で量る 2 点（text 段の前 / DiT 段の後・VAE 段の前）。 */
+/**
+ * The two points the pipeline measures for pre-emptive eviction (before the text stage / after the
+ * DiT stage, before the VAE stage).
+ */
 type HeadroomPoint = "text" | "vae";
 
-/** 台が量る点ごとに渡す必要量（値そのものに意味は無い — どちらの点の量りかを見分ける印）。 */
+/**
+ * The need the harness passes per measuring point (the value itself means nothing — a mark that
+ * tells which point measured).
+ */
 const TEXT_NEED = 2 * 1024 * 1024 * 1024;
 const VAE_NEED = 1024 * 1024 * 1024;
 
 const oom = (where: string): GpuOutOfMemoryError =>
   new GpuOutOfMemoryError(`${where}: not enough memory left`);
 
-/** 台に注入する後始末側の故障。 */
+/** Cleanup-side faults to inject into the harness. */
 type HarnessOptions = {
   readonly disposeFails?: boolean;
   readonly settleFails?: boolean;
-  /** 通知の購読側が投げる例外（返した値を投げる・undefined なら投げない）。 */
+  /**
+   * The exception a notice subscriber throws (the returned value is thrown; undefined throws
+   * nothing).
+   */
   readonly notifyThrows?: (notice: ResidencyNotice) => unknown;
 };
 
 /**
- * pipeline の `#generate` と同じ呼び順で状態機械を回す台（先回りの量り → text 段 → DiT 段 → 先回りの
- * 量り → VAE 段 — 失敗したら `releaseIfRequested` を通して投げる）。`log` に GPU 側の出来事（構築 / 破棄 / 解放待ち / 段の試行）と
- * 通知を時系列で積む。`disposals` は破棄の瞬間の状態機械の状態（MUST の順序の観測点）。
+ * A harness that runs the state machine in the same call order as the pipeline's `#generate`
+ * (pre-emptive measurement → text stage → DiT stage → pre-emptive measurement → VAE stage — on
+ * failure it throws through `releaseIfRequested`). `log` accumulates the GPU-side events
+ * (construction / disposal / release wait / stage attempts) and the notices in time order.
+ * `disposals` is the state of the state machine at the moment of each disposal (the observation
+ * point of the MUST ordering).
  */
 const createHarness = (options: HarnessOptions = {}) => {
   const log: string[] = [];
@@ -85,7 +103,10 @@ const createHarness = (options: HarnessOptions = {}) => {
     readonly holding: boolean;
     readonly downgraded: boolean;
   }[] = [];
-  /** 先回りの退避の probe が呼ばれた点と必要量（`log` に混ぜない — 常駐ありの既存の列を変えない）。 */
+  /**
+   * The points and needs at which the pre-emptive eviction probe was called (kept out of `log` —
+   * the existing sequences with residency stay unchanged).
+   */
   const probes: { readonly point: HeadroomPoint; readonly need: number }[] = [];
   const residency: TransformerResidency<FakeSession> = new TransformerResidency<FakeSession>({
     dispose: (session) => {
@@ -96,12 +117,12 @@ const createHarness = (options: HarnessOptions = {}) => {
         holding: residency.holding,
         downgraded: residency.downgraded,
       });
-      if (options.disposeFails === true) throw new Error(`dispose ${session.id} に失敗`);
+      if (options.disposeFails === true) throw new Error(`dispose ${session.id} failed`);
     },
     settleRelease: () => {
       log.push("settle");
       return options.settleFails === true
-        ? Promise.reject(new Error("解放待ちに失敗"))
+        ? Promise.reject(new Error("the release wait failed"))
         : Promise.resolve();
     },
   });
@@ -114,16 +135,19 @@ const createHarness = (options: HarnessOptions = {}) => {
   const takeFault = (request: FakeRequest, stage: "text" | "transformer" | "vae") =>
     request.faults?.[stage]?.shift();
 
-  /** 段ごと運転の段（text / VAE）1 回の試行。故障があれば投げる。 */
+  /** One attempt of a per-stage stage (text / VAE). Throws if there is a fault. */
   const attempt = (request: FakeRequest, stage: "text" | "vae") => (): Promise<string> => {
     log.push(`attempt:${stage}`);
     const fault = takeFault(request, stage);
     if (fault === "oom") return Promise.reject(oom(stage));
-    if (fault === "failure") return Promise.reject(new Error(`${stage} が失敗`));
+    if (fault === "failure") return Promise.reject(new Error(`${stage} failed`));
     return Promise.resolve(stage);
   };
 
-  /** pipeline と同じ形で 1 点を量る（常駐 DiT があるときだけ `ensureHeadroom` を呼ぶ）。 */
+  /**
+   * Measures one point the same way as the pipeline (calls `ensureHeadroom` only when a resident
+   * DiT exists).
+   */
   const ensureHeadroom = async (
     request: FakeRequest,
     point: HeadroomPoint,
@@ -154,10 +178,10 @@ const createHarness = (options: HarnessOptions = {}) => {
         },
         body: (session) => {
           log.push(`body:${session.id}`);
-          assertFalse(session.disposed, "破棄済みの Session で段を回している");
+          assertFalse(session.disposed, "a stage is running on a disposed Session");
           const fault = takeFault(request, "transformer");
           if (fault === "oom") return Promise.reject(oom("transformer"));
-          if (fault === "failure") return Promise.reject(new Error("transformer が失敗"));
+          if (fault === "failure") return Promise.reject(new Error("transformer failed"));
           return Promise.resolve(session.id);
         },
         notify,
@@ -174,13 +198,14 @@ const createHarness = (options: HarnessOptions = {}) => {
 };
 
 describe("assertAnimaResidency", () => {
-  it("2 つの綴りだけを受ける", () => {
+  it("accepts exactly two spellings", () => {
     assertEquals(assertAnimaResidency("per-stage", "residency"), "per-stage");
     assertEquals(assertAnimaResidency("transformer", "residency"), "transformer");
   });
 
-  it("未知の綴りは既定へ縮退せず、出所と実際の値を名指しして ModelInputError で落とす", () => {
-    // 綴り違いが黙って段ごと運転になると、opt-in が効いていないことに速度でしか気付けない。
+  it("an unknown spelling is not degraded to the default; it fails with a ModelInputError naming the origin and the actual value", () => {
+    // If a misspelling silently became per-stage operation, one would notice that the opt-in has no
+    // effect only through speed.
     for (const [value, actual] of [
       ["transformers", "'transformers'"],
       [null, "null"],
@@ -195,14 +220,14 @@ describe("assertAnimaResidency", () => {
   });
 });
 
-describe("transformerSource（DiT 段の Session の出所）", () => {
-  it("常駐 DiT があれば、実効値にも格下げにも関わらずそれを使う（読み直さない）", () => {
+describe("transformerSource (the origin of the DiT stage's Session)", () => {
+  it("if a resident DiT exists it is used regardless of the effective value or a downgrade (no re-read)", () => {
     for (const effective of ["per-stage", "transformer"] as const) {
       assertEquals(transformerSource({ effective, downgraded: false, held: true }), "resident");
     }
   });
 
-  it("常駐が無ければ、transformer かつ格下げでないときだけ常駐の席に載せて作る", () => {
+  it("without a resident DiT, it is built into the resident slot only for transformer without a downgrade", () => {
     assertEquals(
       transformerSource({ effective: "transformer", downgraded: false, held: false }),
       "build-resident",
@@ -218,15 +243,15 @@ describe("transformerSource（DiT 段の Session の出所）", () => {
   });
 });
 
-describe("decideAfterTransformer（DiT 段を抜けるときの決定）", () => {
-  it("既定の段ごと運転で常駐と無関係なら、手放すだけで何も名乗らない（既定のイベント列を変えない）", () => {
+describe("decideAfterTransformer (the decision when leaving the DiT stage)", () => {
+  it("with the default per-stage operation and nothing to do with residency, it only releases and announces nothing (the default event sequence is unchanged)", () => {
     assertEquals(
       decideAfterTransformer({ effective: "per-stage", downgraded: false, held: false }, "success"),
       { action: "release" },
     );
   });
 
-  it("transformer で席が空（この generate で作る DiT）なら、成功した段の後に席へ載せて retained / request を名乗る", () => {
+  it("with transformer and an empty slot (a DiT built in this generate), it puts it in the slot after the successful stage and announces retained / request", () => {
     assertEquals(
       decideAfterTransformer(
         { effective: "transformer", downgraded: false, held: false },
@@ -236,9 +261,10 @@ describe("decideAfterTransformer（DiT 段を抜けるときの決定）", () =>
     );
   });
 
-  it("席に DiT があるまま格下げ済み（到達しない組）は既定値へ落とさず投げる", () => {
-    // 格下げは退避で席を空けるときにだけ立ち、以後は席に載せない。黙って何かを返すと、
-    // 「常駐しない判断は必ず名乗る」と食い違う値が残る。
+  it("a DiT in the slot while already downgraded (an unreachable pair) throws instead of falling to a default", () => {
+    // A downgrade is set only when an eviction empties the slot, and nothing is put in the slot
+    // after that. Silently returning something would leave a value that contradicts "a decision not
+    // to keep a resident DiT is always announced".
     for (const effective of ["per-stage", "transformer"] as const) {
       for (const outcome of ["success", "failure"] as const) {
         assertThrows(
@@ -250,7 +276,7 @@ describe("decideAfterTransformer（DiT 段を抜けるときの決定）", () =>
     }
   });
 
-  it("transformer で席に載っていれば持ち続け、retained / request を名乗る", () => {
+  it("with transformer and a DiT in the slot, it keeps it and announces retained / request", () => {
     assertEquals(
       decideAfterTransformer(
         { effective: "transformer", downgraded: false, held: true },
@@ -260,14 +286,14 @@ describe("decideAfterTransformer（DiT 段を抜けるときの決定）", () =>
     );
   });
 
-  it("持ち越した常駐 DiT を per-stage の要求で使ったら手放し、released / request を名乗る", () => {
+  it("when a carried-over resident DiT is used by a per-stage request it is released and released / request is announced", () => {
     assertEquals(
       decideAfterTransformer({ effective: "per-stage", downgraded: false, held: true }, "success"),
       { action: "release", notice: { action: "released", reason: "request" } },
     );
   });
 
-  it("格下げ済みで transformer を求められたら持たず、released / downgraded を名乗る", () => {
+  it("when transformer is requested after a downgrade it keeps nothing and announces released / downgraded", () => {
     assertEquals(
       decideAfterTransformer(
         { effective: "transformer", downgraded: true, held: false },
@@ -277,7 +303,7 @@ describe("decideAfterTransformer（DiT 段を抜けるときの決定）", () =>
     );
   });
 
-  it("失敗した段の DiT は持ち越しなら捨てて evicted / failure を名乗り、この generate で作ったなら畳むだけ", () => {
+  it("the DiT of a failed stage is discarded with evicted / failure announced when carried over, and only disposed when built in this generate", () => {
     for (const effective of ["per-stage", "transformer"] as const) {
       assertEquals(
         decideAfterTransformer({ effective, downgraded: false, held: true }, "failure"),
@@ -291,52 +317,57 @@ describe("decideAfterTransformer（DiT 段を抜けるときの決定）", () =>
   });
 });
 
-describe("decideAfterFailedGenerate（DiT 段の外で generate が失敗したとき）", () => {
-  it("実効値 per-stage なら席の DiT を手放して released / request を名乗る（失敗しても指示は効く）", () => {
+describe("decideAfterFailedGenerate (when a generate fails outside the DiT stage)", () => {
+  it("with the effective value per-stage it releases the slot's DiT and announces released / request (the instruction takes effect even on failure)", () => {
     assertEquals(decideAfterFailedGenerate("per-stage"), {
       action: "release",
       notice: { action: "released", reason: "request" },
     });
   });
 
-  it("実効値 transformer なら持ったまま何も名乗らない", () => {
+  it("with the effective value transformer it keeps it and announces nothing", () => {
     assertEquals(decideAfterFailedGenerate("transformer"), { action: "retain" });
   });
 });
 
-describe("evictsForMemory（退避に当たる失敗か）", () => {
-  it("常駐 DiT があり、失敗が GpuOutOfMemoryError のときだけ退避する", () => {
+describe("evictsForMemory (whether a failure calls for an eviction)", () => {
+  it("evicts only when a resident DiT exists and the failure is a GpuOutOfMemoryError", () => {
     assert(evictsForMemory(oom("x"), true));
-    assertFalse(evictsForMemory(oom("x"), false), "退避する相手が居ない");
-    // validation や素の Error を退避でやり直すと、本当の原因が 2 度目の失敗に埋もれる。
+    assertFalse(evictsForMemory(oom("x"), false), "nothing to evict");
+    // Retrying a validation error or a plain Error through an eviction would bury the real cause
+    // under the second failure.
     assertFalse(evictsForMemory(new GpuValidationError("x"), true));
-    assertFalse(evictsForMemory(new Error("out-of-memory"), true), "文言では判定しない");
+    assertFalse(
+      evictsForMemory(new Error("out-of-memory"), true),
+      "it does not judge by the wording",
+    );
   });
 });
 
-describe("stageMemoryNeed / generateMemoryNeed（先回りの退避の必要量）", () => {
+describe("stageMemoryNeed / generateMemoryNeed (the need for pre-emptive eviction)", () => {
   const MIB = 1024 * 1024;
 
-  it("段 1 本の必要量は 見積りのピーク + 最大 part の staging + 余裕 512 MiB", () => {
+  it("the need of one stage is the estimated peak + the staging of the largest part + a 512 MiB margin", () => {
     assertEquals(HEADROOM_MARGIN_BYTES, 512 * MIB);
-    // text_encoder の実測（重み 1,138.5 MiB + 保持予算 256 MiB・part 256 MiB）の形。
+    // The shape of the text_encoder measurement (weights 1,138.5 MiB + retention budget 256 MiB,
+    // part 256 MiB).
     assertEquals(
       stageMemoryNeed({ peakAccountedBytes: 1394 * MIB }, 256 * MIB),
       (1394 + 256 + 512) * MIB,
     );
-    // part 0 だけの容器（重みの part が無い）では staging の項が 0。
+    // In a container with only part 0 (no weight parts) the staging term is 0.
     assertEquals(stageMemoryNeed({ peakAccountedBytes: 10 * MIB }, 0), (10 + 512) * MIB);
   });
 
-  it("generate の必要量は段ごとの最大（段は順に張って畳むので和ではない）", () => {
+  it("the need of a generate is the maximum over the stages (stages are opened and disposed in turn, so not the sum)", () => {
     assertEquals(generateMemoryNeed([2162 * MIB, 1281 * MIB, 1212 * MIB]), 2162 * MIB);
     assertEquals(generateMemoryNeed([1 * MIB, 3 * MIB, 2 * MIB]), 3 * MIB);
   });
 });
 
-describe("TransformerResidency（偽の generate で回す状態機械）", () => {
-  describe("① 既定の per-stage", () => {
-    it("DiT を generate ごとに作って段の終わりで畳み、何も名乗らない", async () => {
+describe("TransformerResidency (the state machine run on a fake generate)", () => {
+  describe("① the default per-stage", () => {
+    it("builds the DiT per generate, disposes it at the end of the stage and announces nothing", async () => {
       const h = createHarness();
       assertEquals(await h.generate({ residency: "per-stage" }), 1);
       assertEquals(await h.generate({ residency: "per-stage" }), 2);
@@ -358,11 +389,11 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
   });
 
   describe("② transformer", () => {
-    it("最初の generate の DiT 段で作り、以後は同じ Session を読み直さずに使う", async () => {
+    it("builds it in the DiT stage of the first generate and afterwards uses the same Session without re-reading", async () => {
       const h = createHarness();
       assertEquals(await h.generate({ residency: "transformer" }), 1);
       assertEquals(await h.generate({ residency: "transformer" }), 1);
-      assertEquals(h.sessions.length, 1, "2 回目の generate で DiT を作り直している");
+      assertEquals(h.sessions.length, 1, "the second generate rebuilt the DiT");
       assertFalse(h.sessions[0].disposed);
       assert(h.residency.holding);
       assertEquals(h.notices, [
@@ -371,7 +402,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       ]);
     });
 
-    it("dispose で常駐 DiT を畳む（2 度目は何もしない）", async () => {
+    it("dispose disposes the resident DiT (the second call does nothing)", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       await h.residency.dispose();
@@ -385,14 +416,14 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
     });
   });
 
-  describe("③ request による上書き", () => {
-    it("transformer で持った DiT を次の per-stage が使い、その後に手放す（連続生成の最後の 1 枚）", async () => {
+  describe("③ override by the request", () => {
+    it("a DiT kept by transformer is used by the next per-stage and released after it (the last image of a series)", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       assertEquals(
         await h.generate({ residency: "per-stage" }),
         1,
-        "持ち越した DiT を使っていない",
+        "the carried-over DiT was not used",
       );
       assert(h.sessions[0].disposed);
       assertFalse(h.residency.holding);
@@ -400,14 +431,14 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         { action: "retained", reason: "request" },
         { action: "released", reason: "request" },
       ]);
-      // 手放した後の per-stage は常駐と無関係 = 何も名乗らない。
+      // A per-stage after the release has nothing to do with residency = announces nothing.
       assertEquals(await h.generate({ residency: "per-stage" }), 2);
       assertEquals(h.notices.length, 2);
     });
   });
 
-  describe("④ OOM の退避と格下げ", () => {
-    it("常駐 DiT の上で VAE 段が OOM したら、破棄 → 解放待ち → 名乗る → VAE 段を 1 回だけやり直す", async () => {
+  describe("④ OOM eviction and downgrade", () => {
+    it("when the VAE stage hits an OOM on top of a resident DiT: dispose → release wait → announce → retry the VAE stage exactly once", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       h.log.length = 0;
@@ -426,7 +457,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       assertFalse(h.residency.holding);
     });
 
-    it("格下げの後は transformer を求められても持たず、毎回 released / downgraded を名乗る", async () => {
+    it("after a downgrade it keeps nothing even when transformer is requested, and announces released / downgraded every time", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       await h.generate({ residency: "transformer", faults: { text: ["oom"] } });
@@ -438,16 +469,17 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         { action: "released", reason: "downgraded" },
       ]);
       assertFalse(h.residency.holding);
-      // 格下げ後の DiT は毎回作って畳む（OOM を踏み直さない = 常駐の席に載せない）。
+      // After the downgrade the DiT is built and disposed every time (no hitting the OOM again =
+      // not put in the resident slot).
       assert(h.sessions.every((session) => session.disposed));
     });
 
-    it("常駐 DiT の run が OOM したら退避して、DiT 段を段ごと運転で最初からやり直す", async () => {
+    it("when the resident DiT's run hits an OOM it evicts and redoes the DiT stage from the start with per-stage operation", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       h.log.length = 0;
       const used = await h.generate({ residency: "transformer", faults: { transformer: ["oom"] } });
-      assertEquals(used, 2, "やり直しが新しい Session で走っていない");
+      assertEquals(used, 2, "the retry did not run on a new Session");
       assertEquals(h.log, [
         "attempt:text",
         "body:1",
@@ -463,7 +495,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       assert(h.residency.downgraded);
     });
 
-    it("やり直しも OOM なら、その例外をそのまま投げる（退避は 1 回だけ）", async () => {
+    it("if the retry also hits an OOM, that exception is thrown as is (only one eviction)", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       const error = await assertRejects(
@@ -475,8 +507,9 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       assertEquals(h.log.filter((entry) => entry === "settle").length, 1);
     });
 
-    it("この generate で作った DiT の run の OOM は退避も格下げもせず、畳んで元の例外を投げる", async () => {
-      // 持っている GPU 資源はこの DiT 1 本だけ（段ごと運転と同じ VRAM 構成）— 常駐が原因ではない。
+    it("an OOM in the run of a DiT built in this generate neither evicts nor downgrades; it disposes and throws the original exception", async () => {
+      // The only GPU resource held is this one DiT (the same VRAM layout as per-stage operation) —
+      // residency is not the cause.
       const h = createHarness();
       const error = await assertRejects(
         () => h.generate({ residency: "transformer", faults: { transformer: ["oom"] } }),
@@ -484,16 +517,16 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       );
       assertEquals(error.message, "transformer: not enough memory left");
       assertEquals(h.log, ["attempt:text", "open:1", "body:1", "dispose:1"]);
-      assertEquals(h.notices, [], "席に載る前の失敗を名乗っている");
-      assertFalse(h.residency.downgraded, "常駐と無関係な OOM で格下げした");
+      assertEquals(h.notices, [], "it announces a failure that happened before entering the slot");
+      assertFalse(h.residency.downgraded, "it downgraded on an OOM unrelated to residency");
       assertFalse(h.residency.holding);
-      // 格下げしていないので、次の generate はまた常駐を試みる。
+      // It did not downgrade, so the next generate tries residency again.
       assertEquals(await h.generate({ residency: "transformer" }), 2);
       assert(h.residency.holding);
       assertEquals(h.notices, [{ action: "retained", reason: "request" }]);
     });
 
-    it("退避の破棄が失敗しても、格下げと席の明け渡しが先に立ち、evicted / out-of-memory を名乗ってから投げる", async () => {
+    it("even when the eviction's disposal fails, the downgrade and giving up the slot happen first, and it throws after announcing evicted / out-of-memory", async () => {
       const h = createHarness({ disposeFails: true });
       await h.generate({ residency: "transformer" });
       h.log.length = 0;
@@ -503,19 +536,19 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       );
       assertEquals(
         error.errors.map((cause: Error) => cause.message),
-        ["vae: not enough memory left", "dispose 1 に失敗"],
+        ["vae: not enough memory left", "dispose 1 failed"],
       );
       assertEquals(error.message, "anima: DiT clean-up failed");
-      // 破棄の瞬間に格下げは立ち、席は空いている（MUST の順序）。
+      // At the moment of disposal the downgrade is set and the slot is empty (the MUST ordering).
       assertEquals(h.disposals, [{ id: 1, holding: false, downgraded: true }]);
       assertEquals(h.notices.at(-1), { action: "evicted", reason: "out-of-memory" });
-      // 後始末が壊れた状態ではやり直さない（1 回目の試行だけ）。
+      // With a broken cleanup it does not retry (only the first attempt).
       assertEquals(h.log.filter((entry) => entry === "attempt:vae").length, 1);
       assert(h.residency.downgraded);
       assertFalse(h.residency.holding);
     });
 
-    it("解放待ちが reject しても evicted / out-of-memory を名乗り、元の OOM を先頭にした AggregateError で投げる", async () => {
+    it("even when the release wait rejects, it announces evicted / out-of-memory and throws an AggregateError headed by the original OOM", async () => {
       const h = createHarness({ settleFails: true });
       await h.generate({ residency: "transformer" });
       const error = await assertRejects(
@@ -524,17 +557,18 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       );
       assertEquals(
         error.errors.map((cause: Error) => cause.message),
-        ["text: not enough memory left", "解放待ちに失敗"],
+        ["text: not enough memory left", "the release wait failed"],
       );
       assertEquals(h.notices.at(-1), { action: "evicted", reason: "out-of-memory" });
-      assertEquals(h.log.filter((entry) => entry === "attempt:text").length, 2, "やり直している");
+      assertEquals(h.log.filter((entry) => entry === "attempt:text").length, 2, "it retries");
       assert(h.residency.downgraded);
       assertFalse(h.residency.holding);
     });
 
-    it("evicted / out-of-memory の通知で購読側が投げたら、やり直さずにその例外を投げる（格下げは残る）", async () => {
-      // 通知の throw は中断の手段（onEvent の契約）。退避そのものは済んでいる。
-      const reason = new Error("中止ボタン");
+    it("when a subscriber throws on the evicted / out-of-memory notice, it throws that exception without retrying (the downgrade remains)", async () => {
+      // Throwing from a notice is the means of aborting (the onEvent contract). The eviction itself
+      // is done.
+      const reason = new Error("cancel button");
       const h = createHarness({
         notifyThrows: (notice) => (notice.action === "evicted" ? reason : undefined),
       });
@@ -557,7 +591,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       assertFalse(h.residency.holding);
     });
 
-    it("常駐 DiT が無ければ OOM は退避せずに投げ、格下げもしない", async () => {
+    it("without a resident DiT an OOM throws without eviction and does not downgrade", async () => {
       const h = createHarness();
       await assertRejects(
         () => h.generate({ residency: "per-stage", faults: { vae: ["oom"] } }),
@@ -567,23 +601,26 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       assertEquals(h.notices, []);
     });
 
-    it("OOM 以外の失敗は他の段で起きても常駐 DiT を捨てない（退避は余力切れだけ）", async () => {
+    it("a failure other than OOM does not discard the resident DiT even in another stage (eviction is only for running out of memory)", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       await assertRejects(
         () => h.generate({ residency: "transformer", faults: { vae: ["failure"] } }),
         Error,
-        "vae が失敗",
+        "vae failed",
       );
       assert(h.residency.holding);
       assertFalse(h.residency.downgraded);
     });
   });
 
-  describe("④' 先回りの退避（ensureHeadroom）", () => {
+  describe("④' pre-emptive eviction (ensureHeadroom)", () => {
     const NEED = 3 * 1024 * 1024 * 1024;
 
-    /** 呼ばれた必要量を積み、決めた答えを返す probe（`answer` が Error なら reject する）。 */
+    /**
+     * A probe that records the needs it is called with and returns a fixed answer (rejects when
+     * `answer` is an Error).
+     */
     const recordingProbe = (answer: boolean | Error) => {
       const calls: number[] = [];
       const probe = (bytes: number): Promise<boolean> => {
@@ -593,7 +630,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       return { calls, probe };
     };
 
-    /** 1 回目の generate で DiT を席に載せた台（`log` / `notices` は空にしてある）。 */
+    /** A harness whose first generate put the DiT in the slot (`log` / `notices` emptied). */
     const holdingHarness = async (options: HarnessOptions = {}) => {
       const h = createHarness(options);
       await h.generate({ residency: "transformer" });
@@ -603,8 +640,8 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       return h;
     };
 
-    describe("ensureHeadroom 単体", () => {
-      it("常駐 DiT が無ければ probe を呼ばず、何も名乗らず、格下げもしない", async () => {
+    describe("ensureHeadroom on its own", () => {
+      it("without a resident DiT it does not call the probe, announces nothing and does not downgrade", async () => {
         const h = createHarness();
         const { calls, probe } = recordingProbe(false);
         await h.residency.ensureHeadroom(NEED, probe, h.notify);
@@ -614,7 +651,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         assertFalse(h.residency.downgraded);
       });
 
-      it("入るなら probe を必要量で 1 回だけ呼び、何も名乗らずに常駐を続ける", async () => {
+      it("if it fits, it calls the probe exactly once with the need, announces nothing and keeps the resident DiT", async () => {
         const h = await holdingHarness();
         const { calls, probe } = recordingProbe(true);
         await h.residency.ensureHeadroom(NEED, probe, h.notify);
@@ -625,13 +662,13 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         assertFalse(h.residency.downgraded);
       });
 
-      it("入らなければ 破棄 → 解放待ち → evicted / headroom の順に退避し、以後は段ごと運転に格下げ", async () => {
+      it("if it does not fit, it evicts in the order dispose → release wait → evicted / headroom, and downgrades to per-stage operation afterwards", async () => {
         const h = await holdingHarness();
         const { calls, probe } = recordingProbe(false);
         await h.residency.ensureHeadroom(NEED, probe, h.notify);
         assertEquals(calls, [NEED]);
         assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
-        // 破棄の瞬間に格下げは立ち、席は空いている（MUST の順序）。
+        // At the moment of disposal the downgrade is set and the slot is empty (the MUST ordering).
         assertEquals(h.disposals.at(-1), { id: 1, holding: false, downgraded: true });
         assertFalse(h.residency.holding);
         assert(h.residency.downgraded);
@@ -645,7 +682,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         );
       });
 
-      it("probe が投げたらそのまま投げ、格下げも破棄もせず常駐を続ける（入らない ≠ 失敗）", async () => {
+      it("if the probe throws it throws as is, neither downgrading nor disposing, and keeps the resident DiT (does not fit ≠ failure)", async () => {
         const h = await holdingHarness();
         const failure = new GpuValidationError("probe: validation");
         const { calls, probe } = recordingProbe(failure);
@@ -658,17 +695,18 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         assertFalse(h.residency.downgraded);
       });
 
-      it("退避の破棄が失敗しても evicted / headroom を名乗り、後始末の失敗だけを並べた AggregateError で投げる", async () => {
+      it("even when the eviction's disposal fails it announces evicted / headroom and throws an AggregateError listing only the cleanup failures", async () => {
         const h = await holdingHarness({ disposeFails: true });
         const { probe } = recordingProbe(false);
         const error = await assertRejects(
           () => h.residency.ensureHeadroom(NEED, probe, h.notify),
           AggregateError,
         );
-        // 元の失敗は無い — 並ぶのは後始末の失敗だけ（OOM の退避では先頭に元の OOM が来る）。
+        // There is no original failure — only the cleanup failures are listed (in an OOM eviction
+        // the original OOM comes first).
         assertEquals(
           error.errors.map((cause: Error) => cause.message),
-          ["dispose 1 に失敗"],
+          ["dispose 1 failed"],
         );
         assertEquals(error.message, "anima: DiT clean-up failed");
         assertEquals(h.log, ["dispose:1", "settle", "notice:evicted/headroom"]);
@@ -676,7 +714,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         assertFalse(h.residency.holding);
       });
 
-      it("解放待ちが reject しても evicted / headroom を名乗り、その失敗を AggregateError で投げる", async () => {
+      it("even when the release wait rejects it announces evicted / headroom and throws that failure in an AggregateError", async () => {
         const h = await holdingHarness({ settleFails: true });
         const { probe } = recordingProbe(false);
         const error = await assertRejects(
@@ -685,18 +723,18 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         );
         assertEquals(
           error.errors.map((cause: Error) => cause.message),
-          ["解放待ちに失敗"],
+          ["the release wait failed"],
         );
         assertEquals(h.notices, [{ action: "evicted", reason: "headroom" }]);
         assert(h.residency.downgraded);
         assertFalse(h.residency.holding);
       });
 
-      it("後始末の失敗に通知の失敗が重なれば、両方を AggregateError に並べる", async () => {
+      it("when a notice failure adds to a cleanup failure, both are listed in the AggregateError", async () => {
         const h = await holdingHarness({
           settleFails: true,
           notifyThrows: (notice) =>
-            notice.action === "evicted" ? new Error("購読側の失敗") : undefined,
+            notice.action === "evicted" ? new Error("subscriber failure") : undefined,
         });
         const { probe } = recordingProbe(false);
         const error = await assertRejects(
@@ -705,12 +743,12 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         );
         assertEquals(
           error.errors.map((cause: Error) => cause.message),
-          ["解放待ちに失敗", "購読側の失敗"],
+          ["the release wait failed", "subscriber failure"],
         );
       });
 
-      it("後始末が通って evicted / headroom の通知で購読側が投げたら、その例外をそのまま投げる（格下げは残る）", async () => {
-        const reason = new Error("中止ボタン");
+      it("when the cleanup succeeds and a subscriber throws on the evicted / headroom notice, that exception is thrown as is (the downgrade remains)", async () => {
+        const reason = new Error("cancel button");
         const h = await holdingHarness({
           notifyThrows: (notice) => (notice.action === "evicted" ? reason : undefined),
         });
@@ -723,8 +761,8 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       });
     });
 
-    describe("generate の中の 2 つの量る点", () => {
-      it("text 段の前で入らなければ、段を張る前に退避し、DiT 段は段ごと運転で作り直して downgraded を名乗る", async () => {
+    describe("the two measuring points inside generate", () => {
+      it("if it does not fit before the text stage, it evicts before opening the stage, rebuilds the DiT stage with per-stage operation and announces downgraded", async () => {
         const h = createHarness();
         await h.generate({ residency: "transformer" });
         h.log.length = 0;
@@ -741,11 +779,12 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
           "notice:released/downgraded",
           "attempt:vae",
         ]);
-        // text 段の前の量りは text 系の必要量で、退避の後の VAE 段の前は量らない（席が空）。
+        // The measurement before the text stage uses the text-side need, and after the eviction
+        // nothing is measured before the VAE stage (the slot is empty).
         assertEquals(h.probes, [{ point: "text", need: TEXT_NEED }]);
       });
 
-      it("実効値 per-stage の generate で text 段の前に退避したら、DiT 段は何も名乗らない", async () => {
+      it("when a generate with the effective value per-stage evicts before the text stage, the DiT stage announces nothing", async () => {
         const h = createHarness();
         await h.generate({ residency: "transformer" });
         h.notices.length = 0;
@@ -754,7 +793,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         assert(h.residency.downgraded);
       });
 
-      it("最初の generate でも、DiT を席に載せた後の VAE 段の前で入らなければ退避する", async () => {
+      it("even in the first generate, it evicts if it does not fit before the VAE stage after putting the DiT in the slot", async () => {
         const h = createHarness();
         assertEquals(await h.generate({ residency: "transformer", headroomShort: ["vae"] }), 1);
         assertEquals(h.log, [
@@ -767,13 +806,14 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
           "notice:evicted/headroom",
           "attempt:vae",
         ]);
-        // 席が空の text 段の前は量らず、VAE 段の前だけを VAE の必要量で量る。
+        // Nothing is measured before the text stage while the slot is empty; only before the VAE
+        // stage, with the VAE need.
         assertEquals(h.probes, [{ point: "vae", need: VAE_NEED }]);
         assert(h.residency.downgraded);
         assertFalse(h.residency.holding);
       });
 
-      it("持ち越した DiT の generate は 2 点とも量り、VAE 段の前で入らなければそこで退避する", async () => {
+      it("a generate with a carried-over DiT measures at both points and evicts there if it does not fit before the VAE stage", async () => {
         const h = createHarness();
         await h.generate({ residency: "transformer" });
         h.log.length = 0;
@@ -794,7 +834,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         ]);
       });
 
-      it("退避の後は格下げが残り、transformer を求められても常駐せず、量りもしない", async () => {
+      it("after an eviction the downgrade remains: even when transformer is requested it keeps no resident DiT and measures nothing", async () => {
         const h = createHarness();
         await h.generate({ residency: "transformer" });
         await h.generate({ residency: "transformer", headroomShort: ["text"] });
@@ -806,7 +846,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
         assertFalse(h.residency.holding);
       });
 
-      it("後始末が壊れた退避の後は段へ進まない（text 段の前）", async () => {
+      it("after an eviction with a broken cleanup it does not proceed to the stage (before the text stage)", async () => {
         const h = createHarness({ settleFails: true });
         await h.generate({ residency: "transformer" });
         h.log.length = 0;
@@ -819,33 +859,33 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
     });
   });
 
-  describe("⑤ DiT 段の失敗", () => {
-    it("常駐の席に載った DiT は捨てて evicted / failure を名乗り、元の例外をそのまま投げる", async () => {
+  describe("⑤ failure of the DiT stage", () => {
+    it("a DiT in the resident slot is discarded with evicted / failure announced, and the original exception is thrown as is", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       const error = await assertRejects(
         () => h.generate({ residency: "transformer", faults: { transformer: ["failure"] } }),
         Error,
       );
-      assertEquals(error.message, "transformer が失敗");
+      assertEquals(error.message, "transformer failed");
       assert(h.sessions[0].disposed);
       assertFalse(h.residency.holding);
-      assertFalse(h.residency.downgraded, "失敗の破棄は格下げしない");
+      assertFalse(h.residency.downgraded, "a disposal on failure does not downgrade");
       assertEquals(h.notices.at(-1), { action: "evicted", reason: "failure" });
-      // 次の generate は作り直して持つ。
+      // The next generate rebuilds it and keeps it.
       assertEquals(await h.generate({ residency: "transformer" }), 2);
       assert(h.residency.holding);
     });
 
-    it("通知の購読側が同じ例外を投げ直しても、生成が投げるのは元の例外 1 本（中断の識別を壊さない）", async () => {
+    it("even when the notice subscriber rethrows the same exception, the generation throws only the original one (abort identification stays intact)", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
-      const reason = new Error("中止ボタン");
+      const reason = new Error("cancel button");
       const notified: ResidencyNotice[] = [];
       const error = await assertRejects(() =>
         h.residency.runTransformer({
           effective: "transformer",
-          open: () => Promise.reject(new Error("持ち越した DiT があるのに作っている")),
+          open: () => Promise.reject(new Error("building although a carried-over DiT exists")),
           body: () => Promise.reject(reason),
           notify: (notice) => {
             notified.push(notice);
@@ -858,7 +898,7 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       assertFalse(h.residency.holding);
     });
 
-    it("後始末が失敗したら、元の例外を先頭にした AggregateError で運ぶ（元の失敗を上書きしない）", async () => {
+    it("if the cleanup fails, it carries an AggregateError headed by the original exception (the original failure is not overwritten)", async () => {
       const h = createHarness({ disposeFails: true });
       await h.generate({ residency: "transformer" });
       const error = await assertRejects(
@@ -867,64 +907,65 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
       );
       assertEquals(
         error.errors.map((cause: Error) => cause.message),
-        ["transformer が失敗", "dispose 1 に失敗"],
+        ["transformer failed", "dispose 1 failed"],
       );
-      assertFalse(h.residency.holding, "破棄に失敗した Session を席に残している");
+      assertFalse(h.residency.holding, "a Session whose disposal failed is left in the slot");
     });
 
-    it("席に載っていない DiT（段ごと運転 / この generate で作る DiT）の失敗は畳むだけで何も名乗らない", async () => {
+    it("the failure of a DiT not in the slot (per-stage operation / a DiT built in this generate) only disposes it and announces nothing", async () => {
       for (const residency of ["per-stage", "transformer"] as const) {
         const h = createHarness();
         await assertRejects(
           () => h.generate({ residency, faults: { transformer: ["failure"] } }),
           Error,
-          "transformer が失敗",
+          "transformer failed",
         );
-        assert(h.sessions[0].disposed, `${residency}: 畳んでいない`);
-        assertEquals(h.notices, [], `${residency}: 名乗っている`);
+        assert(h.sessions[0].disposed, `${residency}: not disposed`);
+        assertEquals(h.notices, [], `${residency}: announces something`);
         assertFalse(h.residency.holding);
       }
     });
   });
 
-  describe("⑥ DiT 段より前で失敗した generate", () => {
-    it("実効値 per-stage なら持ち越した DiT を手放して released / request を名乗り、元の例外を投げる", async () => {
+  describe("⑥ a generate that failed before the DiT stage", () => {
+    it("with the effective value per-stage it releases the carried-over DiT, announces released / request and throws the original exception", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       h.log.length = 0;
       await assertRejects(
         () => h.generate({ residency: "per-stage", faults: { text: ["failure"] } }),
         Error,
-        "text が失敗",
+        "text failed",
       );
       assertEquals(h.log, ["attempt:text", "dispose:1", "notice:released/request"]);
       assertFalse(h.residency.holding);
       assertFalse(h.residency.downgraded);
-      // 次の per-stage は常駐と無関係 = 何も名乗らない。
+      // The next per-stage has nothing to do with residency = announces nothing.
       await h.generate({ residency: "per-stage" });
       assertEquals(h.notices.at(-1), { action: "released", reason: "request" });
       assertEquals(h.notices.length, 2);
     });
 
-    it("実効値 transformer なら持ったまま何も名乗らない", async () => {
+    it("with the effective value transformer it keeps it and announces nothing", async () => {
       const h = createHarness();
       await h.generate({ residency: "transformer" });
       await assertRejects(
         () => h.generate({ residency: "transformer", faults: { text: ["failure"] } }),
         Error,
-        "text が失敗",
+        "text failed",
       );
       assert(h.residency.holding);
       assertEquals(h.notices, [{ action: "retained", reason: "request" }]);
     });
 
-    it("手放しの通知で購読側が同じ例外を投げ直しても元の例外 1 本、破棄の失敗は AggregateError に並べる", async () => {
-      const reason = new Error("中止ボタン");
+    it("even when a subscriber rethrows the same exception on the release notice there is only the original exception, and a disposal failure is listed in an AggregateError", async () => {
+      const reason = new Error("cancel button");
       const h = createHarness({
         notifyThrows: (notice) => (notice.action === "released" ? reason : undefined),
       });
       await h.generate({ residency: "transformer" });
-      // 返り値が投げるべき例外（pipeline の失敗経路は `throw await releaseIfRequested(...)`）。
+      // The return value is the exception to throw (the pipeline's failure path is `throw await
+      // releaseIfRequested(...)`).
       assertStrictEquals(
         await h.residency.releaseIfRequested(reason, "per-stage", h.notify),
         reason,
@@ -933,21 +974,21 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
 
       const broken = createHarness({ disposeFails: true });
       await broken.generate({ residency: "transformer" });
-      const original = new Error("text が失敗");
+      const original = new Error("text failed");
       const error = await broken.residency.releaseIfRequested(original, "per-stage", broken.notify);
       assert(error instanceof AggregateError);
-      assertStrictEquals(error.errors[0], original, "元の失敗を先頭に置いていない");
+      assertStrictEquals(error.errors[0], original, "the original failure is not placed first");
       assertEquals(
         error.errors.map((cause: Error) => cause.message),
-        ["text が失敗", "dispose 1 に失敗"],
+        ["text failed", "dispose 1 failed"],
       );
-      assertFalse(broken.residency.holding, "破棄に失敗した Session を席に残している");
+      assertFalse(broken.residency.holding, "a Session whose disposal failed is left in the slot");
       assertEquals(broken.notices.at(-1), { action: "released", reason: "request" });
     });
 
-    it("席が空なら何もせず元の例外を返す", async () => {
+    it("with an empty slot it does nothing and returns the original exception", async () => {
       const h = createHarness();
-      const original = new Error("text が失敗");
+      const original = new Error("text failed");
       assertStrictEquals(
         await h.residency.releaseIfRequested(original, "per-stage", h.notify),
         original,
@@ -957,8 +998,8 @@ describe("TransformerResidency（偽の generate で回す状態機械）", () =
   });
 });
 
-describe("disposeResidencyThenGpu（pipeline の dispose の本体）", () => {
-  it("常駐 DiT を畳んでから GPU を破棄する（flush-before-destroy）", async () => {
+describe("disposeResidencyThenGpu (the body of the pipeline's dispose)", () => {
+  it("disposes the resident DiT before destroying the GPU (flush-before-destroy)", async () => {
     const log: string[] = [];
     await disposeResidencyThenGpu(
       { dispose: () => Promise.resolve(void log.push("residency")) },
@@ -967,21 +1008,21 @@ describe("disposeResidencyThenGpu（pipeline の dispose の本体）", () => {
     assertEquals(log, ["residency", "gpu"]);
   });
 
-  it("常駐 DiT の破棄が失敗しても内部で取った GPU は破棄し、失敗を投げる", async () => {
+  it("even when disposing the resident DiT fails, it destroys the GPU it acquired internally and throws the failure", async () => {
     const log: string[] = [];
     await assertRejects(
       () =>
         disposeResidencyThenGpu(
-          { dispose: () => Promise.reject(new Error("常駐 DiT の破棄に失敗")) },
+          { dispose: () => Promise.reject(new Error("disposing the resident DiT failed")) },
           () => void log.push("gpu"),
         ),
       Error,
-      "常駐 DiT の破棄に失敗",
+      "disposing the resident DiT failed",
     );
     assertEquals(log, ["gpu"]);
   });
 
-  it("共有 GPU（破棄の口なし）でも常駐 DiT は畳む", async () => {
+  it("disposes the resident DiT even with a shared GPU (no destroy hook)", async () => {
     const h = createHarness();
     await h.generate({ residency: "transformer" });
     await disposeResidencyThenGpu(h.residency, undefined);

@@ -1,14 +1,16 @@
-// ホスト側 sampling（`src/generation/sampler.ts`）と EOS 集合の停止判定の挙動テスト。
-// GPU も実資産も要らない。
+// Behaviour tests of host-side sampling (`src/generation/sampler.ts`) and the stop decision over
+// the EOS set. Neither a GPU nor real assets are needed.
 //
-// ここで縛るのは「logits 1 本 → token 1 個」の**加工の順序と境界**— 温度 0 の greedy 縮退・
-// top-k / top-p の残す集合・repetition penalty の符号規約・logit bias・seed の決定性。実 GPU で
-// 回すと「文章が少し変」という形でしか出ず（sampling は例外を出さない）、境界を 1 個間違えても
-// 検収 e2e は温度 0 経路しか踏まないので**永久に緑のまま**になる位置にある。
+// What this pins is the **order and boundaries of the logit processing** from "one logits row → one
+// token" — temperature 0 collapsing to greedy, the sets top-k / top-p keep, the sign convention of
+// the repetition penalty, logit bias, and seed determinism. On a real GPU these show up only as
+// "the text is a little odd" (sampling raises no exception), and the acceptance e2e only takes the
+// temperature-0 path, so a boundary off by one would **stay green forever**.
 //
-// MUST: HF の sampling 出力との token 列 parity は取れない（RNG が splitmix64 で torch の
-// Philox と別物 — ADR 0083 決定 7）。したがって期待値はすべて**この門が手で書き下した理論値**で、
-// 実装から採った fixture は 1 つも無い。分布そのものは χ² 門（下段）で縛る。
+// MUST: token-sequence parity with HF's sampling output is impossible (the RNG is splitmix64, not
+// torch's Philox — ADR 0083 decision 7). So every expected value is **a theoretical value this
+// check wrote down by hand**; not a single fixture was taken from the implementation. The
+// distribution itself is pinned by the χ² check (below).
 
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
@@ -28,8 +30,9 @@ const f32 = (values: readonly number[]): Float32Array<ArrayBuffer> => {
 };
 
 /**
- * 期待値側の softmax（**実装と別の形**で書く — 実装は最大値を引いてから exp を取るので、
- * 素の式で書いておくと「同じ関数を両側から呼んで一致を見る」恒真化を避けられる）。
+ * The softmax on the expected side (written **in a different form from the implementation** — the
+ * implementation subtracts the maximum before taking exp, so writing the plain formula avoids the
+ * tautology of "calling the same function on both sides and checking they agree").
  */
 const softmax = (logits: readonly number[]): number[] => {
   const weights = logits.map((logit) => Math.exp(logit));
@@ -42,36 +45,43 @@ const assertProbabilities = (
   expected: readonly number[],
   where: string,
 ): void => {
-  assertEquals(actual.length, expected.length, `${where}: 候補数`);
+  assertEquals(actual.length, expected.length, `${where}: candidate count`);
   expected.forEach((want, index) => {
-    assertAlmostEquals(actual[index], want, 1e-6, `${where}: 確率[${index}]`);
+    assertAlmostEquals(actual[index], want, 1e-6, `${where}: probability[${index}]`);
   });
 };
 
-/** 分布門の対象（`logits = ln(p)` なので温度 1 の softmax がそのまま `p` に戻る）。 */
+/**
+ * The subject of the distribution check (`logits = ln(p)`, so the temperature-1 softmax gives back
+ * `p`).
+ */
 const BASE_PROBABILITIES = [0.5, 0.3, 0.15, 0.05] as const;
 const BASE_LOGITS = f32(BASE_PROBABILITIES.map((probability) => Math.log(probability)));
 
-// ---------------------------------------------------------------------------
-// 温度 0 = greedy 縮退（ADR 0083 決定 7 — parity 門が生き続ける経路）
+// --------------------------------------------------------------------------- Temperature 0 =
+// collapse to greedy (ADR 0083 decision 7 — the path the parity check keeps alive)
 // ---------------------------------------------------------------------------
 
-test("sampler: 既定（指定なし）は温度 0 の greedy で argmax と厳密一致", () => {
+test("sampler: the default (nothing set) is temperature-0 greedy and matches argmax exactly", () => {
   const logits = f32([-1, 4.5, 0, 4.25, -3]);
   assertEquals(createSampler().next(logits, []), 1);
   assertEquals(createSampler({}).next(logits, []), 1);
   const distribution = samplerDistribution(logits, {}, []);
-  assertEquals([...distribution.tokens], [1], "温度 0 は 1 点分布へ縮退する");
+  assertEquals(
+    [...distribution.tokens],
+    [1],
+    "temperature 0 collapses to a one-point distribution",
+  );
   assertEquals([...distribution.probabilities], [1]);
 });
 
-test("sampler: 温度 0 の tie-break は先に出た方（torch の argmax と同じ）", () => {
-  // 同値が並ぶ列で `>=` 更新の実装（後勝ち）を落とす。
+test("sampler: the temperature-0 tie-break takes the earlier one (the same as torch's argmax)", () => {
+  // A row of equal values fails an implementation that updates on `>=` (the later one wins).
   assertEquals(createSampler().next(f32([1, 3, 3, 2]), []), 1);
   assertEquals(createSampler().next(f32([3, 3, 3]), []), 0);
 });
 
-test("sampler: 温度 0 は seed に依らず同じ列（抽選が走らない）", () => {
+test("sampler: temperature 0 gives the same sequence whatever the seed (no draw runs)", () => {
   const logits = f32([0.1, 0.9, 0.4]);
   const first = createSampler({ seed: 1 });
   const second = createSampler({ seed: 999 });
@@ -80,9 +90,10 @@ test("sampler: 温度 0 は seed に依らず同じ列（抽選が走らない�
   }
 });
 
-test("sampler: NaN は最大値でなくても落ちる（比較が全部 false になる値を通さない）", () => {
-  // NaN はあらゆる比較が false なので、素通しすると①argmax が別 token を返し、②top-k の閾値が
-  // 一度 NaN になった後の候補を全部弾き、③softmax の分母が NaN になる。どれも例外を出さない。
+test("sampler: NaN fails even when it is not the maximum (a value that makes every comparison false is not passed)", () => {
+  // Every comparison with NaN is false, so passing it through would ① make argmax return another
+  // token, ② reject every candidate after the top-k threshold once became NaN, and ③ make the
+  // softmax denominator NaN. None of these raises an exception.
   const poisoned = f32([1, NaN, 3, 2]);
   assertThrows(() => createSampler().next(poisoned, []), Error, "NaN");
   assertThrows(() => samplerDistribution(poisoned, { temperature: 1, topK: 2 }, []), Error, "NaN");
@@ -93,13 +104,14 @@ test("sampler: NaN は最大値でなくても落ちる（比較が全部 false 
   );
 });
 
-test("sampler: greedy は範囲内の最初の NaN を最大値より優先して拒否する", () => {
+test("sampler: greedy rejects the first NaN in range ahead of the maximum", () => {
   for (const values of [
     [NaN, 3, 2],
     [Infinity, 3, NaN],
     [NaN, NaN, Infinity],
   ]) {
-    // 外側の NaN は view の対象外。最大値を見つけても末尾まで検査する。
+    // The NaNs outside are not part of the view. The check runs to the end even after the maximum
+    // is found.
     const backing = f32([NaN, ...values, NaN]);
     const logits = backing.subarray(1, backing.length - 1);
     const first = values.findIndex(Number.isNaN);
@@ -117,7 +129,7 @@ test("sampler: greedy は範囲内の最初の NaN を最大値より優先し�
   );
 });
 
-test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", () => {
+test("sampler: topK rejects the first NaN even outside the candidate range", () => {
   for (const topK of [1, 2, 4, 8]) {
     for (const values of [
       [NaN, 3, 2, 1],
@@ -137,7 +149,8 @@ test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", (
       );
     }
   }
-  // 加工で生じた NaN も、上位候補から外れる位置にあっても拒否する。
+  // A NaN produced by the processing is rejected too, even at a position outside the top
+  // candidates.
   assertThrows(
     () =>
       samplerDistribution(
@@ -154,13 +167,15 @@ test("sampler: topK は候補の範囲外でも最初の NaN を拒否する", (
   );
 });
 
-test("sampler: 最大 logit が非有限なら token id へ畳まずに落ちる", () => {
-  // 位置表の外の gather は行ごと NaN 汚染する（known-issues）ので、最終行 logits は**丸ごと**
-  // 非有限になる。argmax はそれを「もっともらしい token id」（NaN 比較が常に false なので
-  // 先頭 = token 0）へ畳むため、畳まれる前がここしかない。
+test("sampler: a non-finite maximum logit fails instead of being folded into a token id", () => {
+  // A gather outside the position table poisons the whole row with NaN (known-issues), so the last
+  // row's logits become non-finite **entirely**. argmax would fold that into "a plausible token id"
+  // (token 0 at the front, since NaN comparisons are always false), so this is the only place
+  // before the folding.
   assertThrows(() => createSampler().next(f32([NaN, NaN, NaN]), []), Error, "non-finite");
   assertThrows(() => createSampler().next(f32([-Infinity, -Infinity]), []), Error, "non-finite");
-  // 温度 > 0 側も同じ段で落ちる（softmax が全 0 になって抽選が壊れる前）。
+  // The temperature > 0 side fails at the same step (before the softmax goes all 0 and breaks the
+  // draw).
   assertThrows(
     () => createSampler({ temperature: 1 }).next(f32([NaN, NaN]), []),
     Error,
@@ -168,16 +183,16 @@ test("sampler: 最大 logit が非有限なら token id へ畳まずに落ちる
   );
 });
 
-// ---------------------------------------------------------------------------
-// top-k（上限なし — 最終行 logits 出口だから。ADR 0083 決定 6 の裏返し）
+// --------------------------------------------------------------------------- top-k (no upper limit
+// — because this is the last-row logits exit; the flip side of ADR 0083 decision 6)
 // ---------------------------------------------------------------------------
 
-test("sampler: topK = 1 は温度に依らず greedy と一致する（候補 1 件で抽選が自明）", () => {
+test("sampler: topK = 1 matches greedy whatever the temperature (one candidate makes the draw trivial)", () => {
   const spec = { temperature: 1, topK: 1, seed: 3 } satisfies SamplerSpec;
   const distribution = samplerDistribution(BASE_LOGITS, spec, []);
   assertEquals([...distribution.tokens], [0]);
   assertEquals([...distribution.probabilities], [1]);
-  // seed を変えても動かない（絞り込みが最上位 1 件へ縮退している）。
+  // Changing the seed does not move it (the filtering has collapsed to the top one).
   const first = createSampler(spec);
   const second = createSampler({ ...spec, seed: 4242 });
   for (let step = 0; step < 16; step += 1) {
@@ -186,19 +201,19 @@ test("sampler: topK = 1 は温度に依らず greedy と一致する（候補 1 
   }
 });
 
-test("sampler: topK は上位 k 件だけを残し、確率をその中で正規化する", () => {
+test("sampler: topK keeps only the top k and normalizes the probabilities among them", () => {
   const distribution = samplerDistribution(BASE_LOGITS, { temperature: 1, topK: 2 }, []);
-  assertEquals([...distribution.tokens], [0, 1], "上位 2 件（確率降順）");
-  // 落とした 0.15 + 0.05 の質量は分母から消える。
+  assertEquals([...distribution.tokens], [0, 1], "top 2 (descending probability)");
+  // The dropped mass of 0.15 + 0.05 leaves the denominator.
   assertProbabilities(distribution.probabilities, [0.5 / 0.8, 0.3 / 0.8], "topK 2");
 });
 
-test("sampler: topK の同値は token id の小さい方を残す", () => {
+test("sampler: a topK tie keeps the smaller token id", () => {
   const distribution = samplerDistribution(f32([2, 2, 1]), { temperature: 1, topK: 1 }, []);
   assertEquals([...distribution.tokens], [0]);
 });
 
-test("sampler: topK が語彙数以上なら全件（HF の min(top_k, vocab)）", () => {
+test("sampler: topK at or above the vocabulary size keeps everything (HF's min(top_k, vocab))", () => {
   for (const topK of [4, 5, 1_000_000]) {
     const distribution = samplerDistribution(BASE_LOGITS, { temperature: 1, topK }, []);
     assertEquals([...distribution.tokens], [0, 1, 2, 3], `topK ${topK}`);
@@ -207,8 +222,9 @@ test("sampler: topK が語彙数以上なら全件（HF の min(top_k, vocab)）
 });
 
 /**
- * 参照の上位 k 件 — **契約の言葉どおり**「全件を値の降順（同値は token id の昇順）に並べて
- * 先頭 k」。実装（有界 heap）とは別の形で書く（全件ソートなので恒真化しない）。
+ * The reference top k — **literally as the contract says**, "sort everything by descending value
+ * (ties by ascending token id) and take the first k". Written in a different form from the
+ * implementation (a bounded heap), so it is not a tautology (it sorts everything).
  */
 const referenceTopK = (logits: Float32Array<ArrayBuffer>, k: number): number[] =>
   Array.from({ length: logits.length }, (_unused, token) => token)
@@ -219,9 +235,10 @@ const referenceTopK = (logits: Float32Array<ArrayBuffer>, k: number): number[] =
     .slice(0, k);
 
 /**
- * 選択の形を変える 3 分布（語彙 8,192）。**昇順**は「値が改善し続ける」最悪形で、**同値**は
- * 足切りが効かないと候補の入れ替えが毎回起きる形 — どちらも上位 k 件の中身より先に並びが
- * 壊れる入力である。
+ * Three distributions that change the shape of the selection (vocabulary 8,192). **Ascending** is
+ * the worst case where "the value keeps improving", and **ties** is the case where, without an
+ * effective cutoff, candidates are swapped every time — both are inputs that break the order before
+ * they break the contents of the top k.
  */
 const SELECTION_LOGITS = (() => {
   const size = 8_192;
@@ -242,9 +259,10 @@ const SELECTION_LOGITS = (() => {
   };
 })();
 
-test("sampler: topK はどの k でも参照（全件を並べた先頭 k）と中身も並びも一致する", () => {
-  // 選び方が k で切り替わる形（k の境界の前後で並びや tie-break が変わりうる）への逆戻りを縛る
-  // ため、離れた k と隣接する 2 値（1024 / 1025）を並べて同じ参照と突き合わせる。
+test("sampler: topK matches the reference (the first k of everything sorted) in contents and order for every k", () => {
+  // To pin against a regression to a selection that switches with k (where order or tie-break could
+  // change around a k boundary), distant k values and two adjacent ones (1024 / 1025) are checked
+  // against the same reference.
   for (const [shape, logits] of Object.entries(SELECTION_LOGITS)) {
     for (const topK of [64, 1024, 1025, 4096]) {
       const distribution = samplerDistribution(logits, { temperature: 1, topK }, []);
@@ -257,7 +275,7 @@ test("sampler: topK はどの k でも参照（全件を並べた先頭 k）と�
   }
 });
 
-test("sampler: 大きな topK の確率は参照の上位 k 件だけで正規化される", () => {
+test("sampler: the probabilities of a large topK are normalized over the reference top k only", () => {
   const logits = SELECTION_LOGITS.uniform;
   const topK = 1025;
   const distribution = samplerDistribution(logits, { temperature: 1, topK }, []);
@@ -265,20 +283,22 @@ test("sampler: 大きな topK の確率は参照の上位 k 件だけで正規�
   assertProbabilities(distribution.probabilities, expected, `topK ${topK}`);
 });
 
-// ---------------------------------------------------------------------------
-// top-p（nucleus — 累積が p に達する最小の集合・最上位 1 件は必ず残す）
+// --------------------------------------------------------------------------- top-p (nucleus — the
+// smallest set whose cumulative mass reaches p; the top one is always kept)
 // ---------------------------------------------------------------------------
 
-test("sampler: topP = 1 は絞らない", () => {
+test("sampler: topP = 1 does not filter", () => {
   const distribution = samplerDistribution(BASE_LOGITS, { temperature: 1, topP: 1 }, []);
   assertEquals([...distribution.tokens], [0, 1, 2, 3]);
   assertProbabilities(distribution.probabilities, [...BASE_PROBABILITIES], "topP 1");
 });
 
-test("sampler: topP は累積が p に達した 1 件までを残す", () => {
-  // 累積は 0.5 / 0.8 / 0.95 / 1.0。境界の読み方（「達した件を含む」）をここで固定する。
-  // NOTE: 累積とちょうど等しい p（ここでは 0.5 / 0.8 / 0.95）は f32 の丸めで両側に振れるので
-  // 門にしない — 固定するのは「達した件を含む」の読み方であって、境界での丸めではない。
+test("sampler: topP keeps up to the one at which the cumulative mass reaches p", () => {
+  // The cumulative masses are 0.5 / 0.8 / 0.95 / 1.0. This fixes how the boundary is read
+  // ("including the one that reaches it").
+  // NOTE: a p exactly equal to a cumulative mass (here 0.5 / 0.8 / 0.95) can swing either way
+  // through f32 rounding, so it is not checked — what is fixed is the reading "including the one
+  // that reaches it", not the rounding at the boundary.
   const cases = [
     { topP: 0.4, tokens: [0] },
     { topP: 0.75, tokens: [0, 1] },
@@ -297,10 +317,10 @@ test("sampler: topP は累積が p に達した 1 件までを残す", () => {
   }
 });
 
-test("sampler: topP は topK の後に効く（残った集合の中で累積を取る）", () => {
-  // topK 3 で {0.5, 0.3, 0.15} が残り、その中の正規化確率は 0.5263 / 0.3158 / 0.1579。
-  // 最上位の累積 0.5263 は 0.52 に達するので 1 件だけ残る — 語彙全体（0.5 < 0.52）で累積を
-  // 取る実装なら 2 件残って落ちる。
+test("sampler: topP applies after topK (the cumulative mass is taken within the remaining set)", () => {
+  // topK 3 leaves {0.5, 0.3, 0.15}, whose normalized probabilities are 0.5263 / 0.3158 / 0.1579.
+  // The top cumulative mass 0.5263 reaches 0.52, so only one remains — an implementation that takes
+  // the cumulative mass over the whole vocabulary (0.5 < 0.52) keeps two and fails.
   const distribution = samplerDistribution(
     BASE_LOGITS,
     { temperature: 1, topK: 3, topP: 0.52 },
@@ -309,7 +329,10 @@ test("sampler: topP は topK の後に効く（残った集合の中で累積を
   assertEquals([...distribution.tokens], [0]);
 });
 
-/** 比較ソートによる参照。順位・加算順・境界を固定し、radix の添字算術とは独立に検証する。 */
+/**
+ * A reference by comparison sort. It fixes rank, summation order and boundary, and verifies
+ * independently of the radix index arithmetic.
+ */
 const orderedWeights = (logits: Float32Array<ArrayBuffer>) => {
   const tokens = Array.from(logits.keys()).sort((a, b) => logits[b] - logits[a] || a - b);
   const weights = tokens.map((token) => Math.exp(logits[token] - logits[tokens[0]]));
@@ -338,10 +361,10 @@ const assertNucleus = (logits: Float32Array<ArrayBuffer>, topP: number): void =>
   assertEquals(new Uint32Array(logits.buffer, logits.byteOffset, logits.length), before);
 };
 
-describe("top-p 単独指定の全語彙順位", () => {
-  it("正負の同値、符号付きゼロ、subnormal、禁止 token を比較ソートと同じ順に残す", () => {
+describe("whole-vocabulary ranking with top-p alone", () => {
+  it("keeps positive and negative ties, signed zeros, subnormals and banned tokens in the same order as a comparison sort", () => {
     const bits = Uint32Array.of(
-      0x7fc00000, // 入力 view の外の NaN を読まない。
+      0x7fc00000, // The NaN outside the input view is not read.
       0x80000000,
       0x00000000,
       0x80000000,
@@ -360,7 +383,8 @@ describe("top-p 単独指定の全語彙順位", () => {
       0x7fc00000,
     );
     const all = new Float32Array(bits.buffer);
-    // 巨大な正値に確率が集中する場合と、それを除いた同値の境界の両方を通す。
+    // Covers both the case where the probability concentrates on a huge positive value and the tie
+    // boundary without it.
     for (const logits of [all.subarray(1, 16), all.subarray(1, 13)]) {
       for (const topP of [0.01, 0.25, 0.5, 0.95, 1 - Number.EPSILON]) {
         assertNucleus(logits, topP);
@@ -368,7 +392,7 @@ describe("top-p 単独指定の全語彙順位", () => {
     }
   });
 
-  it("全件ソートで得た累積確率の直前・一致・直後でも候補と確率を変えない", () => {
+  it("does not change candidates or probabilities just before, at, or just after a cumulative probability from a full sort", () => {
     let state = 20260910;
     const logits = Float32Array.from({ length: 8192 }, () => {
       state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
@@ -386,7 +410,7 @@ describe("top-p 単独指定の全語彙順位", () => {
     }
   });
 
-  it("昇順・降順・同値が多い大語彙でも分布の全ビットが参照と一致する", () => {
+  it("every bit of the distribution matches the reference on large vocabularies that are ascending, descending or tie-heavy", () => {
     for (const shape of ["ascending", "descending", "ties"] as const) {
       const logits = Float32Array.from({ length: 32768 }, (_, token) =>
         shape === "ascending"
@@ -400,23 +424,24 @@ describe("top-p 単独指定の全語彙順位", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// repetition penalty（HF `RepetitionPenaltyLogitsProcessor` の符号規約）
+// --------------------------------------------------------------------------- repetition penalty
+// (the sign convention of HF's `RepetitionPenaltyLogitsProcessor`)
 // ---------------------------------------------------------------------------
 
-test("sampler: repetition penalty は負 logit に掛け・非負 logit で割る", () => {
+test("sampler: the repetition penalty multiplies negative logits and divides non-negative ones", () => {
   const logits = f32([2, -2, 0, 1]);
   const distribution = samplerDistribution(
     logits,
     { temperature: 1, repetitionPenalty: 2 },
     [0, 1, 2],
   );
-  // 2 → 2/2 = 1 / −2 → −2×2 = −4 / 0 → 0/2 = 0（非負側）/ 履歴外の 1 は素通し。
+  // 2 → 2/2 = 1 / −2 → −2×2 = −4 / 0 → 0/2 = 0 (the non-negative side) / 1, not in the history,
+  // passes through.
   assertEquals([...distribution.tokens], [0, 1, 2, 3]);
   assertProbabilities(distribution.probabilities, softmax([1, -4, 0, 1]), "penalty 2");
 });
 
-test("sampler: repetition penalty < 1 は逆向きに効く（既出を持ち上げる）", () => {
+test("sampler: a repetition penalty < 1 works the other way (it lifts tokens already seen)", () => {
   const distribution = samplerDistribution(
     f32([2, -2, 0]),
     { temperature: 1, repetitionPenalty: 0.5 },
@@ -425,24 +450,24 @@ test("sampler: repetition penalty < 1 は逆向きに効く（既出を持ち上
   assertProbabilities(distribution.probabilities, softmax([4, -1, 0]), "penalty 0.5");
 });
 
-test("sampler: repetition penalty は履歴に何度出ても 1 回だけ効く", () => {
+test("sampler: the repetition penalty applies once however often a token appears in the history", () => {
   const once = samplerDistribution(f32([2, 0]), { temperature: 1, repetitionPenalty: 2 }, [0]);
   const many = samplerDistribution(
     f32([2, 0]),
     { temperature: 1, repetitionPenalty: 2 },
     [0, 0, 0, 0],
   );
-  assertProbabilities(many.probabilities, [...once.probabilities], "重複した履歴");
-  assertProbabilities(once.probabilities, softmax([1, 0]), "1 回ぶんの適用");
+  assertProbabilities(many.probabilities, [...once.probabilities], "repeated history");
+  assertProbabilities(once.probabilities, softmax([1, 0]), "one application");
 });
 
-test("sampler: repetitionPenalty = 1（既定）は履歴を読まない", () => {
+test("sampler: repetitionPenalty = 1 (the default) does not read the history", () => {
   const plain = samplerDistribution(BASE_LOGITS, { temperature: 1 }, []);
   const withHistory = samplerDistribution(BASE_LOGITS, { temperature: 1 }, [0, 1, 2, 3]);
-  assertProbabilities(withHistory.probabilities, [...plain.probabilities], "履歴あり");
+  assertProbabilities(withHistory.probabilities, [...plain.probabilities], "with history");
 });
 
-test("sampler: 履歴の token id が語彙の外なら fail loudly", () => {
+test("sampler: a history token id outside the vocabulary fails loudly", () => {
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, repetitionPenalty: 2 }, [5]),
     RangeError,
@@ -454,30 +479,36 @@ test("sampler: 履歴の token id が語彙の外なら fail loudly", () => {
 // logit bias
 // ---------------------------------------------------------------------------
 
-test("sampler: logit bias は温度の前に加算される", () => {
+test("sampler: the logit bias is added before the temperature", () => {
   const logits = f32([2, 1, 0]);
   const distribution = samplerDistribution(logits, { temperature: 2, logitBias: [[2, 6]] }, []);
-  // 加算 → 除算の順（[2,1,6] / 2 = [1,0.5,3]）。温度の後に足す実装なら [1,0.5,3] にならない。
+  // Add, then divide ([2,1,6] / 2 = [1,0.5,3]). An implementation that adds after the temperature
+  // does not give [1,0.5,3].
   assertProbabilities(distribution.probabilities, softmax([1, 0.5, 3]), "bias then temperature");
-  assertEquals(createSampler({ logitBias: [[2, 6]] }).next(logits, []), 2, "温度 0 でも効く");
+  assertEquals(
+    createSampler({ logitBias: [[2, 6]] }).next(logits, []),
+    2,
+    "applies at temperature 0 too",
+  );
 });
 
-test("sampler: logit bias の -Infinity はその token を候補から外す", () => {
+test("sampler: a logit bias of -Infinity removes that token from the candidates", () => {
   const logits = f32([5, 1, 2]);
   const spec = { logitBias: [[0, Number.NEGATIVE_INFINITY]] } satisfies SamplerSpec;
-  assertEquals(createSampler(spec).next(logits, []), 2, "温度 0");
+  assertEquals(createSampler(spec).next(logits, []), 2, "temperature 0");
   const distribution = samplerDistribution(logits, { ...spec, temperature: 1 }, []);
   assertEquals([...distribution.tokens], [0, 1, 2]);
-  assertEquals(distribution.probabilities[0], 0, "禁止した token の確率");
+  assertEquals(distribution.probabilities[0], 0, "probability of the banned token");
 });
 
-test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さない）", () => {
+test("sampler: banning every token fails loudly (it does not silently return 0)", () => {
   const banned: SamplerSpec["logitBias"] = [
     [0, -Infinity],
     [1, -Infinity],
   ];
-  // 加工前の logits の最大値は有限なので、候補を消したのは呼び手の `logitBias` で確定する
-  // = 入力起因（ADR 0107 決定 2 — 打つ手は「禁止指定を外す」）。温度 0 / 温度ありの 2 経路とも。
+  // The maximum of the logits before processing is finite, so it was the caller's `logitBias` that
+  // removed the candidates = an input error (ADR 0107 decision 2 — the remedy is "drop the ban").
+  // Both paths, temperature 0 and with a temperature.
   assertThrows(
     () => samplerDistribution(f32([1, 2]), { temperature: 1, logitBias: banned }, []),
     ModelInputError,
@@ -495,17 +526,19 @@ test("sampler: 全 token を禁止したら fail loudly（黙って 0 を返さ�
   );
 });
 
-test("sampler: 加工前から非有限な logits は入力起因ではない（bias と出所を分ける）", () => {
-  // 同じ 2 行が「モデル出力が元から全 −Infinity」でも通る。そちらは呼び手が `logitBias` を
-  // どう直しても直らない配線・重みの破れなので、素の `Error` のまま（ADR 0107 決定 2）。
+test("sampler: logits already non-finite before processing are not an input error (the source is told apart from bias)", () => {
+  // The same two lines also pass when "the model output is all −Infinity to begin with". That is a
+  // wiring or weight breakage no change to `logitBias` by the caller can fix, so it stays a plain
+  // `Error` (ADR 0107 decision 2).
   for (const spec of [{ temperature: 0 }, { temperature: 1 }, { temperature: 1, topK: 1 }]) {
     const error = assertThrows(() => samplerDistribution(f32([-Infinity, -Infinity]), spec, []));
     assert(
       !(error instanceof ModelInputError),
-      `${JSON.stringify(spec)}: モデル出力の故障が入力起因に分類されている`,
+      `${JSON.stringify(spec)}: a model-output failure is classified as an input error`,
     );
   }
-  // 禁止指定が付いていても、加工前が非有限なら出所はモデル出力側のまま。
+  // Even with a ban set, when the logits are non-finite before processing the source stays the
+  // model output.
   const withBias = assertThrows(() =>
     samplerDistribution(
       f32([-Infinity, -Infinity]),
@@ -519,7 +552,7 @@ test("sampler: 加工前から非有限な logits は入力起因ではない（
   assert(!(withBias instanceof ModelInputError));
 });
 
-test("sampler: logit bias の token が語彙の外なら fail loudly", () => {
+test("sampler: a logit bias token outside the vocabulary fails loudly", () => {
   assertThrows(
     () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
     ModelInputError,
@@ -527,9 +560,10 @@ test("sampler: logit bias の token が語彙の外なら fail loudly", () => {
   );
 });
 
-test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（後勝ちで畳まない）", () => {
-  // `Map` なら黙って後勝ちで畳んでいた形（`[[2,6],[2,-1]]`）— 配列では「2 つ書いた bias の
-  // 片方だけが効く」ことになるので落とす。値が同じでも落とす（畳み方の疑義は同じ）。
+test("sampler: writing a logit bias for the same token twice fails loudly (it is not folded with the last one winning)", () => {
+  // A `Map` would have silently folded this (`[[2,6],[2,-1]]`) with the last one winning — with an
+  // array it would mean "only one of the two biases written applies", so it fails. It fails even
+  // when the values are equal (the question of how to fold them is the same).
   assertThrows(
     () =>
       createSampler({
@@ -559,26 +593,27 @@ test("sampler: 同じ token の logit bias を 2 度書いたら fail loudly（�
   );
 });
 
-test("sampler: 発行後に logitBias 配列を書き換えても抽選は変わらない（防御コピー）", () => {
+test("sampler: changing the logitBias array after creation does not change the draws (defensive copy)", () => {
   const logits = f32([5, 1, 2]);
-  // 呼び手が握ったままの可変配列（外側も内側のタプルも書き換えられる形）で発行する。
+  // Create it with a mutable array the caller keeps holding (both the outer array and the inner
+  // tuples can be changed).
   const bias: [number, number][] = [[0, Number.NEGATIVE_INFINITY]];
   const sampler = createSampler({ logitBias: bias });
-  assertEquals(sampler.next(logits, []), 2, "発行時の指定（token 0 を禁止）");
+  assertEquals(sampler.next(logits, []), 2, "the spec at creation (token 0 banned)");
 
-  bias[0][1] = 0; // 禁止を解く
-  assertEquals(sampler.next(logits, []), 2, "タプルの書き換えは効かない");
-  bias.push([2, Number.NEGATIVE_INFINITY]); // 勝った token を禁止する
-  assertEquals(sampler.next(logits, []), 2, "配列への追加も効かない");
+  bias[0][1] = 0; // lift the ban
+  assertEquals(sampler.next(logits, []), 2, "changing the tuple has no effect");
+  bias.push([2, Number.NEGATIVE_INFINITY]); // ban the winning token
+  assertEquals(sampler.next(logits, []), 2, "appending to the array has no effect either");
   bias.length = 0;
-  assertEquals(sampler.next(logits, []), 2, "空にしても効かない");
+  assertEquals(sampler.next(logits, []), 2, "emptying it has no effect either");
 });
 
-// ---------------------------------------------------------------------------
-// 指定の受理集合（黙って丸めない）
+// --------------------------------------------------------------------------- The accepted set of
+// specs (nothing is rounded silently)
 // ---------------------------------------------------------------------------
 
-test("sampler: 受理できない指定は構築時に落ちる", () => {
+test("sampler: a spec that cannot be accepted fails at construction", () => {
   const rejected: readonly SamplerSpec[] = [
     { temperature: -1 },
     { temperature: Number.NaN },
@@ -610,12 +645,13 @@ test("sampler: 受理できない指定は構築時に落ちる", () => {
   }
 });
 
-/** 型を外した JS / JSON 由来の指定（TS の型検査を通らない値を門へ届ける）。 */
+/** An untyped spec from JS / JSON (to bring values the TS type check would reject to the check). */
 const untypedSpec = (value: unknown): SamplerSpec => value as SamplerSpec;
 
-test("sampler: 未知のキーは黙って無視せず、許可キーを並べて落ちる", () => {
-  // `minP: 1` で最大確率の候補だけに絞ったつもりでも、無視されれば全分布から抽選される。
-  // 綴り違い（`top_p`）も同じく「効いていないノブ」として静かに残る。
+test("sampler: an unknown key is not silently ignored; it fails listing the allowed keys", () => {
+  // Even when `minP: 1` was meant to narrow to the most probable candidate, if it is ignored the
+  // draw comes from the whole distribution. A misspelling (`top_p`) likewise stays quietly as "a
+  // knob that has no effect".
   for (const spec of [{ temperature: 1, minP: 1, seed: 1 }, { top_p: 0.9 }]) {
     const error = assertThrows(
       () => createSampler(untypedSpec(spec)),
@@ -624,12 +660,16 @@ test("sampler: 未知のキーは黙って無視せず、許可キーを並べ�
       JSON.stringify(spec),
     );
     for (const key of ["temperature", "topK", "topP", "repetitionPenalty", "logitBias", "seed"]) {
-      assert(error.message.includes(key), `許可キー ${key} が文言に無い: ${error.message}`);
+      assert(
+        error.message.includes(key),
+        `allowed key ${key} missing from the message: ${error.message}`,
+      );
     }
   }
-  // 発行時の写しも同じ門を通る（上層は抽選器を作る前に写す）。
+  // The snapshot at creation goes through the same check (the upper layers snapshot before creating
+  // the sampler).
   assertThrows(() => snapshotSpec(untypedSpec({ minP: 1 })), ModelInputError, "minP");
-  // 既知のキーだけなら全部並べても通る（seed を許可集合に入れ忘れていない）。
+  // Listing every known key passes (seed was not forgotten in the allowed set).
   createSampler({
     temperature: 1,
     topK: 2,
@@ -640,9 +680,10 @@ test("sampler: 未知のキーは黙って無視せず、許可キーを並べ�
   });
 });
 
-describe("sampler: 型を外した logitBias は加算せずに入力の誤りで落ちる", () => {
-  it("文字列の bias は文字列連結にならない（temperature 0 の選択を変えない）", () => {
-    // `1 + "0"` は `"10"` — f32 へ 10 として書かれ、bias なしなら選ばれる token 1 が 0 に化ける。
+describe("sampler: an untyped logitBias fails as an input error without being added", () => {
+  it("a string bias does not become string concatenation (it does not change the temperature-0 choice)", () => {
+    // `1 + "0"` is `"10"` — written to f32 as 10, it would turn token 1, chosen without the bias,
+    // into 0.
     assertThrows(
       () => createSampler(untypedSpec({ temperature: 0, logitBias: [[0, "0"]] })),
       ModelInputError,
@@ -650,7 +691,7 @@ describe("sampler: 型を外した logitBias は加算せずに入力の誤り�
     );
   });
 
-  it("null / boolean の bias を 0 / 1 として黙って受けない", () => {
+  it("a null / boolean bias is not silently taken as 0 / 1", () => {
     for (const bias of [null, true, false, undefined]) {
       assertThrows(
         () => createSampler(untypedSpec({ logitBias: [[0, bias]] })),
@@ -661,7 +702,7 @@ describe("sampler: 型を外した logitBias は加算せずに入力の誤り�
     }
   });
 
-  it("配列でない logitBias・2 要素でない組は形の誤り", () => {
+  it("a logitBias that is not an array, or a pair without 2 elements, is a shape error", () => {
     for (const logitBias of [new Map([[0, 1]]), { 0: 1 }, [[0]], [[0, 1, 2]], [0]]) {
       assertThrows(
         () => createSampler(untypedSpec({ logitBias })),
@@ -672,9 +713,9 @@ describe("sampler: 型を外した logitBias は加算せずに入力の誤り�
     }
   });
 
-  it("発行時の写し（snapshotSpec）も同じ門を先に通す", () => {
-    // 上層（chat / ChatSession）は抽選器を作る前に写すので、写しが形の誤りを TypeError に
-    // 化かすと入力の誤りに見えない。
+  it("the snapshot at creation (snapshotSpec) goes through the same check first", () => {
+    // The upper layers (chat / ChatSession) snapshot before creating the sampler, so if the
+    // snapshot turned a shape error into a TypeError it would not look like an input error.
     assertThrows(
       () => snapshotSpec(untypedSpec({ logitBias: new Map([[0, 1]]) })),
       ModelInputError,
@@ -682,7 +723,7 @@ describe("sampler: 型を外した logitBias は加算せずに入力の誤り�
     );
   });
 
-  it("-Infinity（禁止）と有限数は従来どおり受ける", () => {
+  it("-Infinity (ban) and finite numbers are accepted as before", () => {
     createSampler({
       logitBias: [
         [0, Number.NEGATIVE_INFINITY],
@@ -692,19 +733,20 @@ describe("sampler: 型を外した logitBias は加算せずに入力の誤り�
   });
 });
 
-// ---------------------------------------------------------------------------
-// 失敗の分類（ADR 0107 — 呼び手の分岐先で型を割る）
+// --------------------------------------------------------------------------- Failure
+// classification (ADR 0107 — the type is split by where the caller branches)
 // ---------------------------------------------------------------------------
 
-describe("sampler: 失敗の分類は呼び手の分岐先で決まる", () => {
-  it("指定の値域は入力起因（呼び手が値を直せば通る）", () => {
+describe("sampler: the failure classification is set by where the caller branches", () => {
+  it("the range of a spec value is an input error (the caller can fix the value to pass)", () => {
     assertThrows(() => createSampler({ topP: 0 }), ModelInputError, "topP 0");
-    // seed の受理集合の所有者は `request-gates.ts` の 1 本（ADR 0107 決定 6）。ここが
-    // `ModelInputError` で落ちること自体が、`Randu` が自前の条件を持っていないことの対。
+    // The single owner of seed's accepted set is `request-gates.ts` (ADR 0107 decision 6). That
+    // this fails with `ModelInputError` is itself the counterpart that `Randu` has no condition of
+    // its own.
     assertThrows(() => createSampler({ seed: -1 }), ModelInputError, "seed -1");
   });
 
-  it("語彙の外の logitBias も入力起因（語彙が判るのが最初の抽選なだけ）", () => {
+  it("a logitBias outside the vocabulary is an input error too (the vocabulary is only known at the first draw)", () => {
     assertThrows(
       () => createSampler({ logitBias: [[9, 1]] }).next(f32([1, 2]), []),
       ModelInputError,
@@ -712,38 +754,49 @@ describe("sampler: 失敗の分類は呼び手の分岐先で決まる", () => {
     );
   });
 
-  it("logits の NaN は入力起因ではない（呼び手が要求を直しても直らない）", () => {
-    // 重みか配線の破れで、HTTP サーバーなら 500。同じ型で捕まると「入力を直せ」と返す形になる。
+  it("a NaN in the logits is not an input error (the caller cannot fix it by changing the request)", () => {
+    // A weight or wiring breakage; an HTTP server would return 500. Caught as the same type, it
+    // would come back as "fix your input".
     const error = assertThrows(() => createSampler().next(f32([Number.NaN, 1]), []), Error, "NaN");
-    assert(!(error instanceof ModelInputError), "logits の NaN が入力起因に分類されている");
+    assert(
+      !(error instanceof ModelInputError),
+      "a NaN in the logits is classified as an input error",
+    );
   });
 
-  it("履歴の token id が語彙の外も入力起因ではない（唯一の呼び元は検査済み）", () => {
-    // `createSampler` は公開面に出ておらず、`history` を渡すのは `GenerationSequence.generate`
-    // だけ（検査済み prompt + 自分が選んだ token）。ここが落ちるのは配線の破れである。
+  it("a history token id outside the vocabulary is not an input error either (the only caller is already checked)", () => {
+    // `createSampler` is not on the public surface, and only `GenerationSequence.generate` passes
+    // `history` (a checked prompt + the tokens it chose itself). A failure here is a wiring
+    // breakage.
     const error = assertThrows(
       () => samplerDistribution(f32([1, 2]), { temperature: 1, repetitionPenalty: 2 }, [5]),
       RangeError,
       "vocabulary",
     );
-    assert(!(error instanceof ModelInputError), "履歴の語彙外が入力起因に分類されている");
+    assert(
+      !(error instanceof ModelInputError),
+      "a history token outside the vocabulary is classified as an input error",
+    );
   });
 });
 
-// ---------------------------------------------------------------------------
-// seed の決定性と分布門
+// --------------------------------------------------------------------------- Seed determinism and
+// the distribution check
 //
-// 分布門の設計: 語彙 4 の既知分布 p =(0.5, 0.3, 0.15, 0.05) から N = 20,000 回引き、Pearson の
-// χ² 統計量（自由度 3）を**理論値**（この門が手で書いた p / p²）と突き合わせる。閾値
-// 21.108 は片側 α = 1e-4 の分位点で、門は 3 本（温度 1 × seed 2 本 + 温度 0.5）なので、
-// 実装が正しいのに落ちる確率は union bound で ≤ 3e-4。seed は固定なので、いったん緑なら
-// 以後は決定的に緑（「たまたま落ちる CI」にはならない）。
+// Design of the distribution check: draw N = 20,000 times from the known distribution p = (0.5,
+// 0.3, 0.15, 0.05) over a vocabulary of 4 and compare Pearson's χ² statistic (3 degrees of freedom)
+// against the **theoretical values** (p / p², written by hand in this check). The threshold 21.108
+// is the one-sided α = 1e-4 quantile, and there are 3 checks (temperature 1 × 2 seeds + temperature
+// 0.5), so the probability of failing with a correct implementation is ≤ 3e-4 by the union bound.
+// The seeds are fixed, so once green it stays green deterministically (it does not become "CI that
+// fails by chance").
 //
-// 恒真でないことの根拠: 一様に引く実装なら χ² ≈ 20,000、温度を無視する（p のまま引く）実装なら
-// 温度 0.5 の門で χ² ≈ 9,200 になり、どちらも閾値の 2〜3 桁上を通る。
+// Why it is not a tautology: an implementation that draws uniformly gives χ² ≈ 20,000, and one that
+// ignores the temperature (draws from p as is) gives χ² ≈ 9,200 in the temperature-0.5 check; both
+// land 2–3 orders of magnitude above the threshold.
 // ---------------------------------------------------------------------------
 
-/** 自由度 3・片側 α = 1e-4 の χ² 分位点。 */
+/** The χ² quantile at 3 degrees of freedom, one-sided α = 1e-4. */
 const CHI_SQUARE_DF3_1E4 = 21.108;
 const DRAWS = 20_000;
 
@@ -762,25 +815,25 @@ const chiSquare = (counts: readonly number[], probabilities: readonly number[]):
   }, 0);
 };
 
-test("sampler: 温度 1 の抽選が理論分布に従う（χ² 門・自由度 3・α = 1e-4）", () => {
+test("sampler: temperature-1 draws follow the theoretical distribution (χ² check, 3 degrees of freedom, α = 1e-4)", () => {
   for (const seed of [20_260_831, 7]) {
     const counts = drawCounts({ temperature: 1, seed }, DRAWS);
     assertEquals(
       counts.reduce((sum, count) => sum + count, 0),
       DRAWS,
-      `seed ${seed}: 総数`,
+      `seed ${seed}: total`,
     );
     const statistic = chiSquare(counts, BASE_PROBABILITIES);
     assert(
       statistic < CHI_SQUARE_DF3_1E4,
-      `seed ${seed}: χ² = ${statistic.toFixed(3)} が ${CHI_SQUARE_DF3_1E4} 以上` +
-        `（観測 ${counts.join("/")} / 期待 ${BASE_PROBABILITIES.map((p) => p * DRAWS).join("/")}）`,
+      `seed ${seed}: χ² = ${statistic.toFixed(3)} is at or above ${CHI_SQUARE_DF3_1E4}` +
+        ` (observed ${counts.join("/")} / expected ${BASE_PROBABILITIES.map((p) => p * DRAWS).join("/")})`,
     );
   }
 });
 
-test("sampler: 温度が分布を鋭くする（温度 0.5 の理論分布と一致）", () => {
-  // 温度 T の理論分布は p^(1/T) を正規化したもの。T = 0.5 なら p² / Σp²。
+test("sampler: the temperature sharpens the distribution (matches the temperature-0.5 theoretical distribution)", () => {
+  // The theoretical distribution at temperature T is p^(1/T) normalized. At T = 0.5 it is p² / Σp².
   const squared = BASE_PROBABILITIES.map((probability) => probability ** 2);
   const total = squared.reduce((sum, weight) => sum + weight, 0);
   const expected = squared.map((weight) => weight / total);
@@ -788,50 +841,52 @@ test("sampler: 温度が分布を鋭くする（温度 0.5 の理論分布と一
   const statistic = chiSquare(counts, expected);
   assert(
     statistic < CHI_SQUARE_DF3_1E4,
-    `χ² = ${statistic.toFixed(3)} が ${CHI_SQUARE_DF3_1E4} 以上` +
-      `（観測 ${counts.join("/")} / 期待 ${expected
+    `χ² = ${statistic.toFixed(3)} is at or above ${CHI_SQUARE_DF3_1E4}` +
+      ` (observed ${counts.join("/")} / expected ${expected
         .map((p) => (p * DRAWS).toFixed(1))
-        .join("/")}）`,
+        .join("/")})`,
   );
 });
 
-test("sampler: 同じ seed は同じ列・違う seed は違う列", () => {
+test("sampler: the same seed gives the same sequence and different seeds different ones", () => {
   const draw = (seed: number): number[] => {
     const sampler = createSampler({ temperature: 1, seed });
     return Array.from({ length: 64 }, () => sampler.next(BASE_LOGITS, []));
   };
-  assertEquals(draw(5), draw(5), "同じ seed");
-  assert(draw(5).join() !== draw(6).join(), "違う seed で同じ列が出た");
+  assertEquals(draw(5), draw(5), "same seed");
+  assert(draw(5).join() !== draw(6).join(), "different seeds gave the same sequence");
 });
 
-test("sampler: topK / topP で落とした token は一度も引かれない", () => {
-  // 分布門の対（頻度ではなく**集合**を見る）。境界の実装が緩むと必ず落ちる。
+test("sampler: a token dropped by topK / topP is never drawn", () => {
+  // The counterpart of the distribution check (it looks at the **set**, not the frequency). It
+  // always fails if the boundary implementation loosens.
   const sampler = createSampler({ temperature: 1, topK: 2, seed: 31 });
   const seen = new Set<number>();
   for (let draw = 0; draw < 5_000; draw += 1) seen.add(sampler.next(BASE_LOGITS, []));
   assertEquals(
     [...seen].sort((a, b) => a - b),
     [0, 1],
-    "topK 2 で観測された token",
+    "tokens observed with topK 2",
   );
 });
 
-// ---------------------------------------------------------------------------
-// 停止判定（ADR 0083 決定 8 — EOS は単数ではなく集合）
+// --------------------------------------------------------------------------- Stop decision (ADR
+// 0083 decision 8 — EOS is a set, not a single token)
 // ---------------------------------------------------------------------------
 
-test("isStopToken: 集合のどれでも止まり、集合外では止まらない", () => {
-  // 実資産の集合（gemma-4-E2B-it の `generation_config.json` は eos_token_id = [1, 106, 50]）。
+test("isStopToken: stops on any member of the set and not outside it", () => {
+  // The set from real assets (`generation_config.json` of gemma-4-E2B-it has eos_token_id = [1,
+  // 106, 50]).
   const stopTokens = [1, 106, 50] as const;
   for (const token of stopTokens) {
-    assert(isStopToken(token, stopTokens), `token ${token} で止まらない`);
+    assert(isStopToken(token, stopTokens), `did not stop on token ${token}`);
   }
   for (const token of [0, 2, 49, 51, 105, 107, 262_143]) {
-    assert(!isStopToken(token, stopTokens), `token ${token} で止まった`);
+    assert(!isStopToken(token, stopTokens), `stopped on token ${token}`);
   }
 });
 
-test("isStopToken: 空の集合では止まらない（EOS を宣言しない資産）", () => {
+test("isStopToken: an empty set never stops (assets that declare no EOS)", () => {
   for (const token of [0, 1, 106]) assert(!isStopToken(token, []));
 });
 

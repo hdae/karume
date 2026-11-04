@@ -1,28 +1,35 @@
 /**
- * 全量面（`from*Assets`）の受け口（`src/hub/components.ts` の `assetComponentOpener`）の門。
+ * The check of the component opener of the whole-bytes surface (`from*Assets`)
+ * (`assetComponentOpener` in `src/hub/components.ts`).
  * ①② open a Session on a real GPU (each case is explicitly skipped via `ignore` when no adapter
  * is present); ③〜⑥ are the acceptance-side gates and need no GPU.
  *
- * ① **分割形の Record（`<役割>[i]` のキー列）から Session が張れる**（X2-101 —
- *    「`fromPretrained` で読める配布形は `fromAssets` でも読める」）。バイト列は連結せず part 列の
- *    まま開くので、重みの block を持つ part が GPU まで届いたことを run の出力で見る。
- * ② **同じ供給口から Session を 2 本続けて張れる**（block は呼ぶたびに読み直す — 1 度読んだら
- *    終わりの列にしていないか）。
- * ③ **添字の欠番は fail loudly**（`[0]` と `[2]` だけの Record を黙って 1 本で読まない）。
- *    `[0]` が**無い**形（`dit[1]` だけ / 単一形キー + `dit[1]`）も同じ門で落ちる — 添字つきキーが
- *    1 本でもあるのに `[0]` が無い並びは、混在検査も欠番検査も飛ばして単一形の 1 本になりうる。
- * ④ **単一形キーと `[i]` の混在は fail loudly**（どちらを正とするかは決められない）。
- * ⑤ **部品の容器がまったく無い形は、2 形の綴りを添えて落ちる**（綴り間違いが「資産が無い」の
- *    遠い診断に化けない）。
- * ⑥ **重みの part が欠けた列は受け口で落ちる**（黙って部分 Session を返さない）。落とすのは容器の
- *    読み手（宣言された part 数との突き合わせ）で、GPU は要らない。
+ * ① **A Session opens from a split-form Record (a key sequence `<role>[i]`)** (X2-101 — "a
+ *   distribution form `fromPretrained` can read, `fromAssets` can read too"). The bytes are not
+ *   concatenated but opened as the part sequence, so the run's output shows that the part holding
+ *   the weight block reached the GPU.
+ * ② **Two Sessions in a row open from the same opener** (blocks are re-read on every call — it is
+ *   not a sequence that is exhausted after one read).
+ * ③ **A gap in the indexes fails loudly** (a Record with only `[0]` and `[2]` is not silently read
+ *   as one). Shapes **without** `[0]` (`dit[1]` alone / a single-form key + `dit[1]`) fail at the
+ *   same check — a sequence that has at least one indexed key but no `[0]` could skip both the
+ *   mixing check and the gap check and become a single-form one.
+ * ④ **Mixing a single-form key with `[i]` fails loudly** (which one is authoritative cannot be
+ *   decided).
+ * ⑤ **A shape with no container of the component at all fails with the spellings of both forms** (a
+ *   misspelling does not turn into the distant diagnostic "asset missing").
+ * ⑥ **A sequence missing a weight part fails at the opener** (no silent partial Session). What
+ *   rejects it is the container reader (the comparison with the declared part count), and it needs
+ *   no GPU.
  *
- * ③④⑤ の診断は `part` の語と**揃っているキーの列挙**を含むこと（既存の資産診断の流儀）まで
- * 見る — 落ちること自体はキーの作り方が壊れている印で、読み手が現物を突き合わせられる形で
- * ないと意味が無い。
+ * For ③④⑤ the checks go as far as the diagnostic containing the word `part` and **a listing of the
+ * keys present** (the convention of the existing asset diagnostics) — the failure itself is a sign
+ * that the way the keys are built is broken, and it is useless unless the reader can compare it
+ * with what is there.
  *
- * NOTE: `assetComponentOpener` は**開く前に全部品を開く**（同期の供給口を返すには開いてから
- * 配るしかない）ので、これらは `open(key)` ではなく**供給口を作る時点**で落ちる。
+ * NOTE: `assetComponentOpener` **opens every component before opening one** (the only way to return
+ * a synchronous opener is to open first and hand out after), so these fail **when the opener is
+ * built**, not at `open(key)`.
  */
 
 import { test } from "vite-plus/test";
@@ -33,23 +40,24 @@ import { LINEAR_PROBE_Y, runLinearProbe } from "./helpers/container-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 test.skipIf(!GPU_AVAILABLE)(
-  "assetComponentOpener: 分割形の Record から Session が張れる（実 GPU）",
+  "assetComponentOpener: a Session opens from a split-form Record (real GPU)",
   async () => {
     const open = await openerOf(parts("dit"));
     const component = open("dit");
-    // グラフ宣言は part 0（descriptor）から読めている。
+    // The graph declaration is read from part 0 (the descriptor).
     assertEquals(component.graph.outputs, ["y"]);
 
     const gpu = await acquireGpu();
     try {
-      // 重みの block は末尾の part にしか無いので、既知の出力が出ること自体が「part 列が
-      // 読まれて GPU まで届いた」証拠。2 本続けて張るのは②の門 — 2 本目が空の block 列を
-      // 受けて 0 埋めで張れた形もここで出力が崩れる。
+      // The weight block is only in the last part, so getting the known output is itself the
+      // evidence that "the part sequence was read and reached the GPU". Opening two in a row is
+      // check ② — a shape where the second one received an empty block sequence and opened
+      // zero-filled also breaks the output here.
       for (let index = 0; index < 2; index += 1) {
-        // MUST: `open` を呼び直さない — 呼び直すと供給口ごと作り直されるので、狙っている
-        // 「1 つの部品の `createSession` が毎回 block を読み直す」を 1 度も踏まない。
+        // MUST: do not call `open` again — that rebuilds the whole opener, so the target ("one
+        // component's `createSession` re-reads the blocks every time") would never be exercised.
         const session = await component.createSession(gpu);
-        assertEquals(await runLinearProbe(session), LINEAR_PROBE_Y, `Session ${index + 1} 本目`);
+        assertEquals(await runLinearProbe(session), LINEAR_PROBE_Y, `Session number ${index + 1}`);
         await session.dispose();
       }
     } finally {
@@ -59,7 +67,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "assetComponentOpener: 単一形の 1 本からも Session が張れる（実 GPU）",
+  "assetComponentOpener: a Session opens from a single-form key too (real GPU)",
   async () => {
     const open = await openerOf({ dit: single() });
     assertEquals(open("dit").graph.outputs, ["y"]);
@@ -75,7 +83,7 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", async () => {
+test("assetComponentOpener: a gap in the indexes fails naming part", async () => {
   const error = await assertRejects(
     () => openerOf({ "dit[0]": part(0), "dit[2]": part(2) }),
     Error,
@@ -84,26 +92,27 @@ test("assetComponentOpener: 添字の欠番は part を名乗って落ちる", a
     error.message,
     "part indexes of component 'dit' are not contiguous from [0]",
   );
-  // 揃っているキーを列挙する（読み手が現物と突き合わせられる形 — 既存の資産診断の流儀）。
+  // Lists the keys present (a form the reader can compare with what is there — the convention of
+  // the existing asset diagnostics).
   assertStringIncludes(error.message, "dit[0] / dit[2]");
 });
 
-test("assetComponentOpener: 単一形キーと分割形キーの混在は落ちる", async () => {
+test("assetComponentOpener: mixing single-form and split-form keys fails", async () => {
   const error = await assertRejects(() => openerOf({ dit: single(), ...parts("dit") }), Error);
   assertStringIncludes(error.message, "both the single-form key and split-form keys");
   assertStringIncludes(error.message, "dit / dit[0]");
 });
 
-test("assetComponentOpener: 単一形キーと [0] 以外の分割形キーの混在も落ちる（[0] 欠落で門を素通りしない）", async () => {
-  // `[0]` から連続する範囲だけを拾う実装だと、`[0]` が無いときに混在検査を飛ばして「単一形の
-  // 1 本」として組んでしまう（`dit[1]` を黙って無視する = 分割配布のつもりで組んだ Record が
-  // 遠くの層から「part が足りない」で落ちる）。
+test("assetComponentOpener: mixing a single-form key with split-form keys other than [0] fails too (a missing [0] does not slip past the check)", async () => {
+  // An implementation that picks up only the run contiguous from `[0]` would, when `[0]` is
+  // missing, skip the mixing check and build "a single-form one" (silently ignoring `dit[1]` = a
+  // Record built as a split distribution fails from a distant layer with "not enough parts").
   const error = await assertRejects(() => openerOf({ dit: single(), "dit[1]": part(1) }), Error);
   assertStringIncludes(error.message, "both the single-form key and split-form keys");
   assertStringIncludes(error.message, "dit / dit[1]");
 });
 
-test("assetComponentOpener: 添字が [0] から始まらない列は始点を名指しして落ちる", async () => {
+test("assetComponentOpener: a sequence whose indexes do not start at [0] fails naming the start", async () => {
   const error = await assertRejects(
     () => openerOf({ "dit[1]": part(1), "dit[2]": part(2) }),
     Error,
@@ -112,24 +121,25 @@ test("assetComponentOpener: 添字が [0] から始まらない列は始点を�
   assertStringIncludes(error.message, "dit[1] / dit[2]");
 });
 
-test("assetComponentOpener: [0] から連続する列は part 列のまま開ける", async () => {
+test("assetComponentOpener: a sequence contiguous from [0] opens as the part sequence", async () => {
   const open = await openerOf(parts("dit"));
   assertEquals(open("dit").graph.outputs, ["y"]);
 });
 
-test("assetComponentOpener: 単一形の 1 本も同じ供給口から開ける", async () => {
+test("assetComponentOpener: a single-form key opens from the same opener too", async () => {
   const open = await openerOf({ dit: single() });
   assertEquals(open("dit").graph.outputs, ["y"]);
 });
 
-test("assetComponentOpener: キーがどちらの形でも無ければ 2 形の綴りを添えて落ちる", async () => {
+test("assetComponentOpener: when the key exists in neither form it fails with the spellings of both forms", async () => {
   const error = await assertRejects(() => openerOf(parts("dit"), ["dit", "vae"]), Error);
   assertStringIncludes(error.message, "component 'vae' has no container");
   assertStringIncludes(error.message, "split form: 'vae[0]' onwards in index order");
 });
 
-test("assetComponentOpener: 重みの part が欠けた列は part 数と宣言の食い違いを名乗って落ちる", async () => {
-  // 末尾の part（重みの block を持つ）を落とした列 — descriptor が宣言する part 数と合わない。
+test("assetComponentOpener: a sequence missing a weight part fails naming the mismatch between the part count and the declaration", async () => {
+  // A sequence with the last part (holding the weight block) dropped — it disagrees with the part
+  // count the descriptor declares.
   const error = await assertRejects(
     () => openerOf({ "dit[0]": part(0), "dit[1]": part(1) }),
     ContainerFormatError,

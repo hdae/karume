@@ -1,19 +1,21 @@
-// Wan2.2 TI2V-5B の VAE のタイル decode のホスト側（ADR 0121 段 5 — GPU 不要）。
+// The host side of the tiled VAE decode of Wan2.2 TI2V-5B (ADR 0121 stage 5 — no GPU needed).
 //
-// 見るのは 4 つ:
+// Four things are checked:
 //
-// - **タイル計画の凍結**: タイル 16・重なり = 64 px ÷ 空間の圧縮 16（グラフの比 8 × unpatchify 2）= 潜在 4 の開始位置を
-//   値で凍結する（{@link AXIS_STARTS_TI2V} — Python 側 `tools/export-recipes/wan/tests/test_vae_tiling_ti2v.py` の
-//   `MIRRORED_STARTS_TI2V` と同じ値の二重凍結）。計画は本番の入口 `planWanGenerationTiles` を通す。832×480 系は
-//   記述子の受理集合に無い（公式の対応寸法の外）が、この関数は受理集合を見ないので同じ入口で凍結する（段 5 の
-//   タイル参照が受理寸法に依らない数値の照合として使う）。
-// - **要求の門**: 2.2 の記述子を `planWanRequest` に通し、受理寸法（1280×704 / 704×1280）・フレーム数の範囲
-//   （4n+1 の 5〜121）・既定（1280×704・33 フレーム）を値で縛る。
-// - **逆正規化の統計の写し**: `WAN22_LATENTS_MEAN` / `WAN22_LATENTS_STD` と fixture
-//   `fixtures/wan-latents/wan22-ti2v.json` のビット一致（反対側は recipe の `wan/tests/test_ti2v_generation_stats.py` が
-//   pin の config と照合する）。
-// - **実資産の layout**（chunk グラフ 2 本がある機だけ）: 宣言から導いた layout が計画のリテラルと一致し、2.2 の
-//   記述子の admission を通り、2.1 の記述子では落ちる。
+// - **Frozen tile plan**: the start positions for tile 16 and overlap = 64 px ÷ spatial compression 16 (graph ratio 8 ×
+//   unpatchify 2) = 4 latents are frozen by value ({@link AXIS_STARTS_TI2V} — frozen twice with the same values as
+//   `MIRRORED_STARTS_TI2V` in the Python side's `tools/export-recipes/wan/tests/test_vae_tiling_ti2v.py`). The plan
+//   goes through the production entry point `planWanGenerationTiles`. The 832×480 family is not in the descriptor's
+//   accepted set (outside the official supported sizes), but this function does not look at the accepted set, so it
+//   is frozen through the same entry point (stage 5's tile references use it as a numeric comparison that does not
+//   depend on the accepted sizes).
+// - **Request check**: passes the 2.2 descriptor to `planWanRequest` and pins by value the accepted sizes
+//   (1280×704 / 704×1280), the frame-count range (4n+1 in 5..121) and the defaults (1280×704, 33 frames).
+// - **Copy of the denormalization statistics**: `WAN22_LATENTS_MEAN` / `WAN22_LATENTS_STD` are bit-identical to the
+//   fixture `fixtures/wan-latents/wan22-ti2v.json` (on the other side, the recipe's
+//   `wan/tests/test_ti2v_generation_stats.py` compares it with the pinned config).
+// - **Real-asset layout** (only on machines with the two chunk graphs): the layout derived from the declarations
+//   matches the plan's literal, passes the 2.2 descriptor's admission, and fails with the 2.1 descriptor.
 //
 // The real-asset case reads the two f16 chunk graphs of the distribution mirror `models/karume-wan2.2/` (through its
 // manifest — ADR 0139 decision 1) and SKIPs explicitly without the mirror (ADR 0005; the mirror's completeness is the
@@ -46,17 +48,24 @@ import {
 
 const OWNER = "wan.Ti2vPipeline";
 
-/** 2.2 の chunk グラフの宣言（タイル 16・patchify 空間のフレームの辺 128・潜在 48 ch・出口 12 ch）のリテラル。 */
+/**
+ * Literal of the 2.2 chunk graphs' declarations (tile 16, frame edge 128 in patchify space, latent 48 ch,
+ * output 12 ch).
+ */
 const LAYOUT = { latentChannels: 48, tile: 16, sampleTile: 128, sampleChannels: 12 } as const;
-/** グラフの入出力の空間比（`sampleTile / tile`）— ブレンド幅は patchify 空間の画素で数える。 */
+/**
+ * Spatial ratio of the graph's output to its input (`sampleTile / tile`) — blend widths count pixels in
+ * patchify space.
+ */
 const GRAPH_SCALE = 8;
 
 /**
- * タイル辺 16・重なりの下限 4 の開始位置（潜在の全長 → 開始位置）。Python 側の `MIRRORED_STARTS_TI2V` と**同じ値**。
+ * Start positions for tile edge 16 and minimum overlap 4 (latent extent → start positions). **The same values** as the
+ * Python side's `MIRRORED_STARTS_TI2V`.
  *
- * - 16: 縮退（1 枚）
- * - 30 / 52: 832×480 / 480×832 の 2 辺
- * - 44 / 80: 1280×704 / 704×1280 の 2 辺（対ごとにブレンド幅が違う配置）
+ * - 16: degenerate (one tile)
+ * - 30 / 52: the two edges of 832×480 / 480×832
+ * - 44 / 80: the two edges of 1280×704 / 704×1280 (a layout whose blend width differs per pair)
  */
 const AXIS_STARTS_TI2V: readonly (readonly [number, readonly number[]])[] = [
   [16, [0]],
@@ -66,22 +75,22 @@ const AXIS_STARTS_TI2V: readonly (readonly [number, readonly number[]])[] = [
   [80, [0, 11, 21, 32, 43, 53, 64]],
 ];
 
-/** 本番の入口で 1 軸ぶん（全長 × 縮退 16）を計画して、行の開始位置を取る。 */
+/** Plans one axis (extent × degenerate 16) through the production entry point and takes the row start positions. */
 const rowStarts = (extent: number, generation = WAN22_TI2V_GENERATION): readonly number[] =>
   planWanGenerationTiles(LAYOUT, extent, LAYOUT.tile, generation).rows.starts;
 
-test("Wan2.2 のタイル計画: 開始位置を値で凍結する（Python 側と同じ表・本番の入口を通す）", () => {
+test("Wan2.2 tile plan: freezes the start positions by value (the same table as the Python side, through the production entry point)", () => {
   for (const [extent, starts] of AXIS_STARTS_TI2V) {
-    assertEquals([...rowStarts(extent)], [...starts], `潜在 ${extent}`);
+    assertEquals([...rowStarts(extent)], [...starts], `latent ${extent}`);
   }
 });
 
-test("Wan2.2 のタイル計画: 空間の圧縮は 16（グラフの比 8 × unpatchify 2）・受理する 2 寸法はタイルで覆える", () => {
+test("Wan2.2 tile plan: the spatial compression is 16 (graph ratio 8 × unpatchify 2) and tiles cover the two accepted sizes", () => {
   assertEquals(wanSpatialCompression(LAYOUT, WAN22_TI2V_GENERATION), 16);
   assertWanVaeTilesCover(LAYOUT, WAN22_TI2V_GENERATION, OWNER);
 });
 
-test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを通し、832×480 と 125 フレームは受理集合の文言で落とす", () => {
+test("Wan2.2 request check: passes 1280×704 / 704×1280 × up to 121 frames, and rejects 832×480 and 125 frames with the accepted-set message", () => {
   const gate: PromptGate<string> = { resolve: (text) => text, defaultNegative: () => "negative" };
   const config: WanPipelineConfig = {
     scheduler: { shift: 5 },
@@ -90,20 +99,22 @@ test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを
   const planOf = (size: { width?: number; height?: number; frames?: number }) =>
     planWanRequest({ prompt: "p", ...size }, gate, LAYOUT, config, WAN22_TI2V_GENERATION);
 
-  // 既定（1280×704・33 フレーム）と縦向きは通り、潜在の形とタイルの枚数は寸法から決まる。
+  // The defaults (1280×704, 33 frames) and portrait pass; the latent shape and the tile count follow from the size.
   const byDefault = planOf({});
   assertEquals([byDefault.width, byDefault.height, byDefault.frames], [1280, 704, 33]);
   assertEquals(byDefault.latentShape, [48, 9, 44, 80]);
   assertEquals(wanVaeTileCount(byDefault.tiles), 28);
   assertEquals(planOf({ width: 704, height: 1280, frames: 33 }).latentShape, [48, 9, 80, 44]);
 
-  // 上限は公式の既定の 121（開発機 RTX 3080 Ti で 50 ステップの完走を確かめた値）。49 と 121 は両向きで通る。
+  // The upper limit is the official default 121 (the value confirmed to complete 50 steps on the development machine's
+  // RTX 3080 Ti). 49 and 121 pass in both orientations.
   assertEquals(planOf({ frames: 49 }).latentShape, [48, 13, 44, 80]);
   assertEquals(planOf({ width: 704, height: 1280, frames: 49 }).latentShape, [48, 13, 80, 44]);
   assertEquals(planOf({ frames: 121 }).latentShape, [48, 31, 44, 80]);
   assertEquals(planOf({ width: 704, height: 1280, frames: 121 }).latentShape, [48, 31, 80, 44]);
 
-  // 公式の対応寸法の外（832×480 / 480×832）と上限を超えるフレーム数は入力起因で落ちる。
+  // Sizes outside the official supported ones (832×480 / 480×832) and frame counts above the limit fail as
+  // input errors.
   for (const [width, height] of [
     [832, 480],
     [480, 832],
@@ -120,7 +131,7 @@ test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを
     "frames 125 is not in the accepted set (4n+1 in 5..121)",
   );
 
-  // 下限は 5（5 は通り、4n+1 でも 1 は落ちる）。4n+1 でない値も落ちる。
+  // The lower limit is 5 (5 passes; 1 fails even though it is 4n+1). Values that are not 4n+1 fail too.
   assertEquals(planOf({ frames: 5 }).latentShape, [48, 2, 44, 80]);
   for (const frames of [1, 31]) {
     assertThrows(
@@ -131,7 +142,7 @@ test("Wan2.2 の要求の門: 1280×704 / 704×1280 × 121 フレームまでを
   }
 });
 
-/** 4 寸法の計画（出力の画素 → 枚数・開始位置・ブレンド幅〈patchify 空間の画素〉）。 */
+/** Plans of the four sizes (output pixels → tile count, start positions, blend widths in patchify-space pixels). */
 const SIZES: readonly {
   readonly width: number;
   readonly height: number;
@@ -179,7 +190,7 @@ const SIZES: readonly {
   },
 ];
 
-test("Wan2.2 のタイル計画: 832×480 / 480×832 は 12 枚・1280×704 / 704×1280 は 28 枚（枚数・開始位置・対ごとのブレンド幅）", () => {
+test("Wan2.2 tile plan: 832×480 / 480×832 take 12 tiles and 1280×704 / 704×1280 take 28 (count, start positions, blend width per pair)", () => {
   const compression = wanSpatialCompression(LAYOUT, WAN22_TI2V_GENERATION);
   for (const { width, height, count, rows, cols, rowBlend, colBlend } of SIZES) {
     const where = `${width}×${height}`;
@@ -194,25 +205,25 @@ test("Wan2.2 のタイル計画: 832×480 / 480×832 は 12 枚・1280×704 / 70
       [48, 12, GRAPH_SCALE],
       where,
     );
-    assertEquals(wanVaeTileCount(plan), count, `${where}: 枚数`);
-    assertEquals([...plan.rows.starts], [...rows], `${where}: 行`);
-    assertEquals([...plan.cols.starts], [...cols], `${where}: 列`);
+    assertEquals(wanVaeTileCount(plan), count, `${where}: tile count`);
+    assertEquals([...plan.rows.starts], [...rows], `${where}: rows`);
+    assertEquals([...plan.cols.starts], [...cols], `${where}: columns`);
     assertEquals(
       rowBlend.map((_, index) => wanVaeBlendExtentAt(plan.rows, GRAPH_SCALE, index + 1)),
       [...rowBlend],
-      `${where}: 行のブレンド幅`,
+      `${where}: row blend widths`,
     );
     assertEquals(
       colBlend.map((_, index) => wanVaeBlendExtentAt(plan.cols, GRAPH_SCALE, index + 1)),
       [...colBlend],
-      `${where}: 列のブレンド幅`,
+      `${where}: column blend widths`,
     );
   }
 });
 
-test("Wan2.2 のタイル計画の故障注入: 重なりをグラフの比 8 だけで導く（unpatchify を無視して 8）と潜在 44 / 52 / 80 の行が割れる", () => {
-  // unpatchify の倍率を落とした記述子 = 圧縮 8・重なり 8。潜在 16 / 30 は重なり 4 でも 8 でも同じ開始位置になる
-  // ので、この注入を区別するのは 44 / 52 / 80 の行だけ（そこを名指す）。
+test("Wan2.2 tile plan fault injection: deriving the overlap from the graph ratio 8 alone (ignoring unpatchify, so 8) breaks the rows of latents 44 / 52 / 80", () => {
+  // A descriptor that drops the unpatchify factor = compression 8, overlap 8. Latents 16 / 30 get the same start
+  // positions with overlap 4 or 8, so only the rows of 44 / 52 / 80 tell this injection apart (they are named).
   const graphScaleOnly = { ...WAN22_TI2V_GENERATION, vaePatchSize: 1 };
   const broken = AXIS_STARTS_TI2V.filter(([extent, starts]) => {
     const injected = rowStarts(extent, graphScaleOnly);
@@ -223,7 +234,7 @@ test("Wan2.2 のタイル計画の故障注入: 重なりをグラフの比 8 �
   assertEquals(broken, [44, 52, 80]);
 });
 
-// ---- 逆正規化の統計の写し（fixture を挟んだ両側の照合）-----------------------------------------------
+// ---- Copy of the denormalization statistics (checked from both sides of the fixture) -------------------------
 
 type LatentStatsFixture = {
   readonly source: { readonly repo: string; readonly revision: string; readonly reference: string };
@@ -231,7 +242,7 @@ type LatentStatsFixture = {
   readonly std: readonly number[];
 };
 
-test("WAN22_LATENTS_MEAN / STD: fixture wan22-ti2v.json とビット一致（48 本ずつ・fixture の値は f32 そのもの）", async () => {
+test("WAN22_LATENTS_MEAN / STD: bit-identical to the fixture wan22-ti2v.json (48 values each; the fixture's values are exact f32)", async () => {
   const fixture = JSON.parse(
     await readTextFile(new URL("./fixtures/wan-latents/wan22-ti2v.json", import.meta.url)),
   ) as LatentStatsFixture;
@@ -240,17 +251,24 @@ test("WAN22_LATENTS_MEAN / STD: fixture wan22-ti2v.json とビット一致（48 
     ["mean", WAN22_LATENTS_MEAN, fixture.mean],
     ["std", WAN22_LATENTS_STD, fixture.std],
   ] as const) {
-    assertEquals(constant.length, LAYOUT.latentChannels, `${name}: 本数`);
+    assertEquals(constant.length, LAYOUT.latentChannels, `${name}: count`);
     assertEquals(
       [...constant],
       [...Float32Array.from(values)],
-      `${name}: 定数と fixture（f32）の食い違い — 片側だけ書き換えた`,
+      `${name}: the constant and the fixture (f32) disagree — only one side was rewritten`,
     );
-    // fixture 自身が f32 の最短表記であること（f32 へ丸めて変わる値は config の写し方の誤り）。
-    assertEquals([...values], [...Float32Array.from(values)], `${name}: fixture が f32 でない`);
+    // The fixture itself is in shortest f32 notation (a value that changes when rounded to f32 means the config was
+    // copied wrongly).
+    assertEquals([...values], [...Float32Array.from(values)], `${name}: the fixture is not f32`);
   }
-  assert(WAN22_TI2V_GENERATION.latents.mean === WAN22_LATENTS_MEAN, "記述子が別の mean を持つ");
-  assert(WAN22_TI2V_GENERATION.latents.std === WAN22_LATENTS_STD, "記述子が別の std を持つ");
+  assert(
+    WAN22_TI2V_GENERATION.latents.mean === WAN22_LATENTS_MEAN,
+    "the descriptor holds a different mean",
+  );
+  assert(
+    WAN22_TI2V_GENERATION.latents.std === WAN22_LATENTS_STD,
+    "the descriptor holds a different std",
+  );
 });
 
 // ---- Real-asset layout (the mirror's two f16 chunk graphs) ----------------------------------------------
@@ -269,8 +287,8 @@ const prepared = async (component: string): Promise<PreparedModel> =>
   prepareContainer(await openWanTi2vComponent(component, "f16"), component);
 
 test.skipIf(!MIRROR_PRESENT)(
-  "Wan2.2 TI2V VAE のタイルの実資産（GPU 不要）: layout は計画のリテラルと一致・2.2 の記述子の admission を通り" +
-    "・2.1 の記述子では落ちる",
+  "Wan2.2 TI2V VAE tiles on the real assets (no GPU needed): the layout matches the plan's literal, passes the 2.2 " +
+    "descriptor's admission, and fails with the 2.1 descriptor",
   async () => {
     const layout = wanVaeChunkLayout(await prepared(FIRST), await prepared(NEXT));
     assertEquals(
@@ -289,7 +307,8 @@ test.skipIf(!MIRROR_PRESENT)(
       Error,
       `${OWNER}: the denormalization statistics (mean 16, std 16) do not match the VAE latent's 48 channels`,
     );
-    // 統計の本数だけでなく出口のチャネル数でも落ちること（統計を 48 本にした 2.1 の倍率の記述子）。
+    // It fails on the output channel count too, not only on the number of statistics (a descriptor with 2.1's factor
+    // and 48 statistics).
     assertThrows(
       () =>
         assertWanVaeMatchesGeneration(

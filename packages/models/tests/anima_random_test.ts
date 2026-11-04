@@ -1,13 +1,17 @@
-// Anima の決定的乱数（初期 latent を丸ごと決める生成器）の挙動テスト。GPU も資産も要らない。
+// Behaviour tests of Anima's deterministic random numbers (the generator that fully determines the
+// initial latent). Needs neither a GPU nor assets.
 //
-// `src/anima/random.ts` は sbv2 / irodori と**意図的な複製**（`generation/random.ts` の doc）
-// なので、他家族のテスト（`sbv2_host_test.ts` / `irodori_host_test.ts`）は anima 側の写しの
-// 退行を検出しない。実 GPU の PNG sha256 門（`e2e_anima_test.ts`）は資産の無い機では走らない
-// ので、資産不要の門はここが唯一になる。
+// `src/anima/random.ts` is an **intentional duplicate** of sbv2 / irodori (the doc of
+// `generation/random.ts`), so the other families' tests (`sbv2_host_test.ts` /
+// `irodori_host_test.ts`) do not detect a regression in anima's copy. The PNG sha256 check on a
+// real GPU (`e2e_anima_test.ts`) does not run on a machine without assets, so this is the only
+// asset-free check.
 //
-// NOTE: `random.ts` の `normals` の `u1 === 0` 置換（`log(0) = −Inf` 回避）は 1 ドローあたり 2⁻⁵³ で、
-// 故障注入の口（差し替え可能な一様乱数源）も無いので**直接は踏めない** — この分岐だけは
-// テスト不能として明記する（塞ぐには生成器の面を広げるしかなく、それは値の正本を緩める）。
+// NOTE: The `u1 === 0` substitution in `normals` of `random.ts` (avoiding `log(0) = −Inf`) happens
+// with probability 2⁻⁵³ per draw, and there is no fault-injection point (a replaceable uniform
+// source) either, so it **cannot be hit directly** — this one branch is stated as untestable
+// (covering it would need a wider generator surface, which would loosen the source of truth for the
+// values).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -15,20 +19,21 @@ import { ModelInputError } from "../src/errors.ts";
 import { nextUint64, Randn } from "../src/anima/random.ts";
 import { assertAcceptableSeed } from "../src/request-gates.ts";
 
-test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
+test("Randn: the same seed gives the same sequence, a different seed a different one", () => {
   const first = new Randn(7).normals(64);
   const second = new Randn(7).normals(64);
   const other = new Randn(8).normals(64);
   assertEquals([...first], [...second]);
   assert(
     [...first].some((value, index) => value !== other[index]),
-    "seed を変えても同じ列",
+    "changing the seed gives the same sequence",
   );
 });
 
-test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {
-  // 持ち越すと「同じ seed でも呼び出し順で列が変わる」形になり、seed を渡した再現性が崩れる。
-  // 奇数長 → 次の呼び出し、が取り直した生成器の同じ 2 回と一致することで固定する。
+test("Randn: an odd length does not carry a Box–Muller pair over", () => {
+  // Carrying over would make "the same seed gives a different sequence depending on call order",
+  // breaking the reproducibility a seed promises. It is pinned by an odd length → next call
+  // agreeing with the same two calls on a fresh generator.
   const split = new Randn(5);
   const head = split.normals(3);
   const tail = split.normals(2);
@@ -37,9 +42,10 @@ test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {
   assertEquals([...tail], [...fresh.normals(2)]);
 });
 
-test("Randn: 奇数長の呼び出しは対の余り（sin 側）を捨て、次の呼び出しは新しい対から始まる", () => {
-  // 同じ実装の 2 インスタンスを比べるだけでは、余りを持ち越す実装に変えても通る（両方が同じく持ち越す）。
-  // 一続きに引いた 6 要素の列と照合し、3 要素目の後の 1 個（対の sin 側）が捨てられることを縛る。
+test("Randn: an odd-length call drops the rest of the pair (the sin side) and the next call starts a new pair", () => {
+  // Comparing only two instances of the same implementation would pass even after a change to carry
+  // the rest over (both would carry it the same way). Comparing against a 6-element sequence drawn
+  // in one go pins that the one value after the 3rd element (the sin side of the pair) is dropped.
   const split = new Randn(5);
   const head = split.normals(3);
   const tail = split.normals(2);
@@ -48,10 +54,12 @@ test("Randn: 奇数長の呼び出しは対の余り（sin 側）を捨て、次
   assertEquals([...tail], [...whole.subarray(4, 6)]);
 });
 
-test("nextUint64: splitmix64 の既知の列（state 0 → 0xe220a8397b1dcdaf …）", () => {
-  // 正規乱数（f32）は `Math.cos/sin/log` の実装差でエンジンごとにずれうるので、環境に依存しない
-  // 整数部で splitmix64 の 1 ステップ（混合の定数と計算）を固定する。seed から内部状態への写像と
-  // 一様乱数の導出はここでは縛らない。期待値は splitmix64 の公開の参照実装を Python の整数で評価した値。
+test("nextUint64: the known splitmix64 sequence (state 0 → 0xe220a8397b1dcdaf …)", () => {
+  // The normals (f32) can drift between engines through implementation differences in
+  // `Math.cos/sin/log`, so one splitmix64 step (the mixing constants and arithmetic) is pinned on
+  // the environment-independent integer part. The mapping from the seed to the internal state and
+  // the derivation of the uniforms are not pinned here. The expected values come from evaluating
+  // the public splitmix64 reference implementation with Python integers.
   let state = 0n;
   const values: bigint[] = [];
   for (let draw = 0; draw < 4; draw += 1) {
@@ -67,16 +75,17 @@ test("nextUint64: splitmix64 の既知の列（state 0 → 0xe220a8397b1dcdaf �
   ]);
 });
 
-test("Randn: scale は同じ列に線形に効く（列そのものは seed で決まる）", () => {
+test("Randn: scale acts linearly on the same sequence (the sequence itself is determined by the seed)", () => {
   const plain = new Randn(3).normals(16);
   const scaled = new Randn(3).normals(16, 2);
   for (const [index, value] of plain.entries()) {
-    assertEquals(scaled[index], Math.fround(value * 2), `要素 ${index}`);
+    assertEquals(scaled[index], Math.fround(value * 2), `element ${index}`);
   }
 });
 
-test("Randn: seed の受理集合は assertAcceptableSeed と同じ（生成器側の入口）", () => {
-  // 受理集合は 1 本しか持たない（`generate` の入口と生成器で条件が割れると、片方だけ緩む）。
+test("Randn: the accepted set of seeds is the same as assertAcceptableSeed (the generator-side entry)", () => {
+  // There is only one accepted set (if the conditions of `generate`'s entry and the generator
+  // diverged, only one of them would loosen).
   for (const seed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     assertThrows(
       () => assertAcceptableSeed(seed),

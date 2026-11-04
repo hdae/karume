@@ -7,23 +7,24 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { buildRelPosTables } from "../src/sbv2/text/rel-pos-tables.ts";
 
-// ---- 資産の要らない門（上のパリティは golden が無いと 0 本走る）----------------
+// ---- Checks that need no assets (the parity above runs zero cases without the golden) ----
 //
-// 対の `sbv2_relattn_parity_test.ts` には資産不要のテストが 2 本あるのに、こちら側は
-// golden が無いと `PARITY_CASES` が空になり **1 本も走らない**（引数門も数学的性質も
-// 未検証のまま緑）。Python 側とのバイト一致は上のパリティにしか置けないが、式が満たす
-// べき構造（引数の受理集合・転置・Toeplitz）は資産なしで縛れる。
+// The counterpart `sbv2_relattn_parity_test.ts` has two asset-free tests, but on this side
+// `PARITY_CASES` is empty without the golden and **not one case runs** (green with neither the
+// argument checks nor the mathematical properties verified). Byte parity with the Python side can
+// only live in the parity above, but the structure the formula must satisfy (accepted arguments,
+// transpose, Toeplitz) can be pinned without assets.
 
-test("buildRelPosTables: 引数の受理集合（式が成立する下限を割る値は落とす）", () => {
-  // 長さ 0 は表が空になるだけでなく、対角配列 `2·length-1` が負長になる。
+test("buildRelPosTables: accepted arguments (values below the lower bound the formula needs are rejected)", () => {
+  // Length 0 not only empties the table; the diagonal array `2·length-1` gets a negative length.
   assertThrows(() => buildRelPosTables(0, 256, 512), RangeError, "is not an integer >= 1");
-  // bucketSize 1 は mid = 0 で対数の分母（log((maxPosition-1)/mid)）が壊れる。
+  // bucketSize 1 gives mid = 0 and breaks the log denominator (log((maxPosition-1)/mid)).
   assertThrows(
     () => buildRelPosTables(4, 1, 512),
     RangeError,
     "bucketSize 1 is not an integer >= 2",
   );
-  // maxPosition 1 は log(0/…) で -Infinity を作る。
+  // maxPosition 1 produces -Infinity through log(0/…).
   assertThrows(
     () => buildRelPosTables(4, 256, 1),
     RangeError,
@@ -31,19 +32,21 @@ test("buildRelPosTables: 引数の受理集合（式が成立する下限を割�
   );
 });
 
-test("buildRelPosTables: 対数バケットの式が成立しない組は NaN 経由の誤った添字を作らずに落ちる", () => {
-  // (bucket 2, maxPosition 2): mid = 1 で対数の分母 log(1) = 0、係数 mid − 1 = 0 →
-  // `Infinity × 0 = NaN`。NaN は clamp の比較をすり抜け、Int32Array で 0 になって形の合った
-  // 誤った gather 添字になる（|d| = 2 の位置が 0 に化ける）。
+test("buildRelPosTables: a pair for which the log-bucket formula does not hold fails instead of producing wrong indices through NaN", () => {
+  // (bucket 2, maxPosition 2): mid = 1 gives the log denominator log(1) = 0 and the coefficient
+  // mid − 1 = 0 → `Infinity × 0 = NaN`. NaN slips through the clamp comparisons and becomes 0 in an
+  // Int32Array, a wrong gather index of the right shape (the position with |d| = 2 turns into 0).
   assertThrows(() => buildRelPosTables(4, 2, 2), RangeError, "log-bucket");
-  // mid ≥ 2 でも maxPosition − 1 ≤ mid なら分母が 0 以下で、遠方の向きが壊れる。
+  // Even with mid ≥ 2, maxPosition − 1 ≤ mid makes the denominator ≤ 0 and breaks the far
+  // direction.
   assertThrows(() => buildRelPosTables(4, 4, 3), RangeError, "log-bucket");
   assertThrows(() => buildRelPosTables(4, 3, 512), RangeError, "log-bucket");
 });
 
-test("buildRelPosTables: 配布値（256 / 512）の近傍は線形のまま d + 256", () => {
-  // |d| < mid = 128 は対数で圧縮しない（`make_log_bucket_position` の近傍分岐）。入口の
-  // 検査を足しても配布値の表が 1 要素も変わらないことの対。
+test("buildRelPosTables: near positions at the distributed values (256 / 512) stay linear at d + 256", () => {
+  // |d| < mid = 128 is not log-compressed (the near branch of `make_log_bucket_position`). The
+  // counterpart showing that adding the entry checks did not change one element of the table for
+  // the distributed values.
   const length = 7;
   const { c2pPos } = buildRelPosTables(length, 256, 512);
   for (let i = 0; i < length; i += 1) {
@@ -53,7 +56,7 @@ test("buildRelPosTables: 配布値（256 / 512）の近傍は線形のまま d +
   }
 });
 
-test("buildRelPosTables: p2c は c2p の転置（バケット化が奇関数であることの帰結）", () => {
+test("buildRelPosTables: p2c is the transpose of c2p (a consequence of the bucketing being an odd function)", () => {
   const length = 7;
   const { c2pPos, p2cPos } = buildRelPosTables(length, 256, 512);
   for (let i = 0; i < length; i += 1) {
@@ -61,13 +64,13 @@ test("buildRelPosTables: p2c は c2p の転置（バケット化が奇関数で�
       assertEquals(
         p2cPos.data[i * length + j],
         c2pPos.data[j * length + i],
-        `p2c[${i}][${j}] が c2p[${j}][${i}] と違う`,
+        `p2c[${i}][${j}] differs from c2p[${j}][${i}]`,
       );
     }
   }
 });
 
-test("buildRelPosTables: 表は i−j にしか依存しない（Toeplitz）", () => {
+test("buildRelPosTables: the table depends only on i−j (Toeplitz)", () => {
   const length = 7;
   const { c2pPos } = buildRelPosTables(length, 256, 512);
   for (let i = 0; i + 1 < length; i += 1) {
@@ -75,20 +78,22 @@ test("buildRelPosTables: 表は i−j にしか依存しない（Toeplitz）", (
       assertEquals(
         c2pPos.data[i * length + j],
         c2pPos.data[(i + 1) * length + (j + 1)],
-        `対角 ${i - j} の値が位置で変わる`,
+        `the value of diagonal ${i - j} changes with position`,
       );
     }
   }
-  // 上の 2 本が恒真でないことの対: `maxPosition` は遠方（対数域）の値を実際に動かす。
-  // 近傍だけの表（bucketSize 256 に対し length 7）では対数域へ入らないので、
-  // 対数域へ届く形（mid = 4 に対し |i−j| が 4 を超える）で見る。
+  // The counterpart showing the two tests above are not vacuous: `maxPosition` really moves the far
+  // (logarithmic) values. A table with near positions only (length 7 against bucketSize 256) never
+  // enters the logarithmic range, so this uses a shape that reaches it (|i−j| above 4 against mid =
+  // 4).
   const wide = buildRelPosTables(16, 8, 512);
   const narrow = buildRelPosTables(16, 8, 64);
   assert(
     [...wide.c2pPos.data].some((value, index) => value !== narrow.c2pPos.data[index]),
-    "maxPosition を変えても表が同じ（バケット規則を読んでいない）",
+    "the table is the same for a different maxPosition (the bucket rule is not read)",
   );
-  // 近傍（線形域）は maxPosition に依らない — 差が出るのは遠方だけであることの固定。
+  // Near positions (the linear range) do not depend on maxPosition — pinning that only far
+  // positions differ.
   // oxlint-disable-next-line oxc/erasing-op -- `row * width + column` spelled out for row 0 keeps the table coordinates readable
   assertEquals(wide.c2pPos.data[0 * 16 + 1], narrow.c2pPos.data[0 * 16 + 1]);
 });

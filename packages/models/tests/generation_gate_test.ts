@@ -1,24 +1,25 @@
-// 投機の自己採算ゲート（ADR 0096 段 4-B ④）の挙動テスト。純関数なので GPU も時計も要らない
-// （壁は呼び手が渡す = このテストが渡す定数そのもの）。
+// Behaviour tests of the speculation self-accounting gate (ADR 0096 step 4-B ④). It is a pure function, so it needs
+// neither a GPU nor a clock (the wall times are passed by the caller = the very constants this test passes).
 //
-// ここで縛るのは 4 点である:
+// Four things are pinned here:
 //
-// 1. 「負ける文脈では decode 形へ落ち、勝てる文脈では投機のまま」— その判断が**実測の数字**
-//    （`docs/research/2026-09-09-mtp-stage4.md` §2 表 1 / §5.1）で正しい側へ倒れること（T8）。
-//    閾値は host で 1.7〜2.6 と動くので固定値に焼けず、ゲートが自分で測るしかない。
-// 2. **1 サンプルでは判定しない**こと（T2 / T3）。受理数は cycle あたり sd 0.88（平均 2.03 の
-//    43%）で散るので、移動平均の種付け（`ewma(undefined, sample) = sample`）で判定すると
-//    最初の 1 cycle が受理 0 だった会話が即座に plain へ落ちる。実走で観測した欠陥がこれで、
-//    `200 token / 7 cycle / plain step 190 / 切替 1`・always の 7,066 ms に対し 9,262 ms だった。
-//    推定器は `window` 本の非重複ブロックの和で、`confirm` 本連続の負けだけが抜ける根拠になる。
-// 3. **「強い負け」のノブが speculate 側と plain 側で別**であること（T2′ / T4″）。speculate 側の
-//    早抜け（`earlyLeave`）は**未指定 = off** で、既定では比 1.30 でも `confirm` 本連続を待つ
-//    （実走では勝つ課題でも 1 ブロックが 1.16 を超える区間が混ざり、warm な会話で 7 ターン中
-//    3 ターンが誤退出した）。plain 側の打ち切り（`burstAbort`・既定 0.15）は残す — 誤発火は
-//    「誤って抜けた後のバースト」でしか起こりえず、代償は探索 1 回ぶんだからである。
-// 4. **分岐（`fork`）は観測状態を写した独立のゲート**であること（T10 — ADR 0083 追記
-//    2026-10-11）。写さないと分岐した会話が最初の数 cycle の投機を繰り返し、共有すると片方の
-//    分岐の壁がもう片方のモードを倒す。
+// 1. "In a losing context it falls back to the decode shape, in a winning one it stays speculative" — the decision
+//    lands on the correct side for **the measured numbers** (`docs/research/2026-09-09-mtp-stage4.md` §2 table 1 /
+//    §5.1) (T8). The threshold moves between 1.7 and 2.6 per host, so it cannot be hard-coded; the gate has to
+//    measure it itself.
+// 2. **It does not decide on a single sample** (T2 / T3). The accepted count scatters with an sd of 0.88 per cycle
+//    (43% of the mean of 2.03), so deciding on the seeded moving average (`ewma(undefined, sample) = sample`) would
+//    drop a conversation whose first cycle accepted 0 straight into plain. That is the defect observed in a real
+//    run: `200 tokens / 7 cycles / plain step 190 / 1 switch`, 9,262 ms against always's 7,066 ms. The estimator is
+//    the sum of `window` non-overlapping blocks, and only `confirm` consecutive losses justify leaving.
+// 3. **The "strong loss" knobs are separate for the speculate side and the plain side** (T2′ / T4″). The speculate
+//    side's early leave (`earlyLeave`) is **unset = off**, so by default even a ratio of 1.30 waits for `confirm`
+//    consecutive blocks (in real runs, even winning tasks mix in stretches where one block exceeds 1.16, and in a
+//    warm conversation 3 of 7 turns left by mistake). The plain side's abort (`burstAbort`, default 0.15) stays — a
+//    false trigger can only happen in "the burst after a mistaken leave", and its cost is one exploration.
+// 4. **A branch (`fork`) is an independent gate that copies the observation state** (T10 — ADR 0083 addendum
+//    2026-10-11). Without copying, a branched conversation would repeat the speculation of the first few cycles;
+//    with sharing, one branch's wall times would flip the other's mode.
 
 import { describe, it, test } from "vite-plus/test";
 import { assert, assertAlmostEquals, assertEquals, assertThrows } from "@std/assert";
@@ -29,20 +30,20 @@ import {
   type SpeculationGate,
 } from "../src/generation/speculation-gate.ts";
 
-/** 1 cycle ぶんの壁（ゲートに渡す観測 — 投機 cycle と plain step の対）。 */
+/** The wall times of one cycle (the observation passed to the gate — a pair of a speculative cycle and a plain step). */
 type Walls = {
-  /** 投機 cycle の壁 ms。 */
+  /** Wall time of the speculative cycle, in ms. */
   readonly cycle: number;
-  /** その cycle が確定させた token 数。 */
+  /** The number of tokens that cycle confirmed. */
   readonly delivered: number;
-  /** plain step（M=1）の壁 ms。 */
+  /** Wall time of the plain step (M=1), in ms. */
   readonly plain: number;
 };
 
 /**
- * ゲートを 1 cycle 回す（決定に応じた観測を返し、その決定を返す）。
+ * Runs the gate for one cycle (returns the observation matching the decision, and returns that decision).
  *
- * 呼び手の契約（decide 1 回 → 観測 1 回）をそのまま写した口である。
+ * A direct copy of the caller's contract (one decide → one observation).
  */
 const step = (gate: SpeculationGate, walls: Walls): SpeculationDecision => {
   const decision = gate.decide();
@@ -51,12 +52,12 @@ const step = (gate: SpeculationGate, walls: Walls): SpeculationDecision => {
   return decision;
 };
 
-/** 1 step ぶんの記録（決定と、その step の**前後**の定常モード）。 */
+/** The record of one step (the decision, and the steady mode **before and after** that step). */
 type Observed = {
   readonly decision: SpeculationDecision;
-  /** 決定を出した時点のモード（この step が探索側かどうかはこちらで読む）。 */
+  /** The mode when the decision was made (whether this step is on the exploration side is read from this). */
   readonly before: SpeculationDecision;
-  /** 観測を返した後のモード（切替は観測で起きる）。 */
+  /** The mode after the observation was returned (a switch happens on an observation). */
   readonly mode: SpeculationDecision;
 };
 
@@ -70,21 +71,21 @@ const trace = (gate: SpeculationGate, walls: Walls, count: number): Observed[] =
 const run = (gate: SpeculationGate, walls: Walls, count: number): SpeculationDecision[] =>
   trace(gate, walls, count).map((observed) => observed.decision);
 
-/** 決定列の中で `plain` が出た添字。 */
+/** The indices in a decision sequence where `plain` appears. */
 const plainAt = (decisions: readonly SpeculationDecision[]): number[] =>
   decisions.flatMap((decision, index) => (decision === "plain" ? [index] : []));
 
-/** 決定列のうち speculate の本数（= ブロック / バーストに積まれた cycle の数）。 */
+/** The number of speculate decisions in a sequence (= the cycles accumulated into blocks / bursts). */
 const speculateCount = (decisions: readonly SpeculationDecision[]): number =>
   decisions.filter((decision) => decision === "speculate").length;
 
 /**
- * 連続した同種の step の長さの列（`kind` が `"plain"` なら探索間隔・`"speculate"` なら
- * 探索バーストの長さ）。
+ * The list of lengths of consecutive steps of the same kind (`kind` of `"plain"` gives the exploration intervals;
+ * `"speculate"` gives the exploration burst lengths).
  *
- * **決定を出した時点のモードが plain の step だけ**を見る。speculate モードで挟まる 1 手の
- * `W1` の測り直しを混ぜないためと、倒れた瞬間の step（決定は speculate・観測の後は plain）を
- * バーストに数えないためである。
+ * Only **steps whose mode at decision time is plain** are considered. This keeps out the single `W1` re-measurement
+ * inserted in speculate mode, and keeps the step at the moment of the flip (decision speculate, plain after the
+ * observation) from being counted as a burst.
  */
 const plainModeRuns = (steps: readonly Observed[], kind: SpeculationDecision): number[] => {
   const lengths: number[] = [];
@@ -99,23 +100,23 @@ const plainModeRuns = (steps: readonly Observed[], kind: SpeculationDecision): n
   return lengths;
 };
 
-/** 投機が明らかに勝つ壁（比 (100/4)/50 = 0.5）。 */
+/** Wall times where speculation clearly wins (ratio (100/4)/50 = 0.5). */
 const WINNING: Walls = { cycle: 100, delivered: 4, plain: 50 };
-/** 投機が明らかに負ける壁（比 (200/2)/50 = 2.0 — plain の壁は WINNING と同じ 50）。 */
+/** Wall times where speculation clearly loses (ratio (200/2)/50 = 2.0 — the plain wall time is 50, the same as WINNING). */
 const LOSING: Walls = { cycle: 200, delivered: 2, plain: 50 };
 /**
- * 僅かに負ける壁（比 (110/2)/50 = 1.10）— `leave`（1.01）は超えるが「強い負け」の閾値
- * `leave + 0.15`（1.16 — `burstAbort` の既定・`earlyLeave` を渡す席でも同じ値を使う）には届かない。
+ * Wall times that lose slightly (ratio (110/2)/50 = 1.10) — above `leave` (1.01) but below the "strong loss" threshold
+ * `leave + 0.15` (1.16 — the default of `burstAbort`; the setups that pass `earlyLeave` use the same value).
  */
 const MILD: Walls = { cycle: 110, delivered: 2, plain: 50 };
-/** 強く負ける壁（比 (130/2)/50 = 1.30 — 上の 1.16 を超える）。 */
+/** Wall times that lose strongly (ratio (130/2)/50 = 1.30 — above the 1.16 above). */
 const STRONG_LOSS: Walls = { cycle: 130, delivered: 2, plain: 50 };
 
-test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決定で 1 回だけ採る", () => {
-  // `W1`（decode の 1 token あたりの壁）を測るまでは「抜けるべきか」を判断できない。未観測の
-  // まま 16 cycle 回すと、M2 自由文（0.76×）では 2% を先に失う。
+test("gate T1 start: it starts in speculate, and takes W1 exactly once on the second decision", () => {
+  // Until `W1` (the decode wall time per token) is measured, "should it leave" cannot be decided. Running 16 cycles
+  // without measuring it would lose 2% up front on M2 free text (0.76×).
   const gate = createSpeculationGate();
-  assertEquals(gate.mode, "speculate", "初期モード");
+  assertEquals(gate.mode, "speculate", "initial mode");
   assertEquals(gate.switches, 0);
   assertEquals(run(gate, WINNING, 6), [
     "speculate",
@@ -125,135 +126,140 @@ test("ゲート T1 起点: 初期は speculate で、W1 は 2 回目の決定で
     "speculate",
     "speculate",
   ]);
-  // 1 step の plain は `W1` の測り直しであってモードの切替ではない。
+  // A single plain step is a re-measurement of `W1`, not a mode switch.
   assertEquals(gate.mode, "speculate");
-  assertEquals(gate.switches, 0, "`W1` の測り直しを切替に数えている");
+  assertEquals(gate.switches, 0, "counts the `W1` re-measurement as a switch");
 });
 
-test("ゲート T2 ブロック: 満ちるまで判定せず、負けブロック 2 本連続で初めて抜ける", () => {
+test("gate T2 blocks: no decision until a block fills, and it leaves only after 2 consecutive losing blocks", () => {
   const gate = createSpeculationGate();
-  // 既定の window は 16。`W1` の測り直しは決定 1 / 15 に入るので、決定 17 本で投機 cycle は
-  // ちょうど 15 本 = ブロックはまだ満ちない。負けの壁でもここでは倒れない。
+  // The default window is 16. The `W1` re-measurements fall on decisions 1 / 15, so 17 decisions give exactly 15
+  // speculative cycles = the block has not filled yet. Even with losing wall times it does not flip here.
   const first = run(gate, MILD, 17);
-  assertEquals(speculateCount(first), 15, "ブロックが満ちない前提が崩れている");
-  assertEquals(gate.mode, "speculate", "ブロックが満ちる前に抜けている");
+  assertEquals(speculateCount(first), 15, "the premise that the block has not filled is broken");
+  assertEquals(gate.mode, "speculate", "leaves before the block fills");
   assertEquals(gate.switches, 0);
 
-  // 16 本目でブロック 1 が満ちる（比 1.10 > leave 1.01）が、`confirm` は 2 なのでまだ抜けない
-  // （既定では早抜けが off なので、比の大きさで待つ長さは変わらない — T2′）。
+  // The 16th fills block 1 (ratio 1.10 > leave 1.01), but `confirm` is 2, so it does not leave yet (early leave is
+  // off by default, so the size of the ratio does not change how long it waits — T2′).
   run(gate, MILD, 1);
-  assertEquals(gate.mode, "speculate", "負けブロック 1 本だけで抜けている");
+  assertEquals(gate.mode, "speculate", "leaves after a single losing block");
   assertEquals(gate.switches, 0);
 
-  // 続く 17 本（決定 18..34・測り直しは決定 31 の 1 本）で投機 cycle が 16 本 = ブロック 2 が
-  // 満ちる。最後の 1 本の観測まで speculate のままで、その観測で倒れる。
+  // The next 17 (decisions 18..34, with one re-measurement at decision 31) give 16 speculative cycles = block 2
+  // fills. It stays speculate until the last observation, and flips on that observation.
   const second = trace(gate, MILD, 17);
   assertEquals(speculateCount(second.map((observed) => observed.decision)), 16);
   assertEquals(
     second.slice(0, -1).map((observed) => observed.mode),
     Array.from({ length: 16 }, () => "speculate"),
-    "ブロック 2 が満ちる前に倒れている",
+    "flips before block 2 fills",
   );
   assertEquals(gate.mode, "plain");
   assertEquals(gate.switches, 1);
 });
 
-test("ゲート T2′ 早抜け: 既定は off（比 1.30 でも 2 ブロック）・earlyLeave の席だけ 1 本で倒れる", () => {
-  // 既定 off の根拠は机上の確率ではなく実走である。受理はターン内で定常でなく、勝つ課題
-  // （対話・比 0.90）でも 16 cycle 級で受理が落ちる区間が混ざるので、sequence を使い回した会話で
-  // 7 ターン中 3 ターンが誤って抜けた（research §6.5 表 11″）。利得は「抜けるまでの 1 ブロック」で
-  // sequence の寿命に 1 回、害は勝つ課題の毎ターンなので、既定では取らない。
+test("gate T2′ early leave: off by default (2 blocks even at a ratio of 1.30); only the earlyLeave setup flips after 1", () => {
+  // The default of off rests on real runs, not on desk probabilities. Acceptance is not steady within a turn, and
+  // even winning tasks (dialogue, ratio 0.90) mix in stretches of about 16 cycles where acceptance drops, so in a
+  // conversation that reused its sequence, 3 of 7 turns left by mistake (research §6.5 table 11″). The gain is
+  // "one block until leaving", once per sequence lifetime, and the harm hits every turn of a winning task, so it is
+  // not taken by default.
   const patient = createSpeculationGate();
   const steps = trace(patient, STRONG_LOSS, 18);
   assertEquals(speculateCount(steps.map((observed) => observed.decision)), 16);
-  assertEquals(patient.mode, "speculate", "既定で 1 ブロックで倒れている（早抜けは off）");
+  assertEquals(patient.mode, "speculate", "flips after one block by default (early leave is off)");
   assertEquals(patient.switches, 0);
-  // 2 ブロック目（決定 17 本で投機 cycle 16 本 — T2 と同じ数え）で初めて倒れる。
+  // It first flips at the 2nd block (17 decisions give 16 speculative cycles — the same count as T2).
   run(patient, STRONG_LOSS, 17);
-  assertEquals(patient.mode, "plain", "2 ブロック連続の負けで倒れていない");
+  assertEquals(patient.mode, "plain", "does not flip after 2 consecutive losing blocks");
   assertEquals(patient.switches, 1);
 
-  // ノブを渡した席は 1 ブロックで倒れる（= 早抜けは `earlyLeave` の閾値だけで効いている）。
+  // A setup that passes the knob flips after 1 block (= early leave takes effect through the `earlyLeave` threshold alone).
   const eager = createSpeculationGate({ earlyLeave: 0.15 });
   const eagerSteps = trace(eager, STRONG_LOSS, 18);
   assertEquals(speculateCount(eagerSteps.map((observed) => observed.decision)), 16);
   assertEquals(
     eagerSteps.slice(0, -1).map((observed) => observed.mode),
     Array.from({ length: 17 }, () => "speculate"),
-    "ブロックが満ちる前に倒れている（早抜けも満ちた 1 本の判定である）",
+    "flips before the block fills (early leave is also a decision on one filled block)",
   );
-  assertEquals(eager.mode, "plain", "earlyLeave 0.15 の席で 1 ブロックで倒れていない");
+  assertEquals(eager.mode, "plain", "does not flip after 1 block in the earlyLeave 0.15 setup");
   assertEquals(eager.switches, 1);
 
-  // 対（同じ席でも比 1.10 は `leave + earlyLeave` = 1.16 に届かないので `confirm` を待つ）。
+  // Counterpart (in the same setup, a ratio of 1.10 does not reach `leave + earlyLeave` = 1.16, so it waits for `confirm`).
   const mild = createSpeculationGate({ earlyLeave: 0.15 });
   run(mild, MILD, 18);
-  assertEquals(mild.mode, "speculate", "1.16 に届かない負けで早抜けしている");
+  assertEquals(mild.mode, "speculate", "leaves early on a loss that does not reach 1.16");
   assertEquals(mild.switches, 0);
 
-  // 対 2（配線の取り違え）: speculate 側の閾値は `earlyLeave` であって `burstAbort` ではない。
-  // 比 1.30 は `leave + burstAbort` = 1.16 は超えるが `leave + earlyLeave` = 1.31 には届かない。
+  // Counterpart 2 (miswiring): the speculate side's threshold is `earlyLeave`, not `burstAbort`.
+  // A ratio of 1.30 exceeds `leave + burstAbort` = 1.16 but does not reach `leave + earlyLeave` = 1.31.
   const wired = createSpeculationGate({ earlyLeave: 0.3, burstAbort: 0.15 });
   run(wired, STRONG_LOSS, 18);
-  assertEquals(wired.mode, "speculate", "speculate 側が burstAbort の閾値を読んでいる");
+  assertEquals(wired.mode, "speculate", "the speculate side reads the burstAbort threshold");
   assertEquals(wired.switches, 0);
 });
 
-/** 最初の cycle だけ配送 1（受理 0）— 旧 EWMA 設計が 1 サンプルで種付けされた形。 */
+/** Only the first cycle delivers 1 (accepts 0) — the shape that seeded the old EWMA design with a single sample. */
 const SEED_FIRST: Walls = { cycle: 100, delivered: 1, plain: 40 };
-/** 以後の定常（比 (100/3)/40 = 0.83 = 投機が勝っている）。 */
+/** The steady state afterwards (ratio (100/3)/40 = 0.83 = speculation is winning). */
 const SEED_REST: Walls = { cycle: 100, delivered: 3, plain: 40 };
 
-test("ゲート T3 種付け: 最初の cycle が受理 0 でも、勝っている文脈では抜けない", () => {
-  // 移動平均で `A` を持つ設計では `ewma(undefined, 1) = 1` になり、次の決定で比が
-  // `(100/1)/40 = 2.5 > leave` → **3 手目で plain へ落ちる**（実走で観測した欠陥そのもの）。
-  // ブロック集計では 16 本の和で見るので `1600 / (1 + 15×3) = 34.8 ms/token` < `40 × 1.01`
-  // となり、判定は正しく「勝っている」側に出る。
+test("gate T3 seeding: even if the first cycle accepts 0, it does not leave in a winning context", () => {
+  // A design that keeps `A` as a moving average gets `ewma(undefined, 1) = 1`, and at the next decision the ratio is
+  // `(100/1)/40 = 2.5 > leave` → **it drops to plain on the 3rd move** (exactly the defect observed in a real run).
+  // Block aggregation looks at the sum of 16, so `1600 / (1 + 15×3) = 34.8 ms/token` < `40 × 1.01`, and the
+  // decision correctly comes out on the "winning" side.
   const gate = createSpeculationGate();
   step(gate, SEED_FIRST);
   run(gate, SEED_REST, 59);
-  assertEquals(gate.mode, "speculate", "1 サンプルの種付けで抜けている");
+  assertEquals(gate.mode, "speculate", "leaves on single-sample seeding");
   assertEquals(gate.switches, 0);
 
-  // 対（フォールト注入）: 同じ種付けでも、定常が本当に負けていれば抜ける（比 (100/2)/40 = 1.25 が
-  // `confirm` = 2 ブロック続く）。これが無いと上の緑は「そもそも抜けないゲート」でも通る。
+  // Counterpart (fault injection): with the same seeding, it leaves if the steady state really loses (a ratio of
+  // (100/2)/40 = 1.25 lasts for `confirm` = 2 blocks). Without this, the green above would pass even for "a gate that never leaves".
   const losing = createSpeculationGate();
   step(losing, SEED_FIRST);
   run(losing, { cycle: 100, delivered: 2, plain: 40 }, 59);
-  assertEquals(losing.mode, "plain", "本当に負けている壁でも抜けない");
+  assertEquals(losing.mode, "plain", "does not leave even with really losing wall times");
   assertEquals(losing.switches, 1);
 });
 
-test("ゲート T4 探索: plain 側はバーストで測り、外れるたび間隔が倍になる", () => {
-  // 1 cycle 単発の探索では受理数の sd 0.88 に埋もれて判定できない（旧設計が plain から戻れ
-  // なかった理由）。バーストで測り、外れたら遠ざける（固定間隔のままだと探索そのものの
-  // 損失が M2 自由文で 0.950× になり、ゲートが救った負けを探索で払い直す）。
+test("gate T4 exploration: the plain side measures in bursts, and the interval doubles on every miss", () => {
+  // A single-cycle exploration is buried in the accepted count's sd of 0.88 and cannot decide (why the old design
+  // could not return from plain). It measures in bursts and backs off on a miss (with a fixed interval, the loss of
+  // exploration itself would be 0.950× on M2 free text, paying back in exploration the loss the gate saved).
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
   const steps = trace(gate, LOSING, 2000);
   assertEquals(
     plainModeRuns(steps, "plain").slice(0, 7),
     [16, 32, 64, 128, 256, 512, 512],
-    `探索の間隔が幾何バックオフになっていない: ${plainModeRuns(steps, "plain").join(",")}`,
+    `the exploration interval is not a geometric backoff: ${plainModeRuns(steps, "plain").join(",")}`,
   );
-  // 比 2.0 は `leave + burstAbort` = 1.16 を超えるので、外れが確定したバーストは `burstMin` = 4 本で
-  // 畳まれる（T4″）。
+  // A ratio of 2.0 exceeds `leave + burstAbort` = 1.16, so a burst whose miss is settled is folded at `burstMin` = 4
+  // (T4″).
   assertEquals(
     plainModeRuns(steps, "speculate").slice(0, 6),
     [4, 4, 4, 4, 4, 4],
-    `探索バーストが 4 cycle で畳まれていない: ${plainModeRuns(steps, "speculate").join(",")}`,
+    `the exploration burst is not folded at 4 cycles: ${plainModeRuns(steps, "speculate").join(",")}`,
   );
-  assertEquals(gate.mode, "plain", "外れ続ける探索で戻ってしまっている");
-  assertEquals(gate.switches, 1, "探索バーストを切替に数えている");
+  assertEquals(gate.mode, "plain", "returns despite an exploration that keeps missing");
+  assertEquals(gate.switches, 1, "counts exploration bursts as switches");
 });
 
-test("ゲート T4′ 戻る: バーストの集計が enter を下回ったら戻り、間隔は 16 に戻る", () => {
+test("gate T4′ return: it returns when a burst's aggregate falls below enter, and the interval goes back to 16", () => {
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
   run(gate, LOSING, 3);
-  assertEquals(gate.mode, "plain", "負けの壁で plain へ落ちる前提が崩れている");
+  assertEquals(
+    gate.mode,
+    "plain",
+    "the premise of dropping to plain on losing wall times is broken",
+  );
   assertEquals(gate.switches, 1);
 
-  // 課題が変わって投機が勝つようになる → 間隔 16 ぶん plain を回した後、8 cycle のバーストで
-  // 測る（当たりのバーストは満ちるまで回る = 打ち切りは負け側にしか効かない）。
+  // The task changes and speculation starts winning → after the interval of 16 plain steps, it measures with a burst
+  // of 8 cycles (a hitting burst runs until it fills = the abort only acts on the losing side).
   const steps = trace(gate, WINNING, 24);
   assertEquals(
     steps.map((observed) => observed.decision),
@@ -262,91 +268,95 @@ test("ゲート T4′ 戻る: バーストの集計が enter を下回ったら�
   assertEquals(
     steps.slice(16, 23).map((observed) => observed.mode),
     Array.from({ length: 7 }, () => "plain"),
-    "バーストが満ちる前に戻っている（1 cycle の当たりで戻してはならない）",
+    "returns before the burst fills (it must not return on a single hitting cycle)",
   );
-  assertEquals(gate.mode, "speculate", "当たりのバーストで戻っていない");
+  assertEquals(gate.mode, "speculate", "does not return on a hitting burst");
   assertEquals(gate.switches, 2);
 
-  // もう一度負けさせると plain へ落ち、探索は**16 から**やり直す（伸びた間隔を持ち越さない）。
+  // Making it lose again drops it to plain, and exploration restarts **from 16** (the grown interval is not carried over).
   const again = trace(gate, LOSING, 40);
-  assertEquals(gate.mode, "plain", "負けに戻ったのに plain へ落ちていない");
+  assertEquals(gate.mode, "plain", "does not drop to plain after returning to a loss");
   assertEquals(gate.switches, 3);
   assertEquals(
     plainModeRuns(again, "plain")[0],
     16,
-    `戻った後の探索間隔が 16 でない: ${plainModeRuns(again, "plain").join(",")}`,
+    `the exploration interval after returning is not 16: ${plainModeRuns(again, "plain").join(",")}`,
   );
 });
 
-test("ゲート T4″ 打ち切り: 強い負け（burstAbort）が出たバーストは burstMin 本目で畳む", () => {
-  // 負ける文脈が払う探索費の主はここである（バースト 8 cycle × 間隔 16 → 32 → …）。当たりの
-  // 判定は満ちたバーストのままなので、`burst` そのものを縮めるのとは違って戻る精度は落ちない。
+test("gate T4″ abort: a burst with a strong loss (burstAbort) is folded at the burstMin-th cycle", () => {
+  // This is the main exploration cost a losing context pays (bursts of 8 cycles × intervals of 16 → 32 → …). The
+  // hit decision is still made on a filled burst, so unlike shrinking `burst` itself, the return accuracy does not drop.
   const gate = createSpeculationGate({ window: 2, confirm: 1 });
   run(gate, LOSING, 3);
-  assertEquals(gate.mode, "plain", "負けの壁で plain へ落ちる前提が崩れている");
+  assertEquals(
+    gate.mode,
+    "plain",
+    "the premise of dropping to plain on losing wall times is broken",
+  );
   assertEquals(gate.switches, 1);
 
-  // 間隔 16 ぶん plain を回してバースト → 4 本目の観測で比 1.30 > 1.16 なので畳み、以後は
-  // 倍の間隔（32 step）まで plain である。
+  // After the interval of 16 plain steps, a burst → at the 4th observation the ratio is 1.30 > 1.16, so it is folded,
+  // and from then on it stays plain until the doubled interval (32 steps).
   const steps = trace(gate, STRONG_LOSS, 53);
   assertEquals(
     plainModeRuns(steps, "plain"),
     [16, 32],
-    `打ち切ったバーストの後の間隔が倍になっていない: ${plainModeRuns(steps, "plain").join(",")}`,
+    `the interval after the aborted burst did not double: ${plainModeRuns(steps, "plain").join(",")}`,
   );
   assertEquals(
     plainModeRuns(steps, "speculate"),
     [4],
-    `バーストが 4 本目で畳まれていない: ${plainModeRuns(steps, "speculate").join(",")}`,
+    `the burst is not folded at the 4th: ${plainModeRuns(steps, "speculate").join(",")}`,
   );
   assertEquals(gate.mode, "plain");
-  assertEquals(gate.switches, 1, "打ち切ったバーストを切替に数えている");
+  assertEquals(gate.switches, 1, "counts the aborted burst as a switch");
 
-  // 対 1（打ち切りの位置は `burstMin` が決める — 同じ壁でも 5 本目までは畳まない）。
+  // Counterpart 1 (the abort position is decided by `burstMin` — with the same wall times it does not fold before the 5th).
   const later = createSpeculationGate({ window: 2, confirm: 1, burstMin: 5 });
   run(later, LOSING, 3);
   assertEquals(
     plainModeRuns(trace(later, STRONG_LOSS, 22), "speculate"),
     [5],
-    "burstMin を上げてもバーストが 4 本で畳まれている",
+    "the burst is folded at 4 even with a raised burstMin",
   );
 
-  // 対 2（`leave` は超えるが強い負けでない比 1.10 のバーストは 8 cycle 回り切る）。
+  // Counterpart 2 (a burst with a ratio of 1.10, above `leave` but not a strong loss, runs all 8 cycles).
   const full = createSpeculationGate({ window: 2, confirm: 1 });
   run(full, LOSING, 3);
   const mild = trace(full, MILD, 25);
   assertEquals(
     plainModeRuns(mild, "speculate"),
     [8],
-    `弱い負けのバーストを打ち切っている: ${plainModeRuns(mild, "speculate").join(",")}`,
+    `aborts a weakly losing burst: ${plainModeRuns(mild, "speculate").join(",")}`,
   );
-  assertEquals(full.mode, "plain", "比 1.10 のバーストで speculate へ戻っている");
+  assertEquals(full.mode, "plain", "returns to speculate on a burst with a ratio of 1.10");
 
-  // 対 3（閾値は `burstAbort` が持つ — 上げれば同じ比 1.30 のバーストが回り切る。speculate 側の
-  // `earlyLeave` とは別のノブであることの対でもある）。
+  // Counterpart 3 (the threshold is owned by `burstAbort` — raising it lets a burst with the same ratio of 1.30 run to
+  // the end. It is also the counterpart showing it is a different knob from the speculate side's `earlyLeave`).
   const lenient = createSpeculationGate({ window: 2, confirm: 1, burstAbort: 0.5 });
   run(lenient, LOSING, 3);
   const kept = trace(lenient, STRONG_LOSS, 25);
   assertEquals(
     plainModeRuns(kept, "speculate"),
     [8],
-    `burstAbort を上げてもバーストを打ち切っている: ${plainModeRuns(kept, "speculate").join(",")}`,
+    `aborts the burst even with a raised burstAbort: ${plainModeRuns(kept, "speculate").join(",")}`,
   );
-  assertEquals(lenient.mode, "plain", "比 1.30 のバーストで speculate へ戻っている");
+  assertEquals(lenient.mode, "plain", "returns to speculate on a burst with a ratio of 1.30");
 });
 
-test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step はブロックに数えない", () => {
-  // `W1` が古いと「抜けるべきか」の判断材料が古いままになる。間隔は判定ブロックと同じ 16 で、
-  // 費用は 16 cycle につき plain 価格の 1 token（always 比 1% 前後）— これは払う。
+test("gate T5 steady state: measures plain once per 16 observations, and that step is not counted in a block", () => {
+  // A stale `W1` leaves the basis of "should it leave" stale. The interval is 16, the same as the decision block, and
+  // the cost is one token at plain price per 16 cycles (about 1% relative to always) — this is paid.
   const gate = createSpeculationGate();
   const decisions = run(gate, WINNING, 40);
   assertEquals(plainAt(decisions), [1, 15, 31]);
   assertEquals(gate.mode, "speculate");
   assertEquals(gate.switches, 0);
 
-  // ブロックが数えるのは**投機 cycle だけ**である。window 4 の負け壁では、間に `W1` の plain が
-  // 1 本挟まるので 4 本目の投機 cycle = 決定 5 本目でようやく満ちる。plain step もブロックに
-  // 数える実装だと 1 手早く（決定 4 本目で）倒れる。
+  // Blocks count **only speculative cycles**. With a window of 4 and losing wall times, one `W1` plain step is
+  // inserted, so the block only fills at the 4th speculative cycle = the 5th decision. An implementation that also
+  // counted plain steps in blocks would flip one move early (at the 4th decision).
   const counted = createSpeculationGate({ window: 4, confirm: 1 });
   const steps = trace(counted, LOSING, 5);
   assertEquals(
@@ -356,39 +366,39 @@ test("ゲート T5 定常: 16 観測に 1 回 plain を測り、その step は�
   assertEquals(counted.switches, 1);
 });
 
-describe("ゲート T6 skip: 周期だけ進み、W1 もブロックも動かさない", () => {
-  it("周期は進む（`W1` の初回サンプルがそのぶん早く来る）", () => {
-    // 呼び手が「壁の観測に混ぜない」と決めた cycle（各ターンの最初の cycle）— 決定は読むが、
-    // 返すのは観測ではなく `skip()` である。混ぜない cycle でも GPU の仕事は 1 本走っている。
+describe("gate T6 skip: only the period advances; neither W1 nor the blocks move", () => {
+  it("the period advances (the first `W1` sample comes that much earlier)", () => {
+    // A cycle the caller decided "not to mix into the wall-time observations" (the first cycle of each turn) — it reads
+    // the decision but returns `skip()` instead of an observation. Even a cycle that is not mixed in runs one GPU job.
     const gate = createSpeculationGate();
     assertEquals(gate.decide(), "speculate");
     gate.skip();
-    assertEquals(gate.decide(), "plain", "skip した cycle のぶん周期が進んでいない");
+    assertEquals(gate.decide(), "plain", "the period did not advance for the skipped cycle");
     gate.observePlain(WINNING.plain);
     assertEquals(gate.mode, "speculate");
     assertEquals(gate.switches, 0);
   });
 
-  it("ブロックには数えない", () => {
+  it("is not counted in a block", () => {
     const gate = createSpeculationGate({ window: 2, confirm: 1 });
     assertEquals(gate.decide(), "speculate");
     gate.skip();
     assertEquals(gate.decide(), "plain");
     gate.observePlain(LOSING.plain);
-    assertEquals(step(gate, LOSING), "speculate", "ブロック 1 本目");
-    assertEquals(gate.mode, "speculate", "skip がブロックに数えられている");
-    assertEquals(step(gate, LOSING), "speculate", "ブロック 2 本目 = 満ちる");
+    assertEquals(step(gate, LOSING), "speculate", "block 1");
+    assertEquals(gate.mode, "speculate", "skip is counted in a block");
+    assertEquals(step(gate, LOSING), "speculate", "block 2 = it fills");
     assertEquals(gate.mode, "plain");
     assertEquals(gate.switches, 1);
   });
 });
 
-describe("ゲート T7 冪等: decide は状態を動かさない（切替は観測で起きる）", () => {
-  // `decide()` は純粋な読み取りである。ここで縛るのは 2 方向: 同じ状態での重複読みが状態を
-  // 進めないことと、状態が動いた（観測 / `skip`）直後の読みが**必ず作り直される**ことである。
-  // 後者を見ないと、決定をメモ化して観測でだけ捨てる実装（= `skip` した cycle の決定が 1 手
-  // 古いまま出る）が緑のまま通る。
-  it("起点（まだ何も測っていない）", () => {
+describe("gate T7 idempotence: decide does not move the state (a switch happens on an observation)", () => {
+  // `decide()` is a pure read. Two directions are pinned here: repeated reads in the same state do not advance the
+  // state, and the read right after the state moved (an observation / `skip`) is **always recomputed**. Without the
+  // latter, an implementation that memoizes the decision and discards it only on an observation (= the decision of a
+  // `skip`ped cycle comes out one move stale) would stay green.
+  it("start (nothing measured yet)", () => {
     const gate = createSpeculationGate();
     assertEquals(
       [gate.decide(), gate.decide(), gate.decide()],
@@ -397,72 +407,98 @@ describe("ゲート T7 冪等: decide は状態を動かさない（切替は観
     assertEquals(gate.switches, 0);
   });
 
-  it("倒れた直後に何度読んでも、切替は 1 回・探索の周期もずれない", () => {
+  it("however often it is read right after a flip, there is one switch and the exploration period does not shift", () => {
     const gate = createSpeculationGate({ window: 2, confirm: 1 });
-    // 3 手目の**観測**で plain へ倒れる（決定ではなく観測が状態を動かす）。
+    // It flips to plain on the **observation** of the 3rd move (the observation, not the decision, moves the state).
     run(gate, LOSING, 3);
     assertEquals(gate.mode, "plain");
     assertEquals(gate.switches, 1);
     assertEquals([gate.decide(), gate.decide(), gate.decide()], ["plain", "plain", "plain"]);
-    assertEquals(gate.switches, 1, "決定を読んだだけで切替が進んでいる");
+    assertEquals(gate.switches, 1, "merely reading the decision advanced the switches");
 
-    // 読みの回数は周期に効かないので、探索バーストはきっかり 17 手目に始まる。
+    // The number of reads does not affect the period, so the exploration burst starts exactly at the 17th move.
     assertEquals(
       run(gate, LOSING, 17),
       [...Array.from({ length: 16 }, () => "plain"), "speculate"],
-      "重複読みが探索の周期を進めている",
+      "repeated reads advance the exploration period",
     );
     assertEquals(gate.switches, 1);
     assertEquals(gate.mode, "plain");
   });
 
-  it("観測を返せば次の決定は作り直される", () => {
+  it("returning an observation recomputes the next decision", () => {
     const gate = createSpeculationGate();
-    // 16 手目 = 定常の `W1` の測り直し。
+    // The 16th move = the steady `W1` re-measurement.
     run(gate, WINNING, 15);
     assertEquals(gate.decide(), "plain");
-    assertEquals(gate.decide(), "plain", "観測を返す前に決定が動いた");
+    assertEquals(gate.decide(), "plain", "the decision moved before the observation was returned");
     gate.observePlain(WINNING.plain);
-    assertEquals(gate.decide(), "speculate", "観測を返しても決定が更新されていない");
+    assertEquals(
+      gate.decide(),
+      "speculate",
+      "the decision did not update after the observation was returned",
+    );
   });
 
-  it("skip した cycle の決定も持ち越されない（周期は 1 進む）", () => {
+  it("the decision of a skipped cycle is not carried over either (the period advances by 1)", () => {
     const gate = createSpeculationGate();
     assertEquals(gate.decide(), "speculate");
     gate.skip();
-    // 周期が 1 進んだので、次は `W1` の初回サンプル（2 回目の決定 = plain）。決定を持ち越す
-    // 実装だと、ここに 1 手古い speculate が出る。
-    assertEquals(gate.decide(), "plain", "skip した cycle の決定が持ち越されている");
+    // The period advanced by 1, so next is the first `W1` sample (the second decision = plain). An implementation that
+    // carries the decision over would emit a one-move-stale speculate here.
+    assertEquals(gate.decide(), "plain", "the decision of the skipped cycle is carried over");
     gate.observePlain(WINNING.plain);
-    // `skip` はブロックを動かさない = 投機側の観測はまだ 1 本も無く、判定は出ない。
+    // `skip` does not move the blocks = there is no speculative observation yet, so no decision comes out.
     assertEquals(gate.mode, "speculate");
     assertEquals(gate.switches, 0);
   });
 });
 
-/** 実測 1 条件（`docs/research/2026-09-09-mtp-stage4.md` §2 表 1 = RTX / §5.1 = M2・greedy）。 */
+/** One measured condition (`docs/research/2026-09-09-mtp-stage4.md` §2 table 1 = RTX / §5.1 = M2, greedy). */
 type Condition = Walls & {
   readonly name: string;
-  /** 表から導いた比 `(Wc/A)/W1`（1 未満なら投機が速い）。 */
+  /** The ratio `(Wc/A)/W1` derived from the table (below 1 means speculation is faster). */
   readonly ratio: number;
-  /** ブロック 2 本ぶん回した後に居るべきモード（既定の席 = 早抜け off）。 */
+  /** The mode it should be in after 2 blocks (the default setup = early leave off). */
   readonly mode: SpeculationDecision;
   /**
-   * `earlyLeave: 0.15` を渡した席で plain へ倒れるまでに要るブロック数（`mode` が plain の条件だけ
-   * 持つ）。
+   * The number of blocks needed to flip to plain in the setup that passes `earlyLeave: 0.15` (only conditions whose
+   * `mode` is plain have it).
    *
-   * 1 = 比が `leave + earlyLeave` = 1.16 を超えるので早抜けする条件・2 = `leave` は超えるが 1.16 に
-   * 届かないので `confirm` 本連続を待つ条件。**既定の席ではどの条件も 2 である**（早抜けが off）。
+   * 1 = a condition whose ratio exceeds `leave + earlyLeave` = 1.16, so it leaves early; 2 = a condition above `leave`
+   * but below 1.16, so it waits for `confirm` consecutive blocks. **In the default setup every condition is 2**
+   * (early leave is off).
    */
   readonly eagerBlocks?: 1 | 2;
 };
 
 const CONDITIONS: readonly Condition[] = [
-  { name: "RTX 抽出", cycle: 53.7, delivered: 3.39, plain: 29.22, ratio: 0.542, mode: "speculate" },
-  { name: "RTX 要約", cycle: 55.8, delivered: 2.65, plain: 29.67, ratio: 0.71, mode: "speculate" },
-  { name: "RTX 対話", cycle: 46.8, delivered: 2.03, plain: 27.13, ratio: 0.85, mode: "speculate" },
   {
-    name: "RTX 自由文",
+    name: "RTX extraction",
+    cycle: 53.7,
+    delivered: 3.39,
+    plain: 29.22,
+    ratio: 0.542,
+    mode: "speculate",
+  },
+  {
+    name: "RTX summarization",
+    cycle: 55.8,
+    delivered: 2.65,
+    plain: 29.67,
+    ratio: 0.71,
+    mode: "speculate",
+  },
+  {
+    name: "RTX dialogue",
+    cycle: 46.8,
+    delivered: 2.03,
+    plain: 27.13,
+    ratio: 0.85,
+    mode: "speculate",
+  },
+  {
+    name: "RTX free text",
     cycle: 46.5,
     delivered: 1.66,
     plain: 27.02,
@@ -470,10 +506,24 @@ const CONDITIONS: readonly Condition[] = [
     mode: "plain",
     eagerBlocks: 2,
   },
-  { name: "M2 抽出", cycle: 172.4, delivered: 3.39, plain: 66.03, ratio: 0.77, mode: "speculate" },
-  { name: "M2 要約", cycle: 170.7, delivered: 2.65, plain: 66.39, ratio: 0.97, mode: "speculate" },
   {
-    name: "M2 対話",
+    name: "M2 extraction",
+    cycle: 172.4,
+    delivered: 3.39,
+    plain: 66.03,
+    ratio: 0.77,
+    mode: "speculate",
+  },
+  {
+    name: "M2 summarization",
+    cycle: 170.7,
+    delivered: 2.65,
+    plain: 66.39,
+    ratio: 0.97,
+    mode: "speculate",
+  },
+  {
+    name: "M2 dialogue",
     cycle: 123.0,
     delivered: 2.03,
     plain: 56.14,
@@ -482,7 +532,7 @@ const CONDITIONS: readonly Condition[] = [
     eagerBlocks: 2,
   },
   {
-    name: "M2 自由文",
+    name: "M2 free text",
     cycle: 118.2,
     delivered: 1.66,
     plain: 54.45,
@@ -492,78 +542,78 @@ const CONDITIONS: readonly Condition[] = [
   },
 ];
 
-describe("ゲート T8 実測: 8 条件のうち負ける 3 本だけが plain へ落ちる", () => {
+describe("gate T8 measurements: of the 8 conditions, only the 3 losing ones drop to plain", () => {
   for (const condition of CONDITIONS) {
-    it(`${condition.name}（比 ${condition.ratio}）`, () => {
-      // 定数が research の表と同じものであること（表を写し間違えた瞬間に赤くなる）。
+    it(`${condition.name} (ratio ${condition.ratio})`, () => {
+      // The constants are the same as the research table's (it turns red the moment the table is miscopied).
       assertAlmostEquals(
         condition.cycle / condition.delivered / condition.plain,
         condition.ratio,
         0.001,
-        `${condition.name}: 壁の定数から出る比が表の値と違う`,
+        `${condition.name}: the ratio from the wall-time constants differs from the table's value`,
       );
       const gate = createSpeculationGate();
-      // 決定 18 本 = 投機 cycle 16 本 = ブロックちょうど 1 本（plain は `W1` の測り直しだけで、
-      // 決定 1 / 15 の 2 本 ≒ 1/16）。既定は早抜け off なので、**どの条件もここでは倒れない**。
+      // 18 decisions = 16 speculative cycles = exactly 1 block (the only plain steps are the `W1` re-measurements, the
+      // 2 at decisions 1 / 15 ≈ 1/16). Early leave is off by default, so **no condition flips here**.
       const decisions = run(gate, condition, 18);
-      assertEquals(plainAt(decisions), [1, 15], `${condition.name}: 測り直しの本数`);
+      assertEquals(plainAt(decisions), [1, 15], `${condition.name}: number of re-measurements`);
       assertEquals(
         gate.mode,
         "speculate",
-        `${condition.name}: ブロック 1 本ぶんの後のモード（既定は早抜け off）`,
+        `${condition.name}: mode after 1 block (early leave is off by default)`,
       );
 
-      // 続く決定 17 本（測り直しは決定 31 の 1 本）でブロック 2 本目が満ちる。
+      // The next 17 decisions (one re-measurement at decision 31) fill the 2nd block.
       run(gate, condition, 17);
-      assertEquals(gate.mode, condition.mode, `${condition.name}: ブロック 2 本ぶんの後のモード`);
+      assertEquals(gate.mode, condition.mode, `${condition.name}: mode after 2 blocks`);
       assertEquals(
         gate.switches,
         condition.mode === "plain" ? 1 : 0,
-        `${condition.name}: 切替回数`,
+        `${condition.name}: number of switches`,
       );
 
-      // 早抜けを渡した席では、比 1.16 を超える条件だけが 1 ブロックで倒れる（勝つ 5 条件は
-      // どちらの席でも倒れない — 早抜けは「抜けるまでの費用」しか動かさない）。
+      // In the setup that passes early leave, only the conditions above a ratio of 1.16 flip after 1 block (the 5
+      // winning conditions flip in neither setup — early leave only moves "the cost until leaving").
       const eager = createSpeculationGate({ earlyLeave: 0.15 });
       run(eager, condition, 18);
       assertEquals(
         eager.mode,
         condition.eagerBlocks === 1 ? "plain" : "speculate",
-        `${condition.name}: earlyLeave 0.15 の席でブロック 1 本ぶんの後のモード`,
+        `${condition.name}: mode after 1 block in the earlyLeave 0.15 setup`,
       );
       run(eager, condition, 17);
       assertEquals(
         eager.mode,
         condition.mode,
-        `${condition.name}: earlyLeave 0.15 の席でブロック 2 本ぶんの後のモード`,
+        `${condition.name}: mode after 2 blocks in the earlyLeave 0.15 setup`,
       );
     });
   }
 
-  it("不感帯（M2 要約の 0.970）は enter も leave も跨がない", () => {
-    // 0.970 は「戻る」側の閾値 0.97 のすぐ上で、`< enter` を満たさない = 現状維持である。
-    // 3〜4% の差は受理数のノイズ（cycle あたり sd は平均の 43%）に埋もれるので、動かさない
-    // のが正しい。
+  it("the dead band (M2 summarization's 0.970) crosses neither enter nor leave", () => {
+    // 0.970 is just above the return-side threshold of 0.97 and does not satisfy `< enter` = it stays as is. A
+    // difference of 3–4% is buried in the noise of the accepted count (the sd per cycle is 43% of the mean), so
+    // not moving is correct.
     const gate = createSpeculationGate();
     const summarize = CONDITIONS[5];
     run(gate, summarize, 120);
     assertEquals(gate.mode, "speculate");
     assertEquals(gate.switches, 0);
 
-    // 同じ比でも、plain 側から見ると戻らない（不感帯は両側から効く）。`W1` の EWMA は
-    // 54.45 から 66.39 へ**下から**寄るので、戻る閾値 `W1 × 0.97` は 64.40 を超えない
-    // （バーストの実測は 170.7 / 2.65 = 64.42 ms/token）。
+    // At the same ratio it does not return when seen from the plain side either (the dead band acts from both sides).
+    // The `W1` EWMA approaches from 54.45 to 66.39 **from below**, so the return threshold `W1 × 0.97` does not exceed
+    // 64.40 (the burst measures 170.7 / 2.65 = 64.42 ms/token).
     const stuck = createSpeculationGate();
     run(stuck, CONDITIONS[7], 60);
-    assertEquals(stuck.mode, "plain", "M2 自由文で落ちる前提が崩れている");
+    assertEquals(stuck.mode, "plain", "the premise of dropping on M2 free text is broken");
     run(stuck, summarize, 600);
-    assertEquals(stuck.mode, "plain", "不感帯の比で speculate へ戻っている");
+    assertEquals(stuck.mode, "plain", "returns to speculate at a ratio inside the dead band");
     assertEquals(stuck.switches, 1);
   });
 });
 
-describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
-  it("alpha は 0 < α ≤ 1", () => {
+describe("gate T9 checks: knob ranges fail loudly at creation", () => {
+  it("alpha is 0 < α ≤ 1", () => {
     assertThrows(
       () => createSpeculationGate({ alpha: 0 }),
       Error,
@@ -581,7 +631,7 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     );
   });
 
-  it("ブロックは 2 cycle 以上（1 なら 1 サンプル判定に戻る）", () => {
+  it("a block is 2 cycles or more (1 would return to single-sample decisions)", () => {
     assertThrows(
       () => createSpeculationGate({ window: 1 }),
       Error,
@@ -594,7 +644,7 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     );
   });
 
-  it("連続本数とバーストは 1 以上の整数", () => {
+  it("the consecutive count and the burst are integers of 1 or more", () => {
     assertThrows(
       () => createSpeculationGate({ confirm: 0 }),
       Error,
@@ -603,7 +653,7 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     assertThrows(() => createSpeculationGate({ burst: 0 }), Error, "burst 0 is not an integer ≥ 1");
   });
 
-  it("打ち切りの下限は 1 以上 burst 以下の整数", () => {
+  it("the abort minimum is an integer from 1 to burst", () => {
     assertThrows(
       () => createSpeculationGate({ burstMin: 0 }),
       Error,
@@ -614,13 +664,13 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
       Error,
       "burstMin 4.5 is not an integer ≥ 1",
     );
-    // `burstMin > burst` は一度も発火しない死んだノブ（既定の `burst` は 8）。
+    // `burstMin > burst` is a dead knob that never fires (the default `burst` is 8).
     assertThrows(() => createSpeculationGate({ burstMin: 9 }), Error, "burstMin 9 exceeds burst 8");
-    // 既定の `burstMin` は `burst` で抑えてある（バースト 1 cycle の席が門で落ちない）。
+    // The default `burstMin` is capped by `burst` (a setup with a burst of 1 cycle does not fail the check).
     assertEquals(createSpeculationGate({ burst: 1 }).mode, "speculate");
   });
 
-  it("強い負けの上乗せは 2 本とも正の有限数（早抜けは未指定 = off）", () => {
+  it("both strong-loss margins are positive finite numbers (early leave unset = off)", () => {
     for (const [name, value] of [
       ["earlyLeave", 0],
       ["earlyLeave", -1],
@@ -635,13 +685,13 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
         `${name} ${value} is not a positive finite number`,
       );
     }
-    // 未指定の `earlyLeave` は「off」であって門の対象ではない（`0` を渡す形と混ぜない — 0 は
-    // 「閾値 = `leave` の早抜け」を意味してしまうので落とす）。
+    // An unset `earlyLeave` means "off" and is not subject to the check (not to be confused with passing `0` — 0 would
+    // mean "early leave at threshold = `leave`", so it is rejected).
     assertEquals(createSpeculationGate({}).mode, "speculate");
     assertEquals(createSpeculationGate({ earlyLeave: undefined }).mode, "speculate");
   });
 
-  it("探索の間隔は 1 以上の整数・上限は基本間隔以上", () => {
+  it("the exploration interval is an integer of 1 or more, and its cap is at least the base interval", () => {
     assertThrows(
       () => createSpeculationGate({ exploreBase: 0 }),
       Error,
@@ -659,7 +709,7 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     );
   });
 
-  it("不感帯は 1 を挟む（enter < 1 < leave）", () => {
+  it("the dead band straddles 1 (enter < 1 < leave)", () => {
     assertThrows(
       () => createSpeculationGate({ enter: 1 }),
       Error,
@@ -677,7 +727,7 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
     );
   });
 
-  it("端の値は通る（門が広すぎないことの対）", () => {
+  it("the edge values pass (the counterpart showing the check is not too wide)", () => {
     const gate = createSpeculationGate({
       alpha: 1,
       window: 2,
@@ -695,9 +745,9 @@ describe("ゲート T9 門: ノブの値域は生成時に fail loudly", () => {
   });
 });
 
-test("ゲート T9 門: ノブの不受理は家族横断の ModelInputError で捕まる", () => {
-  // ノブ束は `speculative.gate` で呼び手が渡すもので、値域も大小関係も「渡す値を直す」で通る
-  // = ADR 0107 決定 2 の入力起因。ホストの 400 / 500 の分岐に乗ることを型で縛る。
+test("gate T9 checks: a rejected knob is caught as the cross-family ModelInputError", () => {
+  // The knob bundle is passed by the caller as `speculative.gate`, and both the ranges and the ordering are fixed by
+  // "fixing the value passed" = caused by the input per ADR 0107 decision 2. This pins by type that it feeds the host's 400 / 500 branch.
   const rejected = [
     { alpha: 0 },
     { alpha: 1.5 },
@@ -714,32 +764,40 @@ test("ゲート T9 門: ノブの不受理は家族横断の ModelInputError で
     const error = assertThrows(() => createSpeculationGate(options));
     assert(
       error instanceof ModelInputError,
-      `${JSON.stringify(options)} の不受理が入力起因の型で飛んでいない`,
+      `the rejection of ${JSON.stringify(options)} is not thrown with the input-caused type`,
     );
   }
 });
 
-describe("ゲート T10 分岐: fork は観測状態を写した独立のゲートを返す", () => {
-  it("同じ観測列を与えると、元と分岐の決定列とモードの推移が一致する", () => {
+describe("gate T10 branching: fork returns an independent gate that copies the observation state", () => {
+  it("given the same observations, the original and the branch have the same decisions and mode transitions", () => {
     const gate = createSpeculationGate();
-    // 17 本で `W1` は測り済み・ブロック 1 は満ちる直前（T2 と同じ位置）。
+    // After 17, `W1` is measured and block 1 is just about to fill (the same position as T2).
     run(gate, MILD, 17);
     const forked = gate.fork();
     assertEquals([forked.mode, forked.switches], [gate.mode, gate.switches]);
     const fromGate = trace(gate, MILD, 18);
     const fromFork = trace(forked, MILD, 18);
-    assertEquals(fromFork, fromGate, "分岐の決定列とモードの推移が元と違う");
-    // 写したのが観測状態であること: 続きの 18 本で倒れるのは前半 17 本の観測を引き継いだ場合だけ。
+    assertEquals(
+      fromFork,
+      fromGate,
+      "the branch's decisions and mode transitions differ from the original's",
+    );
+    // It is the observation state that was copied: flipping within the next 18 happens only if the first 17 observations were inherited.
     assertEquals([gate.mode, forked.mode], ["plain", "plain"]);
     assertEquals([gate.switches, forked.switches], [1, 1]);
-    // 陽性対照: 観測の無いゲートは同じ 18 本では倒れない（倒れるなら上の一致は何も見ていない）。
+    // Positive control: a gate without observations does not flip within the same 18 (if it did, the agreement above would check nothing).
     const fresh = createSpeculationGate();
     run(fresh, MILD, 18);
-    assertEquals(fresh.mode, "speculate", "観測の無いゲートが 18 本で倒れた（門が空振りする）");
+    assertEquals(
+      fresh.mode,
+      "speculate",
+      "a gate without observations flipped within 18 (the check is vacuous)",
+    );
   });
 
-  it("片方だけに観測を与えても、もう片方は動かない（両向き）", () => {
-    // 同じ履歴を持つ双子を基準にする（分岐しなかった場合の振る舞い）。
+  it("giving observations to only one side does not move the other (both directions)", () => {
+    // The baseline is a twin with the same history (the behaviour had it not branched).
     const knobs = { window: 2, confirm: 1 };
     const gate = createSpeculationGate(knobs);
     const twin = createSpeculationGate(knobs);
@@ -749,13 +807,21 @@ describe("ゲート T10 分岐: fork は観測状態を写した独立のゲー�
     const forkedTwin = createSpeculationGate(knobs);
     run(forkedTwin, WINNING, 5);
 
-    // 分岐だけを負けさせる → 分岐は倒れ、元は双子と同じ振る舞いのまま。
+    // Only the branch is made to lose → the branch flips, and the original behaves the same as the twin.
     run(forked, LOSING, 40);
-    assertEquals(forked.mode, "plain", "陽性対照: 分岐が倒れていない（観測が効いていない）");
+    assertEquals(
+      forked.mode,
+      "plain",
+      "positive control: the branch does not flip (the observations have no effect)",
+    );
     assertEquals([gate.mode, gate.switches], [twin.mode, twin.switches]);
-    assertEquals(trace(gate, WINNING, 20), trace(twin, WINNING, 20), "分岐への観測が元を動かした");
+    assertEquals(
+      trace(gate, WINNING, 20),
+      trace(twin, WINNING, 20),
+      "the observation on the branch moved the original",
+    );
 
-    // 逆向き: 元だけを負けさせても、分岐（の続き）は動かない。
+    // The other direction: making only the original lose does not move the branch (its continuation).
     const second = forkedTwin.fork();
     const secondTwin = createSpeculationGate(knobs);
     run(secondTwin, WINNING, 5);
@@ -764,7 +830,7 @@ describe("ゲート T10 分岐: fork は観測状態を写した独立のゲー�
     assertEquals(
       trace(second, WINNING, 20),
       trace(secondTwin, WINNING, 20),
-      "元への観測が分岐を動かした",
+      "the observation on the original moved the branch",
     );
   });
 });

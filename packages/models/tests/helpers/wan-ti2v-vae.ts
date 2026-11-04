@@ -5,18 +5,20 @@
  * (`models/karume-wan2.2/`, opened through the manifest with `openWanTi2vComponent` of `wan-ti2v-pipeline.ts` —
  * decision 1).
  *
- * GPU 不要の突き合わせ（`e2e_wan_ti2v_vae_chunks_host_test.ts`）と実 GPU の chunk 列の照合
- * （`e2e_wan_ti2v_vae_tiles_test.ts`）が同じ表を読む — 表を 2 か所で育てると、片方だけに足したケースが黙って
- * 片方の門を外れる。
+ * The GPU-free cross-check (`e2e_wan_ti2v_vae_chunks_host_test.ts`) and the real-GPU chunk-sequence comparison
+ * (`e2e_wan_ti2v_vae_tiles_test.ts`) read the same table — growing the table in 2 places would let a case added to only
+ * one side silently escape the other side's check.
  *
- * ケースの正本は `tools/export-recipes/wan/export_vae.py` の `TI2V_FIXTURE_CASES`。cache の表の正本は上流の decoder の
- * forward の順で、recipe の `wan/tests/test_vae_patch_ti2v.py` の `TestCacheTableRealWeights.TABLE` が同じ値を凍結する
- * （二重凍結 — 片方だけ書き換えると、もう片方の側のテストが落ちる）。**列挙結果ではなくここで固定する**（生成を
- * 一部だけ流した環境でテストが黙って消える形にしない）。
+ * The source of truth for the cases is `TI2V_FIXTURE_CASES` of `tools/export-recipes/wan/export_vae.py`. The source of
+ * truth for the cache table is the forward order of the upstream decoder, and `TestCacheTableRealWeights.TABLE` of the
+ * recipe's `wan/tests/test_vae_patch_ti2v.py` freezes the same values (frozen twice — changing only one side fails the
+ * other side's test). **Fixed here rather than enumerated** (so that tests do not silently vanish in an environment
+ * where only part of the generation was run).
  *
- * 段 5 のタイル参照 `vae_tiles.*`（書き手は `tools/export-recipes/wan/vae_tiling.py --model ti2v-5b` — ケースの正本は
- * その `TI2V_FIXTURE_CASES`）は、chunk グラフの組とは**別の在否の組**（{@link ti2vVaeTileAssets} — 3 本とも無ければ
- * 明示 SKIP・一部だけなら FAIL）。書き手が別の台本（`vae_tiling.py`）で、chunk の組とは別の時点に書かれるため。
+ * The stage-5 tile references `vae_tiles.*` (the writer is `tools/export-recipes/wan/vae_tiling.py --model ti2v-5b` —
+ * the source of truth for the cases is its `TI2V_FIXTURE_CASES`) are **a separate presence set** from the chunk-graph
+ * set ({@link ti2vVaeTileAssets} — none of the 3 is an explicit SKIP; only some is a FAIL), because their writer is a
+ * different script (`vae_tiling.py`) and they are written at a different time from the chunk set.
  */
 
 import { goldenDir } from "@karume/test-support/test-assets";
@@ -30,34 +32,34 @@ export const WAN_TI2V_VAE_GOLDEN_DIR = goldenDir(WAN_TI2V_VAE_SERIES);
 export const WAN_TI2V_VAE_FIRST = "vae_decoder_first";
 export const WAN_TI2V_VAE_NEXT = "vae_decoder_next";
 
-/** フィクスチャ 1 本（帯の決定用 1 本 + 受入れ 2 本 — 2.1 と同じ組み立て）。 */
+/** One fixture (1 that decides the band + 2 for acceptance — built the same way as 2.1). */
 export type Ti2vVaeCase = {
   readonly name: "band" | "accept" | "long";
   readonly role: "band" | "accept";
   readonly chunks: number;
 };
 
-/** `long` は 81 フレーム（1 + 4·20 — cache を 20 回持ち越す長さ）の chunk 列。 */
+/** `long` is an 81-frame chunk sequence (1 + 4·20 — long enough to carry the cache over 20 times). */
 export const WAN_TI2V_VAE_CASES: readonly Ti2vVaeCase[] = [
   { name: "band", role: "band", chunks: 9 },
   { name: "accept", role: "accept", chunks: 5 },
   { name: "long", role: "accept", chunks: 21 },
 ];
 
-/** 潜在タイルの辺（ADR 0121 決定 6 — 出力 256 px ÷ 空間の圧縮 16）。 */
+/** The edge of a latent tile (ADR 0121 decision 6 — 256 px of output ÷ spatial compression 16). */
 export const WAN_TI2V_VAE_TILE = 16;
-/** フレームの辺（patchify 空間 — 潜在 1 あたり 8）。 */
+/** The edge of a frame (patchify space — 8 per latent). */
 export const WAN_TI2V_VAE_SAMPLE_TILE = 128;
-/** 潜在のチャネル数（上流 config の `z_dim`）。 */
+/** The number of latent channels (`z_dim` of the upstream config). */
 export const WAN_TI2V_VAE_LATENT_CHANNELS = 48;
-/** 出口のチャネル数（patchify 空間 `3·p²` — unpatchify はグラフの外）。 */
+/** The number of output channels (patchify space `3·p²` — unpatchify is outside the graph). */
 export const WAN_TI2V_VAE_SAMPLE_CHANNELS = 12;
 
-/** cache の表の 1 行（名前 = `cache_` + 上流の `feat_idx` の 2 桁・形はタイル 16 のとき）。 */
+/** One row of the cache table (name = `cache_` + upstream's `feat_idx` in 2 digits; shapes are for tile 16). */
 export type Ti2vVaeCacheRow = {
   readonly name: string;
   readonly shape: readonly number[];
-  /** upsample3d の `time_conv` の cache（first は持たない — 最初の chunk では走らない）。 */
+  /** The cache of upsample3d's `time_conv` (first does not have it — it does not run on the first chunk). */
   readonly timeConv: boolean;
 };
 
@@ -73,7 +75,7 @@ const cacheRows = (
     timeConv,
   }));
 
-/** next の cache の全体（入力の順 — recipe の表と同じ並び・同じ値）。 */
+/** Every cache of next (in input order — the same order and the same values as the recipe's table). */
 export const WAN_TI2V_VAE_CACHE_TABLE: readonly Ti2vVaeCacheRow[] = [
   ...cacheRows(0, 1, [48, 2, 16, 16]),
   ...cacheRows(1, 11, [1024, 2, 16, 16]),
@@ -86,19 +88,19 @@ export const WAN_TI2V_VAE_CACHE_TABLE: readonly Ti2vVaeCacheRow[] = [
   ...cacheRows(26, 32, [256, 2, 128, 128]),
 ];
 
-/** `time_conv` の cache（next だけが持つ — 表の `timeConv` から）。 */
+/** The `time_conv` caches (only next has them — from the table's `timeConv`). */
 export const WAN_TI2V_VAE_TIME_CONV_CACHES: readonly string[] = WAN_TI2V_VAE_CACHE_TABLE.filter(
   ({ timeConv }) => timeConv,
 ).map(({ name }) => name);
 
 /**
- * cache の常駐の合計バイト数（f32 — 116,940,800 要素 × 4。recipe の実重みのテストの要素数と同じ値で、表とは独立に
- * 書く — 表の組み立ての誤りをここで拾う）。
+ * The total resident bytes of the caches (f32 — 116,940,800 elements × 4. The same value as the element count of the
+ * recipe's real-weight test, written independently of the table — this catches a mistake in building the table).
  */
 export const WAN_TI2V_VAE_CACHE_BYTES = 467_763_200;
 /**
- * first の cache の合計バイト数（f32 — 114,319,360 要素 × 4。recipe の同じテストの first の要素数と同じ値で、
- * 表とは独立に書く）。
+ * The total bytes of first's caches (f32 — 114,319,360 elements × 4. The same value as first's element count in the
+ * same recipe test, written independently of the table).
  */
 export const WAN_TI2V_VAE_FIRST_CACHE_BYTES = 457_277_440;
 
@@ -117,27 +119,32 @@ export const ti2vVaeChunkFixtures = (
     return { path: url.pathname, present: filePresent(url) };
   });
 
-// ---- タイル参照（段 5 — `vae_tiles.<case>.safetensors`）------------------------------------------------
+// ---- Tile references (stage 5 — `vae_tiles.<case>.safetensors`) ----------------------------------------
 
-/** タイル参照 1 本（帯の決定用 1 本 + 受入れ 2 本 — 2.1 のタイル参照と同じ組み立て）。 */
+/** One tile reference (1 that decides the band + 2 for acceptance — built the same way as 2.1's tile references). */
 export type Ti2vVaeTileCase = {
   readonly name: "band" | "accept" | "wide";
   readonly role: "band" | "accept";
   readonly chunks: number;
-  /** 潜在の空間の縦（出力の画素 = × 16）。 */
+  /** The height of the latent space (output pixels = × 16). */
   readonly height: number;
-  /** 潜在の空間の横（出力の画素 = × 16）。 */
+  /** The width of the latent space (output pixels = × 16). */
   readonly width: number;
-  /** 非タイルの参照 `frames_full`（patchify 空間・クランプ前 — 観測）を持つ。 */
+  /** Holds the non-tiled reference `frames_full` (patchify space, before the clamp — observation). */
   readonly full: boolean;
-  /** 上流の unpatchify → クランプを当てた RGB `frames_rgb [3, F, H, W]` を持つ（VAE 段の末尾の照合）。 */
+  /**
+   * Holds the RGB `frames_rgb [3, F, H, W]` with upstream's unpatchify → clamp applied (the comparison at the end of
+   * the VAE stage).
+   */
   readonly rgb: boolean;
 };
 
 /**
- * - `band`: 832×480×81（潜在 30×52・21 chunk）— 帯を決める 1 本（ADR 0121 の検収表の段 5）。
- * - `accept`: 縦長 480×832×9（潜在 52×30・3 chunk）— タイルの位置も chunk 境界も band と違う。
- * - `wide`: 1280×704×5（潜在 44×80・2 chunk）— 対ごとにブレンド幅が違うのはこの寸法だけ。
+ * - `band`: 832×480×81 (latent 30×52, 21 chunks) — the one that decides the band (stage 5 of ADR 0121's acceptance
+ *   table).
+ * - `accept`: portrait 480×832×9 (latent 52×30, 3 chunks) — both the tile positions and the chunk boundaries differ
+ *   from band.
+ * - `wide`: 1280×704×5 (latent 44×80, 2 chunks) — the only size whose blend width differs per pair.
  */
 export const WAN_TI2V_VAE_TILE_CASES: readonly Ti2vVaeTileCase[] = [
   { name: "band", role: "band", chunks: 21, height: 30, width: 52, full: false, rgb: false },
@@ -148,7 +155,10 @@ export const WAN_TI2V_VAE_TILE_CASES: readonly Ti2vVaeTileCase[] = [
 export const ti2vVaeTileFixtureUrl = (name: Ti2vVaeTileCase["name"]): URL =>
   new URL(`vae_tiles.${name}.safetensors`, WAN_TI2V_VAE_GOLDEN_DIR);
 
-/** タイル参照 3 本の在否（chunk グラフの組とは別の組）。呼ぶたびに見る（モジュールの評価ではファイルに触らない）。 */
+/**
+ * The presence of the 3 tile references (a set separate from the chunk-graph set). Checked on every call (module
+ * evaluation does not touch files).
+ */
 export const ti2vVaeTileAssets = (): readonly {
   readonly path: string;
   readonly present: boolean;

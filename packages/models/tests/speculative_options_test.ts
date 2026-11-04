@@ -7,9 +7,11 @@ import { Pipeline } from "../gemma.ts";
 import type { Assets } from "../src/gemma/pipeline.ts";
 import { GEMMA4_DRAFT_STEPS } from "../src/gemma/speculative.ts";
 
-test("gemma.Pipeline: speculative の k は 1..3・fromAssets では受けない", async () => {
-  // 受理集合の門は**取得元へ触る前**（`ref` は解決すらされない）。上は配布形の段数
-  // （出口の本数がそのまま上限）、下は「draft を 1 本も採らない投機」= 意味を持たない指定。
+test("gemma.Pipeline: speculative k is 1..3 and is not accepted by fromAssets", async () => {
+  // The accepted-set check runs **before the source is touched** (`ref` is not even resolved). The
+  // upper bound is the distribution's step count (the number of exits is the limit as is); the
+  // lower bound rules out "speculation that accepts not a single draft" = a setting with no
+  // meaning.
   await assertRejects(
     () => Pipeline.fromPretrained("owner/name", { speculative: { k: 0 } }),
     Error,
@@ -23,7 +25,8 @@ test("gemma.Pipeline: speculative の k は 1..3・fromAssets では受けない
     Error,
     `speculative.k ${GEMMA4_DRAFT_STEPS + 1} is outside 1..${GEMMA4_DRAFT_STEPS}`,
   );
-  // `Assets` に drafter の席が無いので、黙って投機なしで組まずに断る。
+  // `Assets` has no place for a drafter, so it refuses rather than silently building without
+  // speculation.
   const assets: Assets = {
     config: {
       chunkLength: 2,

@@ -1,30 +1,35 @@
 /**
- * 生成面（`src/generation/sequence.ts`）の GPU 無しテストが共有する fake（静的配線・Session・
- * context）。非投機の契約（`generation_sequence_test.ts`）と投機経路の契約
- * （`generation_speculation_test.ts`）が**同じ実体**を差すための置き場である。
+ * The fakes (static wiring, Session, context) shared by the GPU-free tests of the generation
+ * surface (`src/generation/sequence.ts`). This is where the non-speculative contract
+ * (`generation_sequence_test.ts`) and the speculative-path contract
+ * (`generation_speculation_test.ts`) point at **the same implementation**.
  *
- * 生成ループは narrow interface（`GenerationSession` / `GenerationContextFace`）で受けるので、
- * fake は素の object 1 個で足りる。ここが持つのは 4 つ:
+ * The generation loop takes narrow interfaces (`GenerationSession` / `GenerationContextFace`), so a
+ * fake needs only one plain object. This file holds four things:
  *
- * - **論理長の進行**: `run` の成功で `pastLength` が進む。`commit: "deferred"` の run は進めずに
- *   保留を立て、`commit(rows)` が受理行数ぶんだけ進める（実 `GenerationContext` と同じ順序）。
- *   保留がある間の run と、保留の無い `commit`、sliding ring の余裕を超える deferred run は、
- *   実 context / 実 executor と同じく fail loudly（門の文言まで写す）。論理長と保留は
- *   **context ごと**に持つ（`fork` が論理長を写した独立の context を返す — ADR 0066 追記
- *   2026-10-11。`createGenerationContext` が返すのは常に最初の 1 本 {@link FakeSession.context}）。
- *   `run` が受けるのは**この fake が作った context だけ**（最初の 1 本と `fork` の分岐 — 他は
- *   fail loudly）。偽物の `fork` が写す拒否は**保留中（commit 待ち）と dispose 後の 2 つだけ**で、
- *   実 `GenerationContext.fork` の残りの拒否（汚染・決着していない run・batch の予約・借り手・
- *   device 消失・Session の dispose 済み）は写さない — それらは実 GPU の門
- *   （`packages/runtime/tests/gpu_generation_context_test.ts` と、借り手は
- *   `packages/runtime/tests/gpu_borrowed_context_test.ts`）が持つ。
- * - **行ごとの logits**: {@link FakeOptions.successor} を渡すと「その行の入力 token → その行の
- *   argmax」の写像になる（= 直前 token だけで決まる決定的な target のモデル）。verify の複数行を
- *   1 本の後続関数で表せるので、投機の受理・棄却を配列 1 本で組める。
- * - **行ごとの hidden**: 行ごとに違う値（{@link hiddenMark}）を書く。生成ループが「どの行の
- *   hidden を写したか」がここでしか観測できない。
- * - **位置列の記録**: 位置は run の入力ではなく派生入力の席（`derivedInputs`）へ降りるので、
- *   「どの run にどの位置が渡ったか」を見られる唯一の場所がこの fake である。
+ * - **Advancing the logical length**: a successful `run` advances `pastLength`. A
+ *   `commit: "deferred"` run does not advance it but sets a pending commit, and `commit(rows)`
+ *   advances it by the accepted row count (the same order as the real `GenerationContext`). A run
+ *   while a commit is pending, a `commit` with nothing pending, and a deferred run beyond the
+ *   sliding ring's slack fail loudly like the real context / real executor (down to the checks'
+ *   wording). The logical length and the pending commit are kept **per context** (`fork` returns an
+ *   independent context with the logical length copied — ADR 0066 addendum 2026-10-11;
+ *   `createGenerationContext` always returns the first one, {@link FakeSession.context}). `run`
+ *   accepts **only contexts this fake made** (the first one and the branches from `fork` — others
+ *   fail loudly). The fake `fork` copies **only two rejections: while a commit is pending and after
+ *   dispose**; it does not copy the rest of the real `GenerationContext.fork`'s rejections
+ *   (poisoning, an unsettled run, a batch reservation, borrowers, device loss, a disposed Session)
+ *   — those belong to the real-GPU checks (`packages/runtime/tests/gpu_generation_context_test.ts`,
+ *   and for borrowers `packages/runtime/tests/gpu_borrowed_context_test.ts`).
+ * - **Per-row logits**: passing {@link FakeOptions.successor} makes it a map "the row's input token
+ *   → the row's argmax" (= a deterministic target model decided by the previous token alone).
+ *   The rows of a verify can be expressed by one successor function, so speculative acceptance and
+ *   rejection can be set up with one array.
+ * - **Per-row hidden**: writes a different value per row ({@link hiddenMark}). "Which row's hidden
+ *   the generation loop copied" can be observed only here.
+ * - **Recording position sequences**: positions are not a run input but go to the derived-input
+ *   hook (`derivedInputs`), so this fake is the only place where "which positions went to which
+ *   run" can be seen.
  */
 
 import type { GenerationContextSpec, RunInputs, RunOutputs, SymbolBindings } from "@karume/runtime";
@@ -54,7 +59,10 @@ export const HIDDEN = "hidden";
 export const DERIVED = "per_layer_inputs";
 export const CHUNK_LENGTH = 4;
 
-/** sliding ring の余裕の既定（門に掛からない十分大きい値 — 小さくするのは門のテストだけ）。 */
+/**
+ * The default slack of the sliding ring (a value large enough not to hit the check — only the
+ * check's tests make it small).
+ */
 export const SLIDING_SLACK = 64;
 
 export const graphOf = (): GenerationGraph => ({
@@ -62,7 +70,8 @@ export const graphOf = (): GenerationGraph => ({
   inputs: [
     { name: IDS, dtype: "i32", shape: [1, "M"] },
     { name: DERIVED, dtype: "f32", shape: [1, "M", 2] },
-    // 行選択は添字**列**（`R` = その run で選ぶ行数）。非投機は常に 1 本・verify は k+1 本。
+    // The row selection is an index **sequence** (`R` = the number of rows the run selects). Always
+    // 1 for non-speculative, k+1 for verify.
     { name: LAST_ROW, dtype: "i32", shape: ["R"] },
   ],
   outputs: [LOGITS, HIDDEN],
@@ -73,10 +82,12 @@ export const graphOf = (): GenerationGraph => ({
 });
 
 /**
- * 静的配線。**派生入力の席は fake が持つ**（既定は位置列を記録する実装）。
+ * The static wiring. **The fake owns the derived-input hook** (by default an implementation that
+ * records the position sequences).
  *
- * 位置は run の入力ではなくなった（`position_ids` はグラフから消え、位置に依存するホスト入力は
- * 派生入力の席が受ける）ので、「どの run にどの位置が渡ったか」を見られる唯一の場所がここである。
+ * Positions are no longer a run input (`position_ids` left the graph, and the host inputs that
+ * depend on positions are taken by the derived-input hook), so this is the only place where "which
+ * positions went to which run" can be seen.
  */
 export const programOf = (
   fake: FakeSession,
@@ -98,17 +109,23 @@ export const programOf = (
     ...override,
   });
 
-/** run 1 回ぶんの記録（呼び出し列だけで step の形が全部読める粒度）。 */
+/**
+ * The record of one run (fine-grained enough that the call list alone reveals the whole shape of a
+ * step).
+ */
 export type RunCall = {
   readonly ids: readonly number[];
   readonly idsShape: readonly number[];
   readonly positions: readonly number[];
   readonly lastRow: number;
-  /** `last_row` に渡った添字の**全部**（verify は k+1 本 — 末尾は pad されうる）。 */
+  /** **All** the indices passed to `last_row` (k+1 for verify — the tail may be padded). */
   readonly lastRows: readonly number[];
   readonly lastRowShape: readonly number[];
   readonly queryLength: number;
-  /** `"deferred"` = 論理長を保留する run（投機の verify）・`undefined` = その場で進める run。 */
+  /**
+   * `"deferred"` = a run that holds the logical length pending (the speculative verify);
+   * `undefined` = a run that advances it on the spot.
+   */
   readonly commit: "deferred" | undefined;
   readonly pastBefore: number;
   readonly bindings: SymbolBindings | undefined;
@@ -116,14 +133,17 @@ export type RunCall = {
   readonly sameContext: boolean;
 };
 
-/** deferred run の保留（実 `GenerationContext.pendingCommit` と同じ形）。 */
+/**
+ * A deferred run's pending commit (the same shape as the real `GenerationContext.pendingCommit`).
+ */
 type FakePending = { readonly pastLength: number; readonly queryLength: number };
 
 /**
- * fake の context（`GenerationContextFace` + `fork`）。論理長と保留は context ごとに持つ。
+ * The fake's context (`GenerationContextFace` + `fork`). The logical length and the pending commit
+ * are kept per context.
  *
- * 型を明示しているのは `fork` が自分と同じ型を返す（F-bound）ため — 推論に任せると再帰した型が
- * 書けない。
+ * The type is spelled out because `fork` returns its own type (F-bound) — left to inference, the
+ * recursive type cannot be written.
  */
 export type FakeContext = {
   readonly pastLength: number;
@@ -131,8 +151,10 @@ export type FakeContext = {
   readonly slidingSlack: number | undefined;
   commit(rows: number): void;
   /**
-   * 論理長を写した独立の context を返す（実 `GenerationContext.fork` と同じく、保留がある間と
-   * dispose の後は拒否する）。写す拒否はこの 2 つだけ（残りはファイル冒頭の「論理長の進行」）。
+   * Returns an independent context with the logical length copied (like the real
+   * `GenerationContext.fork`, it rejects while a commit is pending and after dispose). These are
+   * the only two rejections copied (the rest: "Advancing the logical length" at the top of the
+   * file).
    */
   fork(): Promise<FakeContext>;
   dispose(): Promise<void>;
@@ -142,84 +164,100 @@ const readRow = (
   inputs: RunInputs,
   name: string,
 ): { readonly shape: readonly number[]; readonly values: readonly number[] } => {
-  if (!Object.hasOwn(inputs, name)) throw new Error(`fake: 入力 '${name}' が渡っていない`);
+  if (!Object.hasOwn(inputs, name)) throw new Error(`fake: input '${name}' was not passed`);
   const tensor = inputs[name];
-  if (!("data" in tensor)) throw new Error(`fake: 入力 '${name}' がホストテンソルでない`);
-  if (tensor.dtype !== "i32") throw new Error(`fake: 入力 '${name}' が i32 でない`);
+  if (!("data" in tensor)) throw new Error(`fake: input '${name}' is not a host tensor`);
+  if (tensor.dtype !== "i32") throw new Error(`fake: input '${name}' is not i32`);
   return { shape: tensor.shape, values: [...tensor.data] };
 };
 
 /**
- * hidden の行ごとの目印（`run` の番号と**入力行の添字**で決まる — 行の取り違えの検出線）。
+ * The per-row mark of hidden (decided by the `run`'s number and **the input row's index** — the
+ * detection line for mixed-up rows).
  *
- * 生成ループが読むのは「出力の行 n」だが、その中身は `last_row[n]` が指した入力行のものである。
- * 目印を入力行の添字で作ると、出力行と入力行の対応が壊れた実装がそのまま値の違いに出る。
+ * The generation loop reads "output row n", but its contents are those of the input row that
+ * `last_row[n]` pointed at. Making the mark from the input row's index turns an implementation that
+ * broke the output-row/input-row correspondence directly into a difference in values.
  */
 export const hiddenMark = (call: number, inputRow: number): number => call * 100 + inputRow + 1;
 
 export type FakeOptions = {
-  /** run ごとに argmax が指すべき token id（call 番号で引く — {@link FakeOptions.successor} が優先）。 */
+  /**
+   * The token id each run's argmax should point at (looked up by call number —
+   * {@link FakeOptions.successor} takes precedence).
+   */
   readonly tokens?: readonly number[];
   /**
-   * 「その行の入力 token → その行の argmax」の写像（長さ `VOCAB`）。
+   * A map "the row's input token → the row's argmax" (length `VOCAB`).
    *
-   * 直前 token だけで次が決まる決定的な target のモデルである。verify の行 `j` は token
-   * `[b, d₁..][j]` を食う行なので、この写像 1 本で「draft が当たっていれば受理・外れていれば
-   * 棄却」が表現でき、投機と非投機が**同じ token 列**を出すこと自体を fake の側で保証しない
-   * （実装が行を取り違えれば列が割れる）。
+   * A deterministic target model where the next token is decided by the previous token alone. Row
+   * `j` of a verify is the row that consumes token `[b, d₁..][j]`, so this one map expresses
+   * "accepted when the draft hits, rejected when it misses", and the fake side does not itself
+   * guarantee that speculative and non-speculative produce **the same token sequence** (an
+   * implementation that mixes up rows breaks the sequence).
    */
   readonly successor?: readonly number[];
-  /** この回数目（0 始まり）の run を失敗させる。 */
+  /** Makes the run with this count (0-based) fail. */
   readonly failAt?: number;
   /**
-   * この回数目（0 始まり）の run の logits に NaN を混ぜる（**run は成功し、抽選が落ちる**）。
+   * Mixes NaN into the logits of the run with this count (0-based) (**the run succeeds and sampling
+   * fails**).
    *
-   * {@link FakeOptions.failAt} との違いがこの席の意味である — run は通っているので論理長は進み、
-   * 落ちるのは `sampler.next`（`assertNoNaN`）である。範囲外 gather の行ごと NaN 汚染で実際に
-   * 起きる形で、「run は成功したが token が選べなかった」ときの後始末の唯一の検出線になる。
+   * The difference from {@link FakeOptions.failAt} is the point of this option — the run went
+   * through, so the logical length advances, and what fails is `sampler.next` (`assertNoNaN`). This
+   * is the shape that per-row NaN poisoning from an out-of-range gather actually takes, and it is
+   * the only detection line for the clean-up when "the run succeeded but no token could be chosen".
    */
   readonly nanAt?: number;
   /**
-   * {@link FakeOptions.nanAt} の run のうち、この**出力行**だけを汚す（省略時はその run の全行）。
+   * Poisons only this **output row** of the {@link FakeOptions.nanAt} run (every row of that run
+   * when omitted).
    *
-   * 投機の verify は 1 run に k+1 行あるので、「非投機なら触れない行」だけを汚せると
-   * 「その行の `sampler.next` を呼んだか」が例外の有無で読める（呼ばない実装だけが緑になる）。
+   * A speculative verify has k+1 rows in one run, so being able to poison only "a row the
+   * non-speculative path would not touch" makes "whether `sampler.next` was called on that row"
+   * readable from whether an exception occurs (only an implementation that does not call it goes
+   * green).
    */
   readonly nanRow?: number;
   /**
-   * 対抗馬（第 1 候補より低い logit を持つ id）。
+   * The runner-up (an id with a lower logit than the first candidate).
    *
-   * 既定の logits は「狙った id だけ 10・他は全部 0」なので、正値を割る repetition penalty では
-   * 順位が動かず（10/penalty > 0）、温度 0 の argmax では効きが**原理的に観測できない**。
-   * 2 番手を置くと、penalty が第 1 候補を 2 番手の下へ落としたかを決定論的に見られる。
+   * The default logits are "10 for the targeted id only, 0 for all others", so a repetition penalty
+   * that divides positive values does not change the ranking (10/penalty > 0), and with temperature
+   * 0 argmax its effect is **in principle unobservable**. Placing a second candidate makes it
+   * possible to see deterministically whether the penalty pushed the first candidate below it.
    */
   readonly runnerUp?: { readonly id: number; readonly logit: number };
   /**
-   * logits / hidden を**この行数**で返す（既定は渡った `last_row` の本数 = 正しい実装）。
+   * Returns logits / hidden with **this many rows** (by default the number of `last_row` indices
+   * passed = the correct implementation).
    *
-   * 故障注入用の席である — 「1 行頼んだのに R 行返る」形はグラフの宣言としては正しい
-   * （R は記号）ので、`readLogits` の行数検査だけが検出線になる。
+   * An option for fault injection — the form "asked for 1 row, got R rows" is valid as a graph
+   * declaration (R is a symbol), so only the row-count check of `readLogits` is a detection line.
    */
   readonly logitsRows?: number;
-  /** {@link FakeOptions.logitsRows} を効かせる run の番号（0 始まり・省略時は全 run）。 */
+  /**
+   * The number of the run {@link FakeOptions.logitsRows} applies to (0-based; every run when
+   * omitted).
+   */
   readonly logitsRowsAt?: number;
   /**
-   * sliding ring の余裕（省略時は {@link SLIDING_SLACK}）。
+   * The sliding ring's slack ({@link SLIDING_SLACK} when omitted).
    *
-   * `undefined` を**明示**すると sliding スロットの無い context になる（欄の有無で区別するので、
-   * 省略と明示は別物である）。
+   * **Passing `undefined` explicitly** gives a context without a sliding slot (presence of the
+   * field is what distinguishes them, so omitting it and passing it explicitly are different).
    */
   readonly slidingSlack?: number | undefined;
   /**
-   * dispose の順序を見るための記録先（最初の context は `"context"`、`fork` で作った context は
-   * 作った順に `"context:fork1"`・`"context:fork2"`… を積む）。
+   * Where the dispose order is recorded (the first context pushes `"context"`, contexts made by
+   * `fork` push `"context:fork1"`, `"context:fork2"`… in the order they were made).
    */
   readonly disposeLog?: string[];
 };
 
 export type FakeSession = ReturnType<typeof fakeSession>;
 
-/** context 1 本ぶんの可変状態（論理長・保留・dispose の回数）。 */
+/** One context's mutable state (logical length, pending commit, dispose count). */
 type FakeContextState = {
   pastLength: number;
   pending: FakePending | undefined;
@@ -229,30 +267,44 @@ type FakeContextState = {
 export const fakeSession = (options: FakeOptions = {}) => {
   const calls: RunCall[] = [];
   const specs: GenerationContextSpec[] = [];
-  /** `commit(rows)` に渡った受理行数（cycle ごとに 1 件 — 投機の門の観測口）。 */
+  /**
+   * The accepted row counts passed to `commit(rows)` (one per cycle — the observation point for the
+   * speculative checks).
+   */
   const commits: number[] = [];
-  /** この fake が作った context の状態（run は渡された context の状態だけを動かす）。 */
+  /**
+   * The state of the contexts this fake made (a run moves only the state of the context it was
+   * given).
+   */
   const states = new Map<FakeContext, FakeContextState>();
-  /** `fork` で作った context（作った順）。 */
+  /** The contexts made by `fork` (in the order they were made). */
   const forks: FakeContext[] = [];
   /**
-   * run ごとに走った context（`calls` と同じ添字）。`RunCall` に載せないのは、呼び出し列を
-   * fake どうしで丸ごと比べる門が context の実体の違いで割れないようにするため。
+   * The context each run ran on (same indices as `calls`). It is not put in `RunCall` so that the
+   * checks that compare whole call lists between fakes do not break on the identity of the
+   * contexts.
    */
   const runContexts: FakeContext[] = [];
   const stateOf = (context: FakeContext): FakeContextState => {
     const state = states.get(context);
-    if (state === undefined) throw new Error("fake: この fake が作っていない context");
+    if (state === undefined) throw new Error("fake: a context this fake did not make");
     return state;
   };
-  /** 直前の `derive` が受けた位置列（run の記録へ合流させる — 位置は run の入力ではない）。 */
+  /**
+   * The positions the last `derive` received (merged into the run's record — positions are not a
+   * run input).
+   */
   let derivedPositions: readonly number[] = [];
-  /** 既定の派生入力の席（`[1,M,2]` の f32 を返しつつ、渡った位置列を記録する）。 */
+  /**
+   * The default derived-input hook (returns `[1,M,2]` f32 while recording the positions passed).
+   */
   const derivedInputs: DerivedRunInputs = {
     names: [DERIVED],
     derive: (ids, positions) => {
       if (ids.length !== positions.length) {
-        throw new Error(`fake: ids ${ids.length} と positions ${positions.length} の長さが違う`);
+        throw new Error(
+          `fake: the lengths of ids ${ids.length} and positions ${positions.length} differ`,
+        );
       }
       derivedPositions = [...positions];
       // Column 0 of each row carries its position: a run-ahead step is derived before it runs, so
@@ -266,11 +318,15 @@ export const fakeSession = (options: FakeOptions = {}) => {
       } satisfies RunInputs);
     },
   };
-  // 宣言しなければ十分大きい値（門に掛からない）。`undefined` の明示は sliding スロット無し。
+  // Undeclared: a value large enough (does not hit the check). An explicit `undefined` means no
+  // sliding slot.
   const slidingSlack = Object.hasOwn(options, "slidingSlack")
     ? options.slidingSlack
     : SLIDING_SLACK;
-  /** context を 1 本組む（状態は `state` だけを読み書きする — 分岐は状態を共有しない）。 */
+  /**
+   * Builds one context (state is read and written only through `state` — branches do not share
+   * state).
+   */
   const makeContext = (state: FakeContextState, label: string): FakeContext => {
     const made: FakeContext = {
       get pastLength(): number {
@@ -281,31 +337,33 @@ export const fakeSession = (options: FakeOptions = {}) => {
       },
       slidingSlack,
       /**
-       * 保留中の deferred run の先頭 `rows` 行を確定させる（実 `GenerationContext.commit` と
-       * 同じ受理集合 — 保留が無い呼びと値域外は fail loudly）。
+       * Commits the first `rows` rows of the pending deferred run (the same accepted set as the
+       * real `GenerationContext.commit` — a call with nothing pending or out of range fails
+       * loudly).
        */
       commit: (rows: number): void => {
         const pending = state.pending;
         if (pending === undefined) {
           throw new Error(
-            "fake: 確定待ちの generation run が無い（deferred で発行した run だけが commit を要る）",
+            "fake: no generation run awaiting commit (only a run issued as deferred needs a commit)",
           );
         }
         if (!Number.isSafeInteger(rows) || rows < 0 || rows > pending.queryLength) {
-          throw new Error(`fake: 受理行数 ${rows} が 0..${pending.queryLength} の外`);
+          throw new Error(`fake: accepted row count ${rows} is outside 0..${pending.queryLength}`);
         }
         state.pastLength = pending.pastLength + rows;
         state.pending = undefined;
         commits.push(rows);
       },
       fork: (): Promise<FakeContext> => {
-        // 実 `GenerationContext.fork` と同じ拒否（呼んだ時点で判定し、戻り Promise で返す）。
+        // The same rejections as the real `GenerationContext.fork` (decided at the call, returned
+        // through the Promise).
         if (state.disposals > 0) {
-          return Promise.reject(new Error("fake: dispose 済みの context は fork できない"));
+          return Promise.reject(new Error("fake: a disposed context cannot be forked"));
         }
         if (state.pending !== undefined) {
           return Promise.reject(
-            new Error("fake: commit 待ちの generation run がある間は fork できない"),
+            new Error("fake: cannot fork while a generation run awaits commit"),
           );
         }
         const forked = makeContext(
@@ -341,20 +399,21 @@ export const fakeSession = (options: FakeOptions = {}) => {
       readonly chain?: boolean;
     },
   ): RunOutputs => {
-    // 論理長と保留は**渡された context の**もの（分岐した context は状態を共有しない）。
+    // The logical length and the pending commit are **the given context's** (branched contexts do
+    // not share state).
     const state = stateOf(generation.context);
     const pending = state.pending;
-    // MUST: 実 context と同じ拒否（保留がある間の 2 本目は「どこまでが確定か」が決まらない
-    // まま論理長を捕捉する）。記録もしない = 発行の同期区間で落ちる run と同じ扱い。
+    // MUST: the same rejection as the real context (a second run while a commit is pending would
+    // capture the logical length without knowing how much is committed). Not recorded either = the
+    // same treatment as a run that fails in the synchronous part of issuing.
     if (pending !== undefined && generation.chain !== true) {
-      throw new Error(
-        `fake: commit 待ちの generation run がある（queryLength ${pending.queryLength}）`,
-      );
+      throw new Error(`fake: a generation run awaits commit (queryLength ${pending.queryLength})`);
     }
-    // MUST: deferred run の行数は sliding ring の余裕まで（実 runtime の門を**同じ文言で**
-    // 写す — `executor.ts` の deferred 節）。棄却行は物理 ring 上で live な過去 KV を潰すので、
-    // ここを持たない fake だと `k + 1 ≤ slidingSlack` を外す退行が GPU 無しでは緑のまま、
-    // 実 GPU の最初の verify（GB 級ロードの末）で初めて落ちる。
+    // MUST: a deferred run's row count is bounded by the sliding ring's slack (copies the real
+    // runtime's check **with the same wording** — the deferred section of `executor.ts`). Rejected
+    // rows overwrite live past KV in the physical ring, so with a fake that lacks this, a
+    // regression that drops `k + 1 ≤ slidingSlack` stays green without a GPU and first fails at the
+    // first verify on a real GPU (at the end of a GB-scale load).
     if (generation.commit === "deferred") {
       const slack = generation.context.slidingSlack;
       if (slack !== undefined && generation.queryLength > slack) {
@@ -380,7 +439,7 @@ export const fakeSession = (options: FakeOptions = {}) => {
     calls.push({
       ids: ids.values,
       idsShape: ids.shape,
-      // この run の直前に `derive` が受けた位置列（run の入力には無い）。
+      // The positions `derive` received right before this run (not among the run's inputs).
       positions: derivedPositions,
       lastRow: lastRow.values[0],
       lastRows: lastRow.values,
@@ -394,7 +453,8 @@ export const fakeSession = (options: FakeOptions = {}) => {
     });
     runContexts.push(generation.context);
     if (options.failAt === call) throw new Error("run が落ちた");
-    // 論理長の進行は run の成功で起きる（deferred は保留して commit を待つ — 実 context と同じ）。
+    // The logical length advances when the run succeeds (deferred holds it pending and waits for
+    // commit — like the real context).
     // A chained run extends the pending rows (only a chained run reaches here with some pending).
     if (generation.commit === "deferred") {
       state.pending =
@@ -407,7 +467,8 @@ export const fakeSession = (options: FakeOptions = {}) => {
     } else {
       state.pastLength += generation.queryLength;
     }
-    // 返す行数は渡った `last_row` の本数（実グラフと同じ = R は入力が束縛する）。
+    // The number of rows returned is the number of `last_row` indices passed (same as the real
+    // graph = R is bound by the input).
     const rows =
       options.logitsRows !== undefined &&
       (options.logitsRowsAt === undefined || options.logitsRowsAt === call)
@@ -416,8 +477,9 @@ export const fakeSession = (options: FakeOptions = {}) => {
     const logits = new Float32Array(rows * VOCAB);
     const hidden = new Float32Array(rows * HIDDEN_SIZE);
     for (let row = 0; row < rows; row += 1) {
-      // 出力の行 n が運ぶのは `last_row[n]` が指した**入力行**のものである（行数を偽る故障
-      // 注入では添字が尽きるので、その分は入力行 0 に畳む）。
+      // Output row n carries the contents of the **input row** `last_row[n]` points at (under the
+      // fault injection that fakes the row count the indices run out, and those rows fold to input
+      // row 0).
       const inputRow = lastRow.values[row] ?? 0;
       const id =
         options.successor === undefined
@@ -427,7 +489,8 @@ export const fakeSession = (options: FakeOptions = {}) => {
       if (options.runnerUp !== undefined) {
         logits[row * VOCAB + options.runnerUp.id] = options.runnerUp.logit;
       }
-      // 汚染は行の**別の** id に置く（狙った id を潰すと「行の argmax」の写像が壊れる）。
+      // The poison goes on **another** id of the row (poisoning the targeted id would break the
+      // "row argmax" map).
       if (options.nanAt === call && (options.nanRow === undefined || options.nanRow === row)) {
         logits[row * VOCAB + ((id + 1) % VOCAB)] = Number.NaN;
       }
@@ -436,8 +499,8 @@ export const fakeSession = (options: FakeOptions = {}) => {
     }
     return {
       [LOGITS]: { dtype: "f32", shape: [1, rows, VOCAB], data: logits },
-      // hidden は投機経路だけが読む（非投機で読む実装へ退行すれば、行ごとに違うこの値が
-      // logits の形検査に掛かる）。
+      // Only the speculative path reads hidden (an implementation that regresses to reading it on
+      // the non-speculative path hits the logits shape check with this per-row value).
       [HIDDEN]: { dtype: "f32", shape: [1, rows, HIDDEN_SIZE], data: hidden },
     };
   };
@@ -494,11 +557,12 @@ export const fakeSession = (options: FakeOptions = {}) => {
     aheadBatches,
     derivedInputs,
     /**
-     * `createGenerationContext` が返す唯一の実体（借り手の `open` に渡る面と同一であること）。
-     * 下の `disposals` / `pastLength` / `pendingCommit` はこの context の値。
+     * The only instance `createGenerationContext` returns (it must be the same surface the
+     * borrower's `open` receives). The `disposals` / `pastLength` / `pendingCommit` below are this
+     * context's values.
      */
     context,
-    /** `fork` で作った context（作った順）。 */
+    /** The contexts made by `fork` (in the order they were made). */
     forks,
     calls,
     runContexts,
@@ -507,7 +571,7 @@ export const fakeSession = (options: FakeOptions = {}) => {
     disposals: (): number => rootState.disposals,
     pastLength: (): number => rootState.pastLength,
     pendingCommit: (): FakePending | undefined => rootState.pending,
-    /** 任意の context（分岐を含む）の dispose の回数。 */
+    /** The dispose count of any context (including branches). */
     disposalsOf: (target: FakeContext): number => stateOf(target).disposals,
   };
 };
@@ -540,7 +604,7 @@ export const fakeArgmax = (outputs: RunOutputs): GreedyRunResult => {
   return { index, value };
 };
 
-/** イベントを全部汲む（`done` も一緒に返す）。 */
+/** Drains every event (returns `done` too). */
 export const drain = async (
   stream: GenerationStream,
 ): Promise<{ readonly events: GenerationEvent[]; readonly stop: GenerationStop }> => {
@@ -553,11 +617,14 @@ export const tokenIds = (events: readonly GenerationEvent[]): number[] =>
   events.filter((event) => event.kind === "token").map((event) => event.id);
 
 /**
- * 観測席の列から**時間と局面の欄**（`wallMs` / `delivered` / `gate`）を落とす。
+ * Drops **the time and phase fields** (`wallMs` / `delivered` / `gate`) from a list of observation
+ * records.
  *
- * run の種別と番号だけを見る門（「run 1 本につき 1 通」「cycle 番号は 1 始まりの連番」）が壁時計に
- * 依存しないための口である — 非投機の sequence は偽時計を差せない（`now` は投機の指定の欄）ので、
- * `wallMs` の実値は走行ごとに違う。壁と局面そのものの門は偽時計を差した席が別に見る。
+ * The entry for checks that look only at run kinds and numbers ("one message per run", "cycle
+ * numbers are consecutive from 1") so that they do not depend on the wall clock — the
+ * non-speculative sequence cannot take a fake clock (`now` is a field of the speculative options),
+ * so the real `wallMs` values differ per run. The checks of the wall clock and phases themselves
+ * are done separately by the records that take a fake clock.
  */
 export const runShape = (phases: readonly GenerationRunPhase[]): GenerationRunPhase[] =>
   phases.map((phase) =>

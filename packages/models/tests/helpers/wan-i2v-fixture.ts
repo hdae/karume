@@ -1,10 +1,13 @@
 /**
- * Wan2.2 TI2V の I2V の通しの CPU の参照（`pipeline_steps_i2v.<case>.safetensors` — ADR 0121 段 9b）の置き場と、埋め込まれた
- * 元画像の形。I2V の通しの e2e（`e2e_wan_ti2v_i2v_pipeline_test.ts`）と、条件画像をこの参照から
- * 読む自機 A/B 門の I2V のケース（`e2e_wan_ti2v_ab_test.ts`）が共有する。綴りは**ここ 1 か所**に置く（書き手の出力名や
- * モジュール名が変わったときに片方だけが古い置き場を見て、opt-in の門が黙って SKIP し続けないように）。
+ * Where the CPU reference of the Wan2.2 TI2V I2V end-to-end run (`pipeline_steps_i2v.<case>.safetensors` — ADR 0121
+ * step 9b) lives, and the shape of the source image embedded in it. Shared by the I2V end-to-end e2e
+ * (`e2e_wan_ti2v_i2v_pipeline_test.ts`) and the I2V case of the local A/B check that reads its condition image from
+ * this reference (`e2e_wan_ti2v_ab_test.ts`). The spelling lives **in this one place** (so that when the writer's
+ * output name or module name changes, one side does not keep looking at the old place and the opt-in check does not
+ * silently keep SKIPping).
  *
- * 書き手は recipe の `tools/export-recipes/wan/ti2v_i2v_few_step_ref.py`（中身の規約は I2V の通しの e2e のモジュール doc）。
+ * The writer is the recipe's `tools/export-recipes/wan/ti2v_i2v_few_step_ref.py` (the contents' conventions are in the
+ * module doc of the I2V end-to-end e2e).
  */
 
 import { goldenDir } from "@karume/test-support/test-assets";
@@ -16,7 +19,7 @@ import { WAN_TI2V_SERIES_NAME } from "./wan-ti2v-dit.ts";
  */
 export const WAN_I2V_STEPS_ROOT = goldenDir(WAN_TI2V_SERIES_NAME);
 
-/** 参照 1 本の置き場（`name` は recipe の `FIXTURE_CASES` の名前 — 例 `band-boxing-cats`）。 */
+/** Where one reference lives (`name` is a name of the recipe's `FIXTURE_CASES` — e.g. `band-boxing-cats`). */
 export const wanI2vStepsFixtureUrl = (name: string): URL =>
   new URL(`pipeline_steps_i2v.${name}.safetensors`, WAN_I2V_STEPS_ROOT);
 

@@ -1,17 +1,21 @@
-// 9 家族の `fromPretrained` が hub へ透過するオプション（`src/hub/load-options.ts`）の門。
-// **GPU も実網も要らない**。
+// The check for the options that the `fromPretrained` of 9 families pass through to the hub
+// (`src/hub/load-options.ts`). **Needs neither a GPU nor the real network.**
 //
-// 0.11.0 の hub が `onRetry`（429 / 503 の再試行通知）を足したとき、8 家族の
-// `FromPretrainedOptions`（当時は `XFromPretrainedOptions`）は同じ 5 欄を手書きで複製していた
-// ため 8 か所とも欄が欠け、「新しいノブが黙って届かない」形になった。複製を 1 本（{@link hubLoadOptions}）へ畳んだので、
-// ここで押さえるのは 4 つ:
-//  ① 定義済みの 6 欄が**同じ参照のまま**写ること（写しの途中で包み直さない）。
-//  ② 未定義の欄は**キーごと**現れないこと — `key: undefined` は「無指定」と別物として
-//     取得層の分岐に効きうる（明示 `undefined` の `fetch` が既定 `globalThis.fetch` を潰す等）。
-//  ③ `onProgress` は写さないこと（進捗は家族側が `loadContainerComponents` へ別途載せる）。
-//  ④ 型の門 — 9 家族**全て**が `onRetry` を受けること（欠けたら `deno task check` が赤くなる）。
-// 最後に、公開面から見た対として「anima の `fromPretrained` が `onRetry` を `loadManifest` まで
-// 運ぶ」ことを mock fetch の 429 で見る（1 家族で足りる — 運ぶ経路は 9 家族とも同じ 1 本）。
+// When the 0.11.0 hub added `onRetry` (the retry notification for 429 / 503), the
+// `FromPretrainedOptions` of 8 families (then `XFromPretrainedOptions`) duplicated the same 5
+// fields by hand, so the field was missing in all 8 places — "a new knob silently does not arrive".
+// The duplicates were folded into one ({@link hubLoadOptions}), and this file pins four things:
+//  ① The 6 defined fields are copied **as the same references** (not re-wrapped on the way).
+//  ② Undefined fields do not appear **at all, key included** — `key: undefined` is distinct from
+//     "not specified" and can affect the fetch layer's branches (an explicit `undefined` `fetch`
+//     overriding the default `globalThis.fetch`, and so on).
+//  ③ `onProgress` is not copied (the family side puts progress into `loadContainerComponents`
+//     separately).
+//  ④ The type check — **every one** of the 9 families accepts `onRetry` (`deno task check` goes red
+//     if one is missing).
+// Finally, as the counterpart seen from the public surface, a mock fetch's 429 checks that "anima's
+// `fromPretrained` carries `onRetry` down to `loadManifest`" (one family is enough — the carrying
+// path is the same one for all 9 families).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
@@ -30,11 +34,11 @@ import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
 const noopRetry = (diagnostic: RetryDiagnostic): void => void diagnostic;
 
-test("hubLoadOptions: 定義済みの 6 欄が同じ参照のまま写る", () => {
+test("hubLoadOptions: the 6 defined fields are copied as the same references", () => {
   const signal = AbortSignal.abort();
   const headers = new Headers({ authorization: "Bearer test" });
   const onCacheError = (diagnostic: CacheDiagnostic): void => void diagnostic;
-  const fetchStub: typeof globalThis.fetch = () => Promise.reject(new Error("test: 呼ばない"));
+  const fetchStub: typeof globalThis.fetch = () => Promise.reject(new Error("test: not called"));
   const caches = new MemoryCacheStorage();
 
   const hubOptions = hubLoadOptions({
@@ -46,40 +50,44 @@ test("hubLoadOptions: 定義済みの 6 欄が同じ参照のまま写る", () =
     caches,
   });
 
-  // 包み直すと「アプリが渡したのと別の関数が呼ばれる」形になり、購読の解除も比較もできない。
+  // Re-wrapping would make "a function other than the one the app passed get called", and neither
+  // unsubscribing nor comparing would work.
   assertStrictEquals(hubOptions.signal, signal);
   assertStrictEquals(hubOptions.headers, headers);
   assertStrictEquals(hubOptions.onCacheError, onCacheError);
   assertStrictEquals(hubOptions.onRetry, noopRetry);
   assertStrictEquals(hubOptions.fetch, fetchStub);
   assertStrictEquals(hubOptions.caches, caches);
-  assertEquals(Object.keys(hubOptions).length, 6, "写した欄が 6 つでない");
+  assertEquals(Object.keys(hubOptions).length, 6, "the copied fields are not 6");
 });
 
-test("hubLoadOptions: 未定義の欄はキーごと無い（`key: undefined` を作らない）", () => {
-  // 明示的な `undefined` を置くと、取得層の `options.fetch ?? globalThis.fetch` のような
-  // 既定の当て方は救うが、`Object.hasOwn` や分割代入の既定値で分岐する側は救えない。
-  // 「無指定」と「undefined を指定」は別物のまま届けるのが写しの契約。
+test("hubLoadOptions: undefined fields are absent, key included (no `key: undefined` is created)", () => {
+  // An explicit `undefined` is rescued by defaulting like the fetch layer's
+  // `options.fetch ?? globalThis.fetch`, but not by code that branches on `Object.hasOwn` or on a
+  // destructuring default. The copy's contract is to deliver "not specified" and "specified as
+  // undefined" as the distinct things they are.
   for (const options of [{}, { signal: undefined, headers: undefined, onRetry: undefined }]) {
     const hubOptions: Record<string, unknown> = hubLoadOptions(options);
-    assertEquals(Object.keys(hubOptions), [], "未定義の欄がキーとして現れている");
+    assertEquals(Object.keys(hubOptions), [], "undefined fields appear as keys");
     for (const key of ["signal", "headers", "onCacheError", "onRetry", "fetch", "caches"]) {
-      assertEquals(Object.hasOwn(hubOptions, key), false, `${key} のキーが作られている`);
+      assertEquals(Object.hasOwn(hubOptions, key), false, `the key ${key} was created`);
     }
   }
 });
 
-test("hubLoadOptions: onProgress は写さない（進捗は家族側が別途載せる）", () => {
-  // manifest 取得に進捗は無く、資産取得の進捗は家族ごとに集約してから
-  // `loadContainerComponents` へ渡す。ここで写すと集約前の生の進捗が二重に流れる。
+test("hubLoadOptions: onProgress is not copied (the family side adds progress separately)", () => {
+  // Fetching the manifest has no progress, and asset-fetch progress is aggregated per family before
+  // it is passed to `loadContainerComponents`. Copying it here would send the raw, unaggregated
+  // progress twice.
   const onProgress = (progress: AssetProgress): void => void progress;
   const hubOptions: Record<string, unknown> = hubLoadOptions({ onProgress, onRetry: noopRetry });
-  assertEquals(Object.hasOwn(hubOptions, "onProgress"), false, "onProgress が写っている");
+  assertEquals(Object.hasOwn(hubOptions, "onProgress"), false, "onProgress was copied");
   assertEquals(Object.keys(hubOptions), ["onRetry"]);
 });
 
-test("型の門: 9 家族の fromPretrained オプションが onRetry を受ける", () => {
-  // `satisfies` が本体（`deno task check` が門）。1 家族でも共有型から外れると赤くなる。
+test("type check: the fromPretrained options of 9 families accept onRetry", () => {
+  // `satisfies` is the substance (`deno task check` is the check). Goes red if even one family
+  // drifts from the shared type.
   const perFamily = [
     { onRetry: noopRetry } satisfies anima.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies birefnet.FromPretrainedOptions,
@@ -91,12 +99,14 @@ test("型の門: 9 家族の fromPretrained オプションが onRetry を受け
     { onRetry: noopRetry } satisfies umt5.FromPretrainedOptions,
     { onRetry: noopRetry } satisfies vowelDetector.FromPretrainedOptions,
   ];
-  assertEquals(perFamily.length, 9, "家族が 9 つ並んでいない");
-  // 写しの入口（`hubLoadOptions`）が 9 家族の型を**そのまま**受けることも同じ 1 本で見る。
+  assertEquals(perFamily.length, 9, "the families listed are not 9");
+  // The same list also checks that the copy's entry (`hubLoadOptions`) accepts the 9 families'
+  // types **as they are**.
   for (const options of perFamily) assertStrictEquals(hubLoadOptions(options).onRetry, noopRetry);
 });
 
-// ---- 公開面から見た透過（anima 1 家族）----------------------------------------
+// ---- Pass-through seen from the public surface (anima, one family)
+// ----------------------------------------
 
 const HUB_URL = "https://hub.test";
 const REPO = "someone/karume-anima";
@@ -104,8 +114,9 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const MANIFEST_URL = `${HUB_URL}/${REPO}/resolve/${SHA}/karume.json`;
 
 /**
- * 部品 1 本ぶんの dtype エントリ（実体は 1 度も届かないので sha256 は綴りだけ合わせる）。
- * part 0 の size は「ヘッダ 24 + 2 文書」と一致させる（manifest の門 — container-v1 §8）。
+ * The dtype entry of one component (its contents never arrive, so only the spelling of the sha256
+ * is made to match). The size of part 0 matches "header 24 + 2 documents" (the manifest's check —
+ * container-v1 §8).
  */
 const weightEntry = (stem: string) => ({
   f16: {
@@ -147,7 +158,8 @@ const MANIFEST = {
         },
       },
       defaultQuant: "f16",
-      // parse が席の存在を要求する 2 つ（空でも明示 — 中身はこのテストでは読まれない）。
+      // The 2 fields the parse requires to exist (explicit even when empty — their contents are not
+      // read in this test).
       assets: { tokenizer: { path: "tokenizer/tokenizer.json", size: 42, sha256: "b".repeat(64) } },
       pipelineConfig: {},
     },
@@ -155,9 +167,9 @@ const MANIFEST = {
 };
 
 /**
- * `karume.json` の**初回だけ** 429（`retry-after: 0`）を返し、2 回目で manifest を返す `fetch`。
- * それ以外の URL（= 容器の part）は 404 — 見たいのは manifest 取得までの経路だけなので、
- * その先は落ちてよい。
+ * A `fetch` that returns 429 (`retry-after: 0`) **only the first time** for `karume.json` and the
+ * manifest the second time. Every other URL (= the container's parts) is 404 — only the path up to
+ * the manifest fetch matters here, so what follows may fail.
  */
 const createRateLimitedManifestFetch = (): { fetch: typeof globalThis.fetch; calls: string[] } => {
   const calls: string[] = [];
@@ -185,11 +197,11 @@ const createRateLimitedManifestFetch = (): { fetch: typeof globalThis.fetch; cal
   return { fetch, calls };
 };
 
-test("anima.Pipeline.fromPretrained: onRetry が loadManifest まで届く（429 で 1 回）", async () => {
+test("anima.Pipeline.fromPretrained: onRetry reaches loadManifest (once, on a 429)", async () => {
   const { fetch, calls } = createRateLimitedManifestFetch();
   const retries: RetryDiagnostic[] = [];
-  // manifest の後（容器の part 0）は 404 なので落ちる。ここで見たいのは「家族の
-  // `fromPretrained` が `onRetry` を取得層まで運ぶ」ことだけ。
+  // After the manifest (the container's part 0) it is a 404, so it fails. All this checks is that
+  // "the family's `fromPretrained` carries `onRetry` to the fetch layer".
   await assertRejects(() =>
     anima.Pipeline.fromPretrained(
       { repo: REPO, revision: SHA, hubUrl: HUB_URL },
@@ -200,14 +212,14 @@ test("anima.Pipeline.fromPretrained: onRetry が loadManifest まで届く（429
       },
     ),
   );
-  assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
+  assertEquals(retries.length, 1, "the retry notification did not arrive exactly once");
   assertEquals(retries[0].status, 429);
-  assertEquals(retries[0].url, MANIFEST_URL, "通知が karume.json 以外の URL を名乗っている");
+  assertEquals(retries[0].url, MANIFEST_URL, "the notification names a URL other than karume.json");
   assertEquals(retries[0].attempt, 1);
-  // 429 の後に取り直していること（= 通知だけ出して諦めた形でない）。
+  // It fetched again after the 429 (= not a form that only notifies and gives up).
   assertEquals(calls.filter((url) => url === MANIFEST_URL).length, 2);
   assert(
     calls.some((url) => url.endsWith("/text_encoder/model.f16-00001-of-00002.krm")),
-    "manifest を読めていない（descriptor の取得まで進んでいない）",
+    "the manifest was not read (it did not get as far as fetching the descriptor)",
   );
 });

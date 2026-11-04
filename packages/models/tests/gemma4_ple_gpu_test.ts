@@ -1,10 +1,11 @@
 /**
- * PLE の GPU 常駐席（ADR 0085 追記〈GPU 常駐席〉）のうち、**GPU を要さない部分**の門。
+ * Checks of the **GPU-free part** of the PLE GPU-resident option (ADR 0085 addendum (GPU-resident option)).
  *
- * 見るのは 4 つ — ①席の指定の受理と拒否 ②gather IR の形（ノード列・shape・initializer の宣言）と
- * グラフ単体の規則の門（`parseIrDeclarationValue`）③容器の資産 → メモリ内容器の突合（格納
- * dtype → codec、piece の並びと part 割り、繋ぎ直したバイト列が原本と一致すること）④block が
- * 1 本の索引の供給形。実 GPU での値の一致は `e2e_gemma4_ple_gpu_test.ts` が持つ。
+ * Four things are checked — ① accepting and rejecting the option's setting ② the shape of the gather IR (node list,
+ * shapes, initializer declarations) and the graph-only rules check (`parseIrDeclarationValue`) ③ the container's
+ * assets → the in-memory container (storage dtype → codec, the order of pieces and their part split, and that the
+ * reassembled bytes match the original) ④ the supply form of an index with a single block. Value agreement on a
+ * real GPU is owned by `e2e_gemma4_ple_gpu_test.ts`.
  */
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -23,7 +24,7 @@ import { ModelInputError } from "../src/errors.ts";
 import { resolveGemma4PleResidency } from "../src/gemma/pipeline.ts";
 import { pleFixture, type PleFixtureSpec, scaleOf } from "./helpers/ple-fixture.ts";
 
-/** 索引 1 本ぶんの作り物（実資産と同じ綴り・同じ関係で、桁だけ小さい）。 */
+/** A made-up single index (the same spelling and relations as the real assets, only smaller). */
 const SPEC: PleFixtureSpec = {
   storage: "i4",
   tokens: 6,
@@ -33,25 +34,25 @@ const SPEC: PleFixtureSpec = {
   valueRows: 4,
 };
 
-/** 1 層ぶんのバイト数（i4 なので dim / 2）。 */
+/** Bytes per layer (dim / 2 since it is i4). */
 const ROW_BYTES = SPEC.dim / 2;
-/** 重みの行数（token × 層）。 */
+/** Rows of the weight (token × layer). */
 const WEIGHT_ROWS = SPEC.tokens * SPEC.layers;
 
 const rig = pleFixture(SPEC);
 const index = rig.index;
 
-test("pleResidency: 受理と、併用できないノブの拒否", () => {
+test("pleResidency: acceptance, and rejection of knobs that cannot be combined", () => {
   assertEquals(resolveGemma4PleResidency("T", {}), "host");
   assertEquals(resolveGemma4PleResidency("T", { pleResidency: "host" }), "host");
   assertEquals(resolveGemma4PleResidency("T", { pleResidency: "gpu" }), "gpu");
-  // 綴り違いを既定へ倒さない（型の外から来る指定）。
+  // A misspelling is not turned into the default (a setting that comes from outside the types).
   assertThrows(
     () => resolveGemma4PleResidency("T", { pleResidency: "GPU" as "gpu" }),
     Error,
     "pleResidency",
   );
-  // 併用できないノブの組合せは呼び手のオプションだけで決まるので入力起因（ADR 0107 決定 2）。
+  // A combination of knobs that cannot be used together is decided by the caller's options alone, so it is caused by the input (ADR 0107 decision 2).
   assertThrows(
     () => resolveGemma4PleResidency("T", { pleResidency: "gpu", maxResidentPleBytes: 0 }),
     ModelInputError,
@@ -62,14 +63,14 @@ test("pleResidency: 受理と、併用できないノブの拒否", () => {
     ModelInputError,
     "speculative",
   );
-  // 逆側: 綴り違いは「受理集合を引き直す」側なので入力起因にしない（決定 3 の除外）。
+  // The other side: a misspelling belongs to "re-reading the accepted set", so it is not classified as caused by the input (the exclusion of decision 3).
   const misspelled = assertThrows(() =>
     resolveGemma4PleResidency("T", { pleResidency: "GPU" as "gpu" }),
   );
   assert(!(misspelled instanceof ModelInputError));
 });
 
-test("gather IR: embedding → mul の 2 ノードで、添字の形がそのまま per-layer の形になる", () => {
+test("gather IR: two nodes, embedding → mul, and the index shape becomes the per-layer shape as is", () => {
   const graph = gemma4PleGatherGraph(index);
   assertEquals(
     graph.nodes.map((node) => node.op),
@@ -78,15 +79,15 @@ test("gather IR: embedding → mul の 2 ノードで、添字の形がそのま
   assertEquals(graph.nodes[0].ins, ["ple", "ple_index"]);
   assertEquals(graph.nodes[1].ins, ["ple_raw", "embed_scale"]);
   assertEquals(graph.inputs, [{ name: "ple_index", dtype: "i32", shape: [1, "M", 2] }]);
-  // 重みは (token, layer) を行に畳んだ形 — 1 行 = 1 層ぶんなので scale の並びが索引と揃う。
+  // The weight is folded into rows of (token, layer) — 1 row = 1 layer, so the order of the scales lines up with the index.
   assertEquals(graph.values.ple.shape, [WEIGHT_ROWS, SPEC.dim]);
   assertEquals(graph.values[graph.outputs[0]].shape, [1, "M", 2, SPEC.dim]);
-  // IR v2 の宣言が持つのは名前だけ（格納は束縛表 = メモリ内容器の encoding 側）。
+  // An IR v2 declaration holds only names (the storage is in the binding table = the in-memory container's encoding side).
   assertEquals(Object.keys(graph.initializers), ["ple", "embed_scale"]);
   assertEquals(graph.initializers.ple, { shared: false });
 });
 
-test("メモリ内容器: 格納 dtype が codec 台帳の登録名と group 長に写る", async () => {
+test("in-memory container: the storage dtype maps to the codec ledger's registered name and group length", async () => {
   const mapping = [
     ["i8", "int8-sym"],
     ["i4", "int4-sym-g"],
@@ -97,11 +98,11 @@ test("メモリ内容器: 格納 dtype が codec 台帳の登録名と group 長
     const bound = await buildGemma4PleGatherContainer(fixture.index, fixture.openBlock, "T");
     const encoding = bound.graphs.ple.supplies.get("ple")?.encoding;
     assertEquals(encoding?.codec, codec);
-    // i4 の group = 行長・i8 / i2 の per-channel = 行長。どちらも group 数は 1 なので、
-    // companion scale は `[tokens × layers, 1]` の f32 列そのものになる。
+    // i4's group = the row length; i8 / i2's per-channel = the row length. Either way the group count is 1, so the
+    // companion scale is exactly the f32 column `[tokens × layers, 1]`.
     assertEquals(encoding?.groupSize, SPEC.dim);
     assertEquals(encoding?.rowAxis, 0);
-    // 合流後の格納まで 1 本で見る（3 種とも capability 門を通ること — GPU は触らない）。
+    // Checks through to the storage after the merge (all 3 pass the capability check — the GPU is not touched).
     assertEquals(prepareContainer(bound, "ple").graph.initializers.ple.storage, {
       codec,
       groupSize: SPEC.dim,
@@ -110,40 +111,40 @@ test("メモリ内容器: 格納 dtype が codec 台帳の登録名と group 長
   }
 });
 
-test("メモリ内容器: block 1 本の索引は piece に割らず丸ごと 1 本で供給される", async () => {
-  // `valueRows` を省くと block は 1 本（`pieces` は 2 本以上 MUST なので `bytes` の分岐）。
-  // 旧実装はここを「PLE の行数が 2 行未満」で落としていたので、通ることを縛る。
+test("in-memory container: an index with a single block is supplied whole, not split into pieces", async () => {
+  // Omitting `valueRows` gives a single block (`pieces` MUST have 2 or more, so it takes the `bytes` branch).
+  // The old implementation rejected this as "fewer than 2 PLE rows", so this pins that it passes.
   const fixture = pleFixture({ ...SPEC, storage: "i8", valueRows: undefined });
   assertEquals(fixture.index.values.blocks.length, 1);
   const bound = await buildGemma4PleGatherContainer(fixture.index, fixture.openBlock, "T");
   const supply = bound.graphs.ple.supplies.get("ple");
-  assert(supply !== undefined, "initializer 'ple' の供給が無い");
+  assert(supply !== undefined, "no supply for initializer 'ple'");
   assertEquals(supply.blocks.length, 1);
   assertEquals(supply.blocks[0].rows, [0, WEIGHT_ROWS]);
   assertEquals(
     await bound.readBlock(supply.blocks[0].id),
     fixture.blocks.get(fixture.index.values.blocks[0].asset),
   );
-  // companion scale は丸ごと 1 本の供給とも同じ part に置かれる（規則③）。
+  // The companion scale is placed in the same part as the single whole supply too (rule ③).
   assertEquals(supply.scale?.part, supply.blocks[0].part);
   assertEquals(prepareContainer(bound, "ple").graph.outputs, ["per_layer"]);
 });
 
 /**
- * 解析済みの宣言を JSON 文書へ戻す（`shared: false` は綴れないので欄ごと落とす）— 仕込みを
- * 載せる土台。
+ * Turns a parsed declaration back into a JSON document (`shared: false` cannot be spelled, so the field is dropped)
+ * — the base the doctored inputs are put on.
  */
 const documentOf = (declaration: IrDeclaration): Record<string, unknown> => ({
   ...declaration,
   initializers: Object.fromEntries(Object.keys(declaration.initializers).map((name) => [name, {}])),
 });
 
-test("gather IR: グラフ単体の規則を通る（嘘の requires.ops は宣言の段で落ちる）", () => {
+test("gather IR: passes the graph-only rules (a false requires.ops fails at the declaration step)", () => {
   const document = documentOf(gemma4PleGatherGraph(index));
-  // 陰性対照: 仕込みの無い文書はそのまま通り、同じ宣言に戻る。
+  // Negative control: a document without doctoring passes as is and returns to the same declaration.
   assertEquals(parseIrDeclarationValue(document), gemma4PleGatherGraph(index));
-  // 使っていない op を宣言しても、合流（宣言 × 供給）も `prepareContainer`（capability +
-  // op 契約）も見ない — 落とせるのはグラフ単体の規則を見るこの門だけ。
+  // Declaring an unused op is seen neither by the merge (declaration × supply) nor by `prepareContainer` (capability +
+  // op contracts) — only this check, which looks at the graph-only rules, can reject it.
   assertThrows(
     () => parseIrDeclarationValue({ ...document, requires: { ops: ["embedding", "mul", "topk"] } }),
     IrError,
@@ -151,15 +152,15 @@ test("gather IR: グラフ単体の規則を通る（嘘の requires.ops は宣�
   );
 });
 
-test("gather IR: ランタイムの op 契約と格納を通る", async () => {
+test("gather IR: passes the runtime's op contracts and storage", async () => {
   const bound = await buildGemma4PleGatherContainer(index, rig.openBlock, "T");
-  // prepareContainer は非対応 op / 格納 codec と IR 契約を全件見る（GPU は触らない）。
+  // prepareContainer checks every unsupported op / storage codec and the IR contracts (the GPU is not touched).
   const prepared = prepareContainer(bound, "ple");
   assertEquals(prepared.graph.outputs, ["per_layer"]);
   assertEquals(prepared.graph.symbols, ["M"]);
 });
 
-test("常駐バイト数: 索引だけで決まる（E2B QAT の実値）", () => {
+test("resident bytes: decided by the index alone (the actual values of E2B QAT)", () => {
   const e2b = pleFixture({
     storage: "i4",
     tokens: 4096,
@@ -172,7 +173,7 @@ test("常駐バイト数: 索引だけで決まる（E2B QAT の実値）", () =
     scales: 4096 * 35 * 4,
     total: (4096 * 35 * 256) / 2 + 4096 * 35 * 4,
   });
-  // i8（通常 Gemma 4）は同じ寸法で倍になる。
+  // i8 (regular Gemma 4) doubles at the same dimensions.
   const i8 = pleFixture({
     storage: "i8",
     tokens: 4096,
@@ -191,11 +192,11 @@ test("常駐バイト数: 索引だけで決まる（E2B QAT の実値）", () =
   assertEquals(gemma4PleGpuBytes(i2).values, (4096 * 35 * 256) / 4);
 });
 
-test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の values と一致する", async () => {
+test("in-memory container: pieces are in order, and reassembling them matches the original values", async () => {
   const bound = await buildGemma4PleGatherContainer(index, rig.openBlock, "T");
   const supply = bound.graphs.ple.supplies.get("ple");
-  assert(supply !== undefined, "initializer 'ple' の供給が無い");
-  // piece は `values` の block と 1 対 1（行範囲は token 区間 × 層数 — 1 行 = 1 層ぶん）。
+  assert(supply !== undefined, "no supply for initializer 'ple'");
+  // Pieces are 1:1 with the `values` blocks (the row range is the token interval × the layer count — 1 row = 1 layer).
   assertEquals(
     supply.blocks.map((block) => block.rows),
     [
@@ -203,13 +204,13 @@ test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の value
       [8, 12],
     ],
   );
-  // part 割り: piece k はそれぞれ別 part（= 構築時のフェンス 1 本ぶん）で、companion scale は
-  // piece 1 と同じ part（container-v1 §13.3 の規則③）。
+  // Part split: each piece k is in its own part (= one fence at build time), and the companion scale is in the same
+  // part as piece 1 (rule ③ of container-v1 §13.3).
   const parts = supply.blocks.map((block) => block.part);
-  assertEquals(new Set(parts).size, parts.length, "piece が同じ part に同居している");
+  assertEquals(new Set(parts).size, parts.length, "pieces share a part");
   assertEquals(supply.scale?.part, parts[0]);
 
-  // block 順に読み直した piece を繋ぐと、原本の values の連結そのものになる。
+  // Joining the pieces re-read in block order gives exactly the concatenation of the original values.
   const collected: Uint8Array[] = [];
   for (const block of supply.blocks) collected.push(await bound.readBlock(block.id));
   assertEquals(
@@ -231,9 +232,9 @@ test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の value
   }
   assertEquals(joined, expected);
 
-  // scale の block は、平坦添字 `id * layers + layer` に並べ直した scale 表そのもの。
-  // fixture の scale は token にも依存する（`scaleOf`）ので、この主張は token 方向のずれ
-  // （行の巡回・block の取り違え）でも落ちる。
+  // The scale block is exactly the scale table reordered to the flat index `id * layers + layer`. The fixture's
+  // scales also depend on the token (`scaleOf`), so this claim also fails on a shift in the token direction (rotated
+  // rows, mixed-up blocks).
   const scaleBytes = await bound.readBlock(supply.scale!.id);
   assertEquals(scaleBytes.byteLength, WEIGHT_ROWS * 4);
   const scales = new Float32Array(scaleBytes.buffer, scaleBytes.byteOffset, WEIGHT_ROWS);
@@ -244,7 +245,7 @@ test("メモリ内容器: piece が順に並び、繋ぎ直すと原本の value
     ),
   );
 
-  // embed_scale は丸ごと 1 本（f32・詰め物なし）。
+  // embed_scale is supplied whole (f32, no padding).
   const embedScale = bound.graphs.ple.supplies.get("embed_scale");
   assertEquals(embedScale?.encoding.codec, "f32");
   const embedBytes = await bound.readBlock(embedScale!.blocks[0].id);

@@ -1,35 +1,40 @@
 /**
- * timestamp-query の値の 1 単位を ns へ直す表（環境キー別 — Wan の DiT / umT5 の e2e が共有する）。
+ * The table that converts one unit of a timestamp-query value to ns (per environment key — shared
+ * by the Wan DiT / umT5 e2e).
  *
- * Deno は wgpu の raw tick を換算せずに返す（docs/known-issues.md「Intel Arc B570」節 — B570 で 1 tick = 52.0833 ns）。
- * 表に無い環境の換算は推測しない: 門として時間を見る呼び手は {@link timestampUnitNs} で fail loudly にし、記録だけの
- * 呼び手は {@link lookupTimestampUnitNs} の undefined を見て換算を飛ばす。
+ * Deno returns wgpu's raw ticks without converting them (docs/known-issues.md, section "Intel Arc B570" — on the B570
+ * 1 tick = 52.0833 ns). The conversion of an environment that is not in the table is not guessed: callers that check
+ * times fail loudly through {@link timestampUnitNs}, and callers that only record them see `undefined` from
+ * {@link lookupTimestampUnitNs} and skip the conversion.
  *
- * 環境キーは引数で受ける（このモジュールは何も import しない — 副作用ゼロ）。
+ * The environment key comes in as an argument (this module imports nothing — zero side effects).
  */
 
-/** timestamp の 1 単位の ns（環境キー → ns）。行を足すのは実測で period を確かめた環境だけ。 */
+/** ns per timestamp unit (environment key → ns). Add a row only for an environment whose period was measured. */
 export const TIMESTAMP_UNIT_NS: Readonly<Record<string, number>> = {
   "deno-intel-graphics-bmg-g21": 52.0833,
-  // RTX 3080 Ti（NVIDIA ドライバ 615.71）: Vulkan の timestampPeriod は 1。2026-10-06 の実測で、1 pass の raw tick が壁時計から
-  // submit の固定費（約 11 ms）を引いた値と 1% 以内で一致した（133〜153 ms の pass × 6 回・query set の使い捨てと使い回しの両方）。
+  // RTX 3080 Ti (NVIDIA driver 615.71): Vulkan's timestampPeriod is 1. Measured on 2026-10-06: the raw ticks of one
+  // pass matched the wall clock minus the fixed cost of a submit (about 11 ms) within 1% (6 runs of 133–153 ms passes,
+  // with both a throw-away and a reused query set).
   "deno-nvidia-geforce-rtx-3080-ti": 1,
   // Dawn (Node) reports timestamps already converted to ns (the Vulkan timestampPeriod is applied
   // inside Dawn); the test setup disables Dawn's 65,536 ns quantisation, so 1 unit = 1 ns.
   "node-nvidia-geforce-rtx-3080-ti": 1,
 };
 
-/** 表の行（無ければ undefined — 換算を推測しない）。 */
+/** The table's row (`undefined` when missing — the conversion is not guessed). */
 export const lookupTimestampUnitNs = (key: string | undefined): number | undefined =>
   key !== undefined && Object.hasOwn(TIMESTAMP_UNIT_NS, key) ? TIMESTAMP_UNIT_NS[key] : undefined;
 
-/** 環境キー `key` の timestamp の 1 単位の ns（{@link TIMESTAMP_UNIT_NS}）。表に無ければ fail loudly。 */
+/**
+ * ns per timestamp unit of the environment key `key` ({@link TIMESTAMP_UNIT_NS}). Fails loudly when not in the table.
+ */
 export const timestampUnitNs = (key: string | undefined): number => {
   const unit = lookupTimestampUnitNs(key);
   if (unit === undefined) {
     throw new Error(
-      `環境キー '${key}' の timestamp の 1 単位の ns が TIMESTAMP_UNIT_NS に無い` +
-        "（推測で換算しない — docs/known-issues.md を見て行を足す）",
+      `TIMESTAMP_UNIT_NS has no ns-per-timestamp-unit row for the environment key '${key}'` +
+        " (the conversion is not guessed — see docs/known-issues.md and add a row)",
     );
   }
   return unit;

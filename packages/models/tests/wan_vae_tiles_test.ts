@@ -1,7 +1,9 @@
-// Wan2.1 の動画 VAE のタイル decode のホスト側（ADR 0118 決定 2・段 5 — GPU も資産も要らない純関数）。
+// The host side of the tiled decode of the Wan2.1 video VAE (ADR 0118 decision 2, stage 5 — pure
+// functions that need neither a GPU nor assets).
 //
-// 実 GPU での参照照合と縮退門は `e2e_wan_vae_tiles_test.ts`。ここは**幾何の凍結表**（Python 側と
-// 同じ値 — ADR 0033 追記 9a の二重凍結）・配置の不変条件・貼り合わせの解析解を押さえる。
+// The reference comparison and the degenerate check on a real GPU are in `e2e_wan_vae_tiles_test.ts`.
+// This file pins the **frozen geometry table** (the same values as the Python side — frozen twice, ADR
+// 0033 addendum 9a), the layout invariants and the analytic solutions of the stitching.
 
 import { test } from "vite-plus/test";
 import {
@@ -27,22 +29,24 @@ import {
 import { WAN21_GENERATION } from "../src/wan/descriptor.ts";
 import { finishWanVaeFrames } from "../src/wan/tile-decode.ts";
 
-/** 実寸のタイル辺（潜在 — chunk グラフの既定の入力形）と縮尺。 */
+/** The real tile edge (latent — the chunk graph's default input shape) and the scale. */
 const TILE = 32;
 const SCALE = 8;
 const LAYOUT = { latentChannels: 16, tile: TILE, sampleTile: TILE * SCALE, sampleChannels: 3 };
-/** Wan2.1 の重なりの下限（潜在）= 64 px ÷ 空間の圧縮 8（縮尺 8 × unpatchify 1）。 */
+/** Wan2.1's minimum overlap (latent) = 64 px ÷ spatial compression 8 (scale 8 × unpatchify 1). */
 const MIN_OVERLAP = wanVaeMinTileOverlap(SCALE, WAN21_GENERATION.vaePatchSize);
 
 /**
- * タイル辺 32・重なりの下限 8 の開始位置（潜在の全長 → 開始位置）。Python 側
- * （`tools/export-recipes/wan/tests/test_vae_tiling.py` の `MIRRORED_STARTS`）と**同じ値**で凍結する。
+ * Start positions for tile edge 32 and minimum overlap 8 (latent extent → start positions), frozen with
+ * **the same values** as the Python side (`MIRRORED_STARTS` in
+ * `tools/export-recipes/wan/tests/test_vae_tiling.py`).
  *
- * - 32: 縮退（1 枚 — 縮退門の形）
- * - 60 / 104: 受理集合（832×480 / 480×832 — ADR 0118 決定 7）の 2 辺。ADR の値そのもの
- * - 57: `i·span/(本数−1)` がちょうど半分になる辺（span 25 / 3 本 → 12.5）。0.5 の寄せ方が
- *   切り上げでなくなる退行（`Math.floor` や偶数丸め）はこの 1 行だけが捕まえる — 下の不変条件
- *   ループは寄せ方を決めない
+ * - 32: degenerate (one tile — the shape of the degenerate check)
+ * - 60 / 104: the two edges of the accepted set (832×480 / 480×832 — ADR 0118 decision 7). The ADR's
+ *   values as they are
+ * - 57: an edge where `i·span/(count−1)` lands exactly on a half (span 25 / 3 tiles → 12.5). Only this
+ *   row catches a regression where 0.5 is no longer rounded up (`Math.floor` or round-half-to-even) —
+ *   the invariant loop below does not decide the rounding
  */
 const AXIS_STARTS: readonly (readonly [number, readonly number[]])[] = [
   [32, [0]],
@@ -51,17 +55,17 @@ const AXIS_STARTS: readonly (readonly [number, readonly number[]])[] = [
   [104, [0, 24, 48, 72]],
 ];
 
-test("planWanVaeTileAxis: 開始位置を値で凍結する（Python 側と同じ表）", () => {
+test("planWanVaeTileAxis: freezes the start positions by value (the same table as the Python side)", () => {
   for (const [extent, starts] of AXIS_STARTS) {
     assertEquals(
       [...planWanVaeTileAxis(extent, TILE, MIN_OVERLAP).starts],
       [...starts],
-      `潜在 ${extent}`,
+      `latent ${extent}`,
     );
   }
 });
 
-test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブレンド 144 / 64 px", () => {
+test("planWanVaeTiles: 832×480 (latent 60×104) takes 3×4 = 12 tiles with blends of 144 / 64 px", () => {
   const plan = planWanVaeTiles(LAYOUT, 60, 104, MIN_OVERLAP);
   assertEquals(plan.scale, SCALE);
   assertEquals(wanVaeTileCount(plan), 12);
@@ -75,44 +79,46 @@ test("planWanVaeTiles: 832×480（潜在 60×104）は 3×4 = 12 枚・ブレン
     [1, 2, 3].map((index) => wanVaeBlendExtentAt(plan.cols, SCALE, index)),
     [64, 64, 64],
   );
-  // 480×832 は転置（軸ごとに独立）。
+  // 480×832 is the transpose (the axes are independent).
   const portrait = planWanVaeTiles(LAYOUT, 104, 60, MIN_OVERLAP);
   assertEquals([...portrait.rows.starts], [0, 24, 48, 72]);
   assertEquals([...portrait.cols.starts], [0, 14, 28]);
 });
 
-test("planWanVaeTileAxis: どの全長でも配置の不変条件が成り立つ", () => {
+test("planWanVaeTileAxis: the layout invariants hold for every extent", () => {
   for (const extent of [32, 33, 40, 56, 57, 60, 64, 80, 104, 128, 135, 256]) {
     const axis = planWanVaeTileAxis(extent, TILE, MIN_OVERLAP);
     const where = `extent=${extent}`;
     const span = extent - TILE;
     assertEquals(axis.starts[0], 0, where);
-    // 末端へのスナップ = 固定形のグラフが最後のタイルも食えることの条件。
-    assertEquals(axis.starts.at(-1), span, `${where}: 末端へスナップ`);
-    // 本数は重なりの下限だけを制約にした最小（安全側に倒した実装はタイル数が跳ねる）。
+    // Snapping to the end = the condition for the fixed-shape graph to take the last tile too.
+    assertEquals(axis.starts.at(-1), span, `${where}: snaps to the end`);
+    // The count is the minimum constrained only by the minimum overlap (an implementation that errs on the
+    // safe side makes the tile count jump).
     assertEquals(
       axis.starts.length,
       span === 0 ? 1 : Math.ceil(span / (TILE - MIN_OVERLAP)) + 1,
-      `${where}: 本数`,
+      `${where}: count`,
     );
     const gaps = axis.starts.slice(1).map((start, index) => start - axis.starts[index]);
     for (const [index, gap] of gaps.entries()) {
-      assert(TILE - gap >= MIN_OVERLAP, `${where}: 対 ${index} の重なり`);
+      assert(TILE - gap >= MIN_OVERLAP, `${where}: overlap of pair ${index}`);
       assertEquals(wanVaeBlendExtentAt(axis, SCALE, index + 1), (TILE - gap) * SCALE, where);
     }
-    // 丸め等間隔の実体 = 間隔の差は高々 1 潜在。
+    // What rounded equal spacing means = the gaps differ by at most 1 latent.
     if (gaps.length > 0) assert(Math.max(...gaps) - Math.min(...gaps) <= 1, `${where}: ${gaps}`);
   }
 });
 
-test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", () => {
+test("planWanVaeTileAxis / planWanVaeTiles: rejects shapes they cannot accept", () => {
   assertThrows(() => planWanVaeTileAxis(31, TILE, MIN_OVERLAP), Error, "tile width");
   assertThrows(() => planWanVaeTileAxis(60, TILE, TILE), Error, "overlap");
   assertThrows(
     () => wanVaeBlendExtentAt(planWanVaeTileAxis(32, TILE, MIN_OVERLAP), SCALE, 1),
     RangeError,
   );
-  // 縮尺は資産の宣言（sampleTile / tile）から — 割り切れない宣言は fail loudly。
+  // The scale comes from the asset's declaration (sampleTile / tile) — a declaration that does not divide
+  // fails loudly.
   assertThrows(
     () =>
       planWanVaeTiles(
@@ -126,9 +132,9 @@ test("planWanVaeTileAxis / planWanVaeTiles: 受理できない形は落とす", 
   );
 });
 
-test("wanVaeMinTileOverlap: 重なり = 64 px ÷ 空間の圧縮（グラフの比 × unpatchify — Python 側と同じ式）", () => {
-  // 2 点で式を縛る（Python 側 test_vae_tiling.py と同じ行）。unpatchify の倍率を無視する退行は
-  // (8, 2) で割れる（グラフの比だけなら 8）。
+test("wanVaeMinTileOverlap: overlap = 64 px ÷ spatial compression (graph ratio × unpatchify — the same formula as the Python side)", () => {
+  // Two points pin the formula (the same rows as the Python side's test_vae_tiling.py). A regression that
+  // ignores the unpatchify factor breaks at (8, 2) (the graph ratio alone gives 8).
   for (const [scale, patchSize, expected] of [
     [8, 1, 8],
     [8, 2, 4],
@@ -138,7 +144,7 @@ test("wanVaeMinTileOverlap: 重なり = 64 px ÷ 空間の圧縮（グラフの�
   assertEquals(wanVaeSpatialCompression(8, 2), 16);
 });
 
-test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数でない因子は丸めずに落とす", () => {
+test("wanVaeMinTileOverlap: rejects, without rounding, a compression that does not divide 64 px and factors that are not positive integers", () => {
   assertThrows(
     () => wanVaeMinTileOverlap(8, 3),
     Error,
@@ -159,7 +165,7 @@ test("wanVaeMinTileOverlap: 64 px を割り切れない圧縮と、正の整数�
   }
 });
 
-/** 小さな計画（タイル 8・重なりの下限 2・縮尺 `scale`・出口 3 チャネル）。 */
+/** A small plan (tile 8, minimum overlap 2, scale `scale`, 3 output channels). */
 const smallPlan = (height: number, width: number, scale: number, channels = 2): WanVaeTilePlan =>
   planWanVaeTiles(
     { latentChannels: channels, tile: 8, sampleTile: 8 * scale, sampleChannels: 3 },
@@ -168,8 +174,8 @@ const smallPlan = (height: number, width: number, scale: number, channels = 2): 
     2,
   );
 
-test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り出す（軸とフレームの取り違え検出）", () => {
-  // [2,3,10,12]・値は `平面*1000 + y*12 + x`（平面 = c*3 + f）で全要素が識別できる。
+test("wanVaeLatentTile: cuts the same rectangle from every plane of [C,F,H,W] (detects mixed-up axes and frames)", () => {
+  // [2,3,10,12]; the value `plane*1000 + y*12 + x` (plane = c*3 + f) identifies every element.
   const plan = smallPlan(10, 12, 1);
   assertEquals([...plan.rows.starts], [0, 2]);
   assertEquals([...plan.cols.starts], [0, 4]);
@@ -193,9 +199,9 @@ test("wanVaeLatentTile: [C,F,H,W] の各平面から同じ矩形を切り出す�
   assertThrows(() => wanVaeLatentTile(plan, latents.subarray(1), 0, 0), Error, "element count");
 });
 
-test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
-  // 大小比較だけの範囲検査は 0.5 と NaN を通し、`starts[0.5]` が undefined → ゼロのタイルを黙って返す
-  // （`wanVaeLatentChunk` の chunk の添字と同じ穴）。
+test("wanVaeLatentTile: rejects non-integer indices (0.5, NaN) instead of returning a tile of zeros", () => {
+  // A range check made only of comparisons lets 0.5 and NaN through, `starts[0.5]` is undefined → a tile of
+  // zeros comes back silently (the same hole as the chunk index of `wanVaeLatentChunk`).
   const plan = smallPlan(10, 12, 1);
   const latents = new Float32Array(2 * 3 * 10 * 12).fill(1);
   for (const [row, col] of [
@@ -216,24 +222,28 @@ test("wanVaeLatentTile: 整数でない添字（0.5・NaN）はゼロのタイ�
 const bits = (values: Float32Array): Uint32Array =>
   new Uint32Array(values.buffer, values.byteOffset, values.length);
 
-test("assembleWanVaeTiles: 1 枚（縮退）はタイルの素の写し（ビット同一）", () => {
+test("assembleWanVaeTiles: a single tile (degenerate) is a plain copy of the tile (bit-identical)", () => {
   const plan = smallPlan(8, 8, 1);
   assertEquals(wanVaeTileCount(plan), 1);
   const tile = new Float32Array(3 * 5 * 64).map((_, index) => Math.sin(index) * 3);
   assertEquals(bits(assembleWanVaeTiles([tile], plan)), bits(tile));
 });
 
-/** タイル内の位置（行 / 列番号）を値に持つ `[3, 2, 8, 8]`（重なりの値が隣のタイルと**違う**）。 */
+/**
+ * `[3, 2, 8, 8]` whose values are the position inside the tile (row / column index; the overlap
+ * values **differ** from the neighbouring tile's).
+ */
 const rampTile = (axis: "rows" | "cols"): Float32Array<ArrayBuffer> =>
   new Float32Array(3 * 2 * 64).map((_, index) => {
     const offset = index % 64;
     return axis === "rows" ? Math.floor(offset / 8) : offset % 8;
   });
 
-test("assembleWanVaeTiles: 位置依存のタイルを線形ランプが解析解どおりに畳む（全平面）", () => {
-  // 全長 16・タイル 8・開始 0 / 4 / 8（重なり 4）。傾斜 0..7 は貼り合わせ後 0,1,2,3 → 中間は
-  // 全て 4 → 末尾 4,5,6,7。ブレンドの向き反転・間隔の off-by-one・末端のスナップ落とし・
-  // 担当領域の取り違えは全てここで割れる（同じ値が重なる作りだと向きの反転が緑のまま通る）。
+test("assembleWanVaeTiles: the linear ramp folds position-dependent tiles as the analytic solution says (every plane)", () => {
+  // Extent 16, tile 8, starts 0 / 4 / 8 (overlap 4). After stitching, the slope 0..7 becomes 0,1,2,3 → all 4
+  // in the middle → 4,5,6,7 at the end. A reversed blend direction, an off-by-one in the spacing, a dropped
+  // snap to the end and mixed-up owned regions all break here (with overlaps of equal values, a reversed
+  // direction would stay green).
   const plan = smallPlan(16, 16, 1);
   assertEquals([...plan.rows.starts], [0, 4, 8]);
   const expected = [0, 1, 2, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 6, 7];
@@ -248,17 +258,19 @@ test("assembleWanVaeTiles: 位置依存のタイルを線形ランプが解析�
         { length: 16 },
         (_, at) => out[plane * 256 + (axis === "rows" ? at * 16 : at)],
       );
-      assertEquals(line, expected, `${axis} の平面 ${plane}`);
+      assertEquals(line, expected, `${axis}, plane ${plane}`);
     }
   }
 });
 
-test("assembleWanVaeTiles: 角は縦 → 横の順で畳む（上流と同じ）", () => {
-  // 全長 6・タイル 4・開始 0 / 2（ブレンド幅 2）・定数タイル a=1（左上）/ b=2 / c=3 / d=4。
-  // 右下タイルの 2 行目（出力の行 3）: 左下は上と縦ブレンド済みで行 1 = (a + c) / 2 = 2、
-  // 右上は左と横ブレンド済みで行 3 = [1, 1.5, 2, 2]。右下は縦が先で行 1 = 0.5·右上の行 3 + 0.5·d
-  // = [2.5, 2.75, 3, 3] → 横で列 0 = 2・列 1 = 0.5·2 + 0.5·2.75 = 2.375。出力の行 3 は
-  // 左下の担当 [2, 2] + 右下の担当 [2, 2.375, 3, 3]（横 → 縦なら [2, 2, 1.5, 2.25, 3, 3]）。
+test("assembleWanVaeTiles: corners fold vertical → horizontal (the same as upstream)", () => {
+  // Extent 6, tile 4, starts 0 / 2 (blend width 2), constant tiles a=1 (top left) / b=2 / c=3 / d=4.
+  // Second row of the bottom-right tile (output row 3): bottom left is already blended vertically with the
+  // tile above, so its row 1 = (a + c) / 2 = 2; top right is already blended horizontally with the tile to
+  // its left, so its row 3 = [1, 1.5, 2, 2]. Bottom right goes vertical first: row 1 = 0.5·(top right's row
+  // 3) + 0.5·d = [2.5, 2.75, 3, 3] → then horizontal: column 0 = 2, column 1 = 0.5·2 + 0.5·2.75 = 2.375.
+  // Output row 3 is bottom left's owned part [2, 2] + bottom right's owned part [2, 2.375, 3, 3]
+  // (horizontal → vertical would give [2, 2, 1.5, 2.25, 3, 3]).
   const plan = planWanVaeTiles(
     { latentChannels: 1, tile: 4, sampleTile: 4, sampleChannels: 3 },
     6,
@@ -273,7 +285,7 @@ test("assembleWanVaeTiles: 角は縦 → 横の順で畳む（上流と同じ）
   }
 });
 
-test("assembleWanVaeTiles: 末端まで覆い、渡したタイルを破壊しない", () => {
+test("assembleWanVaeTiles: covers up to the end and does not destroy the tiles passed in", () => {
   const plan = smallPlan(16, 26, 2);
   assertEquals(wanVaeTileCount(plan), 12);
   const tiles = Array.from({ length: 12 }, () => new Float32Array(3 * 2 * 256).fill(7));
@@ -283,16 +295,16 @@ test("assembleWanVaeTiles: 末端まで覆い、渡したタイルを破壊し�
   assertEquals(out.length, 3 * 2 * 32 * 52);
   assert(
     out.every((value) => value >= 7 && value <= 9),
-    "覆われていない画素が残っている",
+    "some pixels are left uncovered",
   );
   assertEquals(
     tiles.map((tile) => [...tile]),
     before,
-    "渡したタイルが書き換わった",
+    "the tiles passed in were rewritten",
   );
 });
 
-test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落とす", () => {
+test("assembleWanVaeTiles: rejects mismatched tile counts and element counts", () => {
   const plan = smallPlan(16, 16, 1);
   const tile = new Float32Array(3 * 64);
   assertThrows(() => assembleWanVaeTiles([tile], plan), Error, "plan");
@@ -304,9 +316,9 @@ test("assembleWanVaeTiles: タイル枚数と要素数の食い違いを落と�
   assertThrows(() => assembleWanVaeTiles(Array(9).fill(new Float32Array(64)), plan), Error, "3,F");
 });
 
-test("assembleWanVaeTiles: 平面はグラフの出口のチャネル数（計画の sampleChannels）で割る — 3 を仮定しない", () => {
-  // 出口 12 チャネルの計画（合成の値 — 縮退の 1 枚なので貼り付けは素の写し）。12 × 1 フレームは
-  // そのまま通り、3 × 1 フレーム（RGB 1 枚ぶん）は出口の形に合わないので落ちる。
+test("assembleWanVaeTiles: splits planes by the graph's output channel count (the plan's sampleChannels) — does not assume 3", () => {
+  // A plan with 12 output channels (synthetic values — one degenerate tile, so pasting is a plain copy).
+  // 12 × 1 frame passes as is; 3 × 1 frame (one RGB frame) does not fit the output shape and fails.
   const plan = planWanVaeTiles(
     { latentChannels: 2, tile: 8, sampleTile: 8, sampleChannels: 12 },
     8,
@@ -318,36 +330,42 @@ test("assembleWanVaeTiles: 平面はグラフの出口のチャネル数（計�
   assertThrows(() => assembleWanVaeTiles([new Float32Array(3 * 64)], plan), Error, "[12,F,8,8]");
 });
 
-test("clampWanVaeFrames: [-1, 1] へ in-place（NaN と -0 はそのまま — torch.clamp と同じ）", () => {
+test("clampWanVaeFrames: clamps to [-1, 1] in place (NaN and -0 stay as they are — the same as torch.clamp)", () => {
   const frames = new Float32Array([-3, -1, -0, 0, 0.5, 1, 1.25, Number.NaN]);
   clampWanVaeFrames(frames);
   assertEquals([...frames.subarray(0, 7)], [-1, -1, -0, 0, 0.5, 1, 1]);
-  assert(Object.is(frames[2], -0), "-0 が保たれていない");
-  assert(Number.isNaN(frames[7]), "NaN が数に化けた");
+  assert(Object.is(frames[2], -0), "-0 was not kept");
+  assert(Number.isNaN(frames[7]), "NaN turned into a number");
 });
 
 /**
- * 本番の計画で「絶対位置を値に持つタイル」を貼り合わせたときの許容差（出力 − 絶対位置・絶対値）。
+ * The tolerance when stitching "tiles whose values are their absolute position" with the production plan
+ * (|output − absolute position|).
  *
- * 値は sample の px 座標（0〜831）で、f32 の 1 ulp は [512, 1024) で 2⁻¹⁴ ≈ 6.1e-5。1 回のランプ合成
- * `f32(f32(a·w₁) + f32(b·w₂))` の誤差は、丸め 3 回（各 0.5 ulp）と、重み 2 本を f32 へ丸めたことによる
- * 和の 1 からのずれ（|δ| ≤ 2⁻²⁴ → 値 1024 未満で 1 ulp 以下）で 2.5 ulp 以下。合成は凸結合なので入力の
- * 誤差を増やさず、誤差は合成の連鎖の深さに比例する。タイル (r, c) は (r−1, c) の最終値との縦の合成と
- * (r, c−1) の最終値との横の合成を経る（in-place — 入れ子ではブレンド済みの行をさらに読む）ので、深さは
- * 高々 2r + c（3×4 枚で 7・4×3 枚で 8）→ 8 × 2.5 = 20 ulp = 1.22e-3 を上限にする。実測（2026-10-03・
- * CPU）の最大は 3.05e-5〜1.22e-4（0.5〜2 ulp）。ブレンド幅の 1 潜在のずれ・担当領域や開始位置のずれは
- * 1 px（= 1.0）以上の差になる。
+ * The values are sample px coordinates (0..831), and one f32 ulp on [512, 1024) is 2⁻¹⁴ ≈ 6.1e-5. The error
+ * of one ramp blend `f32(f32(a·w₁) + f32(b·w₂))` is at most 2.5 ulp: three roundings (0.5 ulp each) plus the
+ * deviation of the sum from 1 caused by rounding the two weights to f32 (|δ| ≤ 2⁻²⁴ → at most 1 ulp for
+ * values below 1024). A blend is a convex combination, so it does not amplify the input error, and the error
+ * grows with the depth of the blend chain. Tile (r, c) goes through a vertical blend with the final values of
+ * (r−1, c) and a horizontal blend with the final values of (r, c−1) (in place — when nested, already blended
+ * rows are read again), so the depth is at most 2r + c (7 for 3×4 tiles, 8 for 4×3) → the bound is
+ * 8 × 2.5 = 20 ulp = 1.22e-3. The measured maximum (2026-10-03, CPU) is 3.05e-5..1.22e-4 (0.5..2 ulp). A blend
+ * width off by 1 latent, or a shifted owned region or start position, gives a difference of 1 px (= 1.0) or
+ * more.
  */
 const ABSOLUTE_POSITION_TOLERANCE = 20 * 2 ** -14;
 
-test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶対位置のタイルが絶対位置に戻る（入れ子のブレンド）", () => {
-  // 行の重なり 18 潜在（144 px）はタイル幅の半分（16 潜在）を超える。タイル 1 の「上と縦ブレンドした
-  // 行」[0, 144) px と「下のタイルが読む行」[112, 256) px が重なり、出力の一部は 3 枚のタイルの寄与に
-  // なる（上流の既定〈ブレンド 64 px < stride 192 px〉では起きない入れ子）。既存の解析解のテストは
-  // 重なりがちょうど半分なので、この状態を通らない。値が位置の線形関数なら、重みの和が 1 で、合成する
-  // 2 行（列）が同じ絶対位置を指す限り位置に戻る — 縛るのは入れ子の配置でのブレンド幅（対ごと）・開始位置
-  // × 縮尺・担当領域の対応。重みの向きと縦 → 横の順は、隣のタイルが同じ値を持つこの形では差が出ないので
-  // 上の解析解のテスト（傾斜・角）が持つ。
+test("assembleWanVaeTiles: with the production plan (latent 60×104 / 104×60), absolute-position tiles come back to their absolute positions (nested blends)", () => {
+  // The row overlap of 18 latents (144 px) exceeds half the tile width (16 latents). Tile 1's "rows blended
+  // vertically with the tile above" [0, 144) px and "rows the tile below reads" [112, 256) px overlap, so part
+  // of the output gets contributions from three tiles (a nesting that upstream's defaults — blend 64 px <
+  // stride 192 px — never produce). The existing analytic-solution tests have an overlap of exactly half, so
+  // they never reach this state. When the values are a linear function of the position, they come back to the
+  // position as long as the weights sum to 1 and the two blended rows (columns) point at the same absolute
+  // position — what this pins is the blend width per pair in the nested layout, start position × scale, and
+  // the mapping of owned regions. The weight direction and the vertical → horizontal order make no difference
+  // in this form, where neighbouring tiles hold the same values, so the analytic-solution tests above (slope,
+  // corner) cover them.
   for (const [height, width] of [
     [60, 104],
     [104, 60],
@@ -361,7 +379,7 @@ test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶�
     const nested = height === 60 ? plan.rows : plan.cols;
     assert(
       wanVaeBlendExtentAt(nested, SCALE, 1) > (TILE * SCALE) / 2,
-      "入れ子の前提（重なり > タイル幅の半分）が崩れた",
+      "the nesting premise (overlap > half the tile width) no longer holds",
     );
     const side = TILE * SCALE;
     const plane = side * side;
@@ -369,7 +387,7 @@ test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶�
       const tiles: Float32Array<ArrayBuffer>[] = [];
       for (const top of plan.rows.starts) {
         for (const left of plan.cols.starts) {
-          // [3, 1, 256, 256]・値 = 出力の絶対位置（行なら y・列なら x の px）。
+          // [3, 1, 256, 256]; value = the absolute position in the output (y px for rows, x px for columns).
           tiles.push(
             new Float32Array(3 * plane).map((_, index) => {
               const offset = index % plane;
@@ -392,28 +410,33 @@ test("assembleWanVaeTiles: 本番の計画（潜在 60×104 / 104×60）で絶�
       }
       assert(
         worst <= ABSOLUTE_POSITION_TOLERANCE,
-        `潜在 ${height}×${width} の ${axis}: 最大差 ${worst} が ${ABSOLUTE_POSITION_TOLERANCE} を超える`,
+        `latent ${height}×${width}, ${axis}: the largest difference ${worst} exceeds ${ABSOLUTE_POSITION_TOLERANCE}`,
       );
     }
   }
 });
 
-// ---- ホストの unpatchify と VAE 段の末尾（ADR 0121 段 5 — Wan2.2 は patchify 空間で貼り合わせてから戻す）----
+// ---- Host unpatchify and the end of the VAE stage (ADR 0121 stage 5 — Wan2.2 stitches in patchify
+// space, then unpatchifies) ----
 
 type Shape4 = readonly [number, number, number, number];
 
 /**
- * unpatchify の並びの表（p = 2・`[dy][dx]` → チャネル内のずれ）。上流 diffusers `unpatchify` の
- * `view(c, r, q, f, h, w).permute(c, f, h, q, w, r)` で、r = dx（幅方向のずれ）が上位・q = dy（高さ方向の
- * ずれ）が下位。Python 側（`tools/export-recipes/wan/tests/test_vae_tiling_ti2v.py` の
- * `UNPATCHIFY_SOURCE_CHANNEL`）と同じ値で凍結し、そちらが上流の関数そのものと照合する（二重凍結）。
+ * The unpatchify ordering table (p = 2, `[dy][dx]` → offset within the channel). In upstream diffusers'
+ * `unpatchify`, `view(c, r, q, f, h, w).permute(c, f, h, q, w, r)`, r = dx (the offset along the width) is
+ * the major one and q = dy (the offset along the height) the minor one. Frozen with the same values as the
+ * Python side (`UNPATCHIFY_SOURCE_CHANNEL` in `tools/export-recipes/wan/tests/test_vae_tiling_ti2v.py`),
+ * which compares them with the upstream function itself (frozen twice).
  */
 const UNPATCHIFY_SOURCE_CHANNEL: readonly (readonly number[])[] = [
   [0, 2],
   [1, 3],
 ];
 
-/** 表から組んだ unpatchify（p = 2 — 出力の座標から入力を引く。実装の入れ子のループとは別の組み立て）。 */
+/**
+ * An unpatchify built from the table (p = 2 — looks up the input from the output coordinates; built
+ * differently from the implementation's nested loops).
+ */
 const unpatchifyByTable = (
   input: Float32Array,
   [channels, count, height, width]: Shape4,
@@ -441,23 +464,23 @@ const unpatchifyByTable = (
 const arange = (length: number): Float32Array<ArrayBuffer> =>
   new Float32Array(length).map((_, index) => index);
 
-/** patchify 空間の `[12, 2, 3, 5]`（RGB にすると `[3, 2, 6, 10]`）。 */
+/** `[12, 2, 3, 5]` in patchify space (`[3, 2, 6, 10]` as RGB). */
 const PATCH_SHAPE: Shape4 = [12, 2, 3, 5];
 
-test("unpatchifyWanVaeFrames: p = 1 は入力の同じインスタンスを返す（写さない — unpatchify の無い世代の経路）", () => {
+test("unpatchifyWanVaeFrames: p = 1 returns the same instance as the input (no copy — the path of generations without unpatchify)", () => {
   const frames = arange(3 * 2 * 3 * 5);
   assertStrictEquals(unpatchifyWanVaeFrames(frames, [3, 2, 3, 5], 1), frames);
 });
 
-test("unpatchifyWanVaeFrames: p = 2 は並びの表どおりに写す・dx と dy を入れ替えた表とは一致しない", () => {
+test("unpatchifyWanVaeFrames: p = 2 copies as the ordering table says and does not match the table with dx and dy swapped", () => {
   const input = arange(12 * 2 * 3 * 5);
   const got = unpatchifyWanVaeFrames(input, PATCH_SHAPE, 2);
   assertEquals(got.length, input.length);
   assertEquals([...got], [...unpatchifyByTable(input, PATCH_SHAPE, UNPATCHIFY_SOURCE_CHANNEL)]);
-  // 上流の式の 2 点: 出力 (c 0, f 0, y 0, x 1) = 入力チャネル 2 の (0, 0)・(y 1, x 0) = 入力チャネル 1 の (0, 0)
-  // （入力チャネル k の先頭 = k · 2·3·5）。
+  // Two points of the upstream formula: output (c 0, f 0, y 0, x 1) = input channel 2 at (0, 0), and (y 1, x 0)
+  // = input channel 1 at (0, 0) (input channel k starts at k · 2·3·5).
   assertEquals([got[1], got[10]], [2 * 30, 1 * 30]);
-  // 対照: arange が並びの誤り（幅と高さのずれの取り違え）を区別できること。
+  // Control: arange can tell an ordering error (width and height offsets mixed up) apart.
   assertNotEquals(
     [...got],
     [
@@ -467,10 +490,10 @@ test("unpatchifyWanVaeFrames: p = 2 は並びの表どおりに写す・dx と d
       ]),
     ],
   );
-  assertEquals([...input], [...arange(input.length)], "入力を書き換えた");
+  assertEquals([...input], [...arange(input.length)], "the input was rewritten");
 });
 
-test("unpatchifyWanVaeFrames: 倍率・形・チャネル数・長さの食い違いは落とす（p = 1 でも）", () => {
+test("unpatchifyWanVaeFrames: rejects mismatched factors, shapes, channel counts and lengths (with p = 1 too)", () => {
   const input = arange(12 * 2 * 3 * 5);
   assertThrows(
     () => unpatchifyWanVaeFrames(input, PATCH_SHAPE, 0),
@@ -503,8 +526,8 @@ test("unpatchifyWanVaeFrames: 倍率・形・チャネル数・長さの食い�
 const OWNER = "wan.Pipeline";
 
 /**
- * 縮退 1 枚のタイル計画（縮尺 2・出口 `sampleChannels`）。末尾の検査が計画から読むのは出口のチャネル数と
- * 潜在 × 縮尺だけ。
+ * A degenerate one-tile plan (scale 2, `sampleChannels` output channels). The end-of-stage checks read only
+ * the output channel count and latent × scale from the plan.
  */
 const finishTiles = (
   sampleChannels: number,
@@ -518,11 +541,11 @@ const finishTiles = (
   cols: { extent: latentWidth, tile: latentWidth, starts: [0] },
 });
 
-/** RGB `[3, 2, 8, 12]` の要求（patchify 空間は p = 2 で `[12, 2, 4, 6]`）。 */
+/** A request for RGB `[3, 2, 8, 12]` (`[12, 2, 4, 6]` in patchify space with p = 2). */
 const RGB = { frames: 2, height: 8, width: 12 } as const;
 const PATCHED = { ...RGB, tiles: finishTiles(12, 2, 3) };
 
-test("finishWanVaeFrames: unpatchify の無い世代（p = 1）は旧来の末尾（有限性 + クランプ）と同じ値・同じインスタンス", () => {
+test("finishWanVaeFrames: generations without unpatchify (p = 1) give the same values and the same instance as the old end of stage (finiteness + clamp)", () => {
   const assembled = new Float32Array(3 * 2 * 8 * 12).map((_, index) => Math.sin(index) * 2);
   assembled[5] = -0;
   const legacy = Float32Array.from(assembled);
@@ -537,17 +560,20 @@ test("finishWanVaeFrames: unpatchify の無い世代（p = 1）は旧来の末�
   assertEquals(bits(got), bits(legacy));
 });
 
-test("finishWanVaeFrames: p = 2 は clamp(表で組んだ unpatchify)（ビット一致）", () => {
+test("finishWanVaeFrames: p = 2 is clamp(the table-built unpatchify) (bit-identical)", () => {
   const assembled = new Float32Array(12 * 2 * 4 * 6).map((_, index) => (index - 288) / 160);
   const expected = unpatchifyByTable(assembled, [12, 2, 4, 6], UNPATCHIFY_SOURCE_CHANNEL);
   clampWanVaeFrames(expected);
   const got = finishWanVaeFrames(assembled, PATCHED, { vaePatchSize: 2 }, OWNER);
   assertEquals(bits(got), bits(expected));
-  assert(got.includes(1) && got.includes(-1), "クランプが 1 度も効いていない（入力の値域が狭い）");
+  assert(
+    got.includes(1) && got.includes(-1),
+    "the clamp never took effect (the input range is too narrow)",
+  );
 });
 
-test("finishWanVaeFrames: 非有限はクランプの前に RGB の座標で名指す（patchify 空間の座標ではない）", () => {
-  // 入力チャネル 6 = c 1・dx 1・dy 0、フレーム 1・(y 2, x 3) → RGB の channel 1・フレーム 1・(x 7, y 4)。
+test("finishWanVaeFrames: names a non-finite value before the clamp by RGB coordinates (not patchify-space coordinates)", () => {
+  // Input channel 6 = c 1, dx 1, dy 0, frame 1, (y 2, x 3) → RGB channel 1, frame 1, (x 7, y 4).
   const assembled = new Float32Array(12 * 2 * 4 * 6);
   assembled[((6 * 2 + 1) * 4 + 2) * 6 + 3] = Number.POSITIVE_INFINITY;
   assertThrows(
@@ -557,15 +583,16 @@ test("finishWanVaeFrames: 非有限はクランプの前に RGB の座標で名�
   );
 });
 
-test("finishWanVaeFrames: 形は次元ごとに見る（要素数が同じでも unpatchify の倍率・フレーム数の食い違いを落とす）", () => {
+test("finishWanVaeFrames: checks the shape per dimension (rejects a mismatched unpatchify factor or frame count even when the element count matches)", () => {
   const assembled = new Float32Array(12 * 2 * 4 * 6);
-  // 出口 12 ch の資産を unpatchify の無い記述子で閉じる（要素数は RGB の [3, 2, 8, 12] と同じ 576）。
+  // Finishes a 12-channel output asset with a descriptor without unpatchify (576 elements, the same as RGB
+  // [3, 2, 8, 12]).
   assertThrows(
     () => finishWanVaeFrames(assembled, PATCHED, WAN21_GENERATION, OWNER),
     Error,
     `${OWNER}: VAE output shape [12, 2, 4, 6] (unpatchify 1 gives [12, 2, 4, 6]) differs from [3, 2, 8, 12]`,
   );
-  // 実フレーム数は長さから導く（要求の 3 フレームに対して 2 フレームぶん）。
+  // The actual frame count is derived from the length (2 frames' worth against the requested 3).
   assertThrows(
     () => finishWanVaeFrames(assembled, { ...PATCHED, frames: 3 }, { vaePatchSize: 2 }, OWNER),
     Error,
@@ -578,13 +605,14 @@ test("finishWanVaeFrames: 形は次元ごとに見る（要素数が同じでも
   );
 });
 
-test("finishWanVaeFrames: 0 要素と、出口のチャネル数が p² で割り切れない計画は、その理由で落とす", () => {
+test("finishWanVaeFrames: rejects 0 elements, and a plan whose output channel count is not divisible by p², with that reason", () => {
   assertThrows(
     () => finishWanVaeFrames(new Float32Array(0), PATCHED, { vaePatchSize: 2 }, OWNER),
     Error,
     `${OWNER}: the VAE output has 0 elements (no frames at all)`,
   );
-  // 出口 3 ch の計画を p = 2 で閉じる（形の比較に小数のチャネル数 0.75 を出さない）。
+  // Finishes a 3-channel output plan with p = 2 (the shape comparison must not produce a fractional channel
+  // count of 0.75).
   assertThrows(
     () =>
       finishWanVaeFrames(

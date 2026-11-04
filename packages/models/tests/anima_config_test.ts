@@ -1,14 +1,15 @@
-// `pipelineConfig` の手書きスキーマ検証（ADR 0038 §1 — スキーマは models 側が所有）。
+// The hand-written schema validation of `pipelineConfig` (ADR 0038 §1 — models owns the schema).
 //
-// hub は `pipelineConfig` を素通しするので、**ここが唯一の門**。主に縛るのは 2 つ:
-// ①必須欄の欠落・型違いを名指しで落とす ②未知キーを fail loudly（黙って既定へ縮退させない）。
+// The hub passes `pipelineConfig` through untouched, so **this is the only check**. It mainly pins
+// two things: ① a missing required field or a wrong type is rejected by name; ② an unknown key
+// fails loudly (it is not silently degraded to a default).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { parseAnimaPipelineConfig } from "../src/anima/config.ts";
 import { ModelInputError } from "../src/errors.ts";
 
-/** `models/karume-anima/karume.json` と同じ形（実配布物の写し）。 */
+/** The same shape as `models/karume-anima/karume.json` (a copy of the real distribution). */
 const VALID = {
   scheduler: { shift: 3, numTrainTimesteps: 1000 },
   defaults: {
@@ -24,9 +25,10 @@ const withDefaults = (patch: Record<string, unknown>): Record<string, unknown> =
   defaults: { ...VALID.defaults, ...patch },
 });
 
-test("parseAnimaPipelineConfig: 実配布物の形を読む", () => {
+test("parseAnimaPipelineConfig: reads the shape of the real distribution", () => {
   const config = parseAnimaPipelineConfig(VALID);
-  // `type` を持たない実配布物は既定の `"euler"` に落ちる（下の「省略時は euler」も参照）。
+  // The real distribution has no `type`, so it falls back to the default `"euler"` (see also
+  // "defaults to euler" below).
   assertEquals(config.scheduler, { type: "euler", shift: 3, numTrainTimesteps: 1000 });
   assertEquals(config.defaults.steps, 10);
   assertEquals(config.defaults.guidanceScale, 1);
@@ -34,7 +36,7 @@ test("parseAnimaPipelineConfig: 実配布物の形を読む", () => {
   assertEquals(config.defaults.negativePrompt, VALID.defaults.negativePrompt);
 });
 
-test("parseAnimaPipelineConfig: negativePrompt は任意（欄ごと無くてよい）", () => {
+test("parseAnimaPipelineConfig: negativePrompt is optional (the field may be absent)", () => {
   const config = parseAnimaPipelineConfig({
     scheduler: VALID.scheduler,
     defaults: {
@@ -47,9 +49,10 @@ test("parseAnimaPipelineConfig: negativePrompt は任意（欄ごと無くてよ
   assertEquals(config.defaults.resolution, { width: 1344, height: 768 });
 });
 
-test("parseAnimaPipelineConfig: scheduler.type は省略時 euler（配布済み manifest の挙動を固定）", () => {
-  // `type` は additive に足した optional 席（ADR 0038 §1）。既に配られたリポは migrate
-  // できないので、欄が無い manifest が別の更新則へ動いた瞬間に出力画像が黙って変わる。
+test("parseAnimaPipelineConfig: scheduler.type defaults to euler (pins the behaviour of distributed manifests)", () => {
+  // `type` is an optional field added additively (ADR 0038 §1). Repositories already distributed
+  // cannot be migrated, so the moment a manifest without the field moved to another update rule,
+  // the output images would change silently.
   assertEquals(parseAnimaPipelineConfig(VALID).scheduler.type, "euler");
   assertEquals(
     parseAnimaPipelineConfig({
@@ -60,7 +63,7 @@ test("parseAnimaPipelineConfig: scheduler.type は省略時 euler（配布済み
   );
 });
 
-test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () => {
+test("parseAnimaPipelineConfig: scheduler.type accepts exactly two words", () => {
   assertEquals(
     parseAnimaPipelineConfig({
       ...VALID,
@@ -68,7 +71,8 @@ test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () 
     }).scheduler,
     { type: "dpmpp-2m", shift: 3, numTrainTimesteps: 1000 },
   );
-  // 未知値・非文字列は期待と実際を並べて落とす（黙って既定の euler へ縮退させない）。
+  // An unknown value or a non-string is rejected with expected and actual side by side (not
+  // silently degraded to the default euler).
   const unknown = assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: "dpm++" } }),
     Error,
@@ -81,7 +85,8 @@ test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () 
     "pipelineConfig.scheduler.type: expected",
   );
   assertEquals(notString.message.includes("actual 2"), true, notString.message);
-  // 大文字違い・前後の空白も受けない（受理集合は 2 語の完全一致）。
+  // Different case or surrounding whitespace is not accepted either (the accepted set is an exact
+  // match of the two words).
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { ...VALID.scheduler, type: "Euler" } }),
     Error,
@@ -89,7 +94,7 @@ test("parseAnimaPipelineConfig: scheduler.type は 2 語だけを受ける", () 
   );
 });
 
-test("parseAnimaPipelineConfig: 未知キーは fail loudly（綴り違いを既定へ縮退させない）", () => {
+test("parseAnimaPipelineConfig: an unknown key fails loudly (a misspelling is not degraded to a default)", () => {
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, sampler: {} }),
     Error,
@@ -113,7 +118,7 @@ test("parseAnimaPipelineConfig: 未知キーは fail loudly（綴り違いを既
   );
 });
 
-test("parseAnimaPipelineConfig: 必須欄の欠落を名指しで落とす", () => {
+test("parseAnimaPipelineConfig: rejects a missing required field by name", () => {
   assertThrows(() => parseAnimaPipelineConfig({}), Error, "pipelineConfig.scheduler: missing");
   assertThrows(
     () => parseAnimaPipelineConfig({ scheduler: VALID.scheduler }),
@@ -132,7 +137,7 @@ test("parseAnimaPipelineConfig: 必須欄の欠落を名指しで落とす", () 
   );
 });
 
-test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
+test("parseAnimaPipelineConfig: checks types and ranges", () => {
   assertThrows(
     () => parseAnimaPipelineConfig({ ...VALID, scheduler: { shift: 0, numTrainTimesteps: 1000 } }),
     Error,
@@ -147,21 +152,24 @@ test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
     Error,
     "not a positive integer",
   );
-  // steps < 2 は sigma の linspace が組めない（sampler の受理集合と同じ下限）。
+  // steps < 2 cannot build the sigma linspace (the same lower bound as the sampler's accepted set).
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ steps: 1 })),
     Error,
     "integer of at least 2",
   );
-  // 上限も sampler の受理集合と同じ（既定が門の外だと、要求が何も渡さない generate が入力起因で落ちる）。
-  // 診断は生成の門（`assertAcceptableSteps`）の文言そのもの — 条件を書き写さず門を呼んでいる証拠。
+  // The upper bound is the sampler's accepted set too (if the default lay outside the check, a
+  // generate whose request passes nothing would fail because of its input). The diagnostic is the
+  // very wording of the generation check (`assertAcceptableSteps`) — evidence that it calls the
+  // check instead of copying the condition.
   assertEquals(parseAnimaPipelineConfig(withDefaults({ steps: 1000 })).defaults.steps, 1000);
   const overLimit = assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ steps: 1001 })),
     Error,
     "is not at most 1000",
   );
-  // 解像度と同じく、manifest 側で外れたのは資産の齟齬なので `ModelInputError` では**ない**。
+  // As with the resolution, a manifest-side violation is an asset mismatch, so it is **not** a
+  // `ModelInputError`.
   assert(!(overLimit instanceof ModelInputError));
   assert(overLimit.cause instanceof ModelInputError);
   assertThrows(
@@ -176,8 +184,9 @@ test("parseAnimaPipelineConfig: 型と値域を検査する", () => {
   );
 });
 
-test("parseAnimaPipelineConfig: 既定の解像度も受理集合の内側であることを要求する", () => {
-  // 配布時に外れていたら構築で落とす — 「生成を 1 回走らせて初めて分かる」を作らない。
+test("parseAnimaPipelineConfig: requires the default resolution to lie inside the accepted set too", () => {
+  // If the distribution violates it, construction fails — no "found out only after running one
+  // generation".
   assertThrows(
     () => parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1000, height: 1024 } })),
     Error,
@@ -188,8 +197,9 @@ test("parseAnimaPipelineConfig: 既定の解像度も受理集合の内側であ
     Error,
     "lower bound",
   );
-  // 逆側: 受理集合の条件は生成要求と共有するが、manifest 側で外れたのは資産の齟齬なので
-  // `ModelInputError` では**ない**（ADR 0107 決定 2）。元の例外は `cause` に残る。
+  // The other side: the accepted-set conditions are shared with the generation request, but a
+  // manifest-side violation is an asset mismatch, so it is **not** a `ModelInputError` (ADR 0107
+  // decision 2). The original exception remains in `cause`.
   const thrown = assertThrows(() =>
     parseAnimaPipelineConfig(withDefaults({ resolution: { width: 1000, height: 1024 } })),
   );

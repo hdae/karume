@@ -1,19 +1,22 @@
 /**
- * `fromAssets` で `gpu` を省いた（パイプラインが自前で device を取る）経路の `requiredLimits`
- * 照合（実 GPU）。
+ * The `requiredLimits` check on the path where `fromAssets` omits `gpu` (the pipeline acquires its
+ * own device) (real GPU).
  *
- * 配布形の quant は満たすべき device limit の最小値（`requiredLimits` — ADR 0038 §7）を宣言する。
- * 共有 GPU は各家族の admission が、`fromPretrained` はダウンロード前にアダプタ値で見るが、
- * `fromAssets` の自前取得には取得前の席が無い。構築が取った device の limits を見ないと、宣言の
- * 不足は Session 構築時の実バッファ検査まで遅れ（低水準の文言になる）、宣言が実需要より厳しい
- * 場合は照合自体が一度も行われない。
+ * A distribution's quant declares the minimum device limits it needs (`requiredLimits` — ADR 0038
+ * §7). On a shared GPU each family's admission checks them, and `fromPretrained` checks them
+ * against the adapter's values before downloading, but the self-acquisition of `fromAssets` has no
+ * point before acquisition to check them. Unless the limits of the device the build acquired are
+ * checked, a shortfall in the declaration is delayed until the actual buffer checks at Session
+ * build (with a low-level message), and when the declaration is stricter than the real demand the
+ * check never happens at all.
  *
- * ここでは**どの実機も満たせない宣言**（`Number.MAX_SAFE_INTEGER` — manifest が受ける最大値）を
- * 置き、宣言だけの容器（重みを持たない）で 4 家族を組んで、limits の文言で落ちることを見る。
- * 家族の門（グラフ宣言・pipelineConfig）は全部通る形にしてあるので、落ちる理由は limits だけ。
+ * Here a **declaration no real machine can satisfy** (`Number.MAX_SAFE_INTEGER` — the largest value
+ * the manifest accepts) is set, 4 families are built from declaration-only containers (no weights),
+ * and they are expected to fail with the limits message. Every family check (graph declarations,
+ * pipelineConfig) is made to pass, so the limits are the only reason to fail.
  *
- * NOTE: 自前で取った device の破棄（失敗時の後始末）は `acquireGpu` を注入できないので観測して
- * いない。後始末は feature 検査と同じ catch に乗っている。
+ * NOTE: releasing the self-acquired device (the cleanup on failure) is not observed because
+ * `acquireGpu` cannot be injected. The cleanup sits in the same catch as the feature check.
  */
 
 import { assertRejects } from "@std/assert";
@@ -34,16 +37,16 @@ import {
 import { writeSafetensors } from "./helpers/safetensors-write.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** 焼いた解像度（正方 2×2）。 */
+/** The baked resolution (square 2×2). */
 const SIZE = 2;
 
-/** どの実機も満たせない宣言。 */
+/** A declaration no real machine can satisfy. */
 const UNSATISFIABLE = { maxBufferSize: Number.MAX_SAFE_INTEGER };
 
-/** limits の門の文言（`assertRequiredLimitsSatisfied`）。 */
+/** The message of the limits check (`assertRequiredLimitsSatisfied`). */
 const LIMITS_MESSAGE = "this GPU does not meet the required device limits";
 
-/** 配布形の骨格（部品 1 本・quant 1 つ・満たせない limits）。 */
+/** The skeleton of a distribution form (one component, one quant, unsatisfiable limits). */
 const manifestOf = (
   pipeline: string,
   key: string,
@@ -70,11 +73,11 @@ const manifestOf = (
     }),
   );
 
-/** 宣言だけの容器 1 本を全量面のキー（`<部品>[i]`）へ畳む。 */
+/** Folds one declaration-only container into full-surface keys (`<component>[i]`). */
 const containerOf = async (key: string, spec: TensorlessGraphSpec) =>
   partAssets(key, await tensorlessContainer(key, spec));
 
-/** `pixel_values [1,3,2,2]` を受ける画像グラフの宣言。 */
+/** The declaration of an image graph that takes `pixel_values [1,3,2,2]`. */
 const imageGraph = (output: string, shape: readonly number[]): TensorlessGraphSpec => ({
   inputs: [{ name: "pixel_values", shape: [1, 3, SIZE, SIZE] }],
   output: { name: output, shape },
@@ -87,7 +90,7 @@ const IMAGE_CONFIG: Record<string, unknown> = {
   imageStd: [0.5, 0.5, 0.5],
 };
 
-/** 表の 1 行（自前取得の経路で組む）。 */
+/** One table row (built on the self-acquisition path). */
 type Family = {
   readonly name: string;
   readonly build: () => Promise<{ dispose: () => Promise<void> }>;
@@ -175,12 +178,12 @@ const families: readonly Family[] = [
   },
 ];
 
-describe.skipIf(!GPU_AVAILABLE)("fromAssets の自前 GPU 取得（実 GPU）", () => {
+describe.skipIf(!GPU_AVAILABLE)("fromAssets's own GPU acquisition (real GPU)", () => {
   for (const family of families) {
-    it(`${family.name}: 取った device が宣言の limits を満たさなければ構築で落とす`, async () => {
+    it(`${family.name}: the build fails when the acquired device does not meet the declared limits`, async () => {
       await assertRejects(
         async () => {
-          // 通ってしまったら（= 修正前）後始末だけして、下の assertRejects に落とさせる。
+          // If it passes (= before the fix), just clean up and let the assertRejects below fail.
           const pipeline = await family.build();
           await pipeline.dispose();
         },

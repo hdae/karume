@@ -1,34 +1,37 @@
 /**
- * コンテナ経路のロード（`src/hub/components.ts`）の門のうち、GPU を取らずに回る側 —
- * 取得層だけを差し替えて固定する:
+ * The GPU-free checks of the container load path (`src/hub/components.ts`), pinned by swapping only the fetch
+ * layer:
  *
- * ① **進捗はモデル全体で 1 本のまま**（取得が「descriptor の温め + 重みの part + 資産の
- *    全量面」へ割れても `loaded` は単調増加で全ファイルの size 合計に着地し、`complete` は
- *    ファイル数ぶん）。越境参照が自リポと同じ path を持っても、合計は 2 本ぶんのまま。
- * ② **admission は重みの part を取る前に落ちる**（part 0 の descriptor だけで capability 違反が
- *    決まり、重みの part の URL は 1 度も叩かれない — ADR 0070 決定 5 の存在理由そのもの）。
- *    この門は prefetch が admission の**後**に置かれていることの門でもある。
- * ③ **重みの part はロード時に落ち切る**（Session を 1 本も張らないうちに DL 済み — 遅延構築の
- *    家族で「初回実行まで DL が遅れ、ロード進捗にも現れない」形を無くす）。
- * ⑤ **abort 済みの `signal` で始めたロードは落ちる**（ロード中の中断契約が消えていないこと。
- *    対の「ロード時の signal を Session 構築へ持ち越さない」は GPU 側）。
- * ⑥ **重みの block のバイト列を握らない**（部品の供給口を保持したままでも常駐ゼロ）。gc を強制
- *    する必要があるので別プロセスの台本（`helpers/weight-block-retention.ts`）へ出し、ここでは
- *    終了コードだけを見る。
- * ⑦ **家族 admission の違反でも重みの part は取得されない**（②の家族版）。② は runtime の
- *    capability 門だけを踏むので、「実行できないモデルの重みは 1 バイトも落とさない」の
- *    うち家族側（pipeline major / `pipelineConfig`）が前段に居ることは縛れない。実家族
- *    （siglip2 = 部品 1 本の最小形）を `fromPretrained` で通して同じ観測法で見る。
- * ⑧ **`requiredLimits` 超過でも重みの part は取得されない（共有 GPU）**（⑦の limits 版 —
- *    ADR 0089 決定 5）。突き合わせ相手は渡された `GpuContext.limits`。
- * ⑩ **選択と供給口の失敗診断**（manifest が持たない部品名 / 開いていない役割）。
+ * ① **Progress stays one stream for the whole model** (even when fetching splits into "descriptor warm-up +
+ *    weight parts + whole-file reads of the assets", `loaded` increases monotonically and lands on the sum of all
+ *    file sizes, and `complete` fires once per file). When a cross-repository reference has the same path as the
+ *    own repo, the total still counts both files.
+ * ② **Admission fails before any weight part is fetched** (the capability violation is decided by the part-0
+ *    descriptor alone and no weight-part URL is ever requested — the very reason for ADR 0070 decision 5).
+ *    This check also pins that the prefetch runs **after** admission.
+ * ③ **Weight parts are fully downloaded at load time** (downloaded before any Session is built — this removes the
+ *    shape where a lazily built family delays the download until the first run and it never shows in load
+ *    progress).
+ * ⑤ **A load started with an already aborted `signal` fails** (the abort contract during load is still in place.
+ *    The paired "the load-time signal is not carried into Session building" is on the GPU side).
+ * ⑥ **The bytes of weight blocks are not retained** (nothing stays resident even while the component opener is
+ *    held). This needs a forced gc, so it runs as a script in a separate process
+ *    (`helpers/weight-block-retention.ts`) and only its exit code is checked here.
+ * ⑦ **A family admission violation also fetches no weight part** (the family version of ②). ② only exercises
+ *    the runtime's capability check, so it cannot pin that the family side (pipeline major / `pipelineConfig`) of
+ *    "not a single byte of weights for a model that cannot run" sits in front. A real family (siglip2 = the
+ *    minimal shape with one component) goes through `fromPretrained` and is observed the same way.
+ * ⑧ **Exceeding `requiredLimits` also fetches no weight part (shared GPU)** (the limits version of ⑦ —
+ *    ADR 0089 decision 5). The comparison target is the `GpuContext.limits` passed in.
+ * ⑩ **Failure diagnostics of selection and of the opener** (a component name the manifest does not have / a role
+ *    that was not opened).
  *
- * NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` と同じ
- * 規律）。モックは `helpers/container-loading-fixture.ts` に最小限だけ組んである。例外は 2 つ
- * — 容器の**書き手**（形式の道具。fixture の NOTE）と、⑧の `fake-gpu.ts`（`GpuContext` は
- * runtime が値として公開しない〈`acquireGpu` が唯一の入口 — ADR 0008〉ので、共有 GPU 経路を
- * GPU 無し環境で踏むには向こうの実物を包む helper が要る。ここで自前に偽物を組むと、検査対象
- * そのもの（limits を持つ GpuContext）が偽物になる）。
+ * NOTE: nothing **test-only** from hub / runtime is imported (the same discipline as `helpers/memory-cache.ts`).
+ * The mock is built minimally in `helpers/container-loading-fixture.ts`. Two exceptions — the container
+ * **writer** (a format tool; see the fixture's NOTE) and ⑧'s `fake-gpu.ts` (the runtime does not expose
+ * `GpuContext` as a value (`acquireGpu` is the only entry point — ADR 0008), so exercising the shared-GPU path
+ * without a GPU needs a helper that wraps the real thing. Building our own fake here would make the very thing
+ * under test (a GpuContext that has limits) a fake).
  *
  * ## Component replacement seat (`LoadContainerOptions.components` — ADR 0108 decision 19 / ADR 0109 decision 10)
  *
@@ -88,11 +91,11 @@ import {
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 import { loadManifest, localDirectory, resolveSelection } from "@karume/hub";
 
-/** 長さ 0 でない part（= 取得層が実際に取りに行く列）。 */
+/** Parts whose length is not 0 (= the ones the fetch layer actually requests). */
 const fetched = (parts: readonly { path: string; size: number }[]): readonly string[] =>
   parts.filter((part) => part.size > 0).map((part) => part.path);
 
-test("loadContainerComponents: 複数部品でも進捗はモデル全体で 1 本（単調増加・合計へ着地）", async () => {
+test("loadContainerComponents: progress is one stream for the whole model even with several components (monotonic, lands on the total)", async () => {
   const front = await serveContainer("front/model.f32", linearComponent("front"));
   const voice = await serveContainer("voice/model.f32", linearComponent("voice"));
   const tokenizer = new TextEncoder().encode(JSON.stringify({ vocab: ["a", "b"] }));
@@ -132,10 +135,10 @@ test("loadContainerComponents: 複数部品でも進捗はモデル全体で 1 �
     { ...rig.hubOptions, onProgress: (progress) => events.push(progress) },
   );
 
-  // admission を通ったこと（グラフ宣言が読める = 合流まで済んでいる）。
+  // Admission passed (the graph declaration is readable = the merge is done).
   assertEquals(open("front").graph.outputs, ["y"]);
   assertEquals(open("voice").graph.outputs, ["y"]);
-  // 残り資産は全量面のまま届く。
+  // The remaining assets still arrive as whole-file reads.
   assertEquals(Object.keys(assets), ["tokenizer"]);
 
   const paths = [...fetched(front.parts), ...fetched(voice.parts), tokenizerRef.path];
@@ -143,33 +146,34 @@ test("loadContainerComponents: 複数部品でも進捗はモデル全体で 1 �
     [...front.parts, ...voice.parts]
       .filter((part) => part.size > 0)
       .reduce((sum, part) => sum + part.size, 0) + tokenizerRef.size;
-  // total は全イベントで**モデル全体の合計**の 1 値（取得の割れ方に依らない）。
+  // In every event, total is the single value of the **whole model's sum** (independent of how fetching is split).
   assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
-  // loaded は単調増加で、最後は合計に一致する。
+  // loaded increases monotonically and finally equals the total.
   let previous = 0;
   for (const event of events) {
     if (event.loaded < previous) {
       throw new Error(
-        `loaded が巻き戻った: ${previous} → ${event.loaded}（${event.phase} ${event.path}）`,
+        `loaded went backwards: ${previous} → ${event.loaded} (${event.phase} ${event.path})`,
       );
     }
     previous = event.loaded;
   }
   assertEquals(events[events.length - 1].loaded, total);
-  // complete はファイル 1 本につき 1 回（per-file 欄も取得層の契約どおり fileTotal で揃う）。
+  // complete fires once per file (the per-file fields also line up as fileTotal, per the fetch layer's contract).
   const completes = events.filter((event) => event.phase === "complete");
   assertEquals(completes.length, paths.length);
   assertEquals(new Set(completes.map((event) => event.path)), new Set(paths));
   for (const event of completes) assertEquals(event.fileLoaded, event.fileTotal);
-  // 長さ 0 の part は取得にも進捗にも現れない（ADR 0109 決定 3）。
+  // A zero-length part appears neither in fetching nor in progress (ADR 0109 decision 3).
   const empty = [...front.parts, ...voice.parts].filter((part) => part.size === 0);
-  assertEquals(empty.length > 0, true, "長さ 0 の part を持つ容器で観測していない");
+  assertEquals(empty.length > 0, true, "not observed on a container that has a zero-length part");
   for (const part of empty) assertEquals(rig.mock.paths.includes(part.path), false);
 });
 
-test("loadContainerComponents: 越境参照が自リポと同じ path でも、進捗は別の 1 本として数える", async () => {
-  // `voice` は越境先のリポから借りる容器（容器単位の越境 — 全 part が越境先の座標を名乗る）。
-  // 書き手の規約どおりの part 名は stem だけで決まるので、同じ stem の 2 本は同じ path を持つ。
+test("loadContainerComponents: a cross-repository reference with the same path as the own repo is counted as a separate file in progress", async () => {
+  // `voice` is a container borrowed from the other repo (a per-container cross reference — every part names the
+  // other repo's coordinates). Part names that follow the writer's convention depend only on the stem, so two
+  // files with the same stem have the same path.
   const CROSS_REPO = "karume-test/borrowed";
   const own = await serveContainer("shared/model.f32", linearComponent("front"));
   const borrowed = await serveContainer("shared/model.f32", linearComponent("voice"));
@@ -200,7 +204,7 @@ test("loadContainerComponents: 越境参照が自リポと同じ path でも、�
   const hubOptions = { fetch: mock.fetch, caches: new MemoryCacheStorage() };
   const loaded = await loadManifest({ repo: REPO, revision: SHA, hubUrl: HUB_URL }, hubOptions);
   const shared = fetched(own.parts).filter((path) => fetched(borrowed.parts).includes(path));
-  assertEquals(shared.length > 0, true, "同じ path を持つ 2 本で観測していない");
+  assertEquals(shared.length > 0, true, "not observed on two files with the same path");
 
   const events: AssetProgress[] = [];
   await loadContainerComponents(
@@ -212,33 +216,38 @@ test("loadContainerComponents: 越境参照が自リポと同じ path でも、�
     { ...hubOptions, onProgress: (progress) => events.push(progress) },
   );
 
-  // path で畳むと `total` が 1 本ぶん小さくなり、`loaded` も同じだけ手前で止まる。
+  // Collapsing by path would make `total` one file smaller, and `loaded` would stop short by the same amount.
   const total = [...own.parts, ...borrowed.parts].reduce((sum, part) => sum + part.size, 0);
   assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
   assertEquals(events[events.length - 1].loaded, total);
-  // 取得先の欄は素通しされ、同じ path の 2 本を消費側でも見分けられる。
+  // The origin field is passed through, so the consumer can also tell the two files with the same path apart.
   for (const path of shared) {
     const origins = events
       .filter((event) => event.phase === "complete" && event.path === path)
       .map((event) => event.repo)
       .sort((a, b) => (a! < b! ? -1 : a! > b! ? 1 : 0));
-    assertEquals(origins, [CROSS_REPO, REPO].sort(), `${path} の 2 本が見分けられない`);
+    assertEquals(
+      origins,
+      [CROSS_REPO, REPO].sort(),
+      `the two files at ${path} cannot be told apart`,
+    );
   }
 });
 
-test("loadContainerComponents: 選択内の 2 部品が part を共有しても、その part は 1 回だけ温める", async () => {
-  // manifest の parse は選択内で別の容器が同じ part ファイルを共有することを許す。取得計画を
-  // 容器ごとの part 列の連結のまま渡すと、温め面の重複検査（同じ参照を 2 回渡すのは呼び手の
-  // 誤り）で、宣言は通るのにロードだけが落ちる。
-  // 重みが同じ値の 2 部品はグラフ名だけが違うので、part 1 以降（重みの block）は同じバイト列に
-  // なる — `voice` の part 1 以降を `front` のファイルへ向けて共有させる。
+test("loadContainerComponents: when two selected components share a part, that part is warmed up only once", async () => {
+  // The manifest parse allows different containers in a selection to share the same part file. If the fetch
+  // plan were passed as the plain concatenation of each container's part list, the duplicate check of the
+  // warm-up surface (passing the same reference twice is a caller error) would make only the load fail while the
+  // declaration passes.
+  // Two components with the same weight values differ only in the graph name, so parts 1 onwards (the weight
+  // blocks) are the same bytes — point `voice`'s parts 1 onwards at `front`'s files so they are shared.
   const front = await serveContainer("front/model.f32", linearComponent("front"));
   const voice = await serveContainer("voice/model.f32", linearComponent("voice"));
   const sharedParts = front.parts.slice(1);
   assertEquals(
     voice.parts.slice(1).map((part) => part.sha256),
     sharedParts.map((part) => part.sha256),
-    "part 1 以降が同じバイト列の 2 部品で観測していない",
+    "not observed on two components whose parts 1 onwards are the same bytes",
   );
   const voiceParts = [voice.parts[0], ...sharedParts];
   const rig = await serveRepo(
@@ -273,20 +282,20 @@ test("loadContainerComponents: 選択内の 2 部品が part を共有しても�
 
   assertEquals(open("voice").graph.outputs, ["y"]);
   const shared = fetched(sharedParts);
-  assertEquals(shared.length > 0, true, "取得される共有 part で観測していない");
+  assertEquals(shared.length > 0, true, "not observed on a fetched shared part");
   for (const path of shared) {
     assertEquals(
       rig.mock.paths.filter((requested) => requested === path).length,
       1,
-      `${path} を 2 回以上取りに行っている`,
+      `${path} is requested more than once`,
     );
     assertEquals(
       events.filter((event) => event.phase === "complete" && event.path === path).length,
       1,
-      `${path} の complete が 1 回でない`,
+      `${path} does not complete exactly once`,
     );
   }
-  // 進捗の分母も共有 part を 1 本と数え、最後は合計に着地する。
+  // The progress denominator also counts the shared part as one file, and finally lands on the total.
   const total = [front.parts[0], voice.parts[0], ...sharedParts].reduce(
     (sum, part) => sum + part.size,
     0,
@@ -295,7 +304,7 @@ test("loadContainerComponents: 選択内の 2 部品が part を共有しても�
   assertEquals(events[events.length - 1].loaded, total);
 });
 
-/** メモリ上の配布形ディレクトリ（`karume.json` + 配るファイル）を取得元にする。 */
+/** Uses an in-memory distribution directory (`karume.json` + the files it ships) as the source. */
 const memorySource = (
   models: unknown,
   files: Iterable<readonly [string, Uint8Array<ArrayBuffer>]>,
@@ -308,8 +317,8 @@ const memorySource = (
     {
       readFile: (path) => {
         const bytes = table.get(path);
-        if (bytes === undefined) return Promise.reject(new Error(`test: ${path} が無い`));
-        // MUST: buffer 全体を占める view を返す（`DirectoryAdapter.readFile` の契約）。
+        if (bytes === undefined) return Promise.reject(new Error(`test: ${path} is missing`));
+        // MUST: return a view that covers the whole buffer (the contract of `DirectoryAdapter.readFile`).
         return Promise.resolve(bytes.slice());
       },
     },
@@ -317,7 +326,7 @@ const memorySource = (
   );
 };
 
-/** 進捗の列が単調増加で合計へ着地し、ファイル 1 本につき complete が 1 回であることを見る。 */
+/** Checks that the progress stream increases monotonically, lands on the total, and completes once per file. */
 const assertLandsOnTotal = (
   events: readonly AssetProgress[],
   files: readonly { readonly path: string; readonly size: number }[],
@@ -328,24 +337,24 @@ const assertLandsOnTotal = (
   for (const event of events) {
     if (event.loaded < previous) {
       throw new Error(
-        `loaded が巻き戻った: ${previous} → ${event.loaded}（${event.phase} ${event.path}）`,
+        `loaded went backwards: ${previous} → ${event.loaded} (${event.phase} ${event.path})`,
       );
     }
     previous = event.loaded;
   }
-  assertEquals(events.at(-1)?.loaded, total, "最後の通知が合計に届いていない");
+  assertEquals(events.at(-1)?.loaded, total, "the last event does not reach the total");
   const completes = events.filter((event) => event.phase === "complete");
   assertEquals(
     completes.map((event) => event.path).sort(),
     files.map((file) => file.path).sort(),
-    "complete がファイル 1 本につき 1 回でない",
+    "complete does not fire once per file",
   );
 };
 
-describe("loadContainerComponents: ローカル取得元だけのロードでも、進捗は合計へ着地する", () => {
-  // 相 1（温め）を持たない取得元の part も、温めの段で complete を 1 回出す（ADR 0086 追記
-  // 2026-10-11）— 出さないと分母に入った part の分だけ最後の値が届かず、資産が無ければ通知が
-  // 1 度も来ない。
+describe("loadContainerComponents: a load from local sources only also lands progress on the total", () => {
+  // Parts of a source without phase 1 (warm-up) also emit complete once in the warm-up step (ADR 0086 addendum
+  // 2026-10-11) — without it, the last value falls short by the parts counted in the denominator, and with no
+  // assets no event arrives at all.
   let front: ServedContainer;
   let voice: ServedContainer;
   let tokenizer: Uint8Array<ArrayBuffer>;
@@ -365,7 +374,7 @@ describe("loadContainerComponents: ローカル取得元だけのロードでも
     parts = [...front.parts, ...voice.parts].filter((part) => part.size > 0);
   });
   for (const withAssets of [false, true]) {
-    it(withAssets ? "資産あり" : "資産なし", async () => {
+    it(withAssets ? "with assets" : "without assets", async () => {
       const source = memorySource(
         {
           test: {
@@ -394,8 +403,8 @@ describe("loadContainerComponents: ローカル取得元だけのロードでも
   }
 });
 
-test("loadContainerComponents: HF とローカルが混ざっても、進捗は 1 つの規則で合計へ着地する", async () => {
-  // 主の配布形はローカル、`voice` だけを疑似 HF のリポから差し替える（同じグラフ記述の容器）。
+test("loadContainerComponents: with HF and local sources mixed, progress lands on the total under one rule", async () => {
+  // The main distribution is local; only `voice` is replaced from a mock HF repo (a container with the same graph description).
   const front = await serveContainer("front/model.f32", linearComponent("front"));
   const voice = await serveContainer("voice/model.f32", linearComponent("voice"));
   const models = {
@@ -427,20 +436,20 @@ test("loadContainerComponents: HF とローカルが混ざっても、進捗は 
   assertEquals(
     fetched(voice.parts).filter((path) => !mock.paths.includes(path)),
     [],
-    "差し替えた部品を HF から取っていない",
+    "the replaced component was not fetched from HF",
   );
-  // HF の part は取得先（repo）を名乗り、ローカルの part は名乗らない — 両方が 1 本の列に並ぶ。
+  // HF parts name their origin (repo) and local parts do not — both line up in one stream.
   const origins = new Set(
     events.filter((event) => event.phase === "complete").map((event) => event.repo),
   );
-  assertEquals(origins, new Set([REPO, undefined]), "HF とローカルの混在で観測していない");
+  assertEquals(origins, new Set([REPO, undefined]), "not observed with HF and local mixed");
   assertLandsOnTotal(
     events,
     [...front.parts, ...voice.parts].filter((part) => part.size > 0),
   );
 });
 
-test("loadContainerComponents: capability 違反は descriptor だけで落ち、重みの part は取得されない", async () => {
+test("loadContainerComponents: a capability violation fails on the descriptor alone and no weight part is fetched", async () => {
   const rig = await prepareComponent({ op: "karume_test_unsupported_op" });
   const parts = rig.parts["dit"];
 
@@ -456,19 +465,19 @@ test("loadContainerComponents: capability 違反は descriptor だけで落ち�
       ),
     Error,
   );
-  // 落ちた理由が capability 門であること（別の失敗で「重みを取らなかった」が成立しない）。
+  // It failed on the capability check (a different failure would not establish "the weights were not fetched").
   if (!error.message.includes("karume_test_unsupported_op")) {
-    throw new Error(`capability 門の文言でない: ${error.message}`);
+    throw new Error(`not the capability check's message: ${error.message}`);
   }
-  // part 0（descriptor）は取りに行き、重みの part は 1 度も叩いていない（= 重み DL 前
-  // admission。ロード時 prefetch が admission の後に置かれていることの門でもある）。
+  // Part 0 (the descriptor) is requested and no weight part is ever requested (= admission before the weight
+  // download. This also checks that the load-time prefetch runs after admission).
   assertEquals(rig.mock.paths.includes(parts[0].path), true);
   for (const part of parts.slice(1)) {
-    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} を取っている`);
+    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} is fetched`);
   }
 });
 
-test("loadContainerComponents: 重みの part は Session を張る前（ロード時）に落ち切り、進捗にも現れる", async () => {
+test("loadContainerComponents: weight parts are fully downloaded before any Session is built (at load time) and show in progress", async () => {
   const rig = await prepareComponent();
   const parts = rig.parts["dit"];
 
@@ -482,11 +491,11 @@ test("loadContainerComponents: 重みの part は Session を張る前（ロー�
     { ...rig.hubOptions, onProgress: (progress) => events.push(progress) },
   );
 
-  // Session は 1 本も張っていない。それでも重みの part の URL は叩かれている。
+  // No Session has been built. Even so, the weight-part URLs have been requested.
   for (const path of fetched(parts)) {
-    assertEquals(rig.mock.paths.includes(path), true, `${path} がロード時に落ちない`);
+    assertEquals(rig.mock.paths.includes(path), true, `${path} is not downloaded at load time`);
   }
-  // 進捗にも取得した part ぶんが乗る（遅延構築の家族でも「ロード = 全 DL」の表示が成立する）。
+  // Progress also includes the fetched parts (even a lazily built family shows "load = the whole download").
   const completes = events.filter((event) => event.phase === "complete");
   assertEquals(new Set(completes.map((event) => event.path)), new Set(fetched(parts)));
   assertEquals(
@@ -495,9 +504,9 @@ test("loadContainerComponents: 重みの part は Session を張る前（ロー�
   );
 });
 
-test("loadContainerComponents: abort 済みの signal で始めたロードは落ちる（中断契約の維持）", async () => {
+test("loadContainerComponents: a load started with an already aborted signal fails (the abort contract holds)", async () => {
   const rig = await prepareComponent();
-  const reason = new Error("test: ロード開始前に中断済み");
+  const reason = new Error("test: aborted before the load started");
 
   const error = await assertRejects(() =>
     loadContainerComponents(
@@ -512,7 +521,7 @@ test("loadContainerComponents: abort 済みの signal で始めたロードは�
   assertEquals(error, reason);
 });
 
-test("家族 admission（pipeline major 不一致）は descriptor だけで落ち、重みの part は取得されない", async () => {
+test("family admission (pipeline major mismatch) fails on the descriptor alone and no weight part is fetched", async () => {
   const rig = await prepareSiglip2({ pipeline: "siglip2/99" });
   const parts = rig.parts["vision"];
 
@@ -524,19 +533,19 @@ test("家族 admission（pipeline major 不一致）は descriptor だけで落�
       ),
     Error,
   );
-  // 落ちた理由が家族の major 門であること（別の失敗で「重みを取らなかった」が成立しない）。
+  // It failed on the family's major check (a different failure would not establish "the weights were not fetched").
   if (!error.message.includes("the major of pipeline 'siglip2/99' is not supported")) {
-    throw new Error(`家族 admission の文言でない: ${error.message}`);
+    throw new Error(`not the family admission's message: ${error.message}`);
   }
-  // descriptor は取りに行き、重みの part は 1 度も叩いていない（ADR 0070 決定 5 の文面
-  // 「実行できないモデルの重みは 1 バイトも落とさない」が家族の門にも及んでいる）。
+  // The descriptor is requested and no weight part is ever requested (the wording of ADR 0070 decision 5,
+  // "not a single byte of weights for a model that cannot run", extends to the family's check).
   assertEquals(rig.mock.paths.includes(parts[0].path), true);
   for (const part of parts.slice(1)) {
-    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} を取っている`);
+    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} is fetched`);
   }
 });
 
-test("家族 admission（pipelineConfig の schema 違反）でも重みの part は取得されない", async () => {
+test("family admission (pipelineConfig schema violation) also fetches no weight part", async () => {
   const rig = await prepareSiglip2({
     pipelineConfig: { ...SIGLIP2_CONFIG, karumeUnknownKey: 1 },
   });
@@ -551,18 +560,18 @@ test("家族 admission（pipelineConfig の schema 違反）でも重みの part
     Error,
   );
   if (!error.message.includes("karumeUnknownKey")) {
-    throw new Error(`pipelineConfig の門の文言でない: ${error.message}`);
+    throw new Error(`not the pipelineConfig check's message: ${error.message}`);
   }
   assertEquals(rig.mock.paths.includes(parts[0].path), true);
   for (const part of parts.slice(1)) {
-    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} を取っている`);
+    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} is fetched`);
   }
 });
 
-test("家族 admission（requiredLimits 超過）でも重みの part は取得されない（共有 GPU）", async () => {
-  // 全 limit が 0 の GpuContext（`fake-gpu.ts` の ZERO_LIMITS）へ、1 バイトでも要求する
-  // 配布形を渡す。共有 GPU は取り直せない（feature も limits も device 生成時の話）ので、
-  // 落とせる唯一の場所が admission 席になる。
+test("family admission (requiredLimits exceeded) also fetches no weight part (shared GPU)", async () => {
+  // Pass a distribution that requires even one byte to a GpuContext whose limits are all 0 (`fake-gpu.ts`'s
+  // ZERO_LIMITS). A shared GPU cannot be re-acquired (features and limits are fixed when the device is created),
+  // so admission is the only place where it can fail.
   const rig = await prepareSiglip2({ quants: quantsRequiring(1) });
   const parts = rig.parts["vision"];
 
@@ -578,19 +587,19 @@ test("家族 admission（requiredLimits 超過）でも重みの part は取得�
       ),
     Error,
   );
-  // 落ちた理由が limits 検査であること（別の失敗で「重みを取らなかった」が成立しない）。
+  // It failed on the limits check (a different failure would not establish "the weights were not fetched").
   if (!error.message.includes("maxBufferSize")) {
-    throw new Error(`limits 門の文言でない: ${error.message}`);
+    throw new Error(`not the limits check's message: ${error.message}`);
   }
   assertEquals(rig.mock.paths.includes(parts[0].path), true);
   for (const part of parts.slice(1)) {
-    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} を取っている`);
+    assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} is fetched`);
   }
 });
 
-test("loadContainerComponents: 重みの block のバイト列を握らない（別プロセスで gc 観測）", async () => {
-  // MUST: 別プロセス — 到達不能なだけの状態と握られた状態を区別するには gc の強制が要り、
-  // `deno test` に `--v8-flags` を渡す口が無い。
+test("loadContainerComponents: the bytes of weight blocks are not retained (gc observed in a separate process)", async () => {
+  // MUST: a separate process — telling a merely unreachable state from a retained one needs a forced gc, and
+  // `deno test` has no way to pass `--v8-flags`.
   const script = new URL("./helpers/weight-block-retention.ts", import.meta.url);
   const { code, stdout, stderr } = await new Promise<{
     code: number | null;
@@ -612,9 +621,9 @@ test("loadContainerComponents: 重みの block のバイト列を握らない（
   assertEquals(code, 0, `${stdout}${stderr}`);
 });
 
-// ---- 選択と供給口の失敗診断（⑩）--------------------------------------------
+// ---- Failure diagnostics of selection and of the opener (⑩) ------------------------------
 
-test("loadContainerComponents: manifest が持たない部品名は選択の部品一覧つきで落ちる", async () => {
+test("loadContainerComponents: a component name the manifest does not have fails with the selection's component list", async () => {
   const rig = await prepareComponent();
   const error = await assertRejects(
     () =>
@@ -629,11 +638,11 @@ test("loadContainerComponents: manifest が持たない部品名は選択の部�
     Error,
     "the container of component 'vae' is not in the manifest",
   );
-  // 読み手が現物と突き合わせられる形（既存の資産診断の流儀）。
+  // A form the reader can check against the actual files (the convention of the existing asset diagnostics).
   assertStringIncludes(error.message, "components of selection test / f32: dit");
 });
 
-test("loadContainerComponents: 開いていない役割で open() すると開いた一覧つきで落ちる", async () => {
+test("loadContainerComponents: open() on a role that was not opened fails with the list of opened roles", async () => {
   const rig = await prepareComponent();
   const { open } = await loadContainerComponents(
     "test.fromPretrained",
@@ -649,7 +658,7 @@ test("loadContainerComponents: 開いていない役割で open() すると開�
 
 // ---- Component replacement seat (`LoadContainerOptions.components`) -------------------
 
-/** 差し替え先の疑似リポ。 */
+/** The mock repo the replacement comes from. */
 const OTHER_REPO = "karume-test/replacement";
 
 const modelsOf = (entries: Readonly<Record<string, ServedContainer>>): unknown => ({
@@ -671,8 +680,8 @@ const modelsOf = (entries: Readonly<Record<string, ServedContainer>>): unknown =
 });
 
 /**
- * 2 リポを立てる。元リポは `front` / `voice` の 2 部品、差し替え先は `voice` 1 本だけ
- * （`sameGraph` が偽なら**別のグラフ**で書く = 記述の sha256 が動く）。
+ * Sets up two repos. The original repo has the two components `front` / `voice`; the replacement repo has only
+ * `voice` (written as a **different graph** when `sameGraph` is false = the description's sha256 changes).
  */
 const prepareSeats = async (options: {
   readonly sameGraph: boolean;
@@ -680,12 +689,12 @@ const prepareSeats = async (options: {
 }) => {
   const front = await serveContainer("front/model.f32", linearComponent("front"));
   const voice = await serveContainer("voice/model.f32", linearComponent("voice", { w: 0.5 }));
-  // 差し替え先: 同じグラフ宣言 + 別の重み値（グラフ記述はバイト同一で sha256 も一致する）。
+  // Replacement: the same graph declaration + different weight values (the graph description is byte-identical, so its sha256 matches too).
   const replacement = await serveContainer(
     options.replacementStem ?? "other/voice.f32",
     options.sameGraph
       ? linearComponent("voice", { w: 1.5 })
-      : // `op` が違えば `requires.ops` とノード列が動く = グラフ記述の sha256 も動く。
+      : // A different `op` changes `requires.ops` and the node list = the graph description's sha256 changes too.
         linearComponent("voice", { op: "add" }),
   );
   const mock = serveRepos([
@@ -704,11 +713,11 @@ const prepareSeats = async (options: {
   };
 };
 
-/** 取得した `.krm` の path（リポ問わず）。 */
+/** Paths of the fetched `.krm` files (from any repo). */
 const fetchedContainers = (paths: readonly string[]): readonly string[] =>
   paths.filter((path) => path !== MANIFEST_PATH);
 
-test("components: 差した役割だけが別リポから来る（元リポの同じ役割は取らない）", async () => {
+test("components: only the replaced role comes from the other repo (the same role of the original repo is not fetched)", async () => {
   const rig = await prepareSeats({ sameGraph: true });
 
   const { open } = await loadContainerComponents(
@@ -719,27 +728,27 @@ test("components: 差した役割だけが別リポから来る（元リポの�
     NO_FAMILY_GATE,
     { ...rig.hubOptions, components: { voice: { source: rig.source } } },
   );
-  // 2 本とも開けている（合流まで済んでいる）。
+  // Both are open (the merge is done).
   assertEquals(open("front").graph.outputs, ["y"]);
   assertEquals(open("voice").graph.outputs, ["y"]);
 
   const asked = (repo: string): readonly string[] =>
     rig.mock.requests.filter((request) => request.repo === repo).map((request) => request.path);
-  // 差し替え先の part は全部（長さ 0 を除く）取られている。
+  // Every part of the replacement (except zero-length ones) is fetched.
   for (const part of rig.parts.replacement.filter((part) => part.size > 0)) {
-    assertEquals(asked(OTHER_REPO).includes(part.path), true, `${part.path} を取っていない`);
+    assertEquals(asked(OTHER_REPO).includes(part.path), true, `${part.path} is not fetched`);
   }
-  // 元リポの `voice` は 1 バイトも取られていない（差し替えが**取得ごと**置き換わっている）。
+  // Not a single byte of the original repo's `voice` is fetched (the replacement replaces **the fetch too**).
   for (const part of rig.parts.voice) {
-    assertEquals(asked(REPO).includes(part.path), false, `${part.path} を取っている`);
+    assertEquals(asked(REPO).includes(part.path), false, `${part.path} is fetched`);
   }
-  // 差していない `front` は元リポのまま。
+  // `front`, which is not replaced, stays on the original repo.
   for (const part of rig.parts.front.filter((part) => part.size > 0)) {
-    assertEquals(asked(REPO).includes(part.path), true, `${part.path} を取っていない`);
+    assertEquals(asked(REPO).includes(part.path), true, `${part.path} is not fetched`);
   }
 });
 
-test("components: グラフ記述が違う容器は admission で落ちる（重みは 1 本も取らない）", async () => {
+test("components: a container with a different graph description fails admission (no weight file is fetched)", async () => {
   const rig = await prepareSeats({ sameGraph: false });
 
   const error = await assertRejects(
@@ -755,13 +764,13 @@ test("components: グラフ記述が違う容器は admission で落ちる（重
     Error,
     "the graph descriptor does not match the manifest's declaration",
   );
-  // 読み手が現物と突き合わせられる形（宣言と差し替えの 2 つの sha256 が並ぶ）。
+  // A form the reader can check against the actual files (the two sha256 of the declaration and the replacement side by side).
   assertStringIncludes(error.message, rig.selection.containers["voice"].descriptor.graph.sha256);
-  // 落ちるのは**宣言だけを読んだ時点** — `.krm` はどちらのリポからも 1 本も取っていない。
+  // It fails **when only the declarations have been read** — no `.krm` has been fetched from either repo.
   assertEquals(fetchedContainers(rig.mock.paths), []);
 });
 
-test("components: この系列が持たない役割名は差し替えられる役割つきで落ちる", async () => {
+test("components: a role name this family does not have fails with the replaceable roles", async () => {
   const rig = await prepareSeats({ sameGraph: true });
 
   const error = await assertRejects(
@@ -778,13 +787,13 @@ test("components: この系列が持たない役割名は差し替えられる�
     "'vae' in components is not a component of this family",
   );
   assertStringIncludes(error.message, "replaceable roles: front / voice");
-  // 綴り間違いは取得へ 1 度も出ない。
+  // A misspelling never reaches the fetch.
   assertEquals(fetchedContainers(rig.mock.paths), []);
 });
 
-test("components: 継承プロパティは差し替えに使わない（own の役割だけが席に座る）", async () => {
-  // 役割の検査は own の列挙可能キーで行うので、継承値（`Object.create` やプロトタイプ汚染）を
-  // 直接添字で読むと、検査を通っていない値が差し替えに使われる。
+test("components: inherited properties are not used for replacement (only own roles take a seat)", async () => {
+  // The roles are checked over own enumerable keys, so reading an inherited value (`Object.create` or prototype
+  // pollution) by direct indexing would use a value that never passed the check as a replacement.
   const rig = await prepareSeats({ sameGraph: true });
   const inherited: Record<string, { readonly source: typeof rig.source }> = Object.create({
     voice: { source: rig.source },
@@ -802,26 +811,26 @@ test("components: 継承プロパティは差し替えに使わない（own の�
   assertEquals(
     rig.mock.requests.filter((request) => request.repo === OTHER_REPO),
     [],
-    "継承値の差し替え先を取りに行っている",
+    "the inherited replacement target is fetched",
   );
   for (const part of rig.parts.voice.filter((part) => part.size > 0)) {
     assertEquals(
       rig.mock.requests.some((request) => request.repo === REPO && request.path === part.path),
       true,
-      `元リポの ${part.path} を取っていない`,
+      `${part.path} of the original repo is not fetched`,
     );
   }
 });
 
-test("components: 差し替え先の part が元リポの別部品と同じ path でも進捗は 2 本として数える", async () => {
-  // 差し替え先の `voice` を元リポの `front` と同じ stem で書く = 同じ path の part が 2 リポに並ぶ。
+test("components: a replacement part with the same path as another component of the original repo is counted as two files in progress", async () => {
+  // Write the replacement's `voice` with the same stem as the original repo's `front` = parts with the same path in two repos.
   const rig = await prepareSeats({ sameGraph: true, replacementStem: "front/model.f32" });
   const nonEmpty = (parts: readonly { path: string; size: number }[]) =>
     parts.filter((part) => part.size > 0);
   const shared = nonEmpty(rig.parts.front)
     .map((part) => part.path)
     .filter((path) => nonEmpty(rig.parts.replacement).some((part) => part.path === path));
-  assertEquals(shared.length > 0, true, "同じ path を持つ 2 本で観測していない");
+  assertEquals(shared.length > 0, true, "not observed on two files with the same path");
 
   const events: AssetProgress[] = [];
   await loadContainerComponents(
@@ -848,14 +857,18 @@ test("components: 差し替え先の part が元リポの別部品と同じ path
       .filter((event) => event.phase === "complete" && event.path === path)
       .map((event) => event.repo)
       .sort((a, b) => (a! < b! ? -1 : a! > b! ? 1 : 0));
-    assertEquals(origins, [OTHER_REPO, REPO].sort(), `${path} の 2 本が見分けられない`);
+    assertEquals(
+      origins,
+      [OTHER_REPO, REPO].sort(),
+      `the two files at ${path} cannot be told apart`,
+    );
   }
 });
 
 // ---- Real-GPU gates -------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "loadContainerComponents: Session 構築は進捗を 1 イベントも動かさない（実 GPU）",
+  "loadContainerComponents: building a Session does not move progress by a single event (real GPU)",
   async () => {
     const rig = await prepareComponent();
     const fetchedCount = fetched(rig.parts["dit"]).length;
@@ -871,25 +884,25 @@ test.skipIf(!GPU_AVAILABLE)(
     );
     const afterLoad = events.length;
     const calls = rig.mock.paths.length;
-    // complete はファイル数ぶんちょうど（ロードを抜けた時点で全ファイルが終端に達している）。
+    // complete fires exactly once per file (every file has reached its end when the load returns).
     assertEquals(events.filter((event) => event.phase === "complete").length, fetchedCount);
 
     const gpu = await acquireGpu();
     try {
-      // 重みの block は末尾の part にしかないので、Session が張れた時点で block は読まれている。
+      // Weight blocks are only in the last part, so the blocks have been read once the Session is built.
       const session = await open("dit").createSession(gpu);
       await session.dispose();
     } finally {
       gpu.destroy();
     }
 
-    assertEquals(events.length, afterLoad, "Session 構築が進捗イベントを追加している");
-    assertEquals(rig.mock.paths.length, calls, "Session 構築が network へ出ている");
+    assertEquals(events.length, afterLoad, "building the Session adds progress events");
+    assertEquals(rig.mock.paths.length, calls, "building the Session goes to the network");
   },
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "loadContainerComponents: 同じ供給口から Session を 2 本続けて張れる（実 GPU）",
+  "loadContainerComponents: one opener can build two Sessions in a row (real GPU)",
   async () => {
     const rig = await prepareComponent();
     const { open } = await loadContainerComponents(
@@ -903,12 +916,12 @@ test.skipIf(!GPU_AVAILABLE)(
 
     const gpu = await acquireGpu();
     try {
-      // 2 本目が正しい出力を返すのは、block を**呼ぶたびに**読み直しているとき。Session 構築は
-      // 宣言した initializer の全到着を突き合わせないので、1 度読んだら終わりの列にすると
-      // 2 本目は空の block 列を受けたまま張れてしまう — 張れたことではなく run の出力で見る。
+      // The second one returns the correct output only when the blocks are re-read **on every call**. Session
+      // building does not check that every declared initializer arrived, so with a read-once list the second
+      // Session is built on an empty block list — check the run output, not that the build succeeded.
       for (let index = 0; index < 2; index += 1) {
         const session = await open("dit").createSession(gpu);
-        assertEquals(await runLinearProbe(session), LINEAR_PROBE_Y, `Session ${index + 1} 本目`);
+        assertEquals(await runLinearProbe(session), LINEAR_PROBE_Y, `Session #${index + 1}`);
         await session.dispose();
       }
     } finally {
@@ -918,7 +931,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "loadContainerComponents: ロード時の signal は Session 構築へ持ち越さない（実 GPU）",
+  "loadContainerComponents: the load-time signal is not carried into Session building (real GPU)",
   async () => {
     const rig = await prepareComponent();
     const controller = new AbortController();
@@ -931,13 +944,13 @@ test.skipIf(!GPU_AVAILABLE)(
       { ...rig.hubOptions, signal: controller.signal },
     );
 
-    // 呼び手の中断ノブは「このロード 1 回」の寿命のもの — ロード成功の後に発火するのは
-    // `AbortSignal.timeout` でも画面のアンマウントでもごく普通の綴り。
+    // The caller's abort knob lives for "this one load" — firing after a successful load is perfectly ordinary,
+    // whether by `AbortSignal.timeout` or a screen unmount.
     controller.abort();
 
     const gpu = await acquireGpu();
     try {
-      // 持ち越していると block の読みで落ちる（キャッシュ完備でも確実に）。
+      // If it were carried over, reading the blocks would fail (reliably, even with a complete cache).
       const session = await open("dit").createSession(gpu);
       await session.dispose();
     } finally {
@@ -946,12 +959,12 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// MUST: アダプタ無し環境は明示 SKIP（ADR 0005）。この経路の突き合わせ相手は
-// `readAdapterLimits()` なので、アダプタが無いと GpuUnavailableError に化けて門が見えない。
+// MUST: an environment without an adapter is skipped explicitly (ADR 0005). The comparison target on this path is
+// `readAdapterLimits()`, so without an adapter it turns into GpuUnavailableError and the check is not visible.
 test.skipIf(!GPU_AVAILABLE)(
-  "requiredLimits 超過は自前 GPU 取得の経路でも重みの part を取らない（アダプタ実測）",
+  "requiredLimits beyond the adapter also fetches no weight part on the self-acquired GPU path (measured adapter)",
   async () => {
-    // どの実機も満たせない要求（`Number.MAX_SAFE_INTEGER` — manifest が受ける最大値）。
+    // A requirement no real device can meet (`Number.MAX_SAFE_INTEGER` — the largest value the manifest accepts).
     const rig = await prepareSiglip2({ quants: quantsRequiring(Number.MAX_SAFE_INTEGER) });
     const parts = rig.parts["vision"];
 
@@ -964,11 +977,11 @@ test.skipIf(!GPU_AVAILABLE)(
       Error,
     );
     if (!error.message.includes("maxBufferSize")) {
-      throw new Error(`limits 門の文言でない: ${error.message}`);
+      throw new Error(`not the limits check's message: ${error.message}`);
     }
     assertEquals(rig.mock.paths.includes(parts[0].path), true);
     for (const part of parts.slice(1)) {
-      assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} を取っている`);
+      assertEquals(rig.mock.paths.includes(part.path), false, `${part.path} is fetched`);
     }
   },
 );

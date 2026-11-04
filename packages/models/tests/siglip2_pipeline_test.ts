@@ -1,30 +1,36 @@
-// `Pipeline` の**構築ガード**と**前処理の結線**。GPU も実資産も要らない範囲だけを見る
-// （実 GPU の突合は `packages/runtime/tests/e2e_siglip2_test.ts` が持つ — 重複させない）。
+// **Construction guards** and **preprocessing wiring** of `Pipeline`. Only what needs neither a GPU
+// nor real assets (the real-GPU comparison belongs to `packages/runtime/tests/e2e_siglip2_test.ts`
+// — not duplicated).
 //
-// 押さえるのは 3 点:
+// Three points are pinned:
 //
-// ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
-//    （`src/siglip2/pipeline.ts` の `openSiglip2State` が掲げる MUST）。観測の仕掛けは
-//    irodori 側と同じ — **全ケースで容器は揃えて**おき、
-//     - 契約違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の門が先
-//     - 正しい manifest + 空の Record が `部品 'vision' の容器が無い` で落ちる（受け口の診断）
-//    の 2 つで門の順序そのものを縛る。
-//    NOTE: 容器を開くのは admission の**前**（`assetComponentOpener` は同期の供給口を返すため
-//    先に全部品を開く — ADR 0109 の継ぎ目）。したがって「資産を開く前に落ちる」ではなく
-//    「資産が揃っていても manifest の門で落ちる」が今の契約である。
+// ① `fromAssets` rejects **manifest contract violations before acquiring a GPU** (the MUST stated
+//  by
+//    `openSiglip2State` in `src/siglip2/pipeline.ts`). The observation set-up is the same as on the
+//    irodori side — **the containers are present in every case**, and the order of the checks
+//    itself is pinned by two things:
+//     - a contract-violation case fails with that violation's message = the manifest check comes
+//       first even with all assets present
+//     - a correct manifest + an empty Record fails with "component 'vision' has no container" (the
+//       entry diagnostic).
+//    NOTE: the containers are opened **before** admission (`assetComponentOpener` returns a
+//    synchronous supply, so it opens every component first — the seam of ADR 0109). So the current
+//    contract is not "fails before opening the assets" but "fails at the manifest check even with
+//    all assets present".
 //
-// ② グラフ宣言との突合（`assertStaticDim` / `assertOutputDim`）の**拒否経路**。ここは
-//    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
-//    （`tests/helpers/stub-model.ts` が宣言だけの `GraphOwner` を組む）。門自身の綴りや
-//    軸番号がずれても、正常系だけを走らせている限り緑のまま通るため、**壊れた宣言を名指しで
-//    落とすこと**を毎回踏む。
+// ② The **rejection paths** of the comparison with the graph declarations (`assertStaticDim` /
+//    `assertOutputDim`). Inside `fromAssets` these can only be reached with a real GPU and real
+//    assets, so the checks are called directly (`tests/helpers/stub-model.ts` builds a
+//    declaration-only `GraphOwner`). If a check's own spelling or axis number drifted, it would
+//    stay green as long as only the normal cases ran, so **rejecting a broken declaration by name**
+//    is exercised every time.
 //
-// ③ 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
-//    `resizeRgb8` → `normalizeToNchw` を通す。**参照は Python 正本のフィクスチャ**
-//    （`fixtures/image-preprocess/parity.json` — 前処理層そのものの門は
-//    `image_preprocess_test.ts`）なので、ここが見るのは「宣言の 6 欄が正しい引数の位置へ
-//    届いているか」だけ。非正方のケースを使うのは、`imageWidth` / `imageHeight` の取り違えが
-//    正方形では**原理的に検出できない**ため。
+// ③ The preprocessing wiring (`preprocessPixelValues`) runs `resizeRgb8` → `normalizeToNchw` as
+//    `pipelineConfig` declares. **The reference is a fixture whose source of truth is Python**
+//    (`fixtures/image-preprocess/parity.json` — the checks of the preprocessing layer itself are in
+//    `image_preprocess_test.ts`), so all this looks at is whether the six declared fields reach the
+//    right argument positions. A non-square case is used because a mix-up of `imageWidth` /
+//    `imageHeight` is **undetectable in principle** with a square.
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -42,7 +48,9 @@ import type { Rgb8Image } from "../src/image/preprocess.ts";
 import { stubModel } from "./helpers/stub-model.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
-/** 宣言だけの `vision` 容器（家族の門が読む形まで再現し、実行はしない）。 */
+/**
+ * A declaration-only `vision` container (reproduces what the family's checks read; never executed).
+ */
 const VISION = partAssets(
   "vision",
   await tensorlessContainer("vision", {
@@ -51,7 +59,7 @@ const VISION = partAssets(
   }),
 );
 
-/** `models/karume-siglip2/karume.json` の `base` の `pipelineConfig` 実物（6 欄）。 */
+/** The real `pipelineConfig` of `base` in `models/karume-siglip2/karume.json` (six fields). */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   imageWidth: 224,
   imageHeight: 224,
@@ -61,7 +69,10 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
   interpolation: "bilinear",
 };
 
-/** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["base"]` の中身を上書きする。 */
+/**
+ * Skeleton of the distribution (only the fields the checks need). `patch` overrides the contents of
+ * `models["base"]`.
+ */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/5",
@@ -71,7 +82,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
       base: {
         pipeline: "siglip2/1",
         weights: { vision: { f32: declaredContainer("vision/model.f32") } },
-        // 実行に要るのはグラフ 1 本だけ（tokenizer も表も無い）。
+        // Running needs only one graph (no tokenizer and no tables).
         assets: {},
         quants: { f32: { weights: { vision: "f32" }, session: {} } },
         defaultQuant: "f32",
@@ -83,11 +94,11 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-/** `pipelineConfig` だけを差し替えた manifest（残りは骨格のまま）。 */
+/** A manifest with only `pipelineConfig` replaced (the rest is the skeleton). */
 const withConfig = (config: Record<string, unknown>): string =>
   manifestText({ pipelineConfig: config });
 
-test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: an unknown model fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: VISION }, { model: "nope" }),
@@ -96,7 +107,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipeline の契約名が siglip2 でない manifest を落とす", async () => {
+test("fromAssets: rejects a manifest whose pipeline contract name is not siglip2", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/1" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: VISION }),
@@ -105,8 +116,9 @@ test("fromAssets: pipeline の契約名が siglip2 でない manifest を落と�
   );
 });
 
-test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
-  // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
+test("fromAssets: an unknown major fails loudly (models owns the check — ADR 0038 §1)", async () => {
+  // The only check that stops the silent degradation "old implementation × new repository". hub
+  // does not check the major.
   const manifest = parseManifest(manifestText({ pipeline: "siglip2/2" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: VISION }),
@@ -115,7 +127,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   );
 });
 
-test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: an unknown quant fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: VISION }, { quant: "nope" }),
@@ -124,8 +136,8 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
-  // 綴り違い（`imageMean` に対する `image_mean`）が黙って既定へ縮退する経路を作らない。
+test("fromAssets: an unknown pipelineConfig key fails at construction", async () => {
+  // No path where a misspelling (`image_mean` for `imageMean`) silently falls back to the default.
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: VISION }),
@@ -134,8 +146,9 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   );
 });
 
-test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ちる", async () => {
-  // 欠けた欄が既定で埋まると、ホストだけが別の数を持ったまま前処理が通る（config.ts の MUST）。
+test("fromAssets: a missing pipelineConfig field fails at construction", async () => {
+  // If a missing field were filled with a default, preprocessing would pass with the host alone
+  // holding a different number (the MUST of config.ts).
   const { hiddenDim: _dropped, ...missing } = PIPELINE_CONFIG;
   const manifest = parseManifest(withConfig(missing));
   await assertRejects(
@@ -145,10 +158,11 @@ test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ち�
   );
 });
 
-test("fromAssets: bilinear 以外の補間を宣言した配布形は受理しない", async () => {
-  // この配布形の上流 resample は 2（PIL の BILINEAR）。前処理層は bicubic も実装しているが、
-  // 受理集合を広げるのは別の判断で、bicubic を黙って bilinear で通すと resize の値が最大
-  // 47/255 ずれたまま実行される（config.ts の MUST）。
+test("fromAssets: does not accept a distribution that declares an interpolation other than bilinear", async () => {
+  // This distribution's upstream resample is 2 (PIL's BILINEAR). The preprocessing layer also
+  // implements bicubic, but widening the accepted set is a separate decision, and silently running
+  // bicubic as bilinear would execute with resize values off by up to 47/255 (the MUST of
+  // config.ts).
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, interpolation: "bicubic" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: VISION }),
@@ -157,9 +171,10 @@ test("fromAssets: bilinear 以外の補間を宣言した配布形は受理し�
   );
 });
 
-test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 上の 7 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
-  // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
+test("fromAssets: fails with both spellings when a component's container is missing (the entry diagnostic)", async () => {
+  // The flip side of the seven cases above. A Record without the containers fails on **the missing
+  // component** (not with a manifest message) = the contrapositive showing that the cases above are
+  // not tripped by missing assets.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
@@ -168,9 +183,9 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   );
 });
 
-// ---- pipelineConfig のスキーマ（門を直接叩く）--------------------------------
+// ---- The pipelineConfig schema (calling the check directly) ----------------
 
-test("parseSiglip2PipelineConfig: 実物の 6 欄をそのまま読む", () => {
+test("parseSiglip2PipelineConfig: reads the six real fields as they are", () => {
   const config = parseSiglip2PipelineConfig(PIPELINE_CONFIG);
   assertEquals(config.imageWidth, 224);
   assertEquals(config.imageHeight, 224);
@@ -180,8 +195,9 @@ test("parseSiglip2PipelineConfig: 実物の 6 欄をそのまま読む", () => {
   assertEquals(config.interpolation, "bilinear");
 });
 
-test("parseSiglip2PipelineConfig: std に 0 があれば落ちる（0 除算は例外を出さない）", () => {
-  // `(x − mean·255) / (std·255)` の除数なので、0 は ±Infinity の pixel_values を静かに作る。
+test("parseSiglip2PipelineConfig: fails when std contains 0 (division by zero raises no exception)", () => {
+  // It is the divisor of `(x − mean·255) / (std·255)`, so 0 silently produces ±Infinity
+  // pixel_values.
   assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageStd: [0.5, 0, 0.5] }),
     Error,
@@ -189,17 +205,18 @@ test("parseSiglip2PipelineConfig: std に 0 があれば落ちる（0 除算は�
   );
 });
 
-test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
-  // 個々の欄は有限でも商が f32 で溢れる。構築時に落とさないと、生成のたびに入力起因の型で落ちる。
+test("a distribution whose imageMean / imageStd pair overflows f32 after normalisation fails as an asset fault", () => {
+  // Each field is finite, but the quotient overflows f32. Not rejected at construction, it would
+  // fail with an input-error type on every generation.
   const error = assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
     Error,
     "pipelineConfig.imageMean / imageStd: channel 0: the normalized range",
   );
-  assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
+  assert(!(error instanceof ModelInputError), "an asset fault was classified as an input error");
 });
 
-test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなければ落ちる", () => {
+test("parseSiglip2PipelineConfig: fails when mean / std do not have 3 elements", () => {
   assertThrows(
     () => parseSiglip2PipelineConfig({ ...PIPELINE_CONFIG, imageMean: [0.5, 0.5] }),
     Error,
@@ -207,9 +224,9 @@ test("parseSiglip2PipelineConfig: mean / std の要素数が 3 でなければ�
   );
 });
 
-// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+// ---- Comparison with the graph declarations (rejection paths) ---------------
 
-/** 実配布形（base）と同じ宣言。`patch` で 1 点だけ壊す。 */
+/** The same declarations as the real distribution (base). `patch` breaks one point. */
 const visionGraph = (
   patch: {
     readonly inputShape?: readonly (number | string)[];
@@ -222,9 +239,10 @@ const visionGraph = (
     values: { pooler_output: patch.outputShape ?? [1, 768] },
   });
 
-test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
-  // so400m（384²）の資産を base（224²）の席へ置いた形。前処理は宣言の寸法へ resize するので
-  // ホスト側は最後まで通り、落ちるのは Session の shape 検査 = どちらが正しいか読めない。
+test("assertStaticDim: a graph matching the declaration passes, and a different resolution fails by name", () => {
+  // The shape of so400m (384²) assets placed where base (224²) belongs. Preprocessing resizes to
+  // the declared size, so the host side passes to the end and the failure comes from Session's
+  // shape check = nobody can tell which side is right.
   assertStaticDim(visionGraph(), "pixel_values", 2, 224, "imageHeight");
   const error = assertThrows(
     () =>
@@ -241,7 +259,7 @@ test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは
   assert(error.message.includes("pipelineConfig has 224"), error.message);
 });
 
-test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+test("assertStaticDim: fails when the input name itself is missing", () => {
   assertThrows(
     () => assertStaticDim(visionGraph(), "pixel", 2, 224, "imageHeight"),
     Error,
@@ -249,8 +267,9 @@ test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   );
 });
 
-test("assertOutputDim: 埋め込み次元の宣言違いは名指しで落ちる", () => {
-  // hiddenDim は前処理にも実行にも使われないので、ずれても埋め込みは何事もなく出る。
+test("assertOutputDim: a wrongly declared embedding dimension fails by name", () => {
+  // hiddenDim is used by neither preprocessing nor execution, so even when it is off the embeddings
+  // come out as if nothing were wrong.
   assertOutputDim(visionGraph(), 1, 768, "hiddenDim");
   assertThrows(
     () => assertOutputDim(visionGraph({ outputShape: [1, 1152] }), 1, 768, "hiddenDim"),
@@ -259,7 +278,7 @@ test("assertOutputDim: 埋め込み次元の宣言違いは名指しで落ちる
   );
 });
 
-test("assertOutputDim: 出力名の宣言が values に無ければ落とす", () => {
+test("assertOutputDim: fails when the output name has no declaration in values", () => {
   const model = stubModel({
     inputs: [{ name: "pixel_values", shape: [1, 3, 224, 224] }],
     outputs: ["pooler_output"],
@@ -272,7 +291,7 @@ test("assertOutputDim: 出力名の宣言が values に無ければ落とす", (
   );
 });
 
-// ---- 前処理の結線（Python 正本のフィクスチャに対して）------------------------
+// ---- Preprocessing wiring (against the fixture whose source of truth is Python) ----
 
 type ParityCase = {
   readonly name: string;
@@ -295,15 +314,18 @@ type Fixture = {
 const FIXTURE_PATH = new URL("./fixtures/image-preprocess/parity.json", import.meta.url);
 const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
-/** 縦は 4 倍縮小・横は 3 倍拡大の非正方ケース（24×5 → 6×15）。 */
+/** A non-square case shrunk 4× vertically and enlarged 3× horizontally (24×5 → 6×15). */
 const MIXED_AXIS = "mixed-axis";
 
-/** 全経路の許容差。導出は `image_preprocess_test.ts` 冒頭（uint8 1 LSB の f32 換算）。 */
+/**
+ * The tolerance for every path. Derived at the top of `image_preprocess_test.ts` (1 uint8 LSB
+ * converted to f32).
+ */
 const PIXEL_ATOL = 7.85e-3;
 
 const parityCase = (name: string): ParityCase => {
   const found = fixture.cases.find((entry) => entry.name === name);
-  assert(found !== undefined, `フィクスチャに '${name}' が無い（生成台本が変わった）`);
+  assert(found !== undefined, `the fixture has no '${name}' (the generation script changed)`);
   return found;
 };
 
@@ -313,7 +335,10 @@ const imageOf = (entry: ParityCase): Rgb8Image => ({
   height: entry.height,
 });
 
-/** そのケースの寸法・定数をそのまま宣言した `pipelineConfig`（hiddenDim は結線に効かない）。 */
+/**
+ * A `pipelineConfig` declaring the case's sizes and constants as is (hiddenDim does not affect the
+ * wiring).
+ */
 const configFor = (entry: ParityCase, swapped = false) =>
   parseSiglip2PipelineConfig({
     imageWidth: swapped ? entry.outHeight : entry.outWidth,
@@ -324,25 +349,35 @@ const configFor = (entry: ParityCase, swapped = false) =>
     interpolation: "bilinear",
   });
 
-test("前処理の結線: 宣言の寸法・mean・std で Python 正本と一致する（非正方）", () => {
+test("preprocessing wiring: matches the Python source of truth with the declared size, mean and std (non-square)", () => {
   const entry = parityCase(MIXED_AXIS);
   const got = preprocessPixelValues(configFor(entry), imageOf(entry));
   assertEquals(got.length, entry.pixelValues.length);
   for (let index = 0; index < got.length; index += 1) {
-    assertAlmostEquals(got[index], entry.pixelValues[index], PIXEL_ATOL, `標本 ${index}`);
+    assertAlmostEquals(got[index], entry.pixelValues[index], PIXEL_ATOL, `sample ${index}`);
   }
 });
 
-test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
-  // 上のケースが恒真でないことの担保 — 非正方の宣言を転置すると要素数から変わる
-  // （`resizeRgb8` は `(width, height)` の順で受ける）。
+test("preprocessing wiring: swapping imageWidth / imageHeight gives a different result", () => {
+  // Ensures the case above is not vacuous — transposing a non-square declaration changes even the
+  // element count (`resizeRgb8` takes `(width, height)` in that order).
   const entry = parityCase(MIXED_AXIS);
-  assert(entry.outWidth !== entry.outHeight, "非正方のケースでないと転置が検出できない");
+  assert(
+    entry.outWidth !== entry.outHeight,
+    "a transpose is undetectable without a non-square case",
+  );
   const swapped = preprocessPixelValues(configFor(entry, true), imageOf(entry));
-  assertEquals(swapped.length, entry.pixelValues.length, "要素数は転置しても同じ");
+  assertEquals(
+    swapped.length,
+    entry.pixelValues.length,
+    "the element count is the same when transposed",
+  );
   let matched = 0;
   for (let index = 0; index < swapped.length; index += 1) {
     if (Math.abs(swapped[index] - entry.pixelValues[index]) <= PIXEL_ATOL) matched += 1;
   }
-  assert(matched < swapped.length, "転置しても全標本が一致した（門が効いていない）");
+  assert(
+    matched < swapped.length,
+    "every sample matched even when transposed (the check has no effect)",
+  );
 });

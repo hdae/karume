@@ -1,16 +1,21 @@
 /**
- * `withSession`（`src/session/with-session.ts`）の実行スコープ契約:
+ * The execution-scope contract of `withSession` (`src/session/with-session.ts`):
  *
- * - body が返しても throw しても、張った Session を**ちょうど 1 回** dispose する（途中で落ちた
- *   段の VRAM が残ると、後続の段が「最初の失敗とは別の場所」で確保に落ちる）。
- * - body の返り値と例外は包まずにそのまま呼び手へ渡る。dispose も落ちたときだけ、body の例外を
- *   先頭にした `AggregateError` で両方を運ぶ（dispose の失敗で最初の失敗を上書きしない）。
- * - `run` は Session の出力を返し、`observe` はその run の**後**・呼び手へ戻る**前**に毎回呼ばれる。
- * - Session の構築が落ちたら body は呼ばれない（GPU を取らない枝 — this file's last describe, run without an adapter）。
+ * - Whether the body returns or throws, the Session it built is disposed **exactly once** (if the
+ *   VRAM of a stage that failed midway stays, a later stage fails its allocation "somewhere other
+ *   than the first failure").
+ * - The body's return value and exception reach the caller as they are, unwrapped. Only when
+ *   dispose fails as well are both carried in an `AggregateError` with the body's exception first
+ *   (a dispose failure does not overwrite the first failure).
+ * - `run` returns the Session's outputs, and `observe` is called every time **after** that run
+ *   and **before** control returns to the caller.
+ * - If building the Session fails, the body is not called (the branch that acquires no GPU — this
+ *   file's last describe, run without an adapter).
  *
- * NOTE: `Session` は `#` 付き private field を持つクラスで fake に置き換えられないため、重みを
- * 持たない小さなグラフ（y = x + x）をメモリ内容器で組んで実 Session を張る。dispose の回数は
- * 実 Session の `dispose` を包んで数え、解放そのものは「以後の run が落ちる」ことで見る。
+ * NOTE: `Session` is a class with `#` private fields and cannot be replaced by a fake, so a real
+ * Session is built from a small weightless graph (y = x + x) in an in-memory container. The dispose
+ * count is taken by wrapping the real Session's `dispose`, and the release itself is observed as
+ * "later runs fail".
  */
 
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
@@ -36,7 +41,10 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 const GRAPH = "double";
 const LENGTH = 2;
 
-/** 重みを 1 本も持たないグラフ（y = x + x）。宣言だけで Session が張れる最小形。 */
+/**
+ * A graph without a single weight (y = x + x). The smallest form that builds a Session from
+ * declarations alone.
+ */
 const doubleGraph = () =>
   parseIrDeclarationValue({
     format: "karume-ir",
@@ -56,7 +64,7 @@ const inputOf = (values: readonly number[]): Record<string, Tensor> => ({
 
 const valuesOf = (outputs: Record<string, Tensor>): number[] => Array.from(outputs["y"].data);
 
-/** withSession が Session に対して何をしたかの記録。 */
+/** A record of what withSession did to the Session. */
 type SessionLog = {
   readonly sessions: Session[];
   readonly options: (SessionOptions | undefined)[];
@@ -64,8 +72,8 @@ type SessionLog = {
 };
 
 /**
- * 実 Session を張る {@link ModelComponent}。張った Session の `dispose` を包んで呼び出し回数を
- * 数える（解放は元の `dispose` へそのまま委ねる）。
+ * A {@link ModelComponent} that builds a real Session. It wraps the built Session's `dispose` to
+ * count the calls (the release itself is delegated to the original `dispose`).
  */
 const spiedComponent = (log: SessionLog): ModelComponent => {
   const prepared = prepareContainer(
@@ -76,7 +84,7 @@ const spiedComponent = (log: SessionLog): ModelComponent => {
     graph: prepared.graph,
     assets: {},
     asset: (name) => {
-      throw new Error(`この fixture は資産を持たない: ${name}`);
+      throw new Error(`this fixture has no assets: ${name}`);
     },
     estimate: (options) => prepared.estimate(options),
     maxPartBytes: 0,
@@ -96,7 +104,10 @@ const spiedComponent = (log: SessionLog): ModelComponent => {
 
 const emptyLog = (): SessionLog => ({ sessions: [], options: [], disposeCalls: 0 });
 
-/** 解放済みの Session は以後の run を fail loudly で拒む（dispose が本当に効いたことの観測点）。 */
+/**
+ * A released Session fails loudly on any later run (the observation point that dispose really took
+ * effect).
+ */
 const assertDisposed = async (session: Session): Promise<void> => {
   await assertRejects(() => session.run(inputOf([1, 2])), ExecutionError, "disposed Session");
 };
@@ -110,13 +121,13 @@ const withGpu = async (fn: (gpu: GpuContext) => Promise<void>): Promise<void> =>
   }
 };
 
-describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
-  describe("body が値を返したとき", () => {
-    it("その値を包まずに返し、渡した options で張った Session を 1 回だけ dispose する", async () => {
+describe.skipIf(!GPU_AVAILABLE)("withSession (real GPU)", () => {
+  describe("when the body returns a value", () => {
+    it("returns that value unwrapped and disposes the Session built with the given options exactly once", async () => {
       await withGpu(async (gpu) => {
         const log = emptyLog();
         const options: SessionOptions = { planBackingBudgetBytes: 0 };
-        const value = { marker: "body の返り値" };
+        const value = { marker: "the body's return value" };
         let received: Session | undefined;
 
         const result = await withSession(gpu, spiedComponent(log), options, undefined, (_, s) => {
@@ -127,18 +138,22 @@ describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
         assertStrictEquals(result, value);
         assertEquals(log.sessions.length, 1);
         assertStrictEquals(log.options[0], options);
-        assertStrictEquals(received, log.sessions[0], "body に渡る Session が張ったものと違う");
+        assertStrictEquals(
+          received,
+          log.sessions[0],
+          "the Session passed to the body is not the one built",
+        );
         assertEquals(log.disposeCalls, 1);
         await assertDisposed(log.sessions[0]);
       });
     });
   });
 
-  describe("body が throw したとき", () => {
-    it("Session を 1 回だけ dispose し、body の例外をそのまま伝える", async () => {
+  describe("when the body throws", () => {
+    it("disposes the Session exactly once and passes the body's exception through as is", async () => {
       await withGpu(async (gpu) => {
         const log = emptyLog();
-        const thrown = new Error("body の途中で落ちた");
+        const thrown = new Error("failed in the middle of the body");
 
         const error = await assertRejects(() =>
           withSession(gpu, spiedComponent(log), {}, undefined, async (run) => {
@@ -155,12 +170,12 @@ describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
     });
   });
 
-  describe("body も dispose も throw したとき", () => {
-    it("dispose の失敗で上書きせず、body の例外を先頭に両方を AggregateError で伝える", async () => {
+  describe("when both the body and dispose throw", () => {
+    it("does not let the dispose failure overwrite and passes both in an AggregateError, the body's exception first", async () => {
       await withGpu(async (gpu) => {
         const log = emptyLog();
-        const thrown = new Error("body の途中で落ちた");
-        const disposeFailure = new Error("flush に失敗した");
+        const thrown = new Error("failed in the middle of the body");
+        const disposeFailure = new Error("flush failed");
         const spied = spiedComponent(log);
         const component: ModelComponent = {
           ...spied,
@@ -193,7 +208,7 @@ describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
   });
 
   describe("run", () => {
-    it("Session の出力を返し、observe を run の後・呼び手へ戻る前に 1 回ずつ呼ぶ", async () => {
+    it("returns the Session's outputs and calls observe once per run, after the run and before returning to the caller", async () => {
       await withGpu(async (gpu) => {
         const log = emptyLog();
         const events: string[] = [];
@@ -205,9 +220,9 @@ describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
 
         const outputs = await withSession(gpu, spiedComponent(log), {}, observe, async (run) => {
           const first = await run(inputOf([1, 2]));
-          events.push("run 1 が戻った");
+          events.push("run 1 returned");
           const second = await run(inputOf([3, -4]));
-          events.push("run 2 が戻った");
+          events.push("run 2 returned");
           return [valuesOf(first), valuesOf(second)];
         });
 
@@ -215,14 +230,14 @@ describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
           [2, 4],
           [6, -8],
         ]);
-        assertEquals(events, ["observe", "run 1 が戻った", "observe", "run 2 が戻った"]);
-        // run の前に読んだ診断なら直近 run の欄は空のまま。
+        assertEquals(events, ["observe", "run 1 returned", "observe", "run 2 returned"]);
+        // Diagnostics read before the run would still have an empty latest-run field.
         assert(observed.every((diagnostics) => diagnostics.lastRun !== undefined));
         assertEquals(log.disposeCalls, 1);
       });
     });
 
-    it("observe が無くても Session の出力を返す", async () => {
+    it("returns the Session's outputs without observe as well", async () => {
       await withGpu(async (gpu) => {
         const log = emptyLog();
 
@@ -238,13 +253,14 @@ describe.skipIf(!GPU_AVAILABLE)("withSession（実 GPU）", () => {
 });
 
 /*
- * NOTE: `withSession` は最初に `createSession(gpu, …)` を呼ぶだけで、それより前に gpu を触らない。
- * 構築が即 reject する部品なら実アダプタは要らないので、`GpuContext` は偽物（`fake-gpu.ts`）を渡す。
+ * NOTE: `withSession` starts by calling `createSession(gpu, …)` and does not touch the gpu before
+ * that. A component whose build rejects immediately needs no real adapter, so a fake `GpuContext`
+ * (`fake-gpu.ts`) is passed.
  */
 describe("withSession", () => {
-  describe("Session の構築が落ちたとき", () => {
-    it("body を呼ばず、構築の例外をそのまま伝える", async () => {
-      const failure = new Error("Session を張れなかった");
+  describe("when building the Session fails", () => {
+    it("does not call the body and passes the build's exception through as is", async () => {
+      const failure = new Error("could not build the Session");
       const open = await openerOf({ dit: single() });
       const component: ModelComponent = {
         ...open("dit"),

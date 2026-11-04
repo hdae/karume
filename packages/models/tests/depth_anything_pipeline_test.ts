@@ -1,37 +1,41 @@
-// `Pipeline` の**構築ガード**と**前後処理の結線**。GPU も実資産も要らない範囲だけ
-// を見る（実 GPU の突合は `packages/runtime/tests/e2e_depth_anything_real_test.ts`〈golden 入力〉と
-// `e2e_depth_anything_real_test.ts`〈実画像の前処理パリティと判別〉が持つ — 重複させない）。
+// The **build guards** and the **pre- and post-processing wiring** of `Pipeline`. Only the part that needs
+// neither a GPU nor real assets is checked here (the real-GPU comparison is owned by
+// `packages/runtime/tests/e2e_depth_anything_real_test.ts` (golden inputs) and `e2e_depth_anything_real_test.ts`
+// (preprocessing parity on real images and discrimination) — not duplicated).
 //
-// 押さえるのは 4 点:
+// Four things are pinned:
 //
-// ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
-//    （`src/depth-anything/pipeline.ts` の `openDepthAnythingState` が掲げる MUST）。観測の
-//    仕掛けは SigLIP2 / BiRefNet 側と同じ — **全ケースで容器は揃えて**おき、
-//     - 契約違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の門が先
-//     - 正しい manifest + 空の Record が `部品 'depth' の容器が無い` で落ちる（受け口の診断）
-//    の 2 つで門の順序そのものを縛る。
-//    NOTE: 容器を開くのは admission の**前**（`assetComponentOpener` は同期の供給口を返すため
-//    先に全部品を開く — ADR 0109 の継ぎ目）。
+// ① `fromAssets` rejects **manifest contract violations before acquiring the GPU** (the MUST stated by
+//    `openDepthAnythingState` in `src/depth-anything/pipeline.ts`). The observation setup is the same as on the
+//    SigLIP2 / BiRefNet side — **every case has the containers in place**, and
+//     - a contract-violation case fails with "that violation's message" = the manifest check comes first even
+//       with the assets in place
+//     - a correct manifest + an empty Record fails with `component 'depth' has no container` (the diagnostic of
+//       the entry point)
+//    together pin the order of the checks itself.
+//    NOTE: the containers are opened **before** admission (`assetComponentOpener` returns a synchronous opener,
+//    so it opens every component first — the seam of ADR 0109).
 //
-// ② グラフ宣言との突合（`assertStaticDim` / `assertDepthShape`）の**拒否経路**。ここは
-//    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
-//    （`tests/helpers/stub-model.ts` が宣言だけの `GraphOwner` を組む）。門自身の軸番号や
-//    期待形がずれても、正常系だけを走らせている限り緑のまま通るため、**壊れた宣言を名指しで
-//    落とすこと**を毎回踏む。
+// ② The **rejection paths** of the comparison with the graph declaration (`assertStaticDim` /
+//    `assertDepthShape`). Inside `fromAssets` they cannot be reached without a real GPU and real assets, so the
+//    checks are called directly (`tests/helpers/stub-model.ts` builds a declaration-only `GraphOwner`). Even if
+//    the axis numbers or expected shapes of the checks themselves drift, they stay green as long as only the
+//    normal path runs, so **rejecting a broken declaration by name** is exercised every time.
 //
-// ③ 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
-//    `resizeRgb8`（**bicubic**）→ `normalizeToNchw` を通す。**Python 正本のフィクスチャは
-//    bicubic 枝にまだ無い**（bilinear 枝の `fixtures/image-preprocess/parity.json` は
-//    フィルタが違うので参照にならない）ので、ここは資産不要で**落ちうる**不変条件だけを見る:
-//     - 一様な画像は「宣言の定数がそのチャネルへ届いているか」を閉じた式で言える
-//     - 非正方の宣言を転置すると値が変わる
-//     - **bilinear で通した結果と一致しない**（既定へ落ちていれば一致してしまう）
-//    bicubic そのものの正しさは、①`image_preprocess_test.ts` のカーネル署名テストと
-//    ②実資産のある環境で毎回 `DPTImageProcessor` と突き合わせる E2E が持つ。
+// ③ The preprocessing wiring (`preprocessPixelValues`) runs `resizeRgb8` (**bicubic**) → `normalizeToNchw` as
+//    declared in `pipelineConfig`. **There is no Python-sourced fixture for the bicubic branch yet** (the
+//    bilinear branch's `fixtures/image-preprocess/parity.json` uses a different filter and cannot serve as a
+//    reference), so only invariants that need no assets and **can fail** are checked here:
+//     - for a uniform image, "do the declared constants reach that channel" can be stated in closed form
+//     - transposing a non-square declaration changes the values
+//     - **the result does not match the one run through bilinear** (it would match if it had fallen back to
+//       the default)
+//    The correctness of bicubic itself is owned by ① the kernel-signature test in `image_preprocess_test.ts`
+//    and ② the E2E that compares with `DPTImageProcessor` on every run in an environment with real assets.
 //
-// ④ 後処理（`resampleDepth`）が**値に触らない**こと。深度を `[0, 1]` へ畳まない決定
-//    （`pipeline.ts` のモジュール doc）は、畳んでも shape も非負性も合ったまま通るので、
-//    「畳んだら落ちる」形の検査を置く。
+// ④ Postprocessing (`resampleDepth`) **does not touch the values**. The decision not to fold the depth into
+//    `[0, 1]` (the module doc of `pipeline.ts`) would still pass with matching shape and non-negativity if it
+//    were folded, so a check of the "fails if folded" form is in place.
 
 import { test } from "vite-plus/test";
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -48,7 +52,7 @@ import { normalizeToNchw, resizeRgb8, type Rgb8Image } from "../src/image/prepro
 import { stubModel } from "./helpers/stub-model.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
-/** 宣言だけの `depth` 容器（家族の門が読む形まで再現し、実行はしない）。 */
+/** A declaration-only `depth` container (reproduces the shape the family's checks read; never runs). */
 const COMPONENT = partAssets(
   "depth",
   await tensorlessContainer("depth", {
@@ -57,7 +61,7 @@ const COMPONENT = partAssets(
   }),
 );
 
-/** `models/karume-depth-anything-v2/karume.json` の `small` の `pipelineConfig` 実物（5 欄）。 */
+/** The actual `pipelineConfig` of `small` in `models/karume-depth-anything-v2/karume.json` (5 fields). */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   imageWidth: 518,
   imageHeight: 518,
@@ -66,7 +70,7 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
   interpolation: "bicubic",
 };
 
-/** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["small"]` の中身を上書きする。 */
+/** The skeleton of a distribution (only the fields the checks need). `patch` overrides the contents of `models["small"]`. */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/5",
@@ -76,7 +80,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
       small: {
         pipeline: "depth-anything/1",
         weights: { depth: { f32: declaredContainer("small/depth/model.f32") } },
-        // 実行に要るのはグラフ 1 本だけ（tokenizer も表も無い）。
+        // Running needs only one graph (no tokenizer, no tables).
         assets: {},
         quants: { f32: { weights: { depth: "f32" }, session: {} } },
         defaultQuant: "f32",
@@ -88,7 +92,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: rejects a model that does not exist, listing the available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
@@ -97,7 +101,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipeline の契約名が depth-anything でない manifest を落とす", async () => {
+test("fromAssets: rejects a manifest whose pipeline contract name is not depth-anything", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/1" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -106,8 +110,8 @@ test("fromAssets: pipeline の契約名が depth-anything でない manifest を
   );
 });
 
-test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
-  // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
+test("fromAssets: an unknown major fails loudly (the check is the models side's job — ADR 0038 §1)", async () => {
+  // The only check that stops the silent degradation of "an old implementation × a new repo". The hub does not check the major.
   const manifest = parseManifest(manifestText({ pipeline: "depth-anything/2" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -116,7 +120,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   );
 });
 
-test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: rejects a quant that does not exist, listing the available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
@@ -125,8 +129,8 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
-  // 綴り違い（`imageMean` に対する `image_mean`）が黙って既定へ縮退する経路を作らない。
+test("fromAssets: an unknown key in pipelineConfig fails at build time", async () => {
+  // No path where a misspelling (`image_mean` for `imageMean`) silently falls back to a default.
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] } }),
   );
@@ -137,7 +141,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   );
 });
 
-test("fromAssets: bicubic 以外の補間を宣言した配布形は受理しない", async () => {
+test("fromAssets: does not accept a distribution that declares an interpolation other than bicubic", async () => {
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, interpolation: "bilinear" } }),
   );
@@ -148,9 +152,9 @@ test("fromAssets: bicubic 以外の補間を宣言した配布形は受理しな
   );
 });
 
-test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 上の 6 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
-  // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
+test("fromAssets: without the component's container it fails with both spellings (the entry point's diagnostic)", async () => {
+  // The flip side of the 6 cases above. A Record without the containers fails on the **missing component** (not
+  // on a manifest message) = the contrapositive showing that the cases above are not caught up in missing assets.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
@@ -159,9 +163,9 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   );
 });
 
-// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+// ---- Comparison with the graph declaration (rejection paths) ------------------------------------------
 
-/** 実配布形（small）と同じ宣言。`patch` で 1 点だけ壊す。 */
+/** The same declaration as the real distribution (small). `patch` breaks exactly one point. */
 const depthGraph = (
   patch: {
     readonly inputShape?: readonly (number | string)[];
@@ -176,8 +180,8 @@ const depthGraph = (
 
 const depthConfig = parseDepthAnythingPipelineConfig(PIPELINE_CONFIG);
 
-test("assertStaticDim: 宣言どおりのグラフは通り、事前学習解像度違いは名指しで落ちる", () => {
-  // DINOv2 の位置埋め込みはパッチ数に紐づくので、ここで落ちるのは常に**資産の取り違え**。
+test("assertStaticDim: a graph as declared passes, and a different pretraining resolution fails by name", () => {
+  // DINOv2's position embeddings are tied to the patch count, so a failure here is always **mixed-up assets**.
   assertStaticDim(depthGraph(), "pixel_values", 2, depthConfig.imageHeight, "imageHeight");
   const error = assertThrows(
     () =>
@@ -194,7 +198,7 @@ test("assertStaticDim: 宣言どおりのグラフは通り、事前学習解像
   assert(error.message.includes("pipelineConfig has 518"), error.message);
 });
 
-test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+test("assertStaticDim: rejects when the input name itself is missing", () => {
   assertThrows(
     () => assertStaticDim(depthGraph(), "pixel", 2, depthConfig.imageHeight, "imageHeight"),
     Error,
@@ -202,45 +206,49 @@ test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   );
 });
 
-test("assertDepthShape: 宣言どおりなら通り、チャネル軸を持ったままの出力は落ちる", () => {
-  // `[1, 1, S, S]` は中間段まで出す別 export の形で、要素数では `[1, S, S]` と区別できない。
-  assertDepthShape(depthGraph(), depthConfig, "深度地図の形");
+test("assertDepthShape: passes when as declared, and rejects an output that still has the channel axis", () => {
+  // `[1, 1, S, S]` is the shape of a different export that outputs up to an intermediate stage, and the element count cannot tell it from `[1, S, S]`.
+  assertDepthShape(depthGraph(), depthConfig, "depth map shape");
   assertThrows(
     () =>
-      assertDepthShape(depthGraph({ outputShape: [1, 1, 518, 518] }), depthConfig, "深度地図の形"),
+      assertDepthShape(
+        depthGraph({ outputShape: [1, 1, 518, 518] }),
+        depthConfig,
+        "depth map shape",
+      ),
     Error,
     "expected [1, 518, 518]",
   );
 });
 
-test("assertDepthShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
-  // `[1, 518]` は宣言されている全軸が期待と一致するので、`shape.length` を見ない門は素通しする。
+test("assertDepthShape: also rejects a shorter declaration whose leading axes match (a per-axis comparison alone would pass it)", () => {
+  // Every declared axis of `[1, 518]` matches the expectation, so a check that ignores `shape.length` lets it through.
   assertThrows(
-    () => assertDepthShape(depthGraph({ outputShape: [1, 518] }), depthConfig, "深度地図の形"),
+    () => assertDepthShape(depthGraph({ outputShape: [1, 518] }), depthConfig, "depth map shape"),
     Error,
     "graph output 'depth' has shape [1, 518]",
   );
 });
 
-test("assertDepthShape: 出力名の宣言が values に無ければ落とす", () => {
+test("assertDepthShape: rejects when the output name has no declaration in values", () => {
   const model = stubModel({
     inputs: [{ name: "pixel_values", shape: [1, 3, 518, 518] }],
     outputs: ["depth"],
     values: {},
   });
   assertThrows(
-    () => assertDepthShape(model, depthConfig, "深度地図の形"),
+    () => assertDepthShape(model, depthConfig, "depth map shape"),
     Error,
-    "depth-anything: graph output 'depth' has no declaration (深度地図の形)",
+    "depth-anything: graph output 'depth' has no declaration (depth map shape)",
   );
 });
 
-// ---- 前処理の結線（bicubic + ImageNet 統計）----------------------------------
+// ---- Preprocessing wiring (bicubic + ImageNet statistics) ----------------------------------
 
 const IMAGE_MEAN: readonly [number, number, number] = [0.485, 0.456, 0.406];
 const IMAGE_STD: readonly [number, number, number] = [0.229, 0.224, 0.225];
 
-/** そのケースの寸法をそのまま宣言した `pipelineConfig`（定数は配布形の実物）。 */
+/** A `pipelineConfig` that declares the case's size as is (the constants are the real distribution's). */
 const configFor = (width: number, height: number) =>
   parseDepthAnythingPipelineConfig({
     imageWidth: width,
@@ -250,7 +258,7 @@ const configFor = (width: number, height: number) =>
     interpolation: "bicubic",
   });
 
-/** チャネルごとに違う値で塗りつぶした RGB8（統計の順序違いが値に出る）。 */
+/** RGB8 filled with a different value per channel (a wrong order of the statistics shows in the values). */
 const solid = (
   width: number,
   height: number,
@@ -263,7 +271,7 @@ const solid = (
   return { data, width, height };
 };
 
-/** 市松 + 斜めランプ（bicubic と bilinear が別の値を出すだけの構造を持つ）。 */
+/** A checkerboard + a diagonal ramp (just enough structure for bicubic and bilinear to give different values). */
 const textured = (width: number, height: number): Rgb8Image => {
   const data = new Uint8Array(width * height * 3);
   for (let y = 0; y < height; y += 1) {
@@ -277,38 +285,39 @@ const textured = (width: number, height: number): Rgb8Image => {
   return { data, width, height };
 };
 
-test("前処理の結線: 一様な画像は宣言の mean / std がチャネルごとに掛かる", () => {
-  // resize の重みは総和 1 なので一様入力は一様のまま通り、残るのは正規化だけ。RGB を別々の
-  // 値にしてあるので、統計の順序違い（BGR / mean と std の入れ替え）はここで落ちる。
+test("preprocessing wiring: for a uniform image the declared mean / std are applied per channel", () => {
+  // The resize weights sum to 1, so a uniform input stays uniform and only normalization remains. R, G and B have
+  // different values, so a wrong order of the statistics (BGR / mean and std swapped) fails here.
   const color = [10, 200, 90] as const;
   const got = preprocessPixelValues(configFor(4, 2), solid(3, 5, color));
   assertEquals(got.length, 3 * 4 * 2);
   for (let channel = 0; channel < 3; channel += 1) {
     const expected = (color[channel] - IMAGE_MEAN[channel] * 255) / (IMAGE_STD[channel] * 255);
     for (let index = 0; index < 4 * 2; index += 1) {
-      assertAlmostEquals(got[channel * 8 + index], expected, 1e-5, `チャネル ${channel}`);
+      assertAlmostEquals(got[channel * 8 + index], expected, 1e-5, `channel ${channel}`);
     }
   }
 });
 
-test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
-  // 宣言の 2 欄が正しい引数の位置へ届いていることの担保（`resizeRgb8` は `(width, height)`
-  // の順）。正方形では原理的に検出できないので非正方で見る。
+test("preprocessing wiring: swapping imageWidth / imageHeight gives a different result", () => {
+  // Ensures the 2 declared fields reach the right argument positions (`resizeRgb8` takes `(width, height)`). A
+  // square cannot detect this in principle, so a non-square size is used.
   const image = textured(12, 9);
   const got = preprocessPixelValues(configFor(6, 4), image);
   const swapped = preprocessPixelValues(configFor(4, 6), image);
-  assertEquals(got.length, swapped.length, "要素数は転置しても同じ");
+  assertEquals(got.length, swapped.length, "the element count is the same after transposing");
   let matched = 0;
   for (let index = 0; index < got.length; index += 1) {
     if (got[index] === swapped[index]) matched += 1;
   }
-  assert(matched < got.length, "転置しても全標本が一致した（門が効いていない）");
+  assert(matched < got.length, "every sample matched after transposing (the check has no effect)");
 });
 
-test("前処理の結線: bicubic で通る（既定の bilinear へ落ちていない）", () => {
-  // `resizeRgb8` の `filter` 引数の既定は bilinear（既存 2 ファミリの値）なので、渡し忘れは
-  // 型検査を通り、shape も値域も合ったまま `pixel_values` がずれる（実測 0.59 = uint8 1 LSB
-  // の 34 倍）。同じ経路を bilinear で組んだ結果と**一致しない**ことがフィルタ選択の証拠。
+test("preprocessing wiring: runs through bicubic (has not fallen back to the default bilinear)", () => {
+  // The default of `resizeRgb8`'s `filter` argument is bilinear (the value of the 2 existing families), so
+  // forgetting to pass it passes the type check, and `pixel_values` drift with shape and range still matching
+  // (measured 0.59 = 34 times one uint8 LSB). **Not matching** the same path built with bilinear is the evidence
+  // of the filter choice.
   const image = textured(12, 9);
   const config = configFor(6, 4);
   const got = preprocessPixelValues(config, image);
@@ -318,12 +327,15 @@ test("前処理の結線: bicubic で通る（既定の bilinear へ落ちてい
   for (let index = 0; index < got.length; index += 1) {
     if (got[index] !== bilinear[index]) differing += 1;
   }
-  assert(differing > 0, "bicubic 指定が bilinear と同じ値を出した（既定へ落ちている）");
+  assert(
+    differing > 0,
+    "the bicubic setting gave the same values as bilinear (it has fallen back to the default)",
+  );
 });
 
-// ---- 後処理（深度地図 → 元解像度・値には触らない）----------------------------
+// ---- Postprocessing (depth map → original resolution, values untouched) ----------------------------
 
-test("後処理: 恒等寸法では値をそのまま通す（丸めも正規化も挟まない）", () => {
+test("postprocessing: at an identity size the values pass through as is (no rounding, no normalization)", () => {
   const depth = Float32Array.from([0, 0.25, 1.5, 4.75, 2, 0]);
   const map = resampleDepth(depth, 3, 2, 3, 2);
   assertEquals(map.width, 3);
@@ -331,33 +343,33 @@ test("後処理: 恒等寸法では値をそのまま通す（丸めも正規化
   assertEquals([...map.data], [...depth]);
 });
 
-test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない）", () => {
+test("postprocessing: the returned size is the **input image's** (not the graph's)", () => {
   const map = resampleDepth(new Float32Array(4 * 4), 4, 4, 7, 3);
   assertEquals(map.width, 7);
   assertEquals(map.height, 3);
   assertEquals(map.data.length, 21);
 });
 
-test("後処理: 相対深度の尺度を保つ（[0, 1] へ畳まない — 公開 API の決定）", () => {
-  // 正規化を足しても shape も非負性も合ったまま通るので、「畳んだら落ちる」形で固定する。
-  // min-max で畳んだ地図は必ず 0 と 1 を含み、上端 4.75 は残らない。
+test("postprocessing: keeps the scale of relative depth (does not fold into [0, 1] — a public API decision)", () => {
+  // Adding normalization would still pass with matching shape and non-negativity, so this is pinned in the
+  // "fails if folded" form. A min-max folded map always contains 0 and 1, and the top value 4.75 would not survive.
   const depth = Float32Array.from([2, 2.5, 3, 4.75]);
   const map = resampleDepth(depth, 4, 1, 4, 1);
-  assertEquals(map.data[0], 2, "下端が 0 へ落ちている（min-max 正規化が掛かっている）");
-  assertEquals(map.data[3], 4.75, "上端が 1 へ落ちている（min-max 正規化が掛かっている）");
+  assertEquals(map.data[0], 2, "the bottom value dropped to 0 (min-max normalization is applied)");
+  assertEquals(map.data[3], 4.75, "the top value dropped to 1 (min-max normalization is applied)");
 });
 
-test("後処理: 拡大しても非負のまま（重みが非負・総和 1）", () => {
-  // head 末尾の ReLU が出す「遠景は厳密に 0」という性質が、後処理で負へ潜らないこと。
-  // 負のローブを持つカーネル（bicubic）へ差し替えるとここが落ちる — モジュール doc の
-  // 「元解像度へ戻す段は bilinear」が値に出る唯一の点。
+test("postprocessing: stays non-negative when upscaled (non-negative weights summing to 1)", () => {
+  // The property "the far background is exactly 0" produced by the ReLU at the end of the head must not dip
+  // below 0 in postprocessing. Swapping in a kernel with negative lobes (bicubic) makes this fail — the only
+  // point where the module doc's "the step back to the original resolution is bilinear" shows in the values.
   const depth = Float32Array.from([0, 0, 5, 5]);
   const map = resampleDepth(depth, 4, 1, 16, 1);
-  for (const value of map.data) assert(value >= 0, `負の深度 ${value} が出た`);
-  assert(map.data[15] > map.data[0], "単調性が失われた（左右が入れ替わっている）");
+  for (const value of map.data) assert(value >= 0, `negative depth ${value} appeared`);
+  assert(map.data[15] > map.data[0], "monotonicity was lost (left and right are swapped)");
 });
 
-test("後処理: 横方向だけの勾配は拡大しても横方向だけ（軸の取り違え検出）", () => {
+test("postprocessing: a horizontal-only gradient stays horizontal-only when upscaled (detects swapped axes)", () => {
   const width = 6;
   const height = 4;
   const plane = new Float32Array(width * height);
@@ -367,16 +379,17 @@ test("後処理: 横方向だけの勾配は拡大しても横方向だけ（軸
   const map = resampleDepth(plane, width, height, 3, 9);
   for (let y = 1; y < 9; y += 1) {
     for (let x = 0; x < 3; x += 1) {
-      assertAlmostEquals(map.data[y * 3 + x], map.data[x], 1e-7, `行 ${y} 列 ${x}`);
+      assertAlmostEquals(map.data[y * 3 + x], map.data[x], 1e-7, `row ${y} column ${x}`);
     }
   }
-  assert(map.data[0] < map.data[2], "横方向の単調性が失われた（軸が入れ替わっている）");
+  assert(map.data[0] < map.data[2], "horizontal monotonicity was lost (the axes are swapped)");
 });
 
-test("後処理: 非有限の深度は resize の前に画素座標つきで落ちる（真っ黒な地図にしない）", () => {
-  // モジュール doc が配っている可視化レシピは `value < min` / `value > max` で走査するので、
-  // NaN は比較を素通りして `span` が非正になり、**全画素 0 = 一様な真っ黒の深度地図**が
-  // 正常値の顔で出る。BiRefNet の `matteFromLogits` と逐語同型の検査点を持つ。
+test("postprocessing: non-finite depth fails before the resize with pixel coordinates (no all-black map)", () => {
+  // The visualization recipe in the module doc scans with `value < min` / `value > max`, so NaN slips past the
+  // comparisons, `span` becomes non-positive, and **every pixel 0 = a uniformly black depth map** comes out
+  // looking like a normal value. This has a check point of the same form, word for word, as BiRefNet's
+  // `matteFromLogits`.
   const width = 4;
   const height = 3;
   for (const [index, bad] of [
@@ -385,21 +398,22 @@ test("後処理: 非有限の深度は resize の前に画素座標つきで落�
   ] as const) {
     const plane = new Float32Array(width * height).fill(1);
     plane[index] = bad;
-    // 座標まで文言に出ることを縛る — 要素数だけの検査だと resize の**後**へ移しても緑のまま
-    // 通る（NaN が近傍へ広がってから見ることになり、発生源が特定できない）。
+    // Pins that the coordinates appear in the message — a check on the element count alone would stay green even
+    // if the check moved **after** the resize (it would look after NaN spreads to neighbours, and the source could
+    // not be located).
     assertThrows(
       () => resampleDepth(plane, width, height, width, height),
       Error,
       `depth-anything: depth value (x=${index % width}, y=${Math.floor(index / width)}) is non-finite`,
     );
-    // 拡大する呼び出し（`resizePlaneF32` が重み付き和で NaN を広げる経路）でも同じ座標。
+    // The same coordinates for a call that upscales (the path where `resizePlaneF32` spreads NaN through weighted sums).
     assertThrows(
       () => resampleDepth(plane, width, height, 9, 7),
       Error,
       `(x=${index % width}, y=${Math.floor(index / width)})`,
     );
   }
-  // 対: 有限な平面はそのまま通る（門が恒真でないことの実証）。
+  // Counterpart: a finite plane passes as is (shows the check is not always true).
   const clean = Float32Array.from([0, 0.25, 1.5, 4.75, 2, 0]);
   assertEquals([...resampleDepth(clean, 3, 2, 3, 2).data], [...clean]);
 });

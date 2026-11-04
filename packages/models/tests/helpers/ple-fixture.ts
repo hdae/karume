@@ -1,15 +1,18 @@
 /**
- * 合成の PLE 索引と block（`src/gemma/ple.ts` / `ple-gpu.ts` の門が共有するフィクスチャ）。
+ * A synthetic PLE index and blocks (the fixture shared by the checks of `src/gemma/ple.ts` /
+ * `ple-gpu.ts`).
  *
- * 実資産を要さない — 索引は schema 3 の文書を組み立てて `parseGemma4PleIndex` に通し、block は
- * 「token 区間ぶんの行を隙間なく並べた生の行列」を決定的な値で作る（容器の資産と同じ形 —
- * ADR 0109 決定 4）。値は `quantized` / `scaleOf` から決まるので、逆量子化の期待値
- * （{@link expectedValue}）がテスト側で閉じる。
+ * It needs no real assets — the index is built as a schema 3 document and passed through
+ * `parseGemma4PleIndex`, and the blocks are made with deterministic values as "a raw matrix of the
+ * rows of a token range laid out without gaps" (the same shape as the container's assets — ADR 0109
+ * decision 4). The values follow from `quantized` / `scaleOf`, so the expected dequantized values
+ * ({@link expectedValue}) are computed entirely on the test side.
  *
- * 読み口（{@link PleFixture.openBlock}）は**呼び出しを全部記録する**。方針表の分岐（全量読み /
- * 行読み / 常駐 hit）は「どの block の・どの区間が・何回読まれたか」でしか観測できないためで、
- * 同時発行のピーク（`peak.inFlight`）も持つ — 1 read = 1 fd を取る取得元では、上限が効いている
- * ことは回数ではなくピークでしか見えない。
+ * The reader ({@link PleFixture.openBlock}) **records every call**. The branches of the policy
+ * table (full read / row read / resident hit) can be observed only through "which range of which
+ * block was read how many times", and it also keeps the peak of concurrent reads
+ * (`peak.inFlight`) — with a source where 1 read takes 1 fd, a working limit is visible only in the
+ * peak, not in the count.
  *
  * {@link pleBf16Fixture} builds the schema 5 form (a bf16 `values` table, no `scales`): its values
  * are chosen to be exact in bf16, so the expected gather ({@link expectedBf16Value}) is the chosen
@@ -32,17 +35,20 @@ import {
   SCHEMA,
 } from "../../src/gemma/ple-index.ts";
 
-/** 合成索引の寸法。 */
+/** The dimensions of the synthetic index. */
 export type PleFixtureSpec = {
   readonly storage?: Gemma4PleQuantizedStorage;
   readonly tokens: number;
   readonly layers: number;
   readonly dim: number;
-  /** 2 冪（f32 の乗算が厳密 — ADR 0085 決定 4 と同じ性質を合成側でも保つ）。 */
+  /**
+   * A power of 2 (f32 multiplication is exact — the synthetic side keeps the same property as ADR
+   * 0085 decision 4).
+   */
   readonly embedScale: number;
-  /** `values` の block 1 本が持つ token 行数（既定 = `tokens` = 1 本）。 */
+  /** The token rows one `values` block holds (default = `tokens` = 1 block). */
   readonly valueRows?: number;
-  /** `scales` の block 1 本が持つ token 行数（既定 = `valueRows`）。 */
+  /** The token rows one `scales` block holds (default = `valueRows`). */
   readonly scaleRows?: number;
   /**
    * Values per scale of a (token, layer) row: set = a schema 4 index (`groupSize` spelled, a scales
@@ -51,7 +57,7 @@ export type PleFixtureSpec = {
   readonly groupSize?: number;
 };
 
-/** 読み口が受けた区間 1 本。 */
+/** One range the reader received. */
 export type BlockRead = {
   readonly asset: string;
   readonly offset: number;
@@ -60,13 +66,13 @@ export type BlockRead = {
 
 /** What both fixture forms share (the document, the blocks and the recording reader). */
 export type PleFixtureBase = {
-  /** 索引の生 JSON（`parseGemma4PleIndex` の門を直接叩くときの元）。 */
+  /** The index's raw JSON (the source when driving the `parseGemma4PleIndex` check directly). */
   readonly document: Record<string, unknown>;
-  /** block 名 → 実体。 */
+  /** Block name → contents. */
   readonly blocks: ReadonlyMap<string, Uint8Array<ArrayBuffer>>;
-  /** `createGemma4Ple` / `createGemma4PleResident` の `openBlock`。 */
+  /** The `openBlock` for `createGemma4Ple` / `createGemma4PleResident`. */
   readonly openBlock: (asset: string) => AssetReader;
-  /** 開かれた読み口の本数（`asset()` の呼び出し回数）。 */
+  /** The number of readers opened (calls to `asset()`). */
   readonly opens: string[];
   readonly reads: BlockRead[];
   readonly peak: { inFlight: number };
@@ -78,17 +84,22 @@ export type PleFixture = PleFixtureBase & { readonly index: Gemma4PleQuantizedIn
 /** A bf16 fixture (schema 5 — {@link pleBf16Fixture}). */
 export type PleBf16Fixture = PleFixtureBase & { readonly index: Gemma4PleFloatIndex };
 
-/** i8 の値は `id * 10 + 層 * 2 + 列`（packed では格納幅で切り詰める）。 */
+/**
+ * The i8 value is `id * 10 + layer * 2 + column` (packed storage truncates it to the storage
+ * width).
+ */
 export const quantized = (id: number, layer: number, column: number): number =>
   id * 10 + layer * 2 + column;
 
 /**
- * per-row scale は `(id+1) / 2^(層+1)`。
+ * The per-row scale is `(id+1) / 2^(layer+1)`.
  *
- * MUST: **token にも依存させる**。層だけの関数にすると scale 表は 1 token 行ぶんの繰り返しに
- * なり、行の入れ替え・巡回・block の取り違えが「同じバイト列」になって、並びを見る主張が
- * どれも無感になる（scale がずれると形も dtype も合ったまま別 token で逆量子化する沈黙誤値）。
- * 分子は整数・分母は 2 冪なので f32 で厳密（逆量子化の期待値がテスト側で閉じる条件）。
+ * MUST: **make it depend on the token too**. As a function of the layer alone the scale table would
+ * repeat one token row, so swapped rows, rotation and mixed-up blocks would give "the same bytes",
+ * and every claim about order would be blind to them (a shifted scale dequantizes with another
+ * token's scale while the shape and dtype still match — a silent wrong value). The numerator is an
+ * integer and the denominator a power of 2, so it is exact in f32 (the condition for the expected
+ * dequantized values to be computed entirely on the test side).
  */
 export const scaleOf = (id: number, layer: number, group = 0): number =>
   // Group 0 is the schema 3 value as is; a later group adds group / 64 to the numerator, so every
@@ -104,7 +115,10 @@ export const groupOf = (spec: PleFixtureSpec, column: number): number =>
 const groupsOf = (spec: PleFixtureSpec): number =>
   spec.groupSize === undefined ? 1 : spec.dim / spec.groupSize;
 
-/** 格納 dtype で切り詰めた後の量子化値（packed は符号付き範囲へ折り返す）。 */
+/**
+ * The quantized value after truncation to the storage dtype (packed values wrap into the signed
+ * range).
+ */
 export const storedValue = (
   storage: Gemma4PleQuantizedStorage,
   id: number,
@@ -117,7 +131,10 @@ export const storedValue = (
   return (((quantized(id, layer, column) % span) + span) % span) - offset;
 };
 
-/** 逆量子化 → embed scale の 2 段（`writeRow` と同じ順序・同じ丸め点）。 */
+/**
+ * The two stages dequantize → embed scale (the same order and the same rounding points as
+ * `writeRow`).
+ */
 export const expectedValue = (
   spec: PleFixtureSpec,
   id: number,
@@ -129,7 +146,7 @@ export const expectedValue = (
       scaleOf(id, layer, groupOf(spec, column)),
   ) * spec.embedScale;
 
-/** 表 1 本ぶんの block 分割（`[start, stop)` の昇順・隙間なし）。 */
+/** The block partition of one table (ascending `[start, stop)`, no gaps). */
 const partition = (tokens: number, rows: number, prefix: string) => {
   const blocks: { asset: string; start: number; stop: number }[] = [];
   for (let start = 0; start < tokens; start += rows) {
@@ -158,8 +175,8 @@ const valuesBlockBytes = (
     for (let layer = 0; layer < spec.layers; layer += 1) {
       const base = row * rowBytes + (layer * spec.dim) / factor;
       for (let column = 0; column < spec.dim; column += 1) {
-        // i8 は素の符号付きバイト（`writeRow` は `Int8Array` でそのまま読む）。packed は
-        // `+ offset` で持ち上げた無符号のニブル / 2bit（`writeRow` が引き戻す）。
+        // i8 is a plain signed byte (`writeRow` reads it as `Int8Array` directly). packed is the
+        // unsigned nibble / 2 bits lifted by `+ offset` (`writeRow` brings it back).
         const value =
           storedValue(storage, start + row, layer, column) + (factor === 1 ? 0 : offset);
         bytes[base + Math.floor(column / factor)] |= (value & mask) << (bits * (column % factor));
@@ -187,13 +204,13 @@ const scalesBlockBytes = (
   return new Uint8Array(scales.buffer);
 };
 
-/** 読みを遅らせる口（中断と同時発行の観測に使う）。 */
+/** An option that delays reads (used to observe aborts and concurrent reads). */
 export type PleFixtureOptions = {
-  /** 各読みを 1 マクロタスク遅らせる（同時発行のピークが観測できるようになる）。 */
+  /** Delays each read by one macrotask (makes the peak of concurrent reads observable). */
   readonly defer?: boolean;
 };
 
-/** 合成の索引と block を作る。 */
+/** Builds the synthetic index and blocks. */
 export const pleFixture = (spec: PleFixtureSpec, options: PleFixtureOptions = {}): PleFixture => {
   const storage = spec.storage ?? "i8";
   const factor = packFactor({ storage });
@@ -240,15 +257,15 @@ const recordingReader = (
   const openBlock = (asset: string): AssetReader => {
     opens.push(asset);
     const bytes = blocks.get(asset);
-    if (bytes === undefined) throw new Error(`fixture: 知らない block '${asset}'`);
+    if (bytes === undefined) throw new Error(`fixture: unknown block '${asset}'`);
     return {
       role: asset.startsWith("ple.values") ? "ple-values" : "ple-scales",
       length: bytes.byteLength,
       read: (offset, length) => {
         if (offset < 0 || length < 0 || offset + length > bytes.byteLength) {
           throw new Error(
-            `fixture: block '${asset}' の区間 [${offset}, ${offset + length}) が` +
-              ` 長さ ${bytes.byteLength} の外`,
+            `fixture: block '${asset}': range [${offset}, ${offset + length}) is outside` +
+              ` its length ${bytes.byteLength}`,
           );
         }
         reads.push({ asset, offset, length });
@@ -259,8 +276,8 @@ const recordingReader = (
           options.defer === true
             ? new Promise<Uint8Array<ArrayBuffer>>((resolve) => setTimeout(() => resolve(slice), 0))
             : Promise.resolve(slice);
-        // 減らすのは**解決した後**（`finally`）— 返す前に減らすと、この数は常に 1 になり
-        // 「撒いたまま返ってきていない本数」を測らなくなる。
+        // Decrement only **after it settles** (`finally`) — decrementing before returning would
+        // keep this count at 1 and stop it measuring "reads issued but not yet returned".
         return pending.finally(() => {
           inFlight -= 1;
         });
@@ -343,16 +360,16 @@ export const pleBf16Fixture = (
   return { document, index, ...recordingReader(blocks, options) };
 };
 
-/** 索引が指す block 1 本ぶんのバイト数（テスト側が予算を組み立てるための口）。 */
+/** The bytes of one block the index points to (the entry for the test side to build budgets). */
 export const blockBytesOf = (index: Gemma4PleQuantizedIndex, table: "values" | "scales"): number =>
   (index[table].blocks[0].stop - index[table].blocks[0].start) * index[table].rowBytes;
 
 /**
- * フィクスチャを**容器の部品の面**（{@link Gemma4PleAssetSource}）へ畳む
- * （`readGemma4PleIndex` / `assertGemma4PleAssets` の門を叩くための口）。
+ * Folds the fixture into **the container's component surface** ({@link Gemma4PleAssetSource})
+ * (the entry for driving the checks of `readGemma4PleIndex` / `assertGemma4PleAssets`).
  *
- * `patch` は宣言だけを壊す口で、`undefined` を渡すとその資産を「容器が宣言していない」形に、
- * `{role}` / `{length}` を渡すと役割・論理長だけを差し替えた形にする。
+ * `patch` breaks only the declarations: passing `undefined` makes the asset "not declared by the
+ * container", and passing `{role}` / `{length}` replaces only the role / logical length.
  */
 export const pleComponentOf = (
   fixture: PleFixtureBase,
@@ -384,7 +401,7 @@ export const pleComponentOf = (
     assets: Object.fromEntries([...declared].map(([asset, entry]) => [asset, entry.role])),
     asset: (asset: string): AssetReader => {
       const entry = declared.get(asset);
-      if (entry === undefined) throw new Error(`fixture: 未宣言の資産 '${asset}'`);
+      if (entry === undefined) throw new Error(`fixture: undeclared asset '${asset}'`);
       if (asset === PLE_INDEX_ASSET) {
         return {
           role: entry.role,

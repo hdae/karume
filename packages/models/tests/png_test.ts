@@ -1,25 +1,26 @@
-// 共通 image 層（RGBA → PNG）の挙動テスト。GPU も資産も要らない純関数。
+// Behaviour tests of the shared image layer (RGBA → PNG). Pure functions; no GPU and no assets.
 //
-// 主張は 3 つ: ①CRC-32 が既知ベクタと合う ②チャンク構造が PNG 仕様どおり ③IDAT を展開すると
-// 元の画素列に**行ずれなく**戻る（filter バイトの挿入漏れは長さ検査では捕まらない）。
-// 圧縮結果のバイト列そのものは固定しない（zlib のバージョンで変わるため — 代わりに往復一致が
-// 中身を保証する）。
+// Three claims: ① CRC-32 matches known vectors ② the chunk structure follows the PNG spec ③
+// inflating IDAT gives back the original pixels **without a row shift** (a missing filter byte is
+// not caught by a length check). The compressed bytes themselves are not pinned (they change with
+// the zlib version — the round trip guarantees the content instead).
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import { crc32, encodePng } from "../src/image/png.ts";
 
-test("crc32: 既知ベクタ（CRC-32/ISO-HDLC の check 値と IEND チャンク）", () => {
+test("crc32: known vectors (the CRC-32/ISO-HDLC check value and the IEND chunk)", () => {
   const ascii = (text: string) => Uint8Array.from(text, (c) => c.charCodeAt(0));
-  // CRC-32/ISO-HDLC の標準 check 値。
+  // The standard check value of CRC-32/ISO-HDLC.
   assertEquals(crc32(ascii("123456789")), 0xcbf43926);
-  // PNG の IEND チャンク（型 4 バイトのみ・データ長 0）の CRC は仕様上いつもこの値。
+  // By the spec, the CRC of PNG's IEND chunk (4 type bytes only, data length 0) is always this
+  // value.
   assertEquals(crc32(ascii("IEND")), 0xae426082);
   assertEquals(crc32(new Uint8Array(0)), 0);
 });
 
-/** PNG のチャンクを頭から辿る（長さ・型・CRC を全部見る）。 */
+/** Walks the PNG chunks from the start (checking length, type and CRC of each). */
 const walkChunks = (
   png: Uint8Array<ArrayBuffer>,
 ): readonly { type: string; data: Uint8Array; crcOk: boolean }[] => {
@@ -37,7 +38,7 @@ const walkChunks = (
   return chunks;
 };
 
-test("encodePng: シグネチャ + IHDR/IDAT/IEND の順で、全チャンクの CRC が合う", async () => {
+test("encodePng: signature + IHDR/IDAT/IEND in that order, and every chunk's CRC matches", async () => {
   const width = 3;
   const height = 2;
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -55,29 +56,30 @@ test("encodePng: シグネチャ + IHDR/IDAT/IEND の順で、全チャンクの
     chunks.map((chunk) => chunk.type),
     ["IHDR", "IDAT", "IEND"],
   );
-  for (const chunk of chunks) assert(chunk.crcOk, `${chunk.type} の CRC が合わない`);
+  for (const chunk of chunks) assert(chunk.crcOk, `${chunk.type} CRC does not match`);
 
   const ihdr = new DataView(
     chunks[0].data.buffer,
     chunks[0].data.byteOffset,
     chunks[0].data.byteLength,
   );
-  assertEquals(ihdr.getUint32(0), width, "IHDR の幅");
-  assertEquals(ihdr.getUint32(4), height, "IHDR の高さ");
+  assertEquals(ihdr.getUint32(0), width, "IHDR width");
+  assertEquals(ihdr.getUint32(4), height, "IHDR height");
   assertEquals(
     [...chunks[0].data.subarray(8)],
     [8, 2, 0, 0, 0],
-    "深度8 / truecolor / 非インタレース",
+    "bit depth 8 / truecolor / non-interlaced",
   );
-  assertEquals(chunks[2].data.length, 0, "IEND はデータを持たない");
+  assertEquals(chunks[2].data.length, 0, "IEND has no data");
 });
 
-test("encodePng: IDAT を DecompressionStream で戻すと元の画素列に一致する", async () => {
+test("encodePng: inflating IDAT with DecompressionStream gives back the original pixels", async () => {
   const width = 5;
   const height = 4;
   const rgba = new Uint8ClampedArray(width * height * 4);
   for (let index = 0; index < width * height; index += 1) {
-    // 行ずれ（filter バイトの挿入漏れ）が起きたら必ず変わるよう、隣接画素を全て別値にする。
+    // Give every neighbouring pixel a different value so that a row shift (a missing filter byte)
+    // always changes the result.
     rgba[index * 4] = (index * 37) % 256;
     rgba[index * 4 + 1] = (index * 91 + 7) % 256;
     rgba[index * 4 + 2] = (index * 13 + 200) % 256;
@@ -85,7 +87,7 @@ test("encodePng: IDAT を DecompressionStream で戻すと元の画素列に一�
   }
   const png = await encodePng(rgba, width, height);
   const idat = walkChunks(png).find((chunk) => chunk.type === "IDAT");
-  assert(idat !== undefined, "IDAT が無い");
+  assert(idat !== undefined, "no IDAT");
 
   const source = new ReadableStream<BufferSource>({
     start(controller) {
@@ -98,24 +100,25 @@ test("encodePng: IDAT を DecompressionStream で戻すと元の画素列に一�
   );
 
   const stride = 1 + width * 3;
-  assertEquals(raw.length, height * stride, "展開後の長さ（filter バイト込み）");
+  assertEquals(raw.length, height * stride, "inflated length (including filter bytes)");
   for (let y = 0; y < height; y += 1) {
-    assertEquals(raw[y * stride], 0, `行 ${y} の filter type（None）`);
+    assertEquals(raw[y * stride], 0, `filter type of row ${y} (None)`);
     for (let x = 0; x < width; x += 1) {
       const source = (y * width + x) * 4;
       const target = y * stride + 1 + x * 3;
       assertEquals(
         [raw[target], raw[target + 1], raw[target + 2]],
         [rgba[source], rgba[source + 1], rgba[source + 2]],
-        `画素 (${x}, ${y})`,
+        `pixel (${x}, ${y})`,
       );
     }
   }
 });
 
-test("encodePng: サイズが正の整数でなければ落とす（長さ検査より先）", async () => {
-  // `imageToRgba` 側には同型の門のテストがある（`anima_latents_test.ts`）ので、こちら側だけが
-  // 裸だった。0 / 負 / 端数は行ストライドの計算が破綻するので、長さが合っていても通さない。
+test("encodePng: rejects a size that is not a positive integer (before the length check)", async () => {
+  // `imageToRgba` has a test of the same check (`anima_latents_test.ts`), so only this side was
+  // uncovered. 0, negative and fractional sizes break the row-stride calculation, so they are
+  // rejected even when the length happens to match.
   for (const bad of [0, -1, 1.5]) {
     await assertRejects(
       () => encodePng(new Uint8ClampedArray(4), bad, 1),
@@ -128,8 +131,9 @@ test("encodePng: サイズが正の整数でなければ落とす（長さ検査
       "is not a positive integer",
     );
   }
-  // 門の順序: `width × height × 4` が偶然 RGBA 長と一致する組でも、長さ検査より先に
-  // 寸法の検査で落ちる（後段だと「長さは合っているのに壊れた PNG」を作る経路になる）。
+  // Check order: even for a pair whose `width × height × 4` happens to equal the RGBA length, the
+  // size check fails before the length check (checked later, it would be a path that produces a
+  // broken PNG whose length is correct).
   await assertRejects(
     () => encodePng(new Uint8ClampedArray(4), 2, 0.5),
     ModelInputError,
@@ -137,7 +141,7 @@ test("encodePng: サイズが正の整数でなければ落とす（長さ検査
   );
 });
 
-test("encodePng: 不透明でない画素は落とす（黙って不透明化しない）", async () => {
+test("encodePng: rejects non-opaque pixels (does not silently make them opaque)", async () => {
   const rgba = new Uint8ClampedArray([1, 2, 3, 254]);
   await assertRejects(() => encodePng(rgba, 1, 1), ModelInputError, "Alpha");
   await assertRejects(
@@ -147,19 +151,20 @@ test("encodePng: 不透明でない画素は落とす（黙って不透明化し
   );
 });
 
-// ---- 入力起因かどうかの分類（ADR 0107）------------------------------------
+// ---- Classifying whether a failure is caused by the input (ADR 0107) --------
 
-describe("encodePng の失敗をホストが 400 / 500 に振り分けるとき", () => {
-  it("呼び手が渡した寸法の違反は ModelInputError で捕まる", async () => {
+describe("when a host sorts encodePng failures into 400 / 500", () => {
+  it("a bad size passed by the caller is caught as ModelInputError", async () => {
     await assertRejects(() => encodePng(new Uint8ClampedArray(4), 0, 1), ModelInputError);
   });
 
-  it("呼び手が渡した RGBA の長さ違反も ModelInputError で捕まる", async () => {
+  it("a bad RGBA length passed by the caller is also caught as ModelInputError", async () => {
     await assertRejects(() => encodePng(new Uint8ClampedArray(3), 1, 1), ModelInputError);
   });
 
-  it("呼び手が渡した RGBA の中身（アルファ）の違反も同じ型で捕まる", async () => {
-    // 同じ引数の同じ関数で型が割れていると、ホストは寸法と中身で分岐を書き分ける羽目になる。
+  it("bad RGBA content (alpha) passed by the caller is caught as the same type", async () => {
+    // If the same function split its error types over the same argument, a host would have to
+    // write separate branches for size and content.
     await assertRejects(
       () => encodePng(new Uint8ClampedArray([1, 2, 3, 254]), 1, 1),
       ModelInputError,
@@ -167,18 +172,18 @@ describe("encodePng の失敗をホストが 400 / 500 に振り分けるとき"
   });
 });
 
-test("encodePng: deflate が効いている（一様画像が生バイト列より十分小さい）", async () => {
+test("encodePng: deflate is effective (a uniform image is much smaller than the raw bytes)", async () => {
   const width = 64;
   const height = 64;
   const rgba = new Uint8ClampedArray(width * height * 4).fill(255);
   const png = await encodePng(rgba, width, height);
   assert(
     png.length < (width * height * 3) / 10,
-    `PNG ${png.length}B が無圧縮 ${width * height * 3}B の 1/10 未満でない`,
+    `PNG ${png.length}B is not under 1/10 of the uncompressed ${width * height * 3}B`,
   );
 });
 
-test("encodePng: 同じ入力からバイト単位で同じ PNG が出る（決定性）", async () => {
+test("encodePng: the same input gives a byte-identical PNG (determinism)", async () => {
   const width = 7;
   const height = 5;
   const rgba = new Uint8ClampedArray(width * height * 4);
@@ -193,7 +198,8 @@ test("encodePng: 同じ入力からバイト単位で同じ PNG が出る（決�
     encodePng(rgba, width, height),
   ]);
   assertEquals(first, second);
-  // 生成画像の同一性を sha256 で門にする運用（ADR 0037 の P3 門）は、この決定性の上に立つ。
+  // Checking generated images for identity by sha256 (ADR 0037's P3 check) rests on this
+  // determinism.
   const digest = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)))
       .map((byte) => byte.toString(16).padStart(2, "0"))

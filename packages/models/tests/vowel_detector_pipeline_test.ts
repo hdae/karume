@@ -1,39 +1,47 @@
-// `Pipeline` の**構築ガード**と、運用上限 / mel 基底資産の結線。GPU も実資産も
-// 要らない範囲だけを見る（実 GPU の突合は `packages/e2e/tests/e2e_vowel_detector_chain_test.ts`
-//〈合成 golden のロジット〉と `e2e_vowel_detector_chain_test.ts`〈実音声の全鎖 → `.lab`〉が
-// 持つ — 重複させない。ホスト層の Python 正本とのパリティは
-// `packages/models/tests/vowel_detector_host_test.ts`）。
+// The **construction guards** of `Pipeline`, and the wiring of the operating limits / the mel basis
+// asset. Only what needs neither a GPU nor real assets is covered here (the real-GPU comparison
+// belongs to `packages/e2e/tests/e2e_vowel_detector_chain_test.ts` <the logits of a synthetic
+// golden> and `e2e_vowel_detector_chain_test.ts` <the full chain on real audio → `.lab`> — not
+// duplicated. Parity of the host layer with the Python reference is in
+// `packages/models/tests/vowel_detector_host_test.ts`).
 //
-// 押さえるのは 6 点:
+// Six things are pinned:
 //
-// ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
-//    （`src/vowel-detector/pipeline.ts` の `openVowelDetectorState` が掲げる MUST）。観測の
-//    仕掛けは SigLIP2 / BiRefNet と同じ — **全ケースで容器は揃えて**おき、
-//     - 契約違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の門が先
-//     - 正しい manifest + 空の Record が `部品 'crnn' の容器が無い` で落ちる（受け口の診断）
-//    の 2 つで門の順序そのものを縛る。
-//    NOTE: 容器を開くのは admission の**前**（`assetComponentOpener` は同期の供給口を返すため
-//    先に全部品を開く — ADR 0109 の継ぎ目）。
+// (1) `fromAssets` rejects **manifest contract violations before acquiring the GPU** (the MUST stated
+//     by `openVowelDetectorState` in `src/vowel-detector/pipeline.ts`). The observation setup is the
+//     same as SigLIP2 / BiRefNet — **every case is given the containers**, and
+//      - a contract-violation case fails with "that violation's message" = the manifest check comes
+//        first even when the assets are all there
+//      - a correct manifest + an empty Record fails with `component 'crnn' has no container` (the
+//        diagnostic at the entry)
+//     together pin the order of the checks itself.
+//     NOTE: the containers are opened **before** admission (`assetComponentOpener` returns a
+//     synchronous supply, so every component is opened first — the seam of ADR 0109).
 //
-// ② グラフ宣言との突合（`assertGraph`）の**拒否経路**。`fromAssets` の中では実資産が
-//    揃わないと踏めないので、門を直接叩く（`tests/helpers/stub-model.ts` が宣言だけの
-//    `GraphOwner` を組む）。長さを固定して焼いた古い形は**入出力の名前も階数も同じ**なので、
-//    門の綴りが `format/dims.ts` の正準表記からずれても正常系だけなら緑のまま通る。
+// (2) The **rejection paths** of the comparison with the graph declaration (`assertGraph`). Inside
+//     `fromAssets` they cannot be reached without the real assets, so the check is called directly
+//     (`tests/helpers/stub-model.ts` builds a declaration-only `GraphOwner`). The old form baked at a
+//     fixed length has **the same input/output names and ranks**, so if the check's spelling drifted
+//     from the canonical notation of `format/dims.ts`, the happy path alone would stay green.
 //
-// ③ `pipelineConfig` の**宣言 3 欄**（sampleRate / featureDim / classes）は受理集合が 1 値
-//    きりで、外れた配布形はパース時に落ちる。とくに `classes` は**並びが id** なので、
-//    置換された宣言が通ると `.lab` は成立したままラベルだけが入れ替わる。
+// (3) The **3 declared fields** of `pipelineConfig` (sampleRate / featureDim / classes) each accept
+//     exactly one value, and a distribution outside that fails at parse time. In particular the
+//     **order of `classes` is the id**, so if a permuted declaration passed, the `.lab` would stay
+//     well-formed with only the labels swapped.
 //
-// ④ **運用範囲**（`assertFrameFloor` / `assertFrameLimit`）— 下限未満も上限超過も
-//    fail loudly。ここは「黙って切り詰めない・黙って pad しない」という配布形の約束そのもの
-//    で、境界（ちょうどの長さ・1 フレーム外側）を両側とも名指しで踏む。範囲は配布形の宣言
-//    なので、TS 側に定数を持たない（`config.ts` の MUST）。
+// (4) The **operating range** (`assertFrameFloor` / `assertFrameLimit`) — both below the floor and
+//     above the limit fail loudly. This is the distribution's promise itself, "no silent truncation,
+//     no silent padding", and the boundaries (the exact length, one frame outside) are exercised by
+//     name on both sides. The range is declared by the distribution, so the TS side holds no
+//     constant for it (the MUST in `config.ts`).
 //
-// ⑤ **mel 基底資産**（`parseMelBasis`）— テンソル名・dtype・形の 3 つを見る。基底がずれても
-//    特徴は「それらしい別の値」になるだけで、shape も値域も合ったまま最後まで通る。
+// (5) The **mel basis asset** (`parseMelBasis`) — tensor name, dtype and shape are checked. Even with
+//     a wrong basis the features just become "another plausible value" and pass to the end with the
+//     right shape and range.
 //
-// ⑥ **検出の実行経路の例外**（偽の Session）— run や診断コールバックの失敗の後に Session の
-//    解放まで落ちても、呼び手の例外から最初の失敗を辿れる。
+// (6) **Exceptions on the detection run path** (a fake Session) — even when releasing the Session
+//     also fails after a failure of run or of the diagnostics callback, the first failure can be
+//     traced from the exception the caller gets.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
@@ -67,17 +75,17 @@ import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/co
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
 /**
- * 配布形が宣言する運用範囲
- * （`tools/export-recipes/vowel_detector/distribution.py` の `VOWEL_DETECTOR_MIN_FRAMES` /
- * `VOWEL_DETECTOR_MAX_FRAMES` と同じ数 — 記号 `T` の `Dim(min, max)` を 10ms 側の単位へ
- * 直したもの）。
+ * The operating range the distribution declares
+ * (the same numbers as `VOWEL_DETECTOR_MIN_FRAMES` / `VOWEL_DETECTOR_MAX_FRAMES` in
+ * `tools/export-recipes/vowel_detector/distribution.py` — the `Dim(min, max)` of the symbol `T`
+ * converted to 10ms units).
  */
 const MIN_FRAMES = 4;
 const MAX_FRAMES = 60_000;
 
 const fileRef = (path: string) => ({ path, size: 16, sha256: "a".repeat(64) });
 
-/** 宣言だけの `crnn` 容器（家族の門が読む形まで再現し、実行はしない）。 */
+/** A declaration-only `crnn` container (reproduces what the family checks read, never runs). */
 const COMPONENT = partAssets(
   "crnn",
   await tensorlessContainer("crnn", {
@@ -87,7 +95,7 @@ const COMPONENT = partAssets(
   }),
 );
 
-/** `models/karume-vowel-detector/karume.json` の `pipelineConfig` 実物（5 欄）。 */
+/** The actual `pipelineConfig` of `models/karume-vowel-detector/karume.json` (5 fields). */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   sampleRate: SAMPLE_RATE,
   featureDim: FEATURE_DIM,
@@ -96,7 +104,7 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
   maxFrames: MAX_FRAMES,
 };
 
-/** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["crnn-epoch3"]` の中身を上書きする。 */
+/** The skeleton of the distribution (only the fields the checks need). `patch` overrides the contents of `models["crnn-epoch3"]`. */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/5",
@@ -119,7 +127,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: a model that does not exist fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
@@ -128,7 +136,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipeline の契約名が vowel-detector でない manifest を落とす", async () => {
+test("fromAssets: rejects a manifest whose pipeline contract name is not vowel-detector", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -137,8 +145,9 @@ test("fromAssets: pipeline の契約名が vowel-detector でない manifest を
   );
 });
 
-test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
-  // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
+test("fromAssets: an unknown major fails loudly (checking it is the models side's job — ADR 0038 §1)", async () => {
+  // The only check that stops silent degradation of "old implementation × new repository". The hub
+  // does not check the major.
   const manifest = parseManifest(manifestText({ pipeline: "vowel-detector/2" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -147,7 +156,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   );
 });
 
-test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: a quant that does not exist fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
@@ -156,8 +165,8 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
-  // 綴り違い（`maxFrames` に対する `max_frames`）が黙って既定へ縮退する経路を作らない。
+test("fromAssets: an unknown pipelineConfig key fails at construction", async () => {
+  // No path where a misspelling (`max_frames` for `maxFrames`) silently degrades to the default.
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, max_frames: 200 } }),
   );
@@ -168,9 +177,10 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   );
 });
 
-test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 上の 5 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
-  // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
+test("fromAssets: a missing component container fails with the spellings of both forms (the diagnostic at the entry)", async () => {
+  // The flip side of the 5 cases above. A Record without the containers fails on **the missing
+  // component** (not on a manifest message) = the contrapositive showing the cases above were not
+  // caught up in missing assets.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
@@ -179,9 +189,10 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   );
 });
 
-test("fromAssets: 容器が揃っていれば資産（mel_basis）の不在まで進む", async () => {
-  // 家族の門を全部通った先に残るのは manifest の `assets`（全量面）— ここで初めて
-  // `mel_basis` の不在が見える（門の順序が資産の解析より前であることの対偶）。
+test("fromAssets: with the containers present it gets as far as the missing asset (mel_basis)", async () => {
+  // What remains after every family check is the manifest's `assets` (the full surface) — only here
+  // does the missing `mel_basis` show (the contrapositive showing the checks come before the asset
+  // parsing).
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -190,12 +201,12 @@ test("fromAssets: 容器が揃っていれば資産（mel_basis）の不在ま�
   );
 });
 
-// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+// ---- Comparison with the graph declaration (rejection paths) ---------------
 
-/** 実配布形と同じ pipelineConfig（この節は宣言の突合だけを見る）。 */
+/** The same pipelineConfig as the real distribution (this section only checks the declaration comparison). */
 const graphConfig = parseVowelDetectorPipelineConfig(PIPELINE_CONFIG);
 
-/** 記号長 1 グラフ（ADR 0056 / 0057）の宣言。`patch` で 1 点だけ壊す。 */
+/** The declaration of a single symbolic-length graph (ADR 0056 / 0057). `patch` breaks one point. */
 const crnnGraph = (
   patch: {
     readonly symbols?: readonly string[];
@@ -216,12 +227,13 @@ const crnnGraph = (
     values: { logits: patch.outputShape ?? [1, "T", LIPSYNC_CLASSES.length] },
   });
 
-test("assertGraph: 記号長で焼かれたグラフは時間軸の記号名を返す", () => {
+test("assertGraph: a graph baked with a symbolic length returns the time axis's symbol name", () => {
   assertEquals(assertGraph(crnnGraph(), graphConfig), "T");
 });
 
-test("assertGraph: 長さを固定して焼いた古い形は記号次元で落ちる", () => {
-  // 入出力の名前も階数も同じなので、同じ席に置かれても構築は通ってしまう形。
+test("assertGraph: the old form baked at a fixed length fails on the symbolic dimensions", () => {
+  // The input/output names and ranks are the same, so placed in the same slot it would pass
+  // construction.
   assertThrows(
     () =>
       assertGraph(
@@ -237,8 +249,8 @@ test("assertGraph: 長さを固定して焼いた古い形は記号次元で落�
   );
 });
 
-test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら落とす", () => {
-  // 係数が抜けた配布形は `.lab` の時間が 2 倍に伸びるだけで、形は成立する。
+test("assertGraph: fails when the factor of 2 is missing from the input's time axis", () => {
+  // A distribution without the factor just stretches the `.lab` times twofold; the shapes still work.
   assertThrows(
     () => assertGraph(crnnGraph({ inputShape: [1, "T", FEATURE_DIM] }), graphConfig),
     Error,
@@ -246,7 +258,7 @@ test("assertGraph: 入力の時間軸から 2 倍の係数が抜けたら落と�
   );
 });
 
-test("assertGraph: 入力名が features でなければ落とす", () => {
+test("assertGraph: fails when the input name is not features", () => {
   assertThrows(
     () => assertGraph(crnnGraph({ inputName: "input" }), graphConfig),
     Error,
@@ -254,8 +266,8 @@ test("assertGraph: 入力名が features でなければ落とす", () => {
   );
 });
 
-test("assertGraph: 出力のクラス数が宣言と違えば落とす", () => {
-  // クラス数がずれると `.lab` は成立したままラベルの割り当てだけが崩れる。
+test("assertGraph: fails when the output's class count differs from the declaration", () => {
+  // With a wrong class count the `.lab` stays well-formed and only the label assignment breaks.
   assertThrows(
     () => assertGraph(crnnGraph({ outputShape: [1, "T", 5] }), graphConfig),
     Error,
@@ -263,12 +275,12 @@ test("assertGraph: 出力のクラス数が宣言と違えば落とす", () => {
   );
 });
 
-// ---- pipelineConfig のスキーマ（宣言 3 欄 + 運用範囲 2 欄）--------------------
+// ---- The pipelineConfig schema (3 declared fields + 2 operating-range fields) ----
 
 const config = (patch: Record<string, unknown> = {}): VowelDetectorPipelineConfig =>
   parseVowelDetectorPipelineConfig({ ...PIPELINE_CONFIG, ...patch });
 
-test("pipelineConfig: 実物の 5 欄をそのまま読める", () => {
+test("pipelineConfig: the 5 actual fields are read as is", () => {
   const parsed = config();
   assertEquals(parsed.sampleRate, SAMPLE_RATE);
   assertEquals(parsed.featureDim, FEATURE_DIM);
@@ -277,7 +289,7 @@ test("pipelineConfig: 実物の 5 欄をそのまま読める", () => {
   assertEquals(parsed.maxFrames, MAX_FRAMES);
 });
 
-test("pipelineConfig: 16kHz 以外の配布形は受理しない（リサンプラを持たない）", () => {
+test("pipelineConfig: a distribution at other than 16kHz is not accepted (there is no resampler)", () => {
   assertThrows(
     () => config({ sampleRate: 22050 }),
     Error,
@@ -285,7 +297,7 @@ test("pipelineConfig: 16kHz 以外の配布形は受理しない（リサンプ�
   );
 });
 
-test("pipelineConfig: 特徴次元が 83 でない配布形は受理しない", () => {
+test("pipelineConfig: a distribution whose feature dimension is not 83 is not accepted", () => {
   assertThrows(
     () => config({ featureDim: 80 }),
     Error,
@@ -293,8 +305,9 @@ test("pipelineConfig: 特徴次元が 83 でない配布形は受理しない", 
   );
 });
 
-test("pipelineConfig: クラスの**並び**が違う配布形は受理しない（並びが id）", () => {
-  // 集合としては同じで並びだけが違う = ラベルが置換されるだけで .lab は完全に成立する形。
+test("pipelineConfig: a distribution with a different **order** of classes is not accepted (the order is the id)", () => {
+  // The same set in a different order = the labels are just permuted and the .lab is fully
+  // well-formed.
   const swapped = [...LIPSYNC_CLASSES];
   [swapped[0], swapped[1]] = [swapped[1], swapped[0]];
   assertThrows(
@@ -304,8 +317,9 @@ test("pipelineConfig: クラスの**並び**が違う配布形は受理しない
   );
 });
 
-test("pipelineConfig: 奇数・非整数・非正の上限宣言は落とす", () => {
-  // グラフ入力は `2T` なので、奇数の上限は「その 1 本だけ通らない上限」= 意味が壊れている。
+test("pipelineConfig: an odd, non-integer or non-positive limit declaration fails", () => {
+  // The graph input is `2T`, so an odd limit is "a limit that only that one frame fails to pass" =
+  // its meaning is broken.
   for (const value of [251, 0, -2, 2.5, "2000"]) {
     assertThrows(
       () => config({ maxFrames: value }),
@@ -316,7 +330,7 @@ test("pipelineConfig: 奇数・非整数・非正の上限宣言は落とす", (
   }
 });
 
-test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しない）", () => {
+test("pipelineConfig: a missing limit fails (no fallback to a default)", () => {
   const { maxFrames: _dropped, ...rest } = PIPELINE_CONFIG;
   assertThrows(
     () => parseVowelDetectorPipelineConfig(rest),
@@ -325,8 +339,9 @@ test("pipelineConfig: 上限の欠落は落とす（既定へ縮退しない）"
   );
 });
 
-test("pipelineConfig: 奇数・非整数・非正の下限宣言は落とす", () => {
-  // 下限も 10ms フレーム数（グラフ入力は `2T`）なので、上限と同じ刻みの検査が掛かる。
+test("pipelineConfig: an odd, non-integer or non-positive floor declaration fails", () => {
+  // The floor is also a count of 10ms frames (the graph input is `2T`), so the same step check as the
+  // limit applies.
   for (const value of [3, 0, -2, 2.5, "4"]) {
     assertThrows(
       () => config({ minFrames: value }),
@@ -337,7 +352,7 @@ test("pipelineConfig: 奇数・非整数・非正の下限宣言は落とす", (
   }
 });
 
-test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しない）", () => {
+test("pipelineConfig: a missing floor fails (no fallback to a default)", () => {
   const { minFrames: _dropped, ...rest } = PIPELINE_CONFIG;
   assertThrows(
     () => parseVowelDetectorPipelineConfig(rest),
@@ -346,7 +361,7 @@ test("pipelineConfig: 下限の欠落は落とす（既定へ縮退しない）"
   );
 });
 
-test("pipelineConfig: 下限が上限を超える宣言は落とす（受理集合が空になる）", () => {
+test("pipelineConfig: a declaration whose floor exceeds its limit fails (the accepted set would be empty)", () => {
   assertThrows(
     () => config({ minFrames: MAX_FRAMES + 2 }),
     Error,
@@ -354,26 +369,28 @@ test("pipelineConfig: 下限が上限を超える宣言は落とす（受理集�
   );
 });
 
-// ---- 運用範囲（入力長の門・両側）---------------------------------------------
+// ---- Operating range (the input-length check, both sides) -------------------
 
-test("運用上限: ちょうどの長さは通り、1 フレーム超過で落ちる（境界は上側に閉じる）", () => {
+test("operating limit: the exact length passes, one frame over fails (the boundary is closed on the upper side)", () => {
   const parsed = config();
   assertFrameLimit(parsed, 2);
   assertFrameLimit(parsed, MAX_FRAMES);
-  // 長さは呼び手が渡した波形の寸法なので入力起因（ADR 0107 決定 2 — 区切って渡せば通る）。
+  // The length is the size of the caller's waveform, so this is an input error (ADR 0107 decision 2
+  // — passing it in pieces succeeds).
   const error = assertThrows(
     () => assertFrameLimit(parsed, MAX_FRAMES + 2),
     ModelInputError,
     "the audio is too long",
   );
-  // 何秒までなら通るのかが文言に出ていること（切り詰めの代わりに呼び出し側が区切るため）。
+  // The message must say how many seconds pass (so the caller splits the audio instead of it being
+  // truncated).
   assert(error.message.includes(`${MAX_FRAMES} frames`), error.message);
   assert(error.message.includes("600.00 s"), error.message);
 });
 
-test("運用下限: ちょうどの長さは通り、1 フレーム不足で落ちる（境界は下側に閉じる）", () => {
+test("operating floor: the exact length passes, one frame short fails (the boundary is closed on the lower side)", () => {
   const parsed = config();
-  // 焼き込み下限ちょうど（10ms フレーム 4 本 = 記号 T が 2）は通る。
+  // Exactly the baked-in floor (4 frames of 10ms = symbol T is 2) passes.
   assertFrameFloor(parsed, MIN_FRAMES);
   assertFrameFloor(parsed, MAX_FRAMES);
   for (const frames of [MIN_FRAMES - 1, MIN_FRAMES - 2]) {
@@ -383,20 +400,22 @@ test("運用下限: ちょうどの長さは通り、1 フレーム不足で落�
       "the audio is too short",
       `frames=${frames}`,
     );
-    // 何本あれば通るのかが文言に出ていること（pad の代わりに呼び出し側が長く渡すため）。
+    // The message must say how many frames pass (so the caller passes longer audio instead of it
+    // being padded).
     assert(error.message.includes(`${MIN_FRAMES} frames`), error.message);
     assert(error.message.includes(`${frames} frames of 10ms`), error.message);
   }
 });
 
-test("運用下限: 下限は配布形の宣言から来る（TS 側の定数ではない）", () => {
-  // 同じ入力長が、宣言の下限が違う配布形では通ったり落ちたりする = 数の出所が manifest 側。
+test("operating floor: the floor comes from the distribution's declaration (not a TS-side constant)", () => {
+  // The same input length passes or fails with distributions declaring different floors = the
+  // number comes from the manifest.
   const strict = config({ minFrames: 8 });
   assertThrows(() => assertFrameFloor(strict, 6), ModelInputError, "8 frames");
   assertFrameFloor(config({ minFrames: 2 }), 2);
 });
 
-// ---- mel 基底の資産 ----------------------------------------------------------
+// ---- The mel basis asset ----------------------------------------------------
 
 const melBasisBytes = (
   name = "mel_basis",
@@ -416,12 +435,12 @@ const melBasisBytes = (
     {},
   );
 
-test("mel 基底: [80, 257] の f32 を 1 テンソルだけ読む", () => {
+test("mel basis: reads exactly one f32 tensor of [80, 257]", () => {
   const basis = parseMelBasis(melBasisBytes().buffer);
   assertEquals(basis.length, N_MELS * MEL_BINS);
 });
 
-test("mel 基底: テンソル名が違えば入っているものを添えて落とす", () => {
+test("mel basis: a wrong tensor name fails, listing what is there", () => {
   assertThrows(
     () => parseMelBasis(melBasisBytes("mel").buffer),
     Error,
@@ -429,7 +448,7 @@ test("mel 基底: テンソル名が違えば入っているものを添えて�
   );
 });
 
-test("mel 基底: 転置は要素数が同じでも落とす（形を 2 軸とも見る）", () => {
+test("mel basis: a transpose fails even with the same element count (both axes of the shape are checked)", () => {
   assertThrows(
     () => parseMelBasis(melBasisBytes("mel_basis", [MEL_BINS, N_MELS]).buffer),
     Error,
@@ -437,7 +456,7 @@ test("mel 基底: 転置は要素数が同じでも落とす（形を 2 軸と�
   );
 });
 
-test("mel 基底: f32 でない格納形は落とす", () => {
+test("mel basis: a storage type other than f32 fails", () => {
   const bytes = writeSafetensors(
     new Map([
       [
@@ -454,31 +473,32 @@ test("mel 基底: f32 でない格納形は落とす", () => {
   assertThrows(() => parseMelBasis(bytes.buffer), Error, "the mel basis is not F32");
 });
 
-// ---- 検出の実行経路（Session を偽物にして例外の運び方を見る）------------------
+// ---- The detection run path (a fake Session shows how exceptions are carried) ----
 //
-// `detect` は 1 検出ごとに Session を張って畳む。run や診断コールバックが落ちた後に Session の
-// 解放まで落ちる（device lost では両方が起きる）とき、呼び手が受け取る例外から**最初の失敗**を
-// 辿れることを縛る。Session も GPU も偽物で足りる（`createSession` までしか触らない）ので、
-// 状態を直接組んで非公開のコンストラクタへ渡す（`wan_pipeline_test.ts` と同じ流儀）。
+// `detect` sets up and tears down a Session per detection. When releasing the Session also fails
+// after run or the diagnostics callback failed (a device loss causes both), this pins that **the
+// first failure** can be traced from the exception the caller receives. A fake Session and a fake
+// GPU suffice (nothing past `createSession` is touched), so the state is built directly and passed
+// to the private constructor (the same approach as `wan_pipeline_test.ts`).
 
-/** 偽の Session が投げるもの・呼び手が渡す診断コールバック。 */
+/** What the fake Session throws, and the diagnostics callback the caller passes. */
 type FakeRunPlan = {
   readonly runError?: Error;
   readonly disposeError?: Error;
   readonly onRunDiagnostics?: () => void;
-  /** 既定は運用範囲 4..60,000 の配布形。 */
+  /** Defaults to a distribution with the operating range 4..60,000. */
   readonly config?: VowelDetectorPipelineConfig;
-  /** 既定は正しい寸法のゼロ基底。 */
+  /** Defaults to a zero basis of the right size. */
   readonly melBasis?: Float32Array<ArrayBuffer>;
 };
 
-/** 1 秒の正弦波（10ms フレーム 97 本 → 端数を落として 96 本 = 運用範囲の内側）。 */
+/** One second of a sine wave (97 frames of 10ms → 96 after dropping the remainder = inside the operating range). */
 const ONE_SECOND = Float32Array.from(
   { length: SAMPLE_RATE },
   (_, index) => 0.5 * Math.sin((2 * Math.PI * 220 * index) / SAMPLE_RATE),
 );
 
-/** 偽の Session を張る CRNN で組んだパイプラインと、解放の呼び出し回数。 */
+/** A pipeline built on a CRNN that sets up a fake Session, and the number of release calls. */
 const pipelineWithFakeSession = (
   plan: FakeRunPlan,
 ): { readonly pipeline: Pipeline; readonly disposeCalls: () => number } => {
@@ -519,9 +539,9 @@ const pipelineWithFakeSession = (
   return { pipeline, disposeCalls: () => disposeCalls };
 };
 
-test("detect: run が落ちた後に Session の解放も落ちたら、run の例外を先頭に両方を運ぶ", async () => {
-  const runFailure = new Error("run の途中で device lost");
-  const disposeFailure = new Error("flush に失敗した");
+test("detect: when releasing the Session also fails after run failed, both are carried with run's exception first", async () => {
+  const runFailure = new Error("device lost in the middle of run");
+  const disposeFailure = new Error("flush failed");
   const { pipeline, disposeCalls } = pipelineWithFakeSession({
     runError: runFailure,
     disposeError: disposeFailure,
@@ -529,15 +549,15 @@ test("detect: run が落ちた後に Session の解放も落ちたら、run の�
 
   const error = await assertRejects(() => pipeline.detect(ONE_SECOND), AggregateError);
 
-  // 解放の例外だけが届くと、最初に何が壊れたか（run の失敗）が消える。
+  // If only the release's exception arrived, what broke first (the run failure) would be lost.
   assertStrictEquals(error.errors[0], runFailure);
   assertStrictEquals(error.errors[1], disposeFailure);
   assertEquals(disposeCalls(), 1);
 });
 
-test("detect: 診断コールバックが落ちた後に Session の解放も落ちたら、コールバックの例外を先頭に運ぶ", async () => {
-  const callbackFailure = new Error("診断コールバックが投げた");
-  const disposeFailure = new Error("flush に失敗した");
+test("detect: when releasing the Session also fails after the diagnostics callback failed, the callback's exception is carried first", async () => {
+  const callbackFailure = new Error("the diagnostics callback threw");
+  const disposeFailure = new Error("flush failed");
   const { pipeline, disposeCalls } = pipelineWithFakeSession({
     disposeError: disposeFailure,
     onRunDiagnostics: () => {
@@ -552,8 +572,8 @@ test("detect: 診断コールバックが落ちた後に Session の解放も落
   assertEquals(disposeCalls(), 1);
 });
 
-test("detect: run だけが落ちたら、その例外をそのまま運び Session は 1 回だけ解放する", async () => {
-  const runFailure = new Error("run の途中で落ちた");
+test("detect: when only run fails, its exception is carried as is and the Session is released exactly once", async () => {
+  const runFailure = new Error("failed in the middle of run");
   const { pipeline, disposeCalls } = pipelineWithFakeSession({ runError: runFailure });
 
   const error = await assertRejects(() => pipeline.detect(ONE_SECOND));
@@ -562,18 +582,19 @@ test("detect: run だけが落ちたら、その例外をそのまま運び Sess
   assertEquals(disposeCalls(), 1);
 });
 
-// ---- 運用上限は特徴を作る前に見る ------------------------------------------------
+// ---- The operating limit is checked before the features are built ---------------
 //
-// フレーム数は波形の長さだけで決まる。上限を超える音声で FFT と mel 変換を全フレーム分
-// 回してから拒否すると、600 秒級の音声で数秒同期で占有する（結果は同じ拒否）。観測点は
-// 「寸法の壊れた mel 基底」— 特徴抽出に入れば基底の寸法で落ちるので、上限の拒否が先に
-// 出ることが「抽出に入らなかった」ことの証拠になる。
+// The frame count is determined by the waveform length alone. Running the FFT and the mel transform
+// over every frame of audio past the limit before rejecting it blocks synchronously for seconds on
+// audio of around 600 seconds (with the same rejection as the result). The observation point is "a
+// mel basis of broken size" — entering the feature extraction would fail on the basis size, so the
+// limit's rejection coming first is the evidence that "the extraction was not entered".
 
-/** 10ms フレームをちょうど `frames` 本作る長さの無音。 */
+/** Silence of the length that yields exactly `frames` frames of 10ms. */
 const silenceOfFrames = (frames: number): Float32Array<ArrayBuffer> =>
   new Float32Array(N_FFT + (frames - 1) * HOP);
 
-test("フレーム数: 長さから数えた本数は特徴抽出の本数と一致する", () => {
+test("frame count: the count derived from the length matches the feature extraction's count", () => {
   const melBasis = new Float32Array(N_MELS * MEL_BINS);
   for (const samples of [N_FFT, N_FFT + HOP - 1, N_FFT + HOP, SAMPLE_RATE, SAMPLE_RATE + 77]) {
     assertEquals(
@@ -582,17 +603,18 @@ test("フレーム数: 長さから数えた本数は特徴抽出の本数と一
       `samples=${samples}`,
     );
   }
-  // 1 フレームも取れない長さは 1 未満（受理の判定は呼び手）。
+  // A length too short for a single frame gives less than 1 (the caller decides acceptance).
   assert(featureFrameCount(N_FFT - 1) < 1);
 });
 
-test("detect: 上限を超える音声は特徴を作る前に入力エラーで落とす", async () => {
+test("detect: audio past the limit fails as an input error before the features are built", async () => {
   const { pipeline } = pipelineWithFakeSession({
     config: config({ maxFrames: 8 }),
     melBasis: new Float32Array(0),
   });
 
-  // 10 本（端数なし）は上限 8 を超える。抽出に入っていれば mel 基底の寸法で落ちる。
+  // 10 frames (no remainder) exceed the limit 8. Had the extraction been entered, it would fail on
+  // the mel basis size.
   await assertRejects(
     () => pipeline.detect(silenceOfFrames(10)),
     ModelInputError,
@@ -600,15 +622,17 @@ test("detect: 上限を超える音声は特徴を作る前に入力エラーで
   );
 });
 
-test("detect: 端数を落として上限ちょうどになる音声は上限を通って特徴抽出へ進む", async () => {
+test("detect: audio that is exactly at the limit after dropping the remainder passes the limit and proceeds to the feature extraction", async () => {
   const { pipeline } = pipelineWithFakeSession({
     config: config({ maxFrames: 8 }),
     melBasis: new Float32Array(0),
   });
 
-  // 9 本は端数 1 本を落として 8 本 = 上限ちょうど。上限の判定は切り捨て後の値で比べる。
-  // NOTE: 境界を固定するテストで、退行は検出しない（上限の検査を消しても、mel 基底の寸法で
-  // 同じ文言のまま落ちる）。退行を縛るのは上の「上限超過」のテスト。
+  // 9 frames drop a remainder of 1 to give 8 = exactly the limit. The limit is compared against the
+  // value after truncation.
+  // NOTE: a test that pins the boundary; it does not detect a regression (with the limit check
+  // removed it still fails with the same message on the mel basis size). The regression is pinned
+  // by the "past the limit" test above.
   await assertRejects(
     () => pipeline.detect(silenceOfFrames(9)),
     Error,

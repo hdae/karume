@@ -1,13 +1,14 @@
-// 途中 latent → RGB プレビュー近似の挙動テスト。GPU も資産も要らない純関数。
+// Behaviour tests of the approximate RGB preview of an intermediate latent. Pure functions that
+// need neither a GPU nor assets.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { approximatePreview } from "../src/anima/preview.ts";
 
 /**
- * 16ch・2×2 の合成 latent（planar `[1,16,2,2]`）。値は `{-1,-0.5,0,0.5,1}` を
- * チャネル × 画素でずらして配る — 全チャネル・全画素が違う寄与を持つので、係数表のどの行が
- * 書き換わっても出力が動く（下の golden の前提）。
+ * A synthetic 16ch 2×2 latent (planar `[1,16,2,2]`). The values `{-1,-0.5,0,0.5,1}` are dealt out
+ * shifted by channel × pixel — every channel and every pixel contributes differently, so rewriting
+ * any row of the coefficient table moves the output (the premise of the golden below).
  */
 const syntheticLatents = (): Float32Array<ArrayBuffer> =>
   Float32Array.from(
@@ -15,7 +16,7 @@ const syntheticLatents = (): Float32Array<ArrayBuffer> =>
     (_, at) => (((Math.floor(at / 4) + (at % 4)) % 5) - 2) * 0.5,
   );
 
-test("approximatePreview: 入口ゲート（軸数 / B>1 / チャネル数 / 要素数）", () => {
+test("approximatePreview: entry check (axis count / B>1 / channel count / element count)", () => {
   assertThrows(
     () => approximatePreview(new Float32Array(16), [16, 2, 2]),
     Error,
@@ -38,24 +39,28 @@ test("approximatePreview: 入口ゲート（軸数 / B>1 / チャネル数 / 要
   );
 });
 
-test("approximatePreview: 寸法は latent の H/W・アルファ 255", () => {
-  // 幅と高さを取り違えても要素数は合ってしまうので、非正方（2×3）で位置を縛る。
+test("approximatePreview: dimensions are the latent's H/W, alpha 255", () => {
+  // Swapping width and height still matches the element count, so a non-square (2×3) shape pins the
+  // positions.
   const got = approximatePreview(new Float32Array(16 * 6), [1, 16, 3, 2]);
   assertEquals([got.width, got.height], [2, 3]);
   assertEquals(got.rgba.length, 2 * 3 * 4);
   for (let index = 0; index < 6; index += 1) {
-    assertEquals(got.rgba[index * 4 + 3], 255, `画素 ${index} のアルファ`);
+    assertEquals(got.rgba[index * 4 + 3], 255, `alpha of pixel ${index}`);
   }
 });
 
-test("approximatePreview: 合成 latent の RGBA golden（係数表の書き換わりを止める）", () => {
-  // 係数表は非公開の内部定数なので、外から縛れるのは出力だけ。この golden が係数の門。
+test("approximatePreview: RGBA golden of a synthetic latent (stops rewrites of the coefficient table)", () => {
+  // The coefficient table is a private internal constant, so the output is all that can be pinned
+  // from outside. This golden is the check of the coefficients.
   //
-  // フォールト注入（2026-08-24 実測・注入は即座に戻した）:
-  // ①`preview.ts` の係数表 1 行目 `-0.1299` を `-0.1199` に書き換えてこの 1 本を回すと
-  //   `FAILED | 2 passed | 1 failed` で落ちた（差分は 4 バイト目 `78` → `77` の 1 箇所）。
-  // ②係数表 16×3 + bias 3 の**51 個すべて**を 1 個ずつ +0.01 して掃いた結果は
-  //   `delta=0.01 で golden が動かない定数: 無し` — どの定数が書き換わっても落ちる。
+  // Fault injection (measured 2026-08-24; the injections were reverted at once):
+  // ① Rewriting the first row's `-0.1299` of the coefficient table in `preview.ts` to `-0.1199` and
+  //   running this one case failed with `FAILED | 2 passed | 1 failed` (one difference, the 4th
+  //   byte `78` → `77`).
+  // ② Sweeping **all 51** of the 16×3 coefficients + 3 biases with +0.01 one at a time gave
+  //   `constants for which delta=0.01 does not move the golden: none` — a rewrite of any constant
+  //   fails.
   const got = approximatePreview(syntheticLatents(), [1, 16, 2, 2]);
   assertEquals([got.width, got.height], [2, 2]);
   assertEquals(

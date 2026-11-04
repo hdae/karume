@@ -1,37 +1,43 @@
-// `Pipeline` の**構築ガード**と**前後処理の結線**。GPU も実資産も要らない範囲だけを
-// 見る（実 GPU の突合は `packages/runtime/tests/e2e_birefnet_test.ts`〈golden 入力〉と
-// `e2e_birefnet_real_test.ts`〈実画像の前処理パリティと判別〉が持つ — 重複させない）。
+// The **construction guards** and the **wiring of pre- and postprocessing** of `Pipeline`. Only the
+// part that needs neither a GPU nor real assets (the comparison on a real GPU belongs to
+// `packages/runtime/tests/e2e_birefnet_test.ts` (golden input) and `e2e_birefnet_real_test.ts`
+// (preprocessing parity and discrimination on real images) — not duplicated here).
 //
-// 押さえるのは 4 点:
+// It covers four points:
 //
-// ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
-//    （`src/birefnet/pipeline.ts` の `openBirefnetState` が掲げる MUST）。観測の仕掛けは
-//    SigLIP2 側と同じ — **全ケースで容器は揃えて**おき、
-//     - 契約違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の門が先
-//     - 正しい manifest + 空の Record が `部品 'matte' の容器が無い` で落ちる（受け口の診断）
-//    の 2 つで門の順序そのものを縛る。
-//    NOTE: 容器を開くのは admission の**前**（`assetComponentOpener` は同期の供給口を返すため
-//    先に全部品を開く — ADR 0109 の継ぎ目）。
+// ① `fromAssets` rejects **manifest contract violations before acquiring a GPU** (the MUST stated
+//   by `openBirefnetState` in `src/birefnet/pipeline.ts`). The observation setup is the same as on
+//   the SigLIP2 side — **every case has all the containers**, and the order of the checks itself is
+//   pinned by two things:
+//     - a contract-violation case fails with "that violation's wording" = the manifest check comes
+//       first even when the assets are all there
+//     - a valid manifest + an empty Record fails with `component 'matte' has no container` (the
+//       opener's diagnostic).
+//    NOTE: the containers are opened **before** admission (`assetComponentOpener` opens every
+//    component first so that it can return a synchronous opener — the seam of ADR 0109).
 //
-// ② グラフ宣言との突合（`assertStaticDim` / `assertMatteShape`）の**拒否経路**。ここは
-//    `fromAssets` の中では実 GPU と実資産が揃わないと踏めないので、門を直接叩く
-//    （`tests/helpers/stub-model.ts` が宣言だけの `GraphOwner` を組む）。門自身の軸番号や
-//    期待形がずれても、正常系だけを走らせている限り緑のまま通るため、**壊れた宣言を名指しで
-//    落とすこと**を毎回踏む。
+// ② The **rejection paths** of the comparison with the graph declaration (`assertStaticDim` /
+//   `assertMatteShape`). Inside `fromAssets` they cannot be reached without a real GPU and real
+//   assets, so the checks are called directly (`tests/helpers/stub-model.ts` builds a
+//   declaration-only `GraphOwner`). Even if a check's own axis numbers or expected shapes drifted,
+//   it would stay green as long as only the normal path runs, so **rejecting a broken declaration
+//   by name** is exercised every time.
 //
-// ③ 前処理の結線（`preprocessPixelValues`）が `pipelineConfig` の宣言どおりに
-//    `resizeRgb8` → `normalizeToNchw` を通す。**参照は Python 正本のフィクスチャ**
-//    （`fixtures/image-preprocess/parity.json`）なので、ここが見るのは「宣言の 4 欄が正しい
-//    引数の位置へ届いているか」だけ。非正方のケースを使うのは、`imageWidth` / `imageHeight` の
-//    取り違えが正方形では**原理的に検出できない**ため。
+// ③ The preprocessing wiring (`preprocessPixelValues`) goes through `resizeRgb8` →
+//   `normalizeToNchw` as the `pipelineConfig` declares. **The reference is the fixture of the
+//   Python source of truth** (`fixtures/image-preprocess/parity.json`), so all this checks is
+//   "whether the four declared fields reach the right argument positions". A non-square case is
+//   used because a mix-up of `imageWidth` / `imageHeight` is **undetectable in principle** with a
+//   square.
 //
-// ④ 後処理（`matteFromLogits` — `src/birefnet/matte.ts`）の**段の順序と量子化**と、`segment` が
-//    配布形の宣言（`pipelineConfig.postprocess`）どおりの手順を当てること。sigmoid を resize より
-//    先に掛けるのは両系列の上流と同じで、2 つの手順（HR = `u8-pil-bicubic`・Lucida =
-//    `float-bilinear`）のどちらにも掛かる。量子化（四捨五入）は両系列の上流（切り捨て）と違う
-//    （ADR 0125 — 両系列の上流の実際の手順は `matte.ts` のモジュール doc）。段の順序を入れ替えても
-//    shape も値域も合ったまま通る（順序違いは α が数十の差でずれるだけ）ので、順序が入れ替わったら
-//    落ちる非対称なケースを置く。
+// ④ The **stage order and quantisation** of the postprocessing (`matteFromLogits` —
+//   `src/birefnet/matte.ts`), and that `segment` applies the procedure the distribution declares
+//   (`pipelineConfig.postprocess`). Applying sigmoid before resize is the same as both series'
+//   upstreams, and it holds for both procedures (HR = `u8-pil-bicubic`, Lucida = `float-bilinear`).
+//   The quantisation (round half up) differs from both series' upstreams (truncation) (ADR 0125 —
+//   the actual procedures of both upstreams are in the module doc of `matte.ts`). Swapping the
+//   stage order still passes with matching shape and range (a wrong order only shifts α by a few
+//   tens), so there is an asymmetric case that fails when the order is swapped.
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -57,7 +63,10 @@ import { stubModel } from "./helpers/stub-model.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/container-fixture.ts";
 
-/** 宣言だけの `matte` 容器（家族の門が読む形まで再現し、実行はしない）。 */
+/**
+ * A declaration-only `matte` container (reproduced up to the shape the family's checks read; it is
+ * never run).
+ */
 const COMPONENT = partAssets(
   "matte",
   await tensorlessContainer("matte", {
@@ -66,7 +75,10 @@ const COMPONENT = partAssets(
   }),
 );
 
-/** `models/karume-birefnet-hr/karume.json` の `pipelineConfig`（`birefnet/2` で組み直した形・6 欄）。 */
+/**
+ * The `pipelineConfig` of `models/karume-birefnet-hr/karume.json` (the shape rebuilt for
+ * `birefnet/2`, 6 fields).
+ */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   imageWidth: 1024,
   imageHeight: 1024,
@@ -76,7 +88,10 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
   postprocess: "u8-pil-bicubic",
 };
 
-/** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["hr"]` の中身を上書きする。 */
+/**
+ * The skeleton of the distribution (only the fields the checks need). `patch` overwrites the
+ * contents of `models["hr"]`.
+ */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/5",
@@ -86,7 +101,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
       hr: {
         pipeline: "birefnet/2",
         weights: { matte: { f32: declaredContainer("hr/matte/model.f32") } },
-        // 実行に要るのはグラフ 1 本だけ（tokenizer も表も無い）。
+        // Running it needs only one graph (no tokenizer, no tables).
         assets: {},
         quants: { f32: { weights: { matte: "f32" }, session: {} } },
         defaultQuant: "f32",
@@ -98,7 +113,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: a nonexistent model fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { model: "nope" }),
@@ -107,7 +122,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipeline の契約名が birefnet でない manifest を落とす", async () => {
+test("fromAssets: rejects a manifest whose pipeline contract name is not birefnet", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "siglip2/1" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -116,8 +131,9 @@ test("fromAssets: pipeline の契約名が birefnet でない manifest を落と
   );
 });
 
-test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
-  // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
+test("fromAssets: an unknown major fails loudly (checking it is models' responsibility — ADR 0038 §1)", async () => {
+  // The only check that stops the silent degradation of "old implementation × new repository". The
+  // hub does not check the major.
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/3" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }),
@@ -126,9 +142,10 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   );
 });
 
-test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しない配布形）も落とす", async () => {
-  // major 1 の配布形は `postprocess` を持たない。major の門が無いと pipelineConfig の欠落で落ちる
-  // だけになり、「配布形を組み直せ」という直し方が文言から読めない。
+test("fromAssets: rejects the old major too (birefnet/1 — a distribution that declares no postprocessing procedure)", async () => {
+  // A major-1 distribution has no `postprocess`. Without the major check it would only fail on the
+  // missing pipelineConfig field, and the remedy "rebuild the distribution" would not be readable
+  // from the message.
   const legacy: Record<string, unknown> = { ...PIPELINE_CONFIG };
   delete legacy.postprocess;
   const manifest = parseManifest(manifestText({ pipeline: "birefnet/1", pipelineConfig: legacy }));
@@ -139,7 +156,7 @@ test("fromAssets: 旧 major（birefnet/1 — 後処理の手順を宣言しな�
   );
 });
 
-test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: a nonexistent quant fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENT }, { quant: "nope" }),
@@ -148,8 +165,8 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
-  // 綴り違い（`imageMean` に対する `image_mean`）が黙って既定へ縮退する経路を作らない。
+test("fromAssets: an unknown pipelineConfig key fails at construction", async () => {
+  // No path where a misspelling (`image_mean` for `imageMean`) silently degrades to a default.
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, image_mean: [0.5, 0.5, 0.5] } }),
   );
@@ -160,7 +177,7 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   );
 });
 
-test("fromAssets: bilinear 以外の補間を宣言した配布形は受理しない", async () => {
+test("fromAssets: does not accept a distribution that declares an interpolation other than bilinear", async () => {
   const manifest = parseManifest(
     manifestText({ pipelineConfig: { ...PIPELINE_CONFIG, interpolation: "bicubic" } }),
   );
@@ -171,7 +188,7 @@ test("fromAssets: bilinear 以外の補間を宣言した配布形は受理し�
   );
 });
 
-test("fromAssets: 後処理の手順を宣言しない pipelineConfig は構築時に落ちる", async () => {
+test("fromAssets: a pipelineConfig that declares no postprocessing procedure fails at construction", async () => {
   const missing: Record<string, unknown> = { ...PIPELINE_CONFIG };
   delete missing.postprocess;
   const manifest = parseManifest(manifestText({ pipelineConfig: missing }));
@@ -182,9 +199,10 @@ test("fromAssets: 後処理の手順を宣言しない pipelineConfig は構築�
   );
 });
 
-test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 上の 8 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
-  // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
+test("fromAssets: without a component's container it fails with the spellings of both forms (the opener's diagnostic)", async () => {
+  // The flip side of the eight cases above. A Record without all the containers fails on **the
+  // missing component** (not with the manifest's wording) = the contrapositive showing that the
+  // cases above are not dragged along by missing assets.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
@@ -193,9 +211,9 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   );
 });
 
-// ---- グラフ宣言との突合（拒否経路）------------------------------------------
+// ---- Comparison with the graph declaration (rejection paths) ----------------------------------
 
-/** 実配布形（hr）と同じ宣言。`patch` で 1 点だけ壊す。 */
+/** The same declaration as the real distribution (hr). `patch` breaks a single point. */
 const matteGraph = (
   patch: {
     readonly inputShape?: readonly (number | string)[];
@@ -210,9 +228,10 @@ const matteGraph = (
 
 const birefnetConfig = parseBirefnetPipelineConfig(PIPELINE_CONFIG);
 
-test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは名指しで落ちる", () => {
-  // 2048² の系列を 1024² の席へ置いた形。前処理は宣言の寸法へ resize するのでホスト側は
-  // 最後まで通り、落ちるのは Session の shape 検査 = どちらが正しいか読めない。
+test("assertStaticDim: a graph as declared passes, and a resolution mismatch fails by name", () => {
+  // A 2048² series placed in the 1024² slot. The preprocessing resizes to the declared dimensions,
+  // so the host side goes through to the end, and what fails is the Session's shape check = which
+  // side is right cannot be read.
   assertStaticDim(matteGraph(), "pixel_values", 3, birefnetConfig.imageWidth, "imageWidth");
   const error = assertThrows(
     () =>
@@ -229,7 +248,7 @@ test("assertStaticDim: 宣言どおりのグラフは通り、解像度違いは
   assert(error.message.includes("pipelineConfig has 1024"), error.message);
 });
 
-test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
+test("assertStaticDim: rejects a missing input name", () => {
   assertThrows(
     () => assertStaticDim(matteGraph(), "pixel", 3, birefnetConfig.imageWidth, "imageWidth"),
     Error,
@@ -237,45 +256,47 @@ test("assertStaticDim: 入力名そのものが無ければ落とす", () => {
   );
 });
 
-test("assertMatteShape: multi-scale で焼かれた出力は要素数でなく形で落ちる", () => {
-  // `[1, 3, S, S]` は中間予測込みの export。要素数だけを見る門だと**別の値を α として**通る。
-  assertMatteShape(matteGraph(), birefnetConfig, "マットの形");
+test("assertMatteShape: an output baked as multi-scale fails on its shape, not its element count", () => {
+  // `[1, 3, S, S]` is an export with the intermediate predictions. A check that looks only at the
+  // element count would let **other values through as α**.
+  assertMatteShape(matteGraph(), birefnetConfig, "matte shape");
   assertThrows(
     () =>
       assertMatteShape(
         matteGraph({ outputShape: [1, 3, 1024, 1024] }),
         birefnetConfig,
-        "マットの形",
+        "matte shape",
       ),
     Error,
     "expected [1, 1, 1024, 1024]",
   );
 });
 
-test("assertMatteShape: 先頭が一致する短い宣言も落とす（軸ごとの比較だけでは通る）", () => {
-  // `[1, 1, 1024]` は宣言されている全軸が期待と一致するので、`shape.length` を見ない門は
-  // 素通しする（階数まで見る理由そのもの）。
+test("assertMatteShape: rejects a shorter declaration whose leading axes match (a per-axis comparison alone would pass it)", () => {
+  // In `[1, 1, 1024]` every declared axis matches the expectation, so a check that does not look at
+  // `shape.length` lets it through (the very reason to check the rank).
   assertThrows(
-    () => assertMatteShape(matteGraph({ outputShape: [1, 1, 1024] }), birefnetConfig, "マットの形"),
+    () =>
+      assertMatteShape(matteGraph({ outputShape: [1, 1, 1024] }), birefnetConfig, "matte shape"),
     Error,
     "graph output 'matte' has shape [1, 1, 1024]",
   );
 });
 
-test("assertMatteShape: 出力名の宣言が values に無ければ落とす", () => {
+test("assertMatteShape: rejects an output name that has no declaration in values", () => {
   const model = stubModel({
     inputs: [{ name: "pixel_values", shape: [1, 3, 1024, 1024] }],
     outputs: ["matte"],
     values: {},
   });
   assertThrows(
-    () => assertMatteShape(model, birefnetConfig, "マットの形"),
+    () => assertMatteShape(model, birefnetConfig, "matte shape"),
     Error,
-    "birefnet: graph output 'matte' has no declaration (マットの形)",
+    "birefnet: graph output 'matte' has no declaration (matte shape)",
   );
 });
 
-// ---- 前処理の結線（Python 正本のフィクスチャに対して）------------------------
+// ---- Preprocessing wiring (against the fixture of the Python source of truth) ----------------
 
 type ParityCase = {
   readonly name: string;
@@ -298,15 +319,18 @@ type Fixture = {
 const FIXTURE_PATH = new URL("./fixtures/image-preprocess/parity.json", import.meta.url);
 const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as Fixture;
 
-/** 縦は 4 倍縮小・横は 3 倍拡大の非正方ケース（24×5 → 6×15）。 */
+/** A non-square case downscaled 4× vertically and upscaled 3× horizontally (24×5 → 6×15). */
 const MIXED_AXIS = "mixed-axis";
 
-/** 全経路の許容差。導出は `image_preprocess_test.ts` 冒頭（uint8 1 LSB の f32 換算）。 */
+/**
+ * The tolerance of every path. Derived at the top of `image_preprocess_test.ts` (1 LSB of uint8 in
+ * f32).
+ */
 const PIXEL_ATOL = 7.85e-3;
 
 const parityCase = (name: string): ParityCase => {
   const found = fixture.cases.find((entry) => entry.name === name);
-  assert(found !== undefined, `フィクスチャに '${name}' が無い（生成台本が変わった）`);
+  assert(found !== undefined, `the fixture has no '${name}' (the generator script changed)`);
   return found;
 };
 
@@ -316,7 +340,7 @@ const imageOf = (entry: ParityCase): Rgb8Image => ({
   height: entry.height,
 });
 
-/** そのケースの寸法・定数をそのまま宣言した `pipelineConfig`。 */
+/** A `pipelineConfig` that declares the case's dimensions and constants as they are. */
 const configFor = (entry: ParityCase, swapped = false) =>
   parseBirefnetPipelineConfig({
     imageWidth: swapped ? entry.outHeight : entry.outWidth,
@@ -324,42 +348,54 @@ const configFor = (entry: ParityCase, swapped = false) =>
     imageMean: fixture.constants.imageMean,
     imageStd: fixture.constants.imageStd,
     interpolation: "bilinear",
-    // 前処理は後処理の宣言を読まない（欄は必須なので実物の HR の値を置く）。
+    // The preprocessing does not read the postprocessing declaration (the field is required, so the
+    // real HR value is used).
     postprocess: "u8-pil-bicubic",
   });
 
-test("前処理の結線: 宣言の寸法・mean・std で Python 正本と一致する（非正方）", () => {
+test("preprocessing wiring: matches the Python source of truth with the declared dimensions, mean and std (non-square)", () => {
   const entry = parityCase(MIXED_AXIS);
   const got = preprocessPixelValues(configFor(entry), imageOf(entry));
   assertEquals(got.length, entry.pixelValues.length);
   for (let index = 0; index < got.length; index += 1) {
-    assertAlmostEquals(got[index], entry.pixelValues[index], PIXEL_ATOL, `標本 ${index}`);
+    assertAlmostEquals(got[index], entry.pixelValues[index], PIXEL_ATOL, `sample ${index}`);
   }
 });
 
-test("前処理の結線: imageWidth / imageHeight を入れ替えると別の結果になる", () => {
-  // 上のケースが恒真でないことの担保 — 非正方の宣言を転置すると値が変わる
-  // （`resizeRgb8` は `(width, height)` の順で受ける）。
+test("preprocessing wiring: swapping imageWidth / imageHeight gives a different result", () => {
+  // The guarantee that the case above is not vacuous — transposing a non-square declaration changes
+  // the values (`resizeRgb8` takes `(width, height)` in that order).
   const entry = parityCase(MIXED_AXIS);
-  assert(entry.outWidth !== entry.outHeight, "非正方のケースでないと転置が検出できない");
+  assert(
+    entry.outWidth !== entry.outHeight,
+    "a transpose cannot be detected without a non-square case",
+  );
   const swapped = preprocessPixelValues(configFor(entry, true), imageOf(entry));
-  assertEquals(swapped.length, entry.pixelValues.length, "要素数は転置しても同じ");
+  assertEquals(
+    swapped.length,
+    entry.pixelValues.length,
+    "the element count is the same after transposing",
+  );
   let matched = 0;
   for (let index = 0; index < swapped.length; index += 1) {
     if (Math.abs(swapped[index] - entry.pixelValues[index]) <= PIXEL_ATOL) matched += 1;
   }
-  assert(matched < swapped.length, "転置しても全標本が一致した（門が効いていない）");
+  assert(
+    matched < swapped.length,
+    "every sample matched even after transposing (the check has no effect)",
+  );
 });
 
-// ---- 後処理（logit → sigmoid → 元解像度 → 8bit α）---------------------------
+// ---- Postprocessing (logit → sigmoid → original resolution → 8-bit α) ------------------------
 
-/** 8bit へ落ちたあとの 1 LSB。 */
+/** 1 LSB after rounding to 8 bits. */
 const ALPHA_LSB = 1;
 
-test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量子化する（両手順）", () => {
-  // logit 0 → 0.5 → 127.5 → 最近傍へ丸めて 128（切り捨てだと 127 になる — 両系列の上流の
-  // 切り捨て〈HR は ToPILImage・Lucida は `astype("uint8")`〉ではなく丸めを採る決定が値に出る点）。
-  // `u8-pil-bicubic` は寸法が同じ軸の resample を飛ばすので、恒等では両手順とも同じ値になる。
+test("postprocessing: an identity resize quantises the sigmoid to 8 bits as is (both procedures)", () => {
+  // logit 0 → 0.5 → 127.5 → rounded to nearest gives 128 (truncation would give 127 — the point
+  // where the decision to round rather than truncate like both upstreams (HR's ToPILImage, Lucida's
+  // `astype("uint8")`) shows in the value). `u8-pil-bicubic` skips the resample of an axis whose
+  // size is unchanged, so at identity both procedures give the same value.
   for (const procedure of MATTE_PROCEDURES) {
     const matte = matteFromLogits(Float32Array.from([0, 40, -40, 1]), 2, 2, 2, 2, procedure);
     assertEquals(matte.width, 2);
@@ -372,7 +408,7 @@ test("後処理: 恒等 resize では sigmoid をそのまま 8bit へ量子化�
   }
 });
 
-test("後処理: 返るのは**入力画像の**寸法（グラフの寸法ではない・両手順）", () => {
+test("postprocessing: the result has the **input image's** dimensions (not the graph's; both procedures)", () => {
   for (const procedure of MATTE_PROCEDURES) {
     const matte = matteFromLogits(new Float32Array(4 * 4), 4, 4, 7, 3, procedure);
     assertEquals(matte.width, 7, procedure);
@@ -381,12 +417,14 @@ test("後処理: 返るのは**入力画像の**寸法（グラフの寸法で�
   }
 });
 
-test("後処理: sigmoid は resize の**前**に掛かる（順序を入れ替えると落ちる）", () => {
-  // 2×1 → 1×1 の縮小はどちらのカーネルも 2 点に等しい重みが掛かるので、resize は 2 点の平均そのもの。
-  //   sigmoid 先（float-bilinear）: (σ(0) + σ(10)) / 2 = (0.5 + 0.9999546) / 2 = 0.7499773 → 191
-  //   sigmoid 先（u8-pil-bicubic）: 8bit で (128 + 255) / 2 = 191.5 → 192（固定小数点の四捨五入）
-  //   resize 先                 : σ((0 + 10) / 2) = σ(5) = 0.9933 → 253
-  // 60 以上も離れるので、順序を取り違えたまま「それらしい」マットが出ることはない。
+test("postprocessing: sigmoid is applied **before** resize (swapping the order fails)", () => {
+  // A 2×1 → 1×1 downscale gives the two points equal weight with either kernel, so the resize is
+  // exactly the mean of the two points.
+  //   sigmoid first (float-bilinear): (σ(0) + σ(10)) / 2 = (0.5 + 0.9999546) / 2 = 0.7499773 → 191
+  //   sigmoid first (u8-pil-bicubic): in 8 bits (128 + 255) / 2 = 191.5 → 192 (fixed-point
+  //                                   round half up)
+  //   resize first                  : σ((0 + 10) / 2) = σ(5) = 0.9933 → 253
+  // They are more than 60 apart, so a wrong order cannot produce a "plausible" matte.
   const expected: Readonly<Record<MatteProcedure, number>> = {
     "float-bilinear": 191,
     "u8-pil-bicubic": 192,
@@ -397,13 +435,13 @@ test("後処理: sigmoid は resize の**前**に掛かる（順序を入れ替�
   }
 });
 
-test("resizePlaneF32: 同寸法なら値をそのまま通す（丸めも縮退も挟まない）", () => {
+test("resizePlaneF32: the same dimensions pass the values through as is (no rounding, no degradation)", () => {
   const plane = Float32Array.from([0.1, 0.25, 0.5, 0.75, 0.9, 1]);
   const out = resizePlaneF32(plane, 3, 2, 3, 2);
   assertEquals([...out], [...plane]);
 });
 
-test("resizePlaneF32: 一様な平面は寸法を変えても一様（重み総和が 1）", () => {
+test("resizePlaneF32: a uniform plane stays uniform when resized (the weights sum to 1)", () => {
   const plane = new Float32Array(5 * 7).fill(0.375);
   for (const [width, height] of [
     [3, 2],
@@ -416,16 +454,17 @@ test("resizePlaneF32: 一様な平面は寸法を変えても一様（重み総�
   }
 });
 
-test("resizePlaneF32: 縮小の重みが Pillow の台と一致する（手計算との突合）", () => {
-  // 4 → 2 の縮小: scale = 2 なので台が 2 倍に伸び、出力 0 の重みは
-  // triangle(-0.25) / triangle(0.25) / triangle(0.75) = 0.75 / 0.75 / 0.25 を総和 1.75 で
-  // 正規化したもの。出力 1 は左右反転した並び。**非対称な入力**でないと反転を検出できない。
+test("resizePlaneF32: the downscale weights match Pillow's support (compared with a hand calculation)", () => {
+  // A 4 → 2 downscale: scale = 2, so the support stretches 2×, and the weights of output 0 are
+  // triangle(-0.25) / triangle(0.25) / triangle(0.75) = 0.75 / 0.75 / 0.25 normalised by the sum
+  // 1.75. Output 1 is the mirrored order. A reversal cannot be detected without an **asymmetric
+  // input**.
   const out = resizePlaneF32(Float32Array.from([0, 0, 0, 1]), 4, 1, 2, 1);
   assertAlmostEquals(out[0], 0, 1e-7);
   assertAlmostEquals(out[1], 0.75 / 1.75, 1e-7);
 });
 
-test("resizePlaneF32: 横方向だけの勾配は resize しても横方向だけ（軸の取り違え検出）", () => {
+test("resizePlaneF32: a horizontal-only gradient stays horizontal-only after resize (detects an axis mix-up)", () => {
   const width = 6;
   const height = 4;
   const plane = new Float32Array(width * height);
@@ -435,54 +474,58 @@ test("resizePlaneF32: 横方向だけの勾配は resize しても横方向だ�
   const out = resizePlaneF32(plane, width, height, 3, 9);
   for (let y = 1; y < 9; y += 1) {
     for (let x = 0; x < 3; x += 1) {
-      assertAlmostEquals(out[y * 3 + x], out[x], 1e-7, `行 ${y} 列 ${x}`);
+      assertAlmostEquals(out[y * 3 + x], out[x], 1e-7, `row ${y} column ${x}`);
     }
   }
-  assert(out[0] < out[2], "横方向の単調性が失われた（軸が入れ替わっている）");
+  assert(out[0] < out[2], "horizontal monotonicity was lost (the axes are swapped)");
 });
 
-test("resizePlaneF32: 長さの食い違いは落とす（黙って途中まで読まない）", () => {
+test("resizePlaneF32: rejects a length mismatch (no silently reading part of it)", () => {
   assertThrows(() => resizePlaneF32(new Float32Array(5), 3, 2, 3, 2), Error, "Plane length 5");
   assertThrows(() => resizePlaneF32(new Float32Array(6), 3, 2, 0, 2), RangeError, "Output width");
 });
 
-test("後処理: α は 8bit の全域を使う（飽和側が 1 LSB で潰れていない）", () => {
-  // 恒真化の防止 — 上のケースが全て 128 付近でも通ってしまう形を避ける。
+test("postprocessing: α uses the whole 8-bit range (the saturated side is not crushed by 1 LSB)", () => {
+  // Guards against vacuity — avoids the shape where the cases above would all pass even around 128.
   for (const procedure of MATTE_PROCEDURES) {
     const matte = matteFromLogits(Float32Array.from([-20, -2, 2, 20]), 4, 1, 4, 1, procedure);
     assertEquals(matte.data[0], 0, procedure);
     assertEquals(matte.data[3], 255, procedure);
     assert(
       matte.data[1] > 0 && matte.data[1] < 128 - ALPHA_LSB,
-      `σ(−2) が中間に来ていない（${procedure}）`,
+      `σ(−2) does not land in the middle (${procedure})`,
     );
     assert(
       matte.data[2] > 128 + ALPHA_LSB && matte.data[2] < 255,
-      `σ(2) が中間に来ていない（${procedure}）`,
+      `σ(2) does not land in the middle (${procedure})`,
     );
   }
 });
 
-// ---- segment の後処理の結線（Session を偽物にして GPU なしで通す）--------------------
+// ---- Postprocessing wiring of segment (a fake Session lets it run without a GPU) ----------------
 //
-// `segment` が logit に当てる手順が配布形の宣言（`pipelineConfig.postprocess`）どおりであることを
-// 縛る（ADR 0125 — 系列ごとの手順は配布形が宣言する）。宣言ごとに値が割れる入力で両方の宣言を回すので、
-// パイプラインが宣言を読まずに片方の手順へ固定されたら、どちらかの宣言で落ちる。Session も GPU も偽物で足りる
-// （`run` しか触らない）ので、状態を直接組んで非公開のコンストラクタへ渡す
-// （`vowel_detector_pipeline_test.ts` と同じ流儀）。
+// Pins that the procedure `segment` applies to the logits follows the distribution's declaration
+// (`pipelineConfig.postprocess`) (ADR 0125 — the distribution declares each series' procedure).
+// Both declarations run on an input whose values differ per declaration, so if the pipeline ignored
+// the declaration and stuck to one procedure, one of the declarations would fail. A fake Session
+// and a fake GPU suffice (only `run` is touched), so the state is built directly and passed to the
+// private constructor (the same approach as `vowel_detector_pipeline_test.ts`).
 
-/** グラフの寸法（非正方）と入力画像の寸法（拡大 — 2 つの手順の値が割れる向き）。 */
+/**
+ * The graph's dimensions (non-square) and the input image's dimensions (upscaling — the direction
+ * in which the two procedures' values differ).
+ */
 const FAKE_GRAPH = { width: 6, height: 5 };
 const FAKE_IMAGE = { width: 13, height: 9 };
 
-/** 段差と斜面を持つ logit（2 つの手順の値が割れる入力）。 */
+/** Logits with a step and a slope (an input on which the two procedures' values differ). */
 const fakeLogits = (): Float32Array<ArrayBuffer> =>
   Float32Array.from(
     { length: FAKE_GRAPH.width * FAKE_GRAPH.height },
     (_, index) => (index % FAKE_GRAPH.width < 3 ? -9 : 9) + (index % 7) - 3,
   );
 
-/** 偽の Session（`run` は決まった logit を返す）を張り、`postprocess` を宣言したパイプライン。 */
+/** A pipeline with a fake Session (`run` returns fixed logits) that declares `postprocess`. */
 const pipelineWithFakeSession = (
   logits: Float32Array<ArrayBuffer>,
   postprocess: MatteProcedure,
@@ -509,7 +552,7 @@ const pipelineWithFakeSession = (
   return Reflect.construct(Pipeline, [state]);
 };
 
-test("segment: logit に当てる手順は配布形の宣言どおり（matteFromLogits の明示の手順とビット一致）", async () => {
+test("segment: the procedure applied to the logits follows the distribution's declaration (bit-identical to matteFromLogits with the explicit procedure)", async () => {
   const logits = fakeLogits();
   const image: Rgb8Image = {
     data: new Uint8Array(FAKE_IMAGE.width * FAKE_IMAGE.height * 3).fill(128),
@@ -525,7 +568,8 @@ test("segment: logit に当てる手順は配布形の宣言どおり（matteFro
       name,
     ).data,
   ];
-  // 恒真化の防止 — この入力で 2 つの手順が同じ値なら、手順の取り違えを掴めない。
+  // Guards against vacuity — if the two procedures gave the same value on this input, a mix-up of
+  // procedures could not be caught.
   assertNotEquals(procedure("u8-pil-bicubic"), procedure("float-bilinear"));
 
   for (const declared of MATTE_PROCEDURES) {

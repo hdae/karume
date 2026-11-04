@@ -1,24 +1,28 @@
 /**
- * 固定 packed PLE（i2 / i4）と独立 Torch CPU fixture の突合（ADR 0097）。
+ * Comparison of fixed packed PLE (i2 / i4) with an independent Torch CPU fixture (ADR 0097).
  *
- * 資産はリポジトリ内のフィクスチャで、実体は**系列出力とまったく同じ形**の `krm` 容器
- * （`model-NNNNN-of-NNNNN.krm` の part 列 + 資産 `ple_index` / `ple.values.*` /
- * `ple.scales.*`）。生成器は `tools/export-recipes/gemma4/tests/ple_fixture.py` で、
- * recipe の本番経路と同じ関数（`karume.ple.ple_assets` + `karume.pipeline.publish_model`）が
- * 焼く。読み口も系列出力と同じ 1 本（`helpers/ple-series.ts` の `seriesPleHandle`）なので、
- * この門は「fixture 専用の読み手」ではなく**配布される形**を読んでいる。
+ * The assets are an in-repository fixture, a `krm` container of **exactly the same shape as the series output**
+ * (the part list `model-NNNNN-of-NNNNN.krm` + the assets `ple_index` / `ple.values.*` / `ple.scales.*`). The
+ * generator is `tools/export-recipes/gemma4/tests/ple_fixture.py`, written by the same functions as the recipe's
+ * production path (`karume.ple.ple_assets` + `karume.pipeline.publish_model`). The reader is also the single path
+ * used for series output (`seriesPleHandle` in `helpers/ple-series.ts`), so this check reads **the shipped shape**,
+ * not a "fixture-only reader".
  *
- * 門は 5 本:
- * ① **行読み**（予算 0）の値が torch の CPU 参照と**ビット一致**する
- * ② **全量読み**（予算 = 全量）の値が①とビット一致し、常駐 block と residentBytes が索引どおり
- * ③ 索引の格納宣言が実体とずれていれば値が割れる（片方だけ焼き直した組み合わせ）
- * ④ 索引の受理集合（schema 3）— 旧版・格納の綴り違い・詰め数で割り切れない次元は読まない
- * ⑤ 索引と容器の資産の**両方向**の突合（`readGemma4PleIndex`）が、片側を欠いた容器を落とす
+ * Five checks:
+ * ① The values of **row reads** (budget 0) are **bit-identical** to torch's CPU reference
+ * ② The values of **full reads** (budget = everything) are bit-identical to ①, and the resident blocks and
+ *    residentBytes match the index
+ * ③ If the index's storage declaration disagrees with the data, the values diverge (a combination where only one
+ *    side was rebuilt)
+ * ④ The index's accepted set (schema 3) — an old version, a misspelt storage, or a dimension not divisible by the
+ *    packing count is not read
+ * ⑤ The comparison of the index and the container's assets **in both directions** (`readGemma4PleIndex`) rejects a
+ *    container missing either side
  *
- * NOTE: `values` と `scales` は**別々の block 境界**を持つ（生成器が `BLOCK_BYTES = 144` で
- * 切るので i4 は 3 : 1・i2 は 2 : 1）。表ごとに別の block を引く読み手の誤りを、境界の揃った
- * fixture では拾えないためである。②の本数の断定は索引から導く（焼き直しで動いてよい）が、
- * 「境界が揃っていないこと」自体は下で名指しの断定を置く。
+ * NOTE: `values` and `scales` have **separate block boundaries** (the generator cuts at `BLOCK_BYTES = 144`, so 3 : 1
+ * for i4 and 2 : 1 for i2). A fixture with aligned boundaries cannot catch a reader that wrongly reads a different
+ * block per table. ②'s assertion on the block count is derived from the index (it may move on a rebuild), but "the
+ * boundaries are not aligned" itself gets a named assertion below.
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -36,7 +40,7 @@ import {
 } from "../src/gemma/ple-index.ts";
 import { SERIES_MODEL_FILE, seriesPleHandle } from "./helpers/ple-series.ts";
 
-/** 索引の資産を生のまま読む（受理集合の門は doctored な文書を `parseGemma4PleIndex` へ渡す）。 */
+/** Reads the index asset raw (the accepted-set checks pass doctored documents to `parseGemma4PleIndex`). */
 const readIndexDocument = async (
   opened: Pick<OpenedContainer, "asset">,
 ): Promise<Record<string, unknown>> => {
@@ -45,7 +49,7 @@ const readIndexDocument = async (
 };
 
 for (const dtype of ["i2", "i4"] as const) {
-  test(`PLE ${dtype}: 行読みと全量読みの結果が独立 CPU 参照とビット一致する`, async () => {
+  test(`PLE ${dtype}: row reads and full reads are bit-identical to the independent CPU reference`, async () => {
     const dir = new URL(`./fixtures/gemma4-ple-packed/${dtype}/`, import.meta.url);
     const opened = await openSeriesContainer(new URL(SERIES_MODEL_FILE, dir));
     const { index, openBlock } = await seriesPleHandle(opened, `test: ${dtype} fixture`);
@@ -63,15 +67,15 @@ for (const dtype of ["i2", "i4"] as const) {
       gemma4PleTotalBytes(index),
       index.tokens * (index.layers * (index.dim / factor + 4)),
     );
-    // 表ごとに境界が違うこと（モジュール doc の NOTE）。揃った fixture では、scales を
-    // values の block 番号で引く読み手の誤りが素通りする。
+    // The boundaries differ per table (the NOTE in the module doc). With an aligned fixture, a reader that wrongly
+    // reads scales by the values block number would slip through.
     assert(
       index.values.blocks.length > 1 && index.values.blocks.length !== index.scales.blocks.length,
       `values ${index.values.blocks.length} block / scales ${index.scales.blocks.length} block` +
-        " — 表ごとに違う切り目を踏ませる fixture でなくなっている",
+        " — the fixture no longer exercises boundaries that differ per table",
     );
 
-    // ① 行読み（予算 0 = 常駐も行キャッシュも持たない）。
+    // ① Row reads (budget 0 = no residency and no row cache).
     const rows = createGemma4Ple({
       index,
       openBlock,
@@ -81,11 +85,15 @@ for (const dtype of ["i2", "i4"] as const) {
     const byRows = await rows.gather(ids);
     assert(byRows.dtype === "f32");
     assertEquals(new Uint32Array(byRows.data.buffer), expected);
-    assertEquals(rows.stats().loads, 0, "予算 0 なのに block 全量を読んでいる");
-    assertEquals(rows.stats().rowReads, distinct * 2, "行読みは values / scales の 2 表ぶん");
+    assertEquals(rows.stats().loads, 0, "reads whole blocks despite a budget of 0");
+    assertEquals(
+      rows.stats().rowReads,
+      distinct * 2,
+      "row reads cover the 2 tables values / scales",
+    );
     rows.dispose();
 
-    // ② 全量読み（予算 = 全量 — 参照 id は全 token を覆うので、全 block が下限に届く）。
+    // ② Full reads (budget = everything — the referenced ids cover every token, so every block reaches the threshold).
     const blocks = createGemma4Ple({
       index,
       openBlock,
@@ -97,7 +105,7 @@ for (const dtype of ["i2", "i4"] as const) {
     assertEquals(
       [...new Uint32Array(byBlocks.data.buffer)],
       [...new Uint32Array(byRows.data.buffer)],
-      "全量読みの値が行読みとビット一致しない",
+      "the full-read values are not bit-identical to the row reads",
     );
     const loaded = index.values.blocks.length + index.scales.blocks.length;
     assertEquals(blocks.stats().loads, loaded);
@@ -110,9 +118,9 @@ for (const dtype of ["i2", "i4"] as const) {
       gemma4PleTotalBytes(index) +
         Math.min(256, distinct) * (index.values.rowBytes + index.scales.rowBytes),
     );
-    // 常駐しているので引き直しても読みは増えない。
+    // They are resident, so reading again does not add reads.
     const again = await blocks.gather(ids);
-    assertEquals(blocks.stats().loads, loaded, "常駐している block を読み直している");
+    assertEquals(blocks.stats().loads, loaded, "re-reads a resident block");
     // The second gather is answered from the row cache (rows copied out of the packed blocks), so
     // a packed-specific copy offset error shows up here, not in the first gather.
     assert(again.dtype === "f32");
@@ -125,7 +133,7 @@ for (const dtype of ["i2", "i4"] as const) {
     assertEquals(blocks.stats().residentBytes, 0);
     await assertRejects(() => blocks.gather(ids));
 
-    // ③ 索引の格納宣言だけを差し替えると、形も dtype も合ったまま別の値になる — 参照と割れる。
+    // ③ Swapping only the index's storage declaration gives different values with matching shape and dtype — they diverge from the reference.
     const mismatched = createGemma4Ple({
       index: { ...index, storage: dtype === "i2" ? "i4" : "i2" },
       openBlock,
@@ -137,48 +145,48 @@ for (const dtype of ["i2", "i4"] as const) {
       assert(wrong.dtype === "f32");
       assert(
         [...new Uint32Array(wrong.data.buffer)].some((word, at) => word !== expected[at]),
-        "格納宣言を取り違えても値が変わらない（索引の storage が効いていない）",
+        "values do not change with a mixed-up storage declaration (the index's storage has no effect)",
       );
     } finally {
       mismatched.dispose();
     }
 
-    // ④ 受理集合（schema 3 の門）— 旧版・格納の綴り違い・詰め数で割り切れない次元は読まない。
+    // ④ The accepted set (the schema 3 check) — an old version, a misspelt storage, or a dimension not divisible by the packing count is not read.
     const raw = await readIndexDocument(opened);
-    assertEquals(raw.schema, 3, "容器の索引が schema 3 でない");
+    assertEquals(raw.schema, 3, "the container's index is not schema 3");
     for (const invalid of [{ schema: 1 }, { schema: 2 }, { storage: "i8" }, { dim: 31 }]) {
       assertThrows(() => parseGemma4PleIndex({ ...raw, ...invalid }));
     }
   });
 
   /**
-   * ⑤ 索引と容器の資産の突合（`readGemma4PleIndex` → `assertGemma4PleAssets`）。
+   * ⑤ Comparison of the index and the container's assets (`readGemma4PleIndex` → `assertGemma4PleAssets`).
    *
-   * 旧 sidecar の読み口ではこの門が掛からなかった（索引をテスト側で組み立てていたので、
-   * 「索引が指す資産が容器に無い」は定義上起きなかった）。容器を読む形にした今は、片方だけ
-   * 焼き直した配布形を**重みの block を 1 バイトも取る前に**落とせる。ここは資産の宣言を
-   * 間引いた面を渡して、恒真でないことを確かめる。
+   * The old sidecar reader did not apply this check (the test assembled the index itself, so "an asset the index
+   * points at is missing from the container" could not happen by definition). Now that the container is read, a
+   * distribution where only one side was rebuilt can be rejected **before a single byte of the weight blocks is
+   * fetched**. Here a surface with thinned-out asset declarations is passed to confirm it is not always true.
    */
-  test(`PLE ${dtype}: 索引と容器の資産が食い違えば読む前に落ちる`, async () => {
+  test(`PLE ${dtype}: a mismatch between the index and the container's assets fails before reading`, async () => {
     const dir = new URL(`./fixtures/gemma4-ple-packed/${dtype}/`, import.meta.url);
     const opened = await openSeriesContainer(new URL(SERIES_MODEL_FILE, dir));
     const source = gemma4PleAssetSource(opened);
     const dropped = Object.keys(source.assets).find((name) => name.startsWith("ple.values."));
-    assert(dropped !== undefined, "容器に values の資産が無い");
+    assert(dropped !== undefined, "the container has no values asset");
 
-    // (a) 索引が指す block を容器が宣言していない。
+    // (a) The container does not declare a block the index points at.
     const missing = { ...source.assets };
     delete missing[dropped];
     await assertRejects(
-      () => readGemma4PleIndex("test: 資産欠け", { ...source, assets: missing }),
+      () => readGemma4PleIndex("test: missing asset", { ...source, assets: missing }),
       Error,
       `${dropped}: not declared by the container`,
     );
 
-    // (b) 索引が指していない PLE 資産が容器に在る（配布形が宣言した資産を 1 本も読まない形）。
+    // (b) The container has a PLE asset the index does not point at (the shape where a declared asset is never read).
     await assertRejects(
       () =>
-        readGemma4PleIndex("test: 余分な資産", {
+        readGemma4PleIndex("test: extra asset", {
           ...source,
           assets: { ...source.assets, "ple.values.999": "ple-values" },
         }),
@@ -186,10 +194,10 @@ for (const dtype of ["i2", "i4"] as const) {
       "ple.values.999: an asset with role 'ple-values' that the index does not point at",
     );
 
-    // (c) 役割が違う（値と scale を取り違えた焼き直し）。
+    // (c) A different role (a rebuild that mixed up values and scales).
     await assertRejects(
       () =>
-        readGemma4PleIndex("test: 役割違い", {
+        readGemma4PleIndex("test: wrong role", {
           ...source,
           assets: { ...source.assets, [dropped]: "ple-scales" },
         }),

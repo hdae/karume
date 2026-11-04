@@ -1,12 +1,12 @@
-// 家族横断の入力起因エラー（ADR
-// [0107](../../../docs/decisions/0107-model-input-error.md)）の挙動テスト。GPU も実資産も要らない。
+// Behaviour tests of the cross-family input-caused errors (ADR
+// [0107](../../../docs/decisions/0107-model-input-error.md)). Needs neither a GPU nor real assets.
 //
-// 縛るのは 2 点:
+// Two things are pinned:
 //
-// - **`instanceof` で分岐できること** — ホストが 400 / 500 を分ける唯一の手段なので、派生
-//   2 本が親を通ること自体が仕様である（`extends` の付け替えは型検査では咎められない）。
-// - **受理集合の所有者が 1 本であること** — `assertAcceptableSeed` の境界（0 と
-//   `Number.MAX_SAFE_INTEGER` を通し、その外を落とす）を値で固定する。
+// - **Branching with `instanceof` works** — it is the only way a host tells 400 from 500, so the two subclasses
+//   passing as the parent is itself the spec (re-pointing `extends` would not be caught by the type check).
+// - **The accepted set has a single owner** — the boundaries of `assertAcceptableSeed` (0 and
+//   `Number.MAX_SAFE_INTEGER` pass, anything outside fails) are pinned by value.
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -16,34 +16,34 @@ import * as sbv2 from "../src/sbv2/errors.ts";
 import { GenerationCapacityError } from "../src/generation/sequence.ts";
 
 describe("ModelInputError", () => {
-  it("name は綴りどおりで、ログと err.name の分岐から読める", () => {
-    assertEquals(new ModelInputError("値域の外").name, "ModelInputError");
+  it("name is spelled as is and readable from logs and err.name branches", () => {
+    assertEquals(new ModelInputError("out of range").name, "ModelInputError");
   });
 
-  it("message をそのまま保つ", () => {
-    const error = new ModelInputError("seed -1 が非負の安全整数でない");
-    assertEquals(error.message, "seed -1 が非負の安全整数でない");
+  it("keeps message as is", () => {
+    const error = new ModelInputError("seed -1 is not a non-negative safe integer");
+    assertEquals(error.message, "seed -1 is not a non-negative safe integer");
   });
 
-  it("cause を透過する（包み直しても原因を辿れる）", () => {
-    const cause = new Error("元の失敗");
-    assertEquals(new ModelInputError("受理できない", { cause }).cause, cause);
+  it("passes cause through (the cause can be traced after rewrapping)", () => {
+    const cause = new Error("the original failure");
+    assertEquals(new ModelInputError("not acceptable", { cause }).cause, cause);
   });
 
-  it("Error の派生である（既存の catch の枝を壊さない）", () => {
-    assert(new ModelInputError("受理できない") instanceof Error);
+  it("is a subclass of Error (does not break existing catch branches)", () => {
+    assert(new ModelInputError("not acceptable") instanceof Error);
   });
 });
 
-describe("家族の入力起因エラーをホストから見たとき", () => {
-  it("sbv2.InputError は ModelInputError で捕まる（name は家族名で修飾した綴り）", () => {
-    const error = new sbv2.InputError("スタイル名が配布形に無い");
+describe("family input-caused errors as seen from the host", () => {
+  it("sbv2.InputError is caught as ModelInputError (name is qualified with the family name)", () => {
+    const error = new sbv2.InputError("the style name is not in the distribution");
     assert(error instanceof ModelInputError);
     assertEquals(error.name, "sbv2.InputError");
   });
 
-  it("GenerationCapacityError は ModelInputError で捕まる（切り詰めの欄は保たれる）", () => {
-    const error = new GenerationCapacityError("会話が容量に入らない", {
+  it("GenerationCapacityError is caught as ModelInputError (the truncation fields are kept)", () => {
+    const error = new GenerationCapacityError("the conversation does not fit the capacity", {
       constraint: "capacity",
       pastLength: 100,
       promptLength: 40,
@@ -57,13 +57,13 @@ describe("家族の入力起因エラーをホストから見たとき", () => {
   });
 });
 
-describe("assertAcceptableSeed（3 家族が共有する seed の受理集合）", () => {
-  it("非負の安全整数を通す（両端を含む）", () => {
+describe("assertAcceptableSeed (the seed accepted set shared by 3 families)", () => {
+  it("passes non-negative safe integers (both ends included)", () => {
     assertAcceptableSeed(0);
     assertAcceptableSeed(Number.MAX_SAFE_INTEGER);
   });
 
-  it("負・端数・NaN・安全整数の外を ModelInputError で落とす", () => {
+  it("rejects negative, fractional, NaN and beyond-safe-integer values with ModelInputError", () => {
     for (const seed of [-1, 1.5, Number.NaN, 2 ** 53]) {
       assertThrows(
         () => assertAcceptableSeed(seed),

@@ -19,23 +19,26 @@ import {
 
 // ==== gpuFeatures ====================================================================
 //
-// manifest の `gpuFeatures`（device 生成時にしか要求できない feature）→ `acquireGpu` の要求への
-// 写像。ADR 0038 §3 の綴りの契約で、抜けは**沈黙劣化**（配布形が要求した能力を持たない device で
-// 実行が進む）になる。8 家族全部が同じ 1 本を使うので、門もここ 1 本に集約する（元は 7 家族が
-// `quant.gpuFeatures?.shaderF16 === true` を 1 行ずつ独立に読んでいた — レビュー M1-V9）。
+// The mapping from the manifest's `gpuFeatures` (features that can only be requested when the
+// device is created) to the `acquireGpu` request. It is the spelling contract of ADR 0038 §3, and a
+// gap is a **silent degradation** (running on a device without a capability the distribution asked
+// for). All eight families use the same function, so its checks are gathered here in one place too
+// (originally seven families each read `quant.gpuFeatures?.shaderF16 === true` on their own line —
+// review M1-V9).
 //
-// 取得後の検査（`assertGpuFeaturesGranted`）も GPU 無しで踏む。`GpuContext` は runtime が値と
-// して公開しない（`acquireGpu` が唯一の入口 — ADR 0008）ので、向こうの helper
-// `fake-gpu.ts` の `fakeGpuContext`（= **実物の `GpuContext`** に fake device を包む）を使う
-// （`container_loading_test.ts` の⑧が先例）。自前に偽物を組むと検査対象そのものが偽物になるが、
-// 実物を包む限り検査対象は本物のままである。
+// The check after acquisition (`assertGpuFeaturesGranted`) is exercised without a GPU too. runtime
+// does not expose `GpuContext` as a value (`acquireGpu` is the only entry point — ADR 0008), so
+// this uses `fakeGpuContext` from the helper `fake-gpu.ts` over there (= a fake device wrapped in
+// **the real `GpuContext`**) (precedent: ⑧ in `container_loading_test.ts`). A home-made fake would
+// make the subject under test itself fake; wrapping the real one keeps the subject real.
 //
-// 有効側の対照（feature を持つ device では通る）だけは helper に features を渡す口が要るので
-// まだ書けない（runtime テスト担当へ依頼済み — `fakeGpuContext` の第 3 引数）。
+// Only the positive control (passes on a device that has the feature) cannot be written yet,
+// because the helper needs a way to pass features (requested from whoever owns the runtime tests —
+// a third argument to `fakeGpuContext`).
 
-test("toAcquireGpuOptions: 宣言された feature だけを要求する", () => {
-  // 宣言が無い / 明示的に false の配布形で feature を要求しにいくと、持たないアダプタでは
-  // `acquireGpu` 自体が落ちる（= 動くはずの環境で動かなくなる）。
+test("toAcquireGpuOptions: requests only the declared features", () => {
+  // Requesting a feature for a distribution with no declaration / an explicit false would make
+  // `acquireGpu` itself fail on adapters without it (= it would stop working where it should work).
   assertEquals(toAcquireGpuOptions(undefined), {});
   assertEquals(toAcquireGpuOptions({}), {});
   assertEquals(toAcquireGpuOptions({ shaderF16: false }), {});
@@ -44,7 +47,8 @@ test("toAcquireGpuOptions: 宣言された feature だけを要求する", () =>
 
 test("toAcquireGpuOptions: the online attention preset asks for subgroups only as 'available' (ADR 0132 decision 5)", () => {
   // `attentionScoreStorage: "none"` runs faster with subgroups but is bit-identical without them,
-  // so the request never becomes a requirement (a default preset declares no feature — ADR 0128 C1).
+  // so the request never becomes a requirement (a default preset declares no feature — ADR 0128
+  // C1).
   assertEquals(toAcquireGpuOptions(undefined, { attentionScoreStorage: "none" }), {
     subgroups: "available",
   });
@@ -59,53 +63,57 @@ test("toAcquireGpuOptions: the online attention preset asks for subgroups only a
   assertEquals(toAcquireGpuOptions({ shaderF16: true }, {}), { shaderF16: true });
 });
 
-test("toAcquireGpuOptions: GpuFeaturesSpec の全キーを写す（キー追加の取り残しを検出）", () => {
-  // 写像の網羅は `src/session/gpu-features.ts` の `FEATURES`（`Required<GpuFeaturesSpec>` の
-  // 網羅表）が型で固定しており、キーが増えれば**コンパイルエラー**になる。ここはその型門が
-  // 生きていることを実行時からも見る対（型を緩めた改変は型検査を通ってしまうため）—
-  // 全キーを true で埋めた spec を渡し、出てくるキー集合が入力と一致することを確かめる。
+test("toAcquireGpuOptions: maps every key of GpuFeaturesSpec (detects a key left behind when one is added)", () => {
+  // The mapping's coverage is pinned by type through `FEATURES` in `src/session/gpu-features.ts`
+  // (the exhaustive table of `Required<GpuFeaturesSpec>`), so a new key is a **compile error**.
+  // This is the counterpart that checks at run time that this type check is alive (a change that
+  // loosens the type would pass the type check) — it passes a spec with every key set to true and
+  // confirms that the resulting key set equals the input's.
   const full: Required<GpuFeaturesSpec> = { shaderF16: true };
   const requested = toAcquireGpuOptions(full) as Record<string, unknown>;
   assertEquals(Object.keys(requested).sort(), Object.keys(full).sort());
 });
 
-// ---- 取得済み GpuContext での検査（共有 GPU 経路の唯一の門）--------------------
+// ---- Checks on an acquired GpuContext (the only check on the shared-GPU path) ----
 
 const FEATURES_WHERE = "TestPipeline: quant 'f16'";
 
-/** shader-f16 を持たない device（`fakeGpuContext` は features を空 `Set` で作る）。 */
+/** A device without shader-f16 (`fakeGpuContext` creates features as an empty `Set`). */
 const noFeatureGpu = () => fakeGpuContext(fakeDevice());
 
-test("assertGpuFeaturesGranted: 要求された feature が無効な共有 GPU は名指しで落ちる", () => {
-  // 共有 GPU（`options.gpu`）を渡された経路では device 生成後なので feature を取り直せない
-  // （ADR 0028）。ここを通すと Session 構築まで進んでから落ちるか、黙って別経路へ縮退する。
+test("assertGpuFeaturesGranted: a shared GPU without a requested feature fails, naming it", () => {
+  // On the path given a shared GPU (`options.gpu`), the device already exists, so the feature
+  // cannot be requested again (ADR 0028). Letting it through here would fail later at Session
+  // construction or silently fall back to another path.
   const error = assertThrows(
     () => assertGpuFeaturesGranted({ shaderF16: true }, noFeatureGpu(), FEATURES_WHERE),
     Error,
   );
-  // 診断の 3 点セット: どの席か / どの feature か / どう取り直すか。
+  // The three parts of the diagnostic: which preset / which feature / how to request it again.
   assertStringIncludes(error.message, FEATURES_WHERE);
   assertStringIncludes(error.message, "shader-f16");
   assertStringIncludes(error.message, "acquireGpu({ shaderF16: true })");
 });
 
-test("assertGpuFeaturesGranted: 要求していない配布形は no-op（門が恒真でないことの対）", () => {
+test("assertGpuFeaturesGranted: a no-op for a distribution that requests nothing (the counterpart showing the check is not always true)", () => {
   const gpu = noFeatureGpu();
   assertGpuFeaturesGranted(undefined, gpu, FEATURES_WHERE);
   assertGpuFeaturesGranted({}, gpu, FEATURES_WHERE);
   assertGpuFeaturesGranted({ shaderF16: false }, gpu, FEATURES_WHERE);
 });
 
-// ---- 実効 SessionOptions から導く要求（上書き口を持つ家族の席）--------------------
+// ---- Requests derived from the effective SessionOptions (presets of families with overrides) ----
 
-test("sessionGpuFeatures: f16 計算を実効設定が選べば shader-f16 を要求に足す", () => {
-  // 明示の `linearCompute: "f16"` を quant 宣言（shader-f16 を要求しない）に重ねた形。足さないと
-  // 自前で取る device が feature を持たず、重みを全部上げた後の Session 構築で落ちる。
+test("sessionGpuFeatures: adds shader-f16 to the request when the effective settings choose f16 compute", () => {
+  // An explicit `linearCompute: "f16"` layered over a quant declaration (that does not request
+  // shader-f16). Without adding it, a self-acquired device lacks the feature and Session
+  // construction fails after all the weights have been uploaded.
   assertEquals(sessionGpuFeatures(undefined, { linearCompute: "f16" }), { shaderF16: true });
   assertEquals(sessionGpuFeatures({ shaderF16: false }, { attentionCompute: "f16" }), {
     shaderF16: true,
   });
-  // 共有 GPU の経路では、足した要求がそのまま admission 席の検査に掛かる（重みを取る前に落ちる）。
+  // On the shared-GPU path, the added request goes straight into the admission check (it fails
+  // before the weights are fetched).
   assertThrows(
     () =>
       assertGpuFeaturesGranted(
@@ -118,8 +126,9 @@ test("sessionGpuFeatures: f16 計算を実効設定が選べば shader-f16 を�
   );
 });
 
-test("sessionGpuFeatures: 要らない・宣言済みなら宣言をそのまま返す（要求を増やさない）", () => {
-  // s16（`attentionScoreStorage: "f16"`）は shader-f16 に依らない格納形（ADR 0030 決定 1）。
+test("sessionGpuFeatures: returns the declaration as is when nothing is needed or it is already declared (no extra requests)", () => {
+  // s16 (`attentionScoreStorage: "f16"`) is a storage form that does not depend on shader-f16 (ADR
+  // 0030 decision 1).
   assertEquals(sessionGpuFeatures(undefined, {}), undefined);
   assertEquals(sessionGpuFeatures(undefined, { attentionScoreStorage: "f16" }), undefined);
   assertEquals(sessionGpuFeatures(undefined, { linearCompute: "a8" }), undefined);
@@ -129,20 +138,21 @@ test("sessionGpuFeatures: 要らない・宣言済みなら宣言をそのまま
 
 // ==== requiredLimits =================================================================
 //
-// manifest の `requiredLimits`（quant が宣言する device limit の最小値 — ADR 0038 §7）と GPU
-// 側の limits を突き合わせる検査。ADR 0089 決定 5 の**重みを 1 バイトも落とす前**の門なので、
-// 見落とし（宣言したのに誰も見ない = 数 GiB を落としてから確保で落ちる）も過剰（書かれて
-// いない limit まで見る = 動くはずの環境を誤拒否する）も、どちらも実害が出る側にある。
+// The check that compares the manifest's `requiredLimits` (the minimum device limits a quant
+// declares — ADR 0038 §7) with the GPU's limits. It is ADR 0089 decision 5's check **before a
+// single byte of weights is downloaded**, so both an omission (declared but checked by nobody =
+// fails at allocation after downloading several GiB) and an excess (checking limits nobody wrote =
+// wrongly rejecting an environment that would work) do real harm.
 //
-// 突き合わせ相手を用意する面（`assertRequiredLimitsBeforeDownload` — 共有 GPU の limits か
-// アダプタ実測値か）は GPU / ロード経路が要るので `container_loading_test.ts` の⑧と
-// `container_loading_test.ts` の⑨が縛る。
+// The side that provides what to compare against (`assertRequiredLimitsBeforeDownload` — the shared
+// GPU's limits or the adapter's measured values) needs a GPU / the load path, so ⑧ and ⑨ in
+// `container_loading_test.ts` pin it.
 
 const LIMITS_WHERE = "TestPipeline: quant 'i4'";
 
 /**
- * 突き合わせ相手の実測値。`maxBufferSize` 以外を 0 にしてあるのは、**spec に書かれていない
- * limit を見ていない**ことが「通る」で示せるようにするため。
+ * The measured values to compare against. Everything except `maxBufferSize` is 0 so that a pass
+ * shows that **limits not written in the spec are not examined**.
  */
 const LIMITS: RequiredLimits = {
   maxBufferSize: 268435456,
@@ -158,14 +168,15 @@ const LIMITS: RequiredLimits = {
   maxComputeWorkgroupsPerDimension: 0,
 };
 
-test("assertRequiredLimitsSatisfied: 要求と実測が等しい配布形は通る", () => {
-  // 境界は「不足 = 実測 < 要求」— ここを `<=` で書くと、要求ちょうどの device（exporter が
-  // 焼く値は現物の最大テンソルそのもの）が全て誤拒否される。
+test("assertRequiredLimitsSatisfied: a distribution whose requirement equals the measured value passes", () => {
+  // The boundary is "short = measured < required" — written as `<=`, every device at exactly the
+  // requirement (the value the exporter bakes is the actual largest tensor itself) would be wrongly
+  // rejected.
   const spec: RequiredLimitsSpec = { maxBufferSize: LIMITS.maxBufferSize };
   assertRequiredLimitsSatisfied(spec, LIMITS, LIMITS_WHERE);
 });
 
-test("assertRequiredLimitsSatisfied: 1 でも下回る配布形は落ちる", () => {
+test("assertRequiredLimitsSatisfied: a distribution short by even 1 fails", () => {
   const spec: RequiredLimitsSpec = { maxBufferSize: LIMITS.maxBufferSize + 1 };
   assertThrows(
     () => assertRequiredLimitsSatisfied(spec, LIMITS, LIMITS_WHERE),
@@ -174,20 +185,22 @@ test("assertRequiredLimitsSatisfied: 1 でも下回る配布形は落ちる", ()
   );
 });
 
-test("assertRequiredLimitsSatisfied: spec に書かれていない limit は見ない（部分写像）", () => {
-  // 実測は 10 本が 0 だが、配布形が主張しているのは `maxBufferSize` だけ。書かれていない
-  // limit まで見ると「欄なし = WebGPU 保証既定で動く」（ADR 0089 決定 3）の意味論が壊れる。
+test("assertRequiredLimitsSatisfied: limits not written in the spec are not examined (a partial mapping)", () => {
+  // Ten measured values are 0, but the distribution claims only `maxBufferSize`. Examining limits
+  // that were not written would break the semantics "no field = runs on the WebGPU guaranteed
+  // defaults" (ADR 0089 decision 3).
   const spec: RequiredLimitsSpec = { maxBufferSize: 1 };
   assertRequiredLimitsSatisfied(spec, LIMITS, LIMITS_WHERE);
 });
 
-test("assertRequiredLimitsSatisfied: 宣言の無い配布形は no-op", () => {
+test("assertRequiredLimitsSatisfied: a no-op for a distribution without a declaration", () => {
   assertRequiredLimitsSatisfied(undefined, LIMITS, LIMITS_WHERE);
 });
 
-test("assertRequiredLimitsSatisfied: 診断に where・limit 名・要求値・実測値を全部載せる", () => {
-  // 落ちた利用者が次に打つ手（別の quant / 別の機械）を決めるのに、4 つとも要る。不足は
-  // **全件を 1 回で**出す（1 本ずつ潰させると、環境が足りないことの全体像が出ない）。
+test("assertRequiredLimitsSatisfied: the diagnostic carries where, the limit name, the required and the measured value", () => {
+  // A user who hit the failure needs all four to decide the next step (another quant / another
+  // machine). Every shortfall is reported **at once** (making them fix one at a time hides the full
+  // picture of how far the environment falls short).
   const spec: RequiredLimitsSpec = {
     maxBufferSize: 1073741824,
     maxStorageBufferBindingSize: 134217728,
@@ -206,18 +219,20 @@ test("assertRequiredLimitsSatisfied: 診断に where・limit 名・要求値・�
     "0",
   ]) {
     if (!error.message.includes(fragment)) {
-      throw new Error(`診断に '${fragment}' が無い: ${error.message}`);
+      throw new Error(`the diagnostic lacks '${fragment}': ${error.message}`);
     }
   }
 });
 
-test("assertRequiredLimitsSatisfied: runtime が持たない limit 名は語彙のずれとして落ちる", () => {
-  // hub が受理した名前を runtime が持たない形（防御の二段目）。黙って読み飛ばすと「宣言された
-  // limit が誰にも見られない」= 静かな頭打ちに戻る。`limit_vocabulary_test.ts` が緑である限り
-  // 構造的には到達しないが、その門が外れたときにここが受け止める。
+test("assertRequiredLimitsSatisfied: a limit name runtime does not have fails as vocabulary drift", () => {
+  // A name hub accepted that runtime does not have (the second line of defence). Silently skipping
+  // it would bring back "a declared limit nobody looks at" = the silent cap. While
+  // `limit_vocabulary_test.ts` is green this is structurally unreachable, but it catches the case
+  // when that check comes off.
   //
-  // 未知キーは index signature 経由で組む（`as unknown as` で型を殺すと、この検査が
-  // 「型が緩んだこと」ではなく「実行時に何を言うか」を見ていることが読み取れなくなる）。
+  // The unknown key is built through an index signature (killing the type with `as unknown as`
+  // would obscure that this check looks at what is said at run time, not at the type having been
+  // loosened).
   const spec: Record<string, number> = { maxBufferSize: 1, karumeUnknownLimit: 1 };
   const error = assertThrows(
     () => assertRequiredLimitsSatisfied(spec, LIMITS, LIMITS_WHERE),
@@ -225,7 +240,7 @@ test("assertRequiredLimitsSatisfied: runtime が持たない limit 名は語彙�
   );
   for (const fragment of [LIMITS_WHERE, "karumeUnknownLimit", "tests/limit_vocabulary_test.ts"]) {
     if (!error.message.includes(fragment)) {
-      throw new Error(`診断に '${fragment}' が無い: ${error.message}`);
+      throw new Error(`the diagnostic lacks '${fragment}': ${error.message}`);
     }
   }
 });

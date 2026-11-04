@@ -1,11 +1,14 @@
-// SBV2 の発話入力（`toUtterance` の変換と、合成入口の門）の挙動テスト。
+// Behaviour tests of SBV2 utterance input (the `toUtterance` conversion and the checks at the
+// synthesis entry point).
 //
-// この層が壊れると **shape は合ったまま音だけが変わる** — 核 → トーンの展開が 1 段ずれても
-// front は通り、モーラを差し替えた発話も音素数さえ合えば走る。どちらも例外は出ない。
-// ここでは「変換が上流の規則どおりであること」と「壊れた発話が門で止まること」を分けて押さえる。
+// When this layer breaks, **the shapes stay valid and only the audio changes** — front still runs
+// with the nucleus → tone expansion off by one step, and an utterance with replaced moras runs as
+// long as the phoneme count matches. Neither raises an exception. These tests separately pin that
+// the conversion follows the upstream rules and that a broken utterance is stopped by a check.
 //
-// 変換と門は karume の純関数なので辞書なしで走る。呼び手側の解析（`@hdae/yomi`）を通した
-// 経路は、実辞書があるときだけ走らせる（0.6.0 以降、解析はパッケージの外側にある）。
+// The conversion and the checks are karume's pure functions, so they run without a dictionary. The
+// path through the caller-side analysis (`@hdae/yomi`) runs only when a real dictionary is present
+// (since 0.6.0 the analysis lives outside the package).
 
 import { isNotFound, readDirSync, readFileSync } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -25,8 +28,9 @@ import { type JpExtraRules, parseJpExtraRules } from "../src/sbv2/text/symbols.t
 import { DebertaTokenizer } from "../src/sbv2/text/tokenizer.ts";
 
 /**
- * テスト用の JP-Extra 規則。**本物の値ではない**（本物は `symbols.json` 資産が正）。
- * tone 基点は 0 でない値を置く（0 だと「加算していない実装」と区別できない）。
+ * JP-Extra rules for testing. **Not the real values** (the `symbols.json` asset is authoritative
+ * for those). The tone base is non-zero (with 0, an implementation that does not add it could not
+ * be told apart).
  */
 const TEST_RULES_JSON = {
   symbols: ["_", "a", "e", "k", "m", "o", "r", "t", "u", ".", ","],
@@ -45,9 +49,11 @@ const TEST_RULES_JSON = {
   defaults: { sdpRatio: 0.2, noiseScale: 0.6, noiseScaleW: 0.8, lengthScale: 1 },
 };
 
-const testRules = (): JpExtraRules => parseJpExtraRules(TEST_RULES_JSON, "テスト規則");
+const testRules = (): JpExtraRules => parseJpExtraRules(TEST_RULES_JSON, "test rules");
 
-/** 1 コードポイント = 1 トークンの最小トークナイザ（clean 表は空 = 何も落とさない）。 */
+/**
+ * A minimal tokenizer with one code point = one token (empty clean tables = nothing is dropped).
+ */
 const tinyTokenizer = (tokens: readonly string[]): DebertaTokenizer =>
   DebertaTokenizer.fromVocabText(
     ["[PAD]", "[CLS]", "[SEP]", "[UNK]", ...tokens].join("\n"),
@@ -58,9 +64,11 @@ const tinyTokenizer = (tokens: readonly string[]): DebertaTokenizer =>
 const TEXT = "香留芽";
 const textTokenizer = (): DebertaTokenizer => tinyTokenizer(["香", "留", "芽", "。"]);
 
-// ---- 核 → トーンの展開（辞書なし）------------------------------------------
+// ---- Nucleus → tone expansion (no dictionary) ------------------------------
 
-/** 「カルメ」1 句ぶんの解析結果（呼び手側の解析器が返す形を手で組んだもの）。 */
+/**
+ * The analysis of one phrase "カルメ" (built by hand in the shape the caller-side analyser returns).
+ */
 const karumePhrases = (accentNucleus: number, punctuations: string[] = []): Phrases => ({
   result: {
     leadingPunctuations: [],
@@ -76,7 +84,8 @@ const karumePhrases = (accentNucleus: number, punctuations: string[] = []): Phra
       },
     ],
   },
-  // 語アライメントは記号を 1 要素ずつ持つ（解析器の語ビューと同じ形）。
+  // The word alignment holds each symbol as its own element (the same shape as the analyser's word
+  // view).
   words: [
     { surface: TEXT, phones: ["k", "a", "r", "u", "m", "e"] },
     ...punctuations.map((punct) => ({ surface: punct, phones: [punct] })),
@@ -85,32 +94,35 @@ const karumePhrases = (accentNucleus: number, punctuations: string[] = []): Phra
 
 const tonesOf = (utterance: Utterance): number[] => utterance.moras.map((mora) => mora.tone);
 
-test("toUtterance: 核をモーラごとの 2 値トーンへ展開する（平板 / 頭高 / 中高 / 尾高）", () => {
-  // 上流 SBV2 の g2p と同じ規則。1 段でもずれると「別のアクセントで合成される」沈黙誤値。
-  assertEquals(tonesOf(toUtterance(karumePhrases(0))), [0, 1, 1], "平板");
-  assertEquals(tonesOf(toUtterance(karumePhrases(1))), [1, 0, 0], "頭高");
-  assertEquals(tonesOf(toUtterance(karumePhrases(2))), [0, 1, 0], "中高");
-  assertEquals(tonesOf(toUtterance(karumePhrases(3))), [0, 1, 1], "尾高");
+test("toUtterance: expands the nucleus into a binary tone per mora (heiban / atamadaka / nakadaka / odaka)", () => {
+  // The same rule as upstream SBV2's g2p. Off by even one step, it is a silent wrong value:
+  // "synthesised with a different accent".
+  assertEquals(tonesOf(toUtterance(karumePhrases(0))), [0, 1, 1], "heiban (flat)");
+  assertEquals(tonesOf(toUtterance(karumePhrases(1))), [1, 0, 0], "atamadaka (head-high)");
+  assertEquals(tonesOf(toUtterance(karumePhrases(2))), [0, 1, 0], "nakadaka (middle-high)");
+  assertEquals(tonesOf(toUtterance(karumePhrases(3))), [0, 1, 1], "odaka (tail-high)");
 });
 
-test("toUtterance: 核の上端はモーラ数へ丸める（往復不能を作らない）", () => {
-  // 範囲外核は辞書差・修正辞書由来で普通に出る。落とすと「解析どおりの発話が通らない」に
-  // なるので、上端だけは丸める（丸めてもトーン列は変わらない = 音は同じ）。
+test("toUtterance: clamps the nucleus's upper end to the mora count (no round trip that cannot be made)", () => {
+  // An out-of-range nucleus comes up routinely from dictionary differences and user dictionaries.
+  // Rejecting it would mean "an utterance exactly as analysed does not pass", so only the upper end
+  // is clamped (clamping does not change the tone sequence = the audio is the same).
   assertEquals(tonesOf(toUtterance(karumePhrases(9))), tonesOf(toUtterance(karumePhrases(3))));
 });
 
-test("toUtterance: 負の核・非整数の核は落とす（下端は丸めない）", () => {
-  // 黙って平板へ倒すと、指定したものと別のアクセントで合成される。
+test("toUtterance: rejects a negative or non-integer nucleus (the lower end is not clamped)", () => {
+  // Silently falling back to heiban would synthesise with an accent other than the one specified.
   assertThrows(() => toUtterance(karumePhrases(-1)), InputError, "accentNucleus = -1");
   assertThrows(() => toUtterance(karumePhrases(1.5)), InputError, "accentNucleus = 1.5");
 });
 
-test("toUtterance: 句の記号は句末尾モーラへ、句より前の記号は先頭欄へ", () => {
+test("toUtterance: a phrase's symbols go to its last mora, symbols before any phrase go to the leading field", () => {
   const withPunct = toUtterance(karumePhrases(1, ["."]));
-  assertEquals(withPunct.moras[2].punctuations, ["."], "句末尾モーラに付いていない");
-  assertEquals(withPunct.moras[0].punctuations, undefined, "無関係なモーラに欄が生えた");
+  assertEquals(withPunct.moras[2].punctuations, ["."], "not attached to the phrase's last mora");
+  assertEquals(withPunct.moras[0].punctuations, undefined, "an unrelated mora grew the field");
 
-  // 文頭の記号はフラットな音素列からは復元できない情報（構造で運ぶ理由そのもの）。
+  // Symbols at the start of a sentence cannot be recovered from a flat phoneme sequence (exactly
+  // why they are carried in the structure).
   const leading = karumePhrases(1);
   const withLeading = toUtterance({
     result: { ...leading.result, leadingPunctuations: ["…"] },
@@ -119,13 +131,17 @@ test("toUtterance: 句の記号は句末尾モーラへ、句より前の記号�
   assertEquals(withLeading.leadingPunctuations, ["…"]);
 });
 
-// ---- 複数句（句境界・辞書なし）----------------------------------------------
+// ---- Several phrases (phrase boundaries; no dictionary) ---------------------
 //
-// 1 句フィクスチャでは「発話の末尾モーラ」と「句の末尾モーラ」が同一なので、記号の付け替えを
-// 見分ける検出力が構造的にゼロになる。句を跨ぐ添字ずれ・記号の流出・モーラを持たない句は
-// ここでしか捕まらない（辞書経路のテストは資産のある環境でしか走らない）。
+// In a one-phrase fixture, "the utterance's last mora" and "the phrase's last mora" are the same,
+// so the power to detect a symbol attached to the wrong mora is structurally zero. Index shifts
+// across phrases, symbols leaking to another phrase, and phrases without moras are caught only here
+// (the dictionary-path tests run only where the assets are present).
 
-/** 「カルメ」+「トク」の 2 句（`words` は句の音素列どおりに手で組む — 記号は 1 要素 1 語）。 */
+/**
+ * Two phrases "カルメ" + "トク" (`words` built by hand to match the phrases' phonemes — one word per
+ * symbol).
+ */
 const twoPhrases = (
   nuclei: readonly [number, number],
   punctuations: readonly [string[], string[]] = [[], []],
@@ -160,29 +176,40 @@ const twoPhrases = (
   ],
 });
 
-test("toUtterance: 核は句ごとに独立して展開される（句 2 が句 1 の核に汚されない）", () => {
-  // `tones[at]` の `at` を発話全体の添字にしてしまう退行は、1 句のテストでは一度も踏めない。
+test("toUtterance: each phrase's nucleus is expanded independently (phrase 2 is not tainted by phrase 1's nucleus)", () => {
+  // A regression that makes `at` in `tones[at]` an index over the whole utterance can never be hit
+  // by a one-phrase test.
   assertEquals(tonesOf(toUtterance(twoPhrases([1, 0]))), [1, 0, 0, 0, 1]);
   assertEquals(tonesOf(toUtterance(twoPhrases([0, 0]))), [0, 1, 1, 0, 1]);
-  // 展開は「句 1 の展開 ++ 句 2 の展開」に厳密一致する（1 句版の答えを連結した形）。
+  // The expansion equals exactly "phrase 1's expansion ++ phrase 2's expansion" (the one-phrase
+  // answers concatenated).
   assertEquals(tonesOf(toUtterance(twoPhrases([1, 2]))), [
     ...tonesOf(toUtterance(karumePhrases(1))),
     0,
     1,
   ]);
-  // 句を跨いでも音素列と語アライメントは一致する。
+  // The phoneme sequence and the word alignment agree across phrases too.
   const utterance = toUtterance(twoPhrases([1, 0]));
   assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
 });
 
-test("toUtterance: 記号は**その句の**末尾モーラへ付く（中間句の記号が末尾句へ流れない）", () => {
+test("toUtterance: a symbol attaches to the last mora of **its own** phrase (a middle phrase's symbol does not leak to the last phrase)", () => {
   const utterance = toUtterance(twoPhrases([1, 0], [[","], ["."]]));
-  assertEquals(utterance.moras.length, 5, "句を跨いでモーラが落ちている");
-  assertEquals(utterance.moras[2].punctuations, [","], "中間句の記号が句 1 の末尾モーラに無い");
-  assertEquals(utterance.moras[4].punctuations, ["."], "末尾句の記号が句 2 の末尾モーラに無い");
-  assertEquals(utterance.moras[3].punctuations, undefined, "句 2 の先頭モーラに欄が生えた");
+  assertEquals(utterance.moras.length, 5, "moras were lost across phrases");
+  assertEquals(
+    utterance.moras[2].punctuations,
+    [","],
+    "the middle phrase's symbol is not on phrase 1's last mora",
+  );
+  assertEquals(
+    utterance.moras[4].punctuations,
+    ["."],
+    "the last phrase's symbol is not on phrase 2's last mora",
+  );
+  assertEquals(utterance.moras[3].punctuations, undefined, "phrase 2's first mora grew the field");
   assertEquals(utterance.leadingPunctuations, []);
-  // 位置は音素列にも出る（記号が末尾句へ流れれば並びが変わる）。
+  // The position shows in the phoneme sequence too (a symbol leaking to the last phrase changes the
+  // order).
   assertEquals(toSbv2PhoneTone(utterance, "_").phones, [
     "_",
     "k",
@@ -202,9 +229,9 @@ test("toUtterance: 記号は**その句の**末尾モーラへ付く（中間句
   assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
 });
 
-test("toUtterance: モーラを持たない句の記号は直前モーラへ寄る（先頭なら先頭欄へ）", () => {
-  // `utterance.ts` の doc が明示している 2 分岐。1 句フィクスチャは必ず 3 モーラを持つので、
-  // どちらの分岐にも到達しない。
+test("toUtterance: the symbols of a phrase without moras go to the preceding mora (or to the leading field at the start)", () => {
+  // The two branches the doc of `utterance.ts` spells out. The one-phrase fixture always has 3
+  // moras, so it reaches neither branch.
   const emptyPhrase = { moras: [], accentNucleus: 0, punctuations: ["…"] };
   const karume = karumePhrases(0);
 
@@ -215,12 +242,13 @@ test("toUtterance: モーラを持たない句の記号は直前モーラへ寄�
     },
     words: [...karume.words, { surface: "…", phones: ["…"] }],
   });
-  assertEquals(trailing.moras.length, 3, "モーラの無い句がモーラを生やした");
-  assertEquals(trailing.moras[2].punctuations, ["…"], "直前モーラへ寄っていない");
+  assertEquals(trailing.moras.length, 3, "a phrase without moras grew moras");
+  assertEquals(trailing.moras[2].punctuations, ["…"], "not moved to the preceding mora");
   assertEquals(trailing.leadingPunctuations, []);
   assertWordPhones(toSbv2PhoneTone(trailing, "_").phones, trailing.words);
 
-  // 先頭に置くと寄せ先のモーラが無い → `leadingPunctuations`（構造でしか運べない情報）。
+  // Placed first, there is no mora to move to → `leadingPunctuations` (information only the
+  // structure can carry).
   const leading = toUtterance({
     result: {
       leadingPunctuations: [],
@@ -230,14 +258,15 @@ test("toUtterance: モーラを持たない句の記号は直前モーラへ寄�
   });
   assertEquals(leading.leadingPunctuations, ["…"]);
   for (const [index, mora] of leading.moras.entries()) {
-    assertEquals(mora.punctuations, undefined, `moras[${index}] に欄が生えた`);
+    assertEquals(mora.punctuations, undefined, `moras[${index}] grew the field`);
   }
   assertWordPhones(toSbv2PhoneTone(leading, "_").phones, leading.words);
 });
 
-test("toUtterance: 促音は音素へ畳む（`Mora.vowel` は音素そのもの）", () => {
-  // 上流の解析は促音を "cl" で表すが、語アライメントの音素は "q"。畳まずに運ぶと、
-  // 音素列と words の突合がその 1 個だけで割れる（= 促音を含む入力が全部落ちる）。
+test("toUtterance: folds the geminate consonant (sokuon) into its phoneme (`Mora.vowel` is the phoneme itself)", () => {
+  // The upstream analysis writes the sokuon as "cl", but the word alignment's phoneme is "q".
+  // Carried unfolded, the comparison of the phoneme sequence with words breaks on that one phoneme
+  // (= every input with a sokuon fails).
   const utterance = toUtterance({
     result: {
       leadingPunctuations: [],
@@ -257,13 +286,14 @@ test("toUtterance: 促音は音素へ畳む（`Mora.vowel` は音素そのもの
   });
   assertEquals(utterance.moras[1].vowel, "q");
   assertEquals(toSbv2PhoneTone(utterance, "_").phones, ["_", "k", "a", "q", "t", "o", "_"]);
-  // 突合が通る（畳んでいない実装はここで落ちる）。
+  // The comparison passes (an implementation that does not fold fails here).
   assertWordPhones(toSbv2PhoneTone(utterance, "_").phones, utterance.words);
 });
 
-test("toUtterance: 子音なしモーラは consonant 欄そのものを出さない（撥音・促音・母音単独）", () => {
-  // `Mora.consonant` は optional property であって `string | undefined` ではない。
-  // 欄が生えると「渡せるのに効かない欄を作らない」責務が破れる（撥音 N は通常経路）。
+test("toUtterance: a mora without a consonant has no consonant field at all (moraic nasal, sokuon, lone vowel)", () => {
+  // `Mora.consonant` is an optional property, not `string | undefined`. A field appearing would
+  // break the duty "never create a field that can be passed but has no effect" (the moraic nasal N
+  // is the ordinary path).
   const utterance = toUtterance({
     result: {
       leadingPunctuations: [],
@@ -282,22 +312,23 @@ test("toUtterance: 子音なしモーラは consonant 欄そのものを出さ�
   });
   assertEquals(Object.keys(utterance.moras[0]).sort(), ["consonant", "kana", "tone", "vowel"]);
   assertEquals(Object.keys(utterance.moras[1]).sort(), ["kana", "tone", "vowel"]);
-  // 子音なしモーラは音素 1 個ぶんしか出さない（`_` + k a N + `_`）。
+  // A mora without a consonant emits only one phoneme (`_` + k a N + `_`).
   assertEquals(toSbv2PhoneTone(utterance, "_").phones, ["_", "k", "a", "N", "_"]);
 });
 
-// ---- 音素・トーン列の梱包（辞書なし）----------------------------------------
+// ---- Packing the phoneme and tone sequences (no dictionary) ----------------
 
-test("toSbv2PhoneTone: 両端 PAD・記号 tone 0・モーラ内は同一トーン", () => {
+test("toSbv2PhoneTone: PAD at both ends, tone 0 for symbols, one tone within a mora", () => {
   const utterance = toUtterance(karumePhrases(1, ["."]));
   const { phones, tones } = toSbv2PhoneTone(utterance, "_");
   assertEquals(phones, ["_", "k", "a", "r", "u", "m", "e", ".", "_"]);
-  // 頭高: 第 1 モーラの子音・母音が 1、以降 0。記号と PAD は 0。
+  // atamadaka: the consonant and vowel of the first mora are 1, the rest 0. Symbols and PAD are 0.
   assertEquals(tones, [0, 1, 1, 0, 0, 0, 0, 0, 0]);
 });
 
-test("toSbv2PhoneTone: 0/1 以外の tone は落とす（JS からの呼び出しを型で守れない）", () => {
-  // 2 も -1 も toneStart を足せば記号表の範囲に収まる（`phonesTonesToModelIds` は素通り）。
+test("toSbv2PhoneTone: rejects a tone other than 0/1 (types cannot guard calls from JS)", () => {
+  // Both 2 and -1 fall within the symbol table once toneStart is added (`phonesTonesToModelIds`
+  // lets them through).
   const utterance = toUtterance(karumePhrases(1));
   const broken = (tone: number): Utterance => ({
     ...utterance,
@@ -308,9 +339,9 @@ test("toSbv2PhoneTone: 0/1 以外の tone は落とす（JS からの呼び出�
   assertThrows(() => toSbv2PhoneTone(broken(0.5), "_"), InputError, "tone = 0.5");
 });
 
-// ---- 合成入口の門（moras と words の突合）-----------------------------------
+// ---- Checks at the synthesis entry point (comparing moras with words) ------
 
-test("assertWordPhones: 長さが合っていても内容が違えば落とす", () => {
+test("assertWordPhones: rejects different content even when the lengths match", () => {
   const words: Word[] = [{ surface: TEXT, phones: ["k", "a", "r", "u", "m", "e"] }];
   const phones = ["_", "k", "a", "r", "u", "m", "e", "_"];
   assertWordPhones(phones, words);
@@ -322,42 +353,52 @@ test("assertWordPhones: 長さが合っていても内容が違えば落とす",
   assertThrows(() => assertWordPhones(phones.slice(0, 7), words), InputError, "phoneme count 5");
 });
 
-test("tone の直編集は合成入力の tone ID まで届く（音素側は動かない）", () => {
+test("editing tone directly reaches the tone IDs of the synthesis input (the phoneme side does not move)", () => {
   const rules = testRules();
   const tokenizer = textTokenizer();
   const base = toUtterance(karumePhrases(1));
   const baseInput = buildSbv2ModelInput(base, tokenizer, rules);
 
-  // 反転させる（解析が何を返しても全位置が変わる = 「無視している実装」を必ず捕まえる）。
+  // Invert it (every position changes whatever the analysis returned = an implementation that
+  // ignores the edit is always caught).
   const flipped: Utterance = {
     ...base,
     moras: base.moras.map((mora) => ({ ...mora, tone: (1 - mora.tone) as 0 | 1 })),
   };
   const edited = buildSbv2ModelInput(flipped, tokenizer, rules);
 
-  assertEquals(edited.tones, [0, 0, 0, 1, 1, 1, 1, 0], "モーラの tone が音素へ配られていない");
-  assertEquals(edited.phones, baseInput.phones, "音素列が tone 編集で動いた");
-  assertEquals(edited.ids.phoneIds, baseInput.ids.phoneIds, "音素 ID が動いた");
-  assertEquals(edited.bertText, baseInput.bertText, "BERT 入力はトーンを読まない");
-  assertEquals(edited.baseWord2ph, baseInput.baseWord2ph, "word2ph はトーンを読まない");
+  assertEquals(
+    edited.tones,
+    [0, 0, 0, 1, 1, 1, 1, 0],
+    "the moras' tones were not handed to the phonemes",
+  );
+  assertEquals(edited.phones, baseInput.phones, "the phoneme sequence moved with a tone edit");
+  assertEquals(edited.ids.phoneIds, baseInput.ids.phoneIds, "the phoneme IDs moved");
+  assertEquals(edited.bertText, baseInput.bertText, "the BERT input does not read tones");
+  assertEquals(edited.baseWord2ph, baseInput.baseWord2ph, "word2ph does not read tones");
   assert(
     edited.ids.toneIds.some((id, index) => id !== baseInput.ids.toneIds[index]),
-    "トーン ID が編集を反映していない",
+    "the tone IDs do not reflect the edit",
   );
-  // add_blank 後の実音素位置は奇数添字（`intersperse` の規約）。
+  // After add_blank the real phoneme positions are the odd indices (the `intersperse` convention).
   for (const [index, tone] of edited.tones.entries()) {
     assertEquals(edited.ids.toneIds[2 * index + 1], TEST_RULES_JSON.toneStart + tone);
-    assertEquals(edited.ids.toneIds[2 * index], TEST_RULES_JSON.blankId, "blank 位置が汚れた");
+    assertEquals(
+      edited.ids.toneIds[2 * index],
+      TEST_RULES_JSON.blankId,
+      "a blank position was altered",
+    );
   }
 });
 
-test("音素を変える編集・記号の増減・words の取り違えは入口で落ちる", () => {
+test("edits that change phonemes, adding or removing symbols, and mixed-up words fail at the entry point", () => {
   const rules = testRules();
   const tokenizer = textTokenizer();
   const base = toUtterance(karumePhrases(1));
   const withMoras = (moras: readonly Mora[]): Utterance => ({ ...base, moras });
 
-  // ① モーラの読み替え（音素数は変わらない = 長さ検査だけなら素通りする）。
+  // ① A mora read differently (the phoneme count does not change = a length check alone lets it
+  //  through).
   assertThrows(
     () =>
       buildSbv2ModelInput(
@@ -373,14 +414,14 @@ test("音素を変える編集・記号の増減・words の取り違えは入�
     "Phoneme[3]",
   );
 
-  // ② モーラを 1 つ落とす（音素数が変わる）。
+  // ② One mora dropped (the phoneme count changes).
   assertThrows(
     () => buildSbv2ModelInput(withMoras(base.moras.slice(0, 2)), tokenizer, rules),
     InputError,
     "phoneme count 4",
   );
 
-  // ③ 記号を足す（疑問形の上げを差し込もうとした場合）。
+  // ③ A symbol added (as when trying to insert a question's rising intonation).
   assertThrows(
     () =>
       buildSbv2ModelInput(
@@ -392,7 +433,8 @@ test("音素を変える編集・記号の増減・words の取り違えは入�
     "phoneme count 7",
   );
 
-  // ④ 別の解析から採った words を混ぜた（= moras と words が同一解析でない）。
+  // ④ words taken from a different analysis mixed in (= moras and words not from the same
+  //  analysis).
   assertThrows(
     () =>
       buildSbv2ModelInput(
@@ -405,14 +447,17 @@ test("音素を変える編集・記号の増減・words の取り違えは入�
   );
 });
 
-// ---- 呼び手側の解析経路（実辞書があれば）------------------------------------
+// ---- The caller-side analysis path (if a real dictionary is present) -------
 //
-// 0.6.0 で解析はパッケージの外へ出た。ここで押さえるのは「解析器の返り値がそのまま
-// `toUtterance` に渡せること」と「呼び手側の修正辞書が最終 ID まで届くこと」。
+// 0.6.0 moved the analysis out of the package. Pinned here: the analyser's return value can be
+// passed to `toUtterance` as is, and a caller-side user dictionary reaches the final IDs.
 
 const DICT_DIR = new URL("../../../outputs/misc/yomi/", import.meta.url);
 
-/** `outputs/misc/yomi/` に置かれた JTD1 辞書（版が上がると綴りが変わるので拡張子で拾う）。 */
+/**
+ * The JTD1 dictionary in `outputs/misc/yomi/` (found by extension, as the name changes with the
+ * version).
+ */
 const dictUrl = ((): URL | undefined => {
   let found: string | undefined;
   try {
@@ -428,18 +473,24 @@ const dictUrl = ((): URL | undefined => {
 
 if (dictUrl === undefined) {
   console.warn(
-    `[karume] ${DICT_DIR.pathname} に *.jtd が無いため解析経路の検査を SKIP する。` +
-      "取得: HF dataset hdae/yomi-dict の naist-jdic.jtd（gzip を解いて置く）",
+    `[karume] ${DICT_DIR.pathname} has no *.jtd, so the analysis-path checks are SKIPPED. ` +
+      "Get: naist-jdic.jtd from the HF dataset hdae/yomi-dict (decompress the gzip and place it)",
   );
 }
 
-/** 19MB を読むのは資産があるときだけ（この節の全テストが同じ 1 本を使い回す）。 */
+/**
+ * The 19MB file is read only when the asset is present (every test in this section reuses the same
+ * instance).
+ */
 const dictionary =
   dictUrl === undefined ? undefined : JtdDictionary.load(readFileSync(dictUrl).buffer);
 
-/** ignore の外で undefined を潰す（`ignore: !available` が守るので実際には来ない）。 */
+/**
+ * Narrows away undefined outside ignore (`ignore: !available` guards it, so it never happens in
+ * practice).
+ */
 const jtd = (): JtdDictionary => {
-  if (dictionary === undefined) throw new Error("辞書が無いのに辞書テストが走った");
+  if (dictionary === undefined) throw new Error("a dictionary test ran without a dictionary");
   return dictionary;
 };
 
@@ -450,15 +501,16 @@ const entry = (reading: string, accentType: number): OverlayEntry => ({
 });
 
 test.skipIf(dictUrl === undefined)(
-  "解析器の返り値はそのまま発話になる（修正辞書は呼び手側で効かせる）",
+  "the analyser's return value becomes the utterance as is (user dictionaries are applied on the caller side)",
   () => {
     const dict = jtd();
     const rules = testRules();
     const tokenizer = textTokenizer();
     const base = buildSbv2ModelInput(toUtterance(analyzeWithWords(dict, TEXT)), tokenizer, rules);
 
-    // 読み: 本辞書の読みを固定値で書かない（辞書の版が上がると変わる — 検証したいのは
-    // 「呼び手側の overlay が指定どおりの音素列にする」ことで、本辞書がどう読むかではない）。
+    // Reading: the main dictionary's reading is not written as a fixed value (it changes with the
+    // dictionary version — what is verified is that the caller-side overlay produces the specified
+    // phoneme sequence, not how the main dictionary reads it).
     const head = new OverlayDictionary(dict, [entry("カルメ", 1)]);
     const fixed = buildSbv2ModelInput(
       toUtterance(analyzeWithWords(dict, TEXT, head)),
@@ -466,9 +518,13 @@ test.skipIf(dictUrl === undefined)(
       rules,
     );
     assertEquals(fixed.phones, ["_", "k", "a", "r", "u", "m", "e", "_"]);
-    assert(base.phones.join(" ") !== fixed.phones.join(" "), "overlay 無しと同じ読みになっている");
+    assert(
+      base.phones.join(" ") !== fixed.phones.join(" "),
+      "the reading is the same as without the overlay",
+    );
 
-    // アクセント: 同じ読みで型だけ変えると、音素列は同一のままトーンだけが動く。
+    // Accent: changing only the type for the same reading leaves the phoneme sequence identical and
+    // moves only the tones.
     const flat = new OverlayDictionary(dict, [entry("カルメ", 0)]);
     const heiban = buildSbv2ModelInput(
       toUtterance(analyzeWithWords(dict, TEXT, flat)),
@@ -476,52 +532,59 @@ test.skipIf(dictUrl === undefined)(
       rules,
     );
     assertEquals(heiban.phones, fixed.phones);
-    assertEquals(fixed.tones, [0, 1, 1, 0, 0, 0, 0, 0], "頭高: 第 1 モーラだけ高い");
-    assertEquals(heiban.tones, [0, 0, 0, 1, 1, 1, 1, 0], "平板: 第 1 モーラの後で上がる");
+    assertEquals(fixed.tones, [0, 1, 1, 0, 0, 0, 0, 0], "atamadaka: only the first mora is high");
+    assertEquals(heiban.tones, [0, 0, 0, 1, 1, 1, 1, 0], "heiban: rises after the first mora");
 
-    // 差は front へ渡る ID まで届く（tone 基点 6 を足した値・blank 位置は blankId）。
-    assertEquals(fixed.ids.phoneIds, heiban.ids.phoneIds, "音素 ID は型で変わらない");
+    // The difference reaches the IDs handed to front (tone base 6 added; blank positions are
+    // blankId).
+    assertEquals(
+      fixed.ids.phoneIds,
+      heiban.ids.phoneIds,
+      "the phoneme IDs do not change with the type",
+    );
     assert(
       fixed.ids.toneIds.some((id, index) => id !== heiban.ids.toneIds[index]),
-      "トーン ID が型の違いを反映していない",
+      "the tone IDs do not reflect the difference in type",
     );
-    // word2ph も同一解析から出ている（1 語に畳まれた overlay の語割りを踏む）。
+    // word2ph also comes from the same analysis (exercising the word split of an overlay folded
+    // into one word).
     assertEquals(
       fixed.baseWord2ph.reduce((sum, count) => sum + count, 0),
       fixed.phones.length,
-      "sum(word2ph) が音素数と違う",
+      "sum(word2ph) differs from the phoneme count",
     );
   },
 );
 
 test.skipIf(dictUrl === undefined)(
-  "解析どおりの発話は門を素通りし、tone だけを直した発話も通る",
+  "an utterance exactly as analysed passes the checks, and so does one with only its tones edited",
   () => {
     const dict = jtd();
     const rules = testRules();
     const tokenizer = textTokenizer();
     const overlay = new OverlayDictionary(dict, [entry("カルメ", 1)]);
     const utterance = toUtterance(analyzeWithWords(dict, TEXT, overlay));
-    assertEquals(utterance.moras.length, 3, "1 句 3 モーラに畳まれていない");
+    assertEquals(utterance.moras.length, 3, "not folded into one phrase of 3 moras");
     assertEquals(
       utterance.moras.map((mora) => mora.tone),
       [1, 0, 0],
-      "頭高になっていない",
+      "not atamadaka",
     );
 
-    // 核を平板へ直したのと同じ編集（モーラの tone を直接置く）。
+    // The same edit as changing the nucleus to heiban (setting the moras' tones directly).
     const flattened: Utterance = {
       ...utterance,
       moras: utterance.moras.map((mora, index) => ({ ...mora, tone: index === 0 ? 0 : 1 })),
     };
     const edited = buildSbv2ModelInput(flattened, tokenizer, rules);
     const head = buildSbv2ModelInput(utterance, tokenizer, rules);
-    assertEquals(edited.tones, [0, 0, 0, 1, 1, 1, 1, 0], "平板のトーン列になっていない");
-    assertEquals(edited.phones, head.phones, "音素列が動いた");
-    assertEquals(edited.baseWord2ph, head.baseWord2ph, "word2ph はトーンを読まない");
-    assertEquals(edited.bertText, head.bertText, "BERT 入力はトーンを読まない");
+    assertEquals(edited.tones, [0, 0, 0, 1, 1, 1, 1, 0], "not the heiban tone sequence");
+    assertEquals(edited.phones, head.phones, "the phoneme sequence moved");
+    assertEquals(edited.baseWord2ph, head.baseWord2ph, "word2ph does not read tones");
+    assertEquals(edited.bertText, head.bertText, "the BERT input does not read tones");
 
-    // 別の解析（overlay 無し）から採った words を混ぜると入口で落ちる。
+    // Mixing in words taken from a different analysis (without the overlay) fails at the entry
+    // point.
     assertThrows(
       () =>
         buildSbv2ModelInput(

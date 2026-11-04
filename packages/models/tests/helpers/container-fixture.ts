@@ -1,22 +1,24 @@
 /**
- * テストから **`krm` コンテナ**と `karume/5` の配布形を組む道具（models 側のテストが共有する
- * 1 本）。
+ * Tooling for tests to build **`krm` containers** and the `karume/5` distribution form (the one
+ * helper the models tests share).
  *
- * NOTE: 容器の**書き手**は `packages/runtime/tests/helpers/container-write.ts` を借りる。
- * これは「runtime のテストの都合」ではなく**形式の道具**（Python の `karume.container` と同じ
- * 位置づけ）で、models 側に写しを持つと 2 実装がずれる。`helpers/memory-cache.ts` の規律
- * （向こうの都合をこちらへ持ち込まない）はそのまま。
+ * NOTE: the container **writer** is borrowed from
+ * `packages/runtime/tests/helpers/container-write.ts`. It is not "test-only code of runtime" but
+ * **format tooling** (the same standing as Python's `karume.container`); a copy on the models side
+ * would let the two implementations drift. The rule of `helpers/memory-cache.ts` (do not bring the
+ * other side's test-only code over here) still holds.
  *
- * ここが足すのは「容器 → 配布形」の側だけ:
+ * What this file adds is only the "container → distribution form" side:
  *
- * - {@link writeContainer} … `ModelInput` を書いて、manifest が要る**期待値**（2 文書の
- *   length + sha256）と part 列を一緒に返す
- * - {@link partAssets} … 書いた容器を全量面のキー（`<部品>[i]`）へ畳む
- * - {@link declaredContainer} … manifest の `weights.<部品>.<dtype>` に入る**宣言だけ**の容器
- * - {@link linearComponent} / {@link tensorlessContainer} … 実行できる最小の部品（`linear`
- *   1 段）と、宣言だけの部品（突合の門を踏むための器）
- * - {@link runLinearProbe} … `linearComponent` の Session を 1 回 run して出力を返す（重みが
- *   GPU まで届いたかの観測点）
+ * - {@link writeContainer} … writes a `ModelInput` and returns the **expected values** the
+ *   manifest needs (length + sha256 of the two documents) together with the parts
+ * - {@link partAssets} … folds a written container into full-surface keys (`<component>[i]`)
+ * - {@link declaredContainer} … a **declaration-only** container for the manifest's
+ *   `weights.<component>.<dtype>`
+ * - {@link linearComponent} / {@link tensorlessContainer} … the smallest runnable component (a
+ *   single `linear`) and a declaration-only component (a vessel for reaching the cross-check)
+ * - {@link runLinearProbe} … runs the Session of `linearComponent` once and returns the output
+ *   (the observation point of whether the weights reached the GPU)
  */
 
 import {
@@ -30,14 +32,17 @@ import { type IrDeclaration, parseIrDeclarationValue, type Session } from "@karu
 
 export { parseIrDeclarationValue };
 
-/** 容器が内包する 1 文書の期待値（manifest の `container.descriptor` と同じ形）。 */
+/**
+ * The expected value of one document inside a container (the shape of the manifest's
+ * `container.descriptor`).
+ */
 type DocumentExpectation = { readonly length: number; readonly sha256: string };
 
-/** 書き出した容器 1 本（単一形・分割形・manifest が要る期待値）。 */
+/** One written container (single form, split form, and the expected values the manifest needs). */
 export type TestContainer = {
-  /** 分割形（index 0 が part 0 = ヘッダ + 2 文書）。 */
+  /** The split form (index 0 is part 0 = header + the two documents). */
   readonly parts: readonly Uint8Array<ArrayBuffer>[];
-  /** 単一形（全量 1 本）。 */
+  /** The single form (the whole container in one piece). */
   readonly single: Uint8Array<ArrayBuffer>;
   readonly descriptor: {
     readonly graph: DocumentExpectation;
@@ -55,7 +60,7 @@ const documentOf = async (bytes: Uint8Array<ArrayBuffer>): Promise<DocumentExpec
   sha256: await sha256Hex(bytes),
 });
 
-/** 容器を 1 本書く（既定は part を小さく切って分割形を作る）。 */
+/** Writes one container (by default it cuts small parts to make a split form). */
 export const writeContainer = async (
   input: ModelInput,
   options: WriteOptions = { partBytes: 4096, blockBytes: 512 },
@@ -71,16 +76,21 @@ export const writeContainer = async (
   };
 };
 
-/** 宣言だけの入力（値は流さないので演算の中身は問わない）。 */
+/** A declaration-only input (no values flow, so what the operation computes does not matter). */
 export type TensorlessGraphSpec = {
-  /** 記号次元の名前（省略時は静的グラフ）。入力 shape のどこかに現れる必要がある。 */
+  /**
+   * The names of symbolic dimensions (a static graph when omitted). Each must appear in some input
+   * shape.
+   */
   readonly symbols?: readonly string[];
-  /** 入力の宣言（`assertStaticDim` が読む面）。 */
+  /** The input declarations (the surface `assertStaticDim` reads). */
   readonly inputs: readonly {
     readonly name: string;
     readonly shape: readonly (number | string)[];
   }[];
-  /** 出力 1 本の宣言（`assertOutputScale` / `assertOutputDim` が読む面）。 */
+  /**
+   * The declaration of the one output (the surface `assertOutputScale` / `assertOutputDim` reads).
+   */
   readonly output: {
     readonly name: string;
     readonly shape: readonly (number | string)[];
@@ -88,10 +98,11 @@ export type TensorlessGraphSpec = {
 };
 
 /**
- * 宣言から IR v2 のグラフ宣言を組む。
+ * Builds an IR v2 graph declaration from the spec.
  *
- * ノードは「先頭入力を 2 口で受ける `mul` 1 本」だけ — 宣言の突合が目的なので実行はしない
- * （initializer を 1 本も持たないので束縛表も空になる）。
+ * The only node is "one `mul` that takes the first input on both of its inputs" — the purpose is
+ * the cross-check of declarations, so it is not run (with no initializer at all, the binding table
+ * is empty too).
  */
 const declarationOf = (spec: TensorlessGraphSpec): IrDeclaration =>
   parseIrDeclarationValue({
@@ -115,8 +126,9 @@ const declarationOf = (spec: TensorlessGraphSpec): IrDeclaration =>
   });
 
 /**
- * 宣言だけの容器 1 本の**書く前の入力**（疑似 HF で配る `serveContainer` へ渡す形）。グラフ名 =
- * 配布 manifest の weights キー — container-v1 §2.1。
+ * The **pre-write input** of one declaration-only container (the shape passed to `serveContainer`,
+ * which serves it from the fake HF). Graph name = the weights key of the distribution manifest —
+ * container-v1 §2.1.
  */
 export const tensorlessInput = (
   graph: string,
@@ -130,7 +142,10 @@ export const tensorlessInput = (
   provenance: { license: "test" },
 });
 
-/** 宣言だけの容器 1 本（グラフ名 = 配布 manifest の weights キー — container-v1 §2.1）。 */
+/**
+ * One declaration-only container (graph name = the weights key of the distribution manifest —
+ * container-v1 §2.1).
+ */
 export const tensorlessContainer = async (
   graph: string,
   spec: TensorlessGraphSpec,
@@ -141,8 +156,9 @@ const f32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Float32Array.from(values).buffer);
 
 /**
- * 実行できる最小の部品（`linear(x, w, b)` 1 段・静的 2×2）。`op` を差し替えると「実行できない
- * グラフ」になる（IR パーサは op 名の綴りを見ないので、落ちるのは capability 門 = admission）。
+ * The smallest runnable component (a single `linear(x, w, b)`, static 2×2). Replacing `op` makes it
+ * "a graph that cannot run" (the IR parser does not look at the op name's spelling, so what fails
+ * is the capability check = admission).
  */
 export const linearComponent = (
   graph: string,
@@ -189,15 +205,20 @@ export const linearComponent = (
 };
 
 /**
- * {@link runLinearProbe} の期待値（{@link linearComponent} の既定値 w = 0.5・b = 0.25 のとき）。
+ * The expected value of {@link runLinearProbe} (with the defaults of {@link linearComponent}, w =
+ * 0.5 and b = 0.25).
  *
- * `linear` は `y[m, n] = Σ_k x[m, k] · w[n, k] + b[n]`（runtime の CPU 参照 `reference/ops.ts`）
- * なので、`x = [[1, 2], [3, 4]]` から `[[1.75, 1.75], [3.75, 3.75]]`。値は全て 2 進で割り切れる
- * ので f32 で厳密に一致する。重みの block を読まずに 0 埋めの buffer を上げた形では 0 が出る。
+ * `linear` is `y[m, n] = Σ_k x[m, k] · w[n, k] + b[n]` (runtime's CPU reference
+ * `reference/ops.ts`), so `x = [[1, 2], [3, 4]]` gives `[[1.75, 1.75], [3.75, 3.75]]`. Every value
+ * is exact in binary, so f32 matches exactly. A build that uploads a zero-filled buffer without
+ * reading the weight block outputs 0.
  */
 export const LINEAR_PROBE_Y: readonly number[] = [1.75, 1.75, 3.75, 3.75];
 
-/** {@link linearComponent} の Session を `x = [[1, 2], [3, 4]]` で 1 回 run し、`y` を平らな列で返す。 */
+/**
+ * Runs the Session of {@link linearComponent} once with `x = [[1, 2], [3, 4]]` and returns `y`
+ * flattened.
+ */
 export const runLinearProbe = async (session: Session): Promise<number[]> => {
   const outputs = await session.run({
     x: { dtype: "f32", shape: [2, 2], data: Float32Array.from([1, 2, 3, 4]) },
@@ -205,20 +226,24 @@ export const runLinearProbe = async (session: Session): Promise<number[]> => {
   return Array.from(outputs["y"].data);
 };
 
-/** 全量面（`from*Assets`）へ渡す部品キー（part 0 から添字順）。 */
+/** The component keys passed to the full surface (`from*Assets`), in index order from part 0. */
 export const partAssets = (
   key: string,
   container: TestContainer,
 ): Record<string, Uint8Array<ArrayBuffer>> =>
   Object.fromEntries(container.parts.map((part, index) => [`${key}[${index}]`, part]));
 
-/** コンテナのヘッダ長（container-v1 §1 — part 0 は「ヘッダ + 2 文書ちょうど」）。 */
+/**
+ * The container header length (container-v1 §1 — part 0 is "exactly the header + the two
+ * documents").
+ */
 const HEADER_BYTES = 24;
 
 /**
- * manifest の `weights.<部品>.<dtype>` に入る**宣言だけ**の容器（`fromAssets` の門は part の
- * 実体を読まないので、3 点セットは綴りだけ合わせる）。part 0 の size は宣言した 2 文書の長さと
- * 整合させる — そこは hub の parse が見る（container-v1 §8）。
+ * A **declaration-only** container for the manifest's `weights.<component>.<dtype>` (the checks of
+ * `fromAssets` do not read the parts' contents, so the path / size / sha256 triple only has to be
+ * well-formed). The size of part 0 is kept consistent with the lengths of the two declared
+ * documents — hub's parse checks that (container-v1 §8).
  */
 export const declaredContainer = (stem: string): Record<string, unknown> => {
   const graph = { length: 16, sha256: "b".repeat(64) };

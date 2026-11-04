@@ -10,7 +10,7 @@ import {
   resolveGemmaSessionOptions as resolve,
 } from "../src/gemma/session-options.ts";
 
-/** 入力起因でthrowしたならその文言を、通ったなら`undefined`を返す（2経路の判定の突合せ用）。 */
+/** Returns the message if it threw as caused by the input, or `undefined` if it passed (for comparing the verdicts of the 2 paths). */
 const inputViolationOf = (run: () => void): string | undefined => {
   try {
     run();
@@ -21,13 +21,13 @@ const inputViolationOf = (run: () => void): string | undefined => {
   }
 };
 
-describe("Gemmaのquant実行設定", () => {
+describe("Gemma's quant execution settings", () => {
   const fast = {
     linearGemvReduce: "parallel",
     fuseRmsNormAdd: true,
     fuseLinearStaticQuantize: true,
   } as const;
-  it("未指定・quant宣言・明示上書きを区別する", () => {
+  it("distinguishes unset, the quant declaration and an explicit override", () => {
     assertEquals(resolve({}, {}, "test"), {});
     assertEquals(resolve(fast, {}, "test"), fast);
     assertEquals(resolve(fast, { fuseRmsNormAdd: undefined }, "test"), fast);
@@ -52,7 +52,7 @@ describe("Gemmaのquant実行設定", () => {
       linearGemvReduce: "parallel-subgroup32",
     });
   });
-  it("未対応の宣言を上書きで隠さず、実効設定の不正な組合せを拒否する", () => {
+  it("does not hide an unsupported declaration behind an override, and rejects invalid combinations of the effective settings", () => {
     assertThrows(
       () => resolve({ linearCompute: "f32" }, {}, "test"),
       Error,
@@ -92,8 +92,8 @@ describe("Gemmaのquant実行設定", () => {
       { linearGemvReduce: "parallel", fuseLinearStaticQuantize: true },
     );
   });
-  it("packedStaticQuantizeはquant宣言から入り、明示falseが勝ち、parallel以外を拒否する", () => {
-    // ADR 0105 追記 2（語彙への昇格）— 実配布のi4-fastと同じ4欄が宣言から素通りする。
+  it("packedStaticQuantize comes from the quant declaration, an explicit false wins, and anything but parallel is rejected", () => {
+    // ADR 0105 addendum 2 (promotion into the vocabulary) — the same 4 fields as the shipped i4-fast pass through from the declaration.
     const packedFast = { ...fast, packedStaticQuantize: true } as const;
     assertEquals(resolve(packedFast, {}, "test"), packedFast);
     assertEquals(resolve(packedFast, { packedStaticQuantize: false }, "test"), {
@@ -101,7 +101,7 @@ describe("Gemmaのquant実行設定", () => {
       packedStaticQuantize: false,
     });
     assertEquals(resolve(fast, { packedStaticQuantize: true }, "test"), packedFast);
-    // parallelを伴わない宣言はquant由来でも拒否する（i4-fastはparallelを宣言する）。
+    // A declaration without parallel is rejected even when it comes from the quant (i4-fast declares parallel).
     assertThrows(
       () => resolve({ packedStaticQuantize: true }, {}, "test"),
       Error,
@@ -159,21 +159,21 @@ describe("Gemmaのquant実行設定", () => {
     assertEquals(resolve({}, { linearGemvPlanes: true }, "test"), { linearGemvPlanes: true });
     assertGemmaSessionOverrides({ linearGemvPlanes: true }, "test");
   });
-  it("stateAttentionReduceは他の欄と同じ規則で解け、宣言が無ければ欄を作らない", () => {
-    // 家族のコード既定は持たない（ADR 0104 追記 2026-09-26）。欄が無い = runtime の参照経路
-    // `"sequential"` — `session` が空の `i4` 席と、GEMV だけを宣言する席がこの形になる。
+  it("stateAttentionReduce resolves by the same rules as the other fields and creates no field without a declaration", () => {
+    // There is no family code default (ADR 0104 addendum 2026-09-26). No field = the runtime's reference path
+    // `"sequential"` — the `i4` preset with an empty `session` and presets that declare only GEMV take this shape.
     assertEquals(resolve({}, {}, "test"), {});
     assertEquals(resolve({ linearGemvReduce: "parallel" }, {}, "test"), {
       linearGemvReduce: "parallel",
     });
-    // 通常 E2B の i4-fast と同じ宣言 — 3 欄とも宣言から素通りする。
+    // The same declaration as regular E2B's i4-fast — all 3 fields pass through from the declaration.
     const fastE2b = {
       linearGemvReduce: "parallel",
       stateAttentionReduce: "parallel-fused",
       fuseRmsNormAdd: true,
     } as const;
     assertEquals(resolve(fastE2b, {}, "test"), fastE2b);
-    // 明示が宣言に勝つ（参照経路へ戻す口）。
+    // An explicit value wins over the declaration (the way back to the reference path).
     assertEquals(resolve(fastE2b, { stateAttentionReduce: "sequential" }, "test"), {
       ...fastE2b,
       stateAttentionReduce: "sequential",
@@ -181,17 +181,17 @@ describe("Gemmaのquant実行設定", () => {
     assertEquals(resolve({}, { stateAttentionReduce: "parallel" }, "test"), {
       stateAttentionReduce: "parallel",
     });
-    // 宣言を持たない面（fromAssets）も 3 値とも受ける。
+    // The surface without a declaration (fromAssets) accepts all 3 values too.
     for (const stateAttentionReduce of ["sequential", "parallel", "parallel-fused"] as const) {
       assertGemmaSessionOverrides({ stateAttentionReduce }, "test");
     }
   });
-  it("SessionSpecの全キーが許可表か拒否パスのどちらかに現れる", () => {
-    // hubのSESSION_KEYSとmodelsのWRITERSは`Required<SessionSpec>`の網羅表なので、ノブが
-    // 増えれば型検査が落ちる。Gemmaだけは手書きの文字列比較4本（ADR 0104の3欄 +
-    // ADR 0105追記2のpacked）なので型検査が落ちず、追随漏れは実行時の拒否でしか
-    // 見えない。ここは全キーを埋めた
-    // spec（キーが増えればこの宣言が型検査で落ちる）から、1キーずつ通る／落ちるを確かめる。
+  it("every key of SessionSpec appears either in the allow table or on the rejection path", () => {
+    // The hub's SESSION_KEYS and the models' WRITERS are exhaustive tables over `Required<SessionSpec>`, so a new knob
+    // fails the type check. Only Gemma uses 4 hand-written string comparisons (ADR 0104's 3 fields + ADR 0105
+    // addendum 2's packed), so the type check does not fail and a missed update shows only as a runtime rejection.
+    // Here, from a spec with every key filled (a new key makes this declaration fail the type check), each key is
+    // confirmed to pass / fail one at a time.
     const full: Required<SessionSpec> = {
       linearCompute: "f16",
       convCompute: "a8",
@@ -228,7 +228,7 @@ describe("Gemmaのquant実行設定", () => {
     }
     assertEquals([...accepted, ...rejected].sort(), Object.keys(full).sort());
   });
-  it("不正な明示値をquantの値で置き換えず、値の文字列変換も呼ばない", () => {
+  it("does not replace an invalid explicit value with the quant's value, and never calls the value's string conversion", () => {
     let conversions = 0;
     const object = {
       toString: () => {
@@ -236,8 +236,8 @@ describe("Gemmaのquant実行設定", () => {
         return "parallel";
       },
     };
-    // 期待メッセージまで縛るのは、型検査ではなく組合せ検査で落ちる「理由のすり替わり」を
-    // 通さないため（resolveは4種類の異なる理由でthrowする）。
+    // The expected messages are pinned too so that a "swapped reason" — failing in the combination check instead of
+    // the type check — does not pass (resolve throws for 4 different reasons).
     const invalid = [
       ["linearGemvReduce", "linearGemvReduce is invalid"],
       ["stateAttentionReduce", "stateAttentionReduce is invalid"],
@@ -251,24 +251,24 @@ describe("Gemmaのquant実行設定", () => {
     for (const [key, message] of invalid) {
       for (const value of [null, 0, 1, [], object]) {
         const overrides = {};
-        // 実呼び出しが渡すoptionsは列挙可能なプロパティしか持たないので、同じ形で検査する。
+        // The options real calls pass have only enumerable properties, so the check uses the same shape.
         Object.defineProperty(overrides, key, { value, enumerable: true });
         assertThrows(() => resolve(fast, overrides, "test"), ModelInputError, message);
       }
     }
     assertEquals(conversions, 0);
   });
-  it("manifest宣言だけで成立する不受理は入力起因にしない", () => {
-    // ADR 0107 決定2: 落ちる対象が配布manifestの宣言なら、呼び手が要求を直しても直らない
-    // （資産の齟齬 = 500相当）。overridesが空のときは条件が同じでも素のErrorで出す。
+  it("a rejection that arises from the manifest declaration alone is not classified as caused by the input", () => {
+    // ADR 0107 decision 2: if what fails is the distribution manifest's declaration, fixing the request does not fix
+    // it (an asset inconsistency = the equivalent of 500). With empty overrides, the same condition yields a plain Error.
     for (const quant of [{ linearCompute: "f32" }, { packedStaticQuantize: true }] as const) {
       const thrown = assertThrows(() => resolve(quant, {}, "test"));
       assert(thrown instanceof Error);
       assert(!(thrown instanceof ModelInputError));
     }
   });
-  it("同じ条件でも上書きが関与すれば入力起因にする", () => {
-    // 逆側。quant単独では通る宣言が、明示上書きと組んだ途端に落ちるなら打つ手は「指定を直す」。
+  it("the same condition is caused by the input once an override is involved", () => {
+    // The other side. If a declaration that passes on the quant alone fails once combined with an explicit override, the remedy is "fix the setting".
     assertEquals(resolve({ linearGemvReduce: "sequential" }, {}, "test"), {
       linearGemvReduce: "sequential",
     });
@@ -299,9 +299,9 @@ describe("Gemmaのquant実行設定", () => {
   });
 });
 
-describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
-  it("quant宣言を持たない面でも同じ値域・型・組合せで落とす", () => {
-    // fromAssets はmanifestを持たないので、既定 {} と突き合わせたときと同じ判定になる。
+describe("Gemma's quant execution settings (the check of explicit settings only)", () => {
+  it("rejects with the same ranges, types and combinations on a surface without a quant declaration", () => {
+    // fromAssets has no manifest, so the verdict is the same as when compared with the default {}.
     assertGemmaSessionOverrides({}, "test");
     assertGemmaSessionOverrides({ linearGemvReduce: "parallel-subgroup32" }, "test");
     assertThrows(
@@ -317,8 +317,8 @@ describe("Gemmaのquant実行設定（明示指定だけの門）", () => {
       "fuseRmsNormAdd must be a boolean",
     );
   });
-  it("resolveが同じ明示指定に下す判定と一致する", () => {
-    // 2つの入口が同じ門を通っていることを、判定の一致で縛る（片方だけ緩むのを通さない）。
+  it("agrees with the verdict resolve gives on the same explicit settings", () => {
+    // Pins that the 2 entry points go through the same check by the agreement of their verdicts (no loosening of only one side).
     const explicit = [
       {},
       { linearGemvReduce: "parallel" },

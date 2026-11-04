@@ -1,19 +1,21 @@
-// 解放待ち（`src/session/settle-released-memory.ts` の `settleReleasedMemory`）の門 — 段を畳んだ
-// 直後に次の段が大きな確保をする家族が共有する 1 本（利用者は anima の退避と Wan2.2 の I2V の
-// encoder の段）。偽の GpuContext で縛る（GPU も資産も要らない）。
+// Checks of the release wait (`settleReleasedMemory` in `src/session/settle-released-memory.ts`) —
+// the one function shared by families whose next stage makes a large allocation right after the
+// previous stage is torn down (its users are anima's offload and the encoder stage of Wan2.2 I2V).
+// Pinned with a fake GpuContext (needs neither a GPU nor assets).
 //
-// WHY ここに置く: 共通層の検査は、利用者のどのレーンを回しても走るべきである。ファイル名に家族名を
-// 含めないので `test:core` に入る（家族の名前を持つファイルに置くと、core と別系列のレーンでは
-// 走らない — ADR 0005 追記のレーン規約）。
+// WHY here: checks of a shared layer should run whichever of its users' lanes is run. The file name
+// has no family name, so it goes into `test:core` (in a file named after a family it would not run
+// in lanes other than core and that family — the lane convention of the ADR 0005 addendum).
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { settleReleasedMemory } from "../src/session/settle-released-memory.ts";
 import { losableGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
-describe("settleReleasedMemory（退避の後の解放待ち）", () => {
-  it("空の submit を出してから onSubmittedWorkDone を待ち、消失の購読を残さない", async () => {
-    // 空の submit が「無効化された device の消失を表面化させる呼び出し」（settle-released-memory.ts の doc）。
+describe("settleReleasedMemory (waiting for the release after an offload)", () => {
+  it("issues an empty submit, then waits for onSubmittedWorkDone, and leaves no loss subscription behind", async () => {
+    // The empty submit is "the call that surfaces the loss of an invalidated device" (the doc of
+    // settle-released-memory.ts).
     const calls: string[] = [];
     const { gpu } = losableGpuContext(undefined, {
       submit: (commandBuffers) => void calls.push(`submit:${commandBuffers.length}`),
@@ -25,11 +27,12 @@ describe("settleReleasedMemory（退避の後の解放待ち）", () => {
     const baseline = gpu.pendingLostListeners;
     await settleReleasedMemory(gpu);
     assertEquals(calls, ["submit:0", "onSubmittedWorkDone"]);
-    assertEquals(gpu.pendingLostListeners, baseline, "消失の購読が積み残っている");
+    assertEquals(gpu.pendingLostListeners, baseline, "loss subscriptions were left behind");
   });
 
-  it("空の submit が消失を表面化させたら、onSubmittedWorkDone が解決しなくても待たずに戻る", async () => {
-    // Deno は無効化された device の消失を次の有効性検査（ここでは submit）で初めて解決する。
+  it("returns without waiting when the empty submit surfaces the loss, even if onSubmittedWorkDone never resolves", async () => {
+    // Deno resolves the loss of an invalidated device only at the next validity check (here,
+    // submit).
     const { gpu, lose } = losableGpuContext(undefined, {
       submit: () => lose(),
       onSubmittedWorkDone: () => new Promise<void>(() => {}),
@@ -39,8 +42,9 @@ describe("settleReleasedMemory（退避の後の解放待ち）", () => {
     assertEquals(gpu.pendingLostListeners, baseline);
   });
 
-  it("onSubmittedWorkDone が解決しなくても、device が失われたら待たずに戻る", async () => {
-    // 消失後の onSubmittedWorkDone が解決しない実装への備え（MUST）。競わせないとここで固まる。
+  it("returns without waiting once the device is lost, even if onSubmittedWorkDone never resolves", async () => {
+    // Guards against implementations whose onSubmittedWorkDone never resolves after a loss (MUST).
+    // Without racing the two, this would hang here.
     const { gpu, lose } = losableGpuContext(undefined, {
       onSubmittedWorkDone: () => new Promise<void>(() => {}),
     });
@@ -51,14 +55,14 @@ describe("settleReleasedMemory（退避の後の解放待ち）", () => {
     assertEquals(gpu.pendingLostListeners, baseline);
   });
 
-  it("既に失われた device では待たずに戻る", async () => {
+  it("returns without waiting for a device that is already lost", async () => {
     const { gpu, lose } = losableGpuContext(undefined, {
       onSubmittedWorkDone: () => new Promise<void>(() => {}),
     });
     lose();
-    // 消失の通知は device.lost の解決（マイクロタスク）越しに届く。
+    // The loss notification arrives through the resolution of device.lost (a microtask).
     await Promise.resolve();
-    assert(gpu.lost !== undefined, "前提: 消失を観測済み");
+    assert(gpu.lost !== undefined, "premise: the loss has been observed");
     await settleReleasedMemory(gpu);
   });
 });

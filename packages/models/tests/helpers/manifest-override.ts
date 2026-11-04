@@ -1,10 +1,11 @@
 /**
- * 故障注入用の**一時 manifest**（配布形のディレクトリを symlink で借り、`karume.json` だけを
- * 差し替えた取得元）。手筋は `e2e_gemma4_quant_test.ts` の一時 manifest と同じで、元の配布形と
- * 重みは 1 バイトも書き換えない。
+ * A **temporary manifest** for fault injection (a source that borrows the distribution's directory
+ * through symlinks and replaces only `karume.json`). The technique is the same as the temporary
+ * manifest of `e2e_gemma4_quant_test.ts`; the original distribution and its weights are not
+ * changed by a single byte.
  *
- * NOTE: `Deno.symlink` / `Deno.makeTempDir` を使うのはテストだけ（パッケージ本体は Web 標準 API
- * のみ — 横断不変条件）。
+ * NOTE: only tests use `Deno.symlink` / `Deno.makeTempDir` (the package itself uses Web standard
+ * APIs only — cross-cutting invariant).
  */
 
 import { makeTempDir, readDir, remove, symlink, writeTextFile } from "@karume/test-support/fs";
@@ -12,8 +13,9 @@ import type { DistributionSource, LocalDirectoryOptions } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 
 /**
- * `root` の配布形を `manifest` に差し替えた取得元で `body` を回す（一時ディレクトリは抜けたら
- * 消す — symlink を消すだけで、指す先の実体には触れない）。
+ * Runs `body` with a source that replaces the manifest of the distribution at `root` by `manifest`
+ * (the temporary directory is removed on exit — only the symlinks are removed; the files they
+ * point to are not touched).
  *
  * `options` go to the source as they are — a distribution with cross-repository references needs
  * its `crossRepo` mapping on the overridden source too.

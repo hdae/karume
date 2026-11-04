@@ -1,20 +1,23 @@
-// 焼かれたグラフの宣言と `pipelineConfig` の宣言の突合（`src/hub/graph-gates.ts`）。
-// 4 family（birefnet / depth-anything / irodori / siglip2）が同じ 1 本を通る。
+// Checks a built graph's declarations against the declarations of `pipelineConfig`
+// (`src/hub/graph-gates.ts`). 4 families (birefnet / depth-anything / irodori / siglip2) go through
+// this one path.
 //
-// この門は**失敗経路しか無い**: 通ってしまった食い違いはホスト側を最後まで素通りし、落ちるのは
-// Session の shape 検査 = 「宣言とグラフのどちらが正しいのか」が読み手に伝わらない場所になる。
-// 見るのは 3 点:
+// This check **has only failure paths**: a mismatch that gets through passes the host side all the
+// way and fails only at the Session's shape check = a place where the reader cannot tell "which is
+// right, the declaration or the graph". Three points are checked:
 //
-// ① 一致は通し、1 軸でもずれたら落とす（比較は `===` — 記号次元の文字列は数と一致しない）。
-// ② 入力名そのものが無い場合は、軸を読む前に名指しで落とす。
-// ③ 文言には family・どの宣言を見ていたか（`where`）・入力名・軸・実値・期待値が全部入る。
+// ① A match passes, and a mismatch on even one axis fails (the comparison is `===` — the string of
+//    a symbolic dimension does not equal a number).
+// ② When the input name itself is missing, it fails naming it before reading the axis.
+// ③ The message carries the family, which declaration was being checked (`where`), the input name,
+//    the axis, the actual value and the expected value.
 
 import { test } from "vite-plus/test";
 import { assert, assertThrows } from "@std/assert";
 import { stubModel } from "./helpers/stub-model.ts";
 import { assertGraphInputDim } from "../src/hub/graph-gates.ts";
 
-/** 224² の vision グラフ（`patch` で 1 点だけ壊す）。 */
+/** A 224² vision graph (`patch` breaks exactly one point). */
 const visionGraph = (shape: readonly (number | string)[] = [1, 3, 224, 224]) =>
   stubModel({
     inputs: [{ name: "pixel_values", shape }],
@@ -22,12 +25,12 @@ const visionGraph = (shape: readonly (number | string)[] = [1, 3, 224, 224]) =>
     values: { pooler_output: [1, 768] },
   });
 
-test("assertGraphInputDim: 宣言どおりの軸は通る", () => {
+test("assertGraphInputDim: an axis matching the declaration passes", () => {
   assertGraphInputDim("siglip2", visionGraph(), "pixel_values", 2, 224, "imageHeight");
-  assertGraphInputDim("siglip2", visionGraph(), "pixel_values", 1, 3, "RGB の 3 チャネル");
+  assertGraphInputDim("siglip2", visionGraph(), "pixel_values", 1, 3, "3 RGB channels");
 });
 
-test("assertGraphInputDim: 軸の食い違いは family・where・実値・期待値を名指しで落とす", () => {
+test("assertGraphInputDim: an axis mismatch fails naming the family, where, the actual value and the expected value", () => {
   const error = assertThrows(
     () =>
       assertGraphInputDim(
@@ -44,7 +47,7 @@ test("assertGraphInputDim: 軸の食い違いは family・where・実値・期�
   assert(error.message.includes("pipelineConfig has 224"), error.message);
 });
 
-test("assertGraphInputDim: family ラベルは呼び手のものがそのまま出る", () => {
+test("assertGraphInputDim: the family label is the caller's as is", () => {
   assertThrows(
     () =>
       assertGraphInputDim("depth-anything", visionGraph(), "pixel_values", 3, 518, "imageWidth"),
@@ -53,7 +56,7 @@ test("assertGraphInputDim: family ラベルは呼び手のものがそのまま�
   );
 });
 
-test("assertGraphInputDim: 入力名そのものが無ければ軸を読む前に落ちる", () => {
+test("assertGraphInputDim: a missing input name fails before the axis is read", () => {
   assertThrows(
     () => assertGraphInputDim("irodori", visionGraph(), "pixel", 2, 224, "imageHeight"),
     Error,
@@ -61,9 +64,10 @@ test("assertGraphInputDim: 入力名そのものが無ければ軸を読む前�
   );
 });
 
-test("assertGraphInputDim: 記号次元の軸は静的値と一致しないので落ちる", () => {
-  // 記号次元（データ依存の軸）を静的宣言として要求した形。`===` なので文字列は数と一致せず、
-  // 文言には記号名がそのまま出る（「静的に焼かれていない」と読める）。
+test("assertGraphInputDim: a symbolic-dimension axis fails because it does not equal a static value", () => {
+  // A symbolic dimension (a data-dependent axis) required as a static declaration. With `===` the
+  // string does not equal a number, and the message shows the symbol name as is (readable as "not
+  // built statically").
   assertThrows(
     () =>
       assertGraphInputDim(
@@ -79,8 +83,9 @@ test("assertGraphInputDim: 記号次元の軸は静的値と一致しないの�
   );
 });
 
-test("assertGraphInputDim: 宣言の次元数より外の軸は undefined として落ちる", () => {
-  // 軸番号の取り違え（4 次元の宣言に軸 4 を要求）。黙って通すと「見ていない軸」が増える。
+test("assertGraphInputDim: an axis beyond the declared rank fails as undefined", () => {
+  // A mixed-up axis number (axis 4 required of a 4-dimensional declaration). Passing silently would
+  // add "axes nobody looks at".
   assertThrows(
     () => assertGraphInputDim("birefnet", visionGraph(), "pixel_values", 4, 224, "imageHeight"),
     Error,

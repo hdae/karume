@@ -1,51 +1,58 @@
 /**
- * **束の census 表**（ADR 0110 決定 5 ① / ADR 0058 決定 4 ③）— 系列 × モデル × 実効 SessionOptions ×
- * 部品 × 相 → 席ごとの**期待本数（ちょうど）**。
+ * **The per-bundle census table** (ADR 0110 decision 5 ① / ADR 0058 decision 4 ③) — family × model
+ * × effective SessionOptions × component × phase → the **expected count (exact)** per option.
  *
- * 席の判別述語は runtime の `tests/helpers/pipeline-census.ts`（`SEAT_SIGNATURES`）が持ち、ここは
- * 「その束のその相で、変種キーが何本・参照変種のキーが何本走るか」だけを持つ。e2e はこの表に
- * 行がある束を {@link phaseExpectations} → `assertPipelineCensus` で**ちょうど**の本数で見る
- * （行の無い束は従来どおり `assertSeatsApplied` の 1 本以上 / 0 本）。
+ * The predicates that tell options apart live in runtime's `tests/helpers/pipeline-census.ts`
+ * (`SEAT_SIGNATURES`); this file holds only "how many variant keys and how many reference-variant
+ * keys run in that phase of that bundle". The e2e tests check a bundle that has a row in this table
+ * for the **exact** count through {@link phaseExpectations} → `assertPipelineCensus` (a bundle
+ * without a row is checked as before by `assertSeatsApplied`, at least one / zero).
  *
- * ## 鍵
+ * ## Key
  *
- * 束の鍵は**実効** SessionOptions（manifest の quant 席の `session` と明示指定を家族の合成
- * `resolveSessionOptions` に通した結果 — ADR 0111）から {@link bundleKey} で作る。manifest の
- * `session` の字面で引かないのは、合成の外で値が足されると（stateAttentionReduce 昇格前の gemma の
- * models 既定がそうだった）表の鍵と実際に走る束がずれるため。参照値の欄は鍵から落とす
- * （`linearGemvReduce: "sequential"` の明示は未指定と同じ束）。
+ * A bundle's key is made by {@link bundleKey} from the **effective** SessionOptions (the result of
+ * passing the quant preset's `session` from the manifest and the explicit overrides through the
+ * family's merge `resolveSessionOptions` — ADR 0111). It is not looked up by the literal `session`
+ * of the manifest because a value added outside the merge (as gemma's models default did before
+ * stateAttentionReduce was promoted) would make the table key and the bundle that actually runs
+ * diverge. Fields at their reference value are dropped from the key (an explicit
+ * `linearGemvReduce: "sequential"` is the same bundle as leaving it unset).
  *
- * ## 値の出どころ（2026-09-26 時点・全て GPU 不要で導出）
+ * ## Where the values come from (as of 2026-09-26, all derived without a GPU)
  *
- * - **既存テストに散っていた値**: irodori DiT の i8a8 linear 317（`e2e_irodori_ab_test.ts` —
- *   ADR 0114 でグラフを割った後は `dit` 245 + `dit_context` 72）・
- *   gemma4 E2B decode の GEMV 277（`e2e_gemma4_greedy_test.ts`）・RMS→add 融合 106 / linear→SRQ
- *   融合 275 / packed SRQ 70（`runtime/tests/e2e_*_fusion_counts_test.ts`）。
- * - **配布ミラーの計画から機械的に導いた値**: 容器の part 0（グラフ宣言だけ）を読み、
- *   `gpu_linear_gemv_parallel_test.ts` の GPU 不要 describe と同じ手筋 —
- *   linear の格納（`planWeightResidency`）と形を recipe-builder と同じ述語
- *   （`linearGemvParallelEligible` / i8a8 の「i8・i4 × k % 4 == 0」/ f16 計算の「i8・i4 以外」）に
- *   通して本数を出す。融合で決まる本数（RMS→add・linear→SRQ・packed）は `planFusions` の
- *   融合ステップが計画時に持つ dispatch キーを `SEAT_SIGNATURES` で数えた値（WebGPU core 既定の
- *   limits — `e2e_*_fusion_counts_test.ts` と同じ）。states 形 attention は
- *   `recipe-builders/attention.ts` の選択（M ≤ 8 で ①' / M < 16 で ③'・readonly は常に ①'③'）と
- *   M ≤ 8 の行ブロック 1 枚から、attention ノード 1 本あたり ①③ 各 1 本。
- *   gemma4-qat E4B の行はこの手筋で導いた（同じ計算が E2B の既知値 275 / 2・106・275・70 + 70・
- *   35 層を再現することを確かめてから、M 1 / 4 / 8〈prefill の RMS→add は M 32 / 768〉で読んだ値）。
+ * - **Values scattered across existing tests**: irodori DiT's i8a8 linears 317
+ *   (`e2e_irodori_ab_test.ts` — after ADR 0114 split the graph, `dit` 245 + `dit_context` 72),
+ *   gemma4 E2B decode's GEMVs 277 (`e2e_gemma4_greedy_test.ts`), RMS→add fusion 106 / linear→SRQ
+ *   fusion 275 / packed SRQ 70 (`runtime/tests/e2e_*_fusion_counts_test.ts`).
+ * - **Values derived mechanically from the distribution mirrors' plans**: read the container's
+ *   part 0 (the graph declarations only) and, with the same approach as the GPU-free describe of
+ *   `gpu_linear_gemv_parallel_test.ts`, pass each linear's storage (`planWeightResidency`) and
+ *   shape through the same predicates as the recipe builder (`linearGemvParallelEligible` / i8a8's
+ *   "i8 or i4 × k % 4 == 0" / f16 compute's "anything but i8 or i4") to get the counts. The counts
+ *   set by fusion (RMS→add, linear→SRQ, packed) are the dispatch keys the fusion steps of
+ *   `planFusions` hold at plan time, counted with `SEAT_SIGNATURES` (WebGPU core default limits —
+ *   the same as `e2e_*_fusion_counts_test.ts`). States-form attention gives one each of ① and ③ per
+ *   attention node, from the choice in `recipe-builders/attention.ts` (①' at M ≤ 8 / ③' at M < 16;
+ *   readonly always ①'③') and a single row block at M ≤ 8. The gemma4-qat E4B rows were derived
+ *   this way (after confirming that the same computation reproduces E2B's known values 275 / 2,
+ *   106, 275, 70 + 70 and 35 layers, read at M 1 / 4 / 8 (prefill RMS→add at M 32 / 768)).
  *
- * ## 書かないもの（未導出 — 行 / 相 / 席を置かない）
+ * ## What is not written (not derived — no row / phase / option is entered)
  *
- * - prefill の並列 GEMV・states 形 attention: 物理 chunk 行数（バケット）に依って本数が変わる。
- *   prefill に書くのは M に依らない融合（RMS→add）だけ。
- * - `stateAttentionReduce: "parallel-fused"`: 融合 kernel の採否が full 層の列上限（= 容量）で決まる。
- * - `attentionCompute` / `attentionScoreStorage`: 非 states 形 attention の行ブロック枚数が device の
- *   `maxStorageBufferBindingSize` で決まる（anima DiT 1024px の S は 1 枚に収まらない）。
+ * - Prefill's parallel GEMV and states-form attention: the count depends on the physical chunk
+ *   row count (the bucket). Prefill carries only the M-independent fusion (RMS→add).
+ * - `stateAttentionReduce: "parallel-fused"`: whether the fused kernel is taken depends on the
+ *   column limit of the full layers (= the capacity).
+ * - `attentionCompute` / `attentionScoreStorage`: the number of row blocks of non-states-form
+ *   attention depends on the device's `maxStorageBufferBindingSize` (the S of anima DiT at 1024px
+ *   does not fit in one).
  *
- * NOTE: 相 `verify` の値は投機の検証行数 M = k + 1 ≤ 8 の前提（並列 GEMV の実測表と ①' の適用
- * 範囲が M ≤ 8）。k ≥ 8 の投機でこの表を引くと並列 GEMV が 0 本になり赤になる。
- * NOTE: census は**計画上の**本数（`SessionDiagnostics.lastRunPipelines`）で、states 形の仕事量ゼロの
- * dispatch も 1 本と数える。ここに書く states 形の本数は M ≤ 8 の decode / verify / draft だけで、
- * 行ブロックが 1 枚なので計画と発行の差は出ない。
+ * NOTE: the values of phase `verify` assume speculation's verify row count M = k + 1 ≤ 8 (the
+ * measured parallel GEMV table and the range of ①' cover M ≤ 8). Looking up this table with
+ * speculation at k ≥ 8 gives zero parallel GEMVs and turns red.
+ * NOTE: the census is the **planned** count (`SessionDiagnostics.lastRunPipelines`) and counts a
+ * states-form dispatch with zero work as one. The states-form counts here are only for decode /
+ * verify / draft at M ≤ 8, where there is one row block, so plan and issue do not differ.
  */
 
 import type { SessionSpec } from "@karume/hub";
@@ -78,15 +85,15 @@ import { UMT5_ENCODER_SESSION_POLICY } from "../../src/umt5/encoder.ts";
 import { VOWEL_DETECTOR_SESSION_POLICY } from "../../src/vowel-detector/pipeline.ts";
 import { WAN_SESSION_POLICY } from "../../src/wan/family.ts";
 
-// ---------------------------------------------------------------------------
-// 鍵
+// --------------------------------------------------------------------------- Key
 // ---------------------------------------------------------------------------
 
 /**
- * manifest の pipeline 名 → 家族の受理表（実効 SessionOptions の合成に使う）。
+ * Manifest pipeline name → the family's acceptance table (used to merge the effective
+ * SessionOptions).
  *
- * MUST: 未知の pipeline 名は {@link effectiveSessionOptions} が落とす — 新しい家族のミラーを
- * 足した日に、census の門が黙ってその家族を外さないように。
+ * MUST: {@link effectiveSessionOptions} fails on an unknown pipeline name — so that on the day a
+ * new family's mirror is added, the census check does not silently leave that family out.
  */
 export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   anima: ANIMA_SESSION_POLICY,
@@ -101,13 +108,14 @@ export const SESSION_POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
   wan: WAN_SESSION_POLICY,
-  // Wan2.2 TI2V は 2.1 と同じ受理表を共有する（共通の admission — `family.ts`）。
+  // Wan2.2 TI2V shares 2.1's acceptance table (the common admission — `family.ts`).
   "wan-ti2v": WAN_SESSION_POLICY,
 };
 
 /**
- * quant 席の宣言と明示指定を**家族の合成**（`resolveSessionOptions` — 入口が実際に呼ぶ 1 本）に
- * 通した実効 SessionOptions。表の鍵はこれから作る。
+ * The effective SessionOptions: the quant preset's declaration and the explicit overrides passed
+ * through the **family's merge** (`resolveSessionOptions` — the one the entry points actually
+ * call). The table keys are made from it.
  */
 export const effectiveSessionOptions = (
   family: string,
@@ -117,21 +125,25 @@ export const effectiveSessionOptions = (
 ): SessionOptions => {
   if (!Object.hasOwn(SESSION_POLICIES, family)) {
     throw new Error(
-      `${where}: pipeline '${family}' の受理表が census 表に無い（SESSION_POLICIES へ足す）`,
+      `${where}: pipeline '${family}' has no acceptance table in the census table (add it to SESSION_POLICIES)`,
     );
   }
   return resolveSessionOptions(SESSION_POLICIES[family], declared, overrides, where);
 };
 
-/** 網羅表の席名（`Object.keys` は string[] を返すので、網羅表の型から取り直す）。 */
+/**
+ * The option names of the exhaustive table (`Object.keys` returns string[], so the type is taken
+ * from the table again).
+ */
 const NUMERIC_SEATS = (Object.keys(SEAT_REFERENCE) as NumericSeat[]).toSorted();
 
 /**
- * 実効 SessionOptions → 束の鍵（数値を変える席のうち**非参照値**の欄だけを、席名の辞書順に
- * `席=値` で `,` 連結）。全席が参照値（= 参照の束）なら空文字列。
+ * Effective SessionOptions → the bundle key (only the fields of the number-changing options that
+ * hold a **non-reference value**, as `option=value` joined with `,` in option-name order). The
+ * empty string when every option is at its reference value (= the reference bundle).
  *
- * NOTE: 数値を変えない欄（`submitPolicy` など — pipeline-census.ts の `NonNumericField`）は
- * census に効かないので鍵に入れない。
+ * NOTE: fields that do not change numbers (`submitPolicy` and so on — `NonNumericField` in
+ * pipeline-census.ts) do not affect the census, so they are not in the key.
  */
 export const bundleKey = (options: SessionOptions): string =>
   NUMERIC_SEATS.flatMap((seat) => {
@@ -139,30 +151,35 @@ export const bundleKey = (options: SessionOptions): string =>
     return value === undefined || value === SEAT_REFERENCE[seat] ? [] : [`${seat}=${value}`];
   }).join(",");
 
-// ---------------------------------------------------------------------------
-// 参照変種の述語
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Reference-variant
+// predicates ---------------------------------------------------------------------------
 
-/** キーの族（先頭の `:` より前）。 */
+/** The key's kernel family (the part before the first `:`). */
 const familyOf = (key: string): string => {
   const colon = key.indexOf(":");
   return colon < 0 ? key : key.slice(0, colon);
 };
 
-/** linear op の dispatch が載る族（既定 GEMM 骨格・逐次 GEMV〈M=1 / 行ブロック〉・並列 GEMV）。 */
+/**
+ * The kernel families that carry linear op dispatches (default GEMM skeleton, sequential GEMV (M=1
+ * / row block), parallel GEMV).
+ */
 const LINEAR_OP_FAMILIES: ReadonlySet<string> = new Set(
   [linearKey("f32", true), linearGemvKey("i8"), linearGemvParallelKey("i8", undefined, 4)].map(
     familyOf,
   ),
 );
 
-/** 席の非参照値のどれかの述語に当たるか。 */
+/** Whether the key matches the predicate of any of the option's non-reference values. */
 const anyVariant =
   (predicates: Readonly<Record<string, KeyPredicate>>): KeyPredicate =>
   (key) =>
     Object.values(predicates).some((predicate) => predicate(key));
 
-/** 逐次の ①QK / ③PV（states 形の参照経路）の全キー（`(sliding, gqa)` の 4 通り）。 */
+/**
+ * Every key of the sequential ①QK / ③PV (the states-form reference path) (the 4 combinations of
+ * `(sliding, gqa)`).
+ */
 const STATE_SEQUENTIAL_KEYS: ReadonlySet<string> = new Set(
   [stateQkKey, statePvKey].flatMap((key) =>
     [false, true].flatMap((sliding) => [false, true].map((gqa) => key(sliding, gqa))),
@@ -170,70 +187,83 @@ const STATE_SEQUENTIAL_KEYS: ReadonlySet<string> = new Set(
 );
 
 /**
- * 参照変種（席が非参照値なのに、その席の参照経路に残った dispatch）の述語を持つ席。
+ * The options that have a reference-variant predicate (dispatches left on the option's reference
+ * path although the option holds a non-reference value).
  *
- * 完全適格なら 0 本（ADR 0110 決定 5 ①）。0 でない束は、対象外の形が逐次へ落ちる本数を
- * そのまま書く（適格表から形が外れると増える側に動く — Fable レビュー I8-02）。
- * 真偽の融合席は「融合しなかったノード」が構造上いつも残るので持たない（変種の本数だけで
- * 外れは見える）。
+ * Zero when fully eligible (ADR 0110 decision 5 ①). A bundle with a non-zero count records the
+ * number of out-of-scope shapes that fall to the sequential path as is (a shape that leaves the
+ * eligibility table moves it upwards — Fable review I8-02). The boolean fusion options have none,
+ * because "nodes that were not fused" always remain by construction (a miss is visible from the
+ * variant count alone).
  */
 type ReferenceSeat = "linearCompute" | "linearGemvReduce" | "stateAttentionReduce";
 
 const REFERENCE_SIGNATURES: { readonly [Seat in ReferenceSeat]: KeyPredicate } = {
-  // linear op の dispatch のうち、linearCompute のどの変種（i8a8 / c16）にも当たらないもの。
+  // Linear op dispatches that match none of linearCompute's variants (i8a8 / c16).
   linearCompute: (key) =>
     LINEAR_OP_FAMILIES.has(familyOf(key)) && !anyVariant(SEAT_SIGNATURES.linearCompute)(key),
-  // linear op の dispatch のうち、並列 GEMV 族に落ちなかったもの（逐次 GEMV・既定 GEMM）。
+  // Linear op dispatches that did not land in the parallel GEMV family (sequential GEMV, default
+  // GEMM).
   linearGemvReduce: (key) =>
     LINEAR_OP_FAMILIES.has(familyOf(key)) && !anyVariant(SEAT_SIGNATURES.linearGemvReduce)(key),
-  // 逐次の ①QK / ③PV（行タイル変種 ①ₜ③ₜ は席に依らない既定なので含めない）。
+  // The sequential ①QK / ③PV (the row-tile variants ①ₜ③ₜ are a default independent of the option,
+  // so they are not included).
   stateAttentionReduce: (key) => STATE_SEQUENTIAL_KEYS.has(key),
 };
 
-// ---------------------------------------------------------------------------
-// 表の型
+// --------------------------------------------------------------------------- Table types
 // ---------------------------------------------------------------------------
 
-/** 席 1 つぶんの期待本数（run 1 回あたり・ちょうど）。 */
+/** The expected counts of one option (per run, exact). */
 type SeatCount<Seat extends NumericSeat> = Seat extends ReferenceSeat
   ? {
-      /** 束が指定した非参照値の変種キーの本数。 */
+      /** The number of variant keys of the non-reference value the bundle selects. */
       readonly variant: number;
-      /** その席の参照経路に残ったキーの本数（完全適格なら 0）。 */
+      /** The number of keys left on that option's reference path (0 when fully eligible). */
       readonly reference: number;
     }
   : { readonly variant: number };
 
 /**
- * 相 1 つぶんの期待（束の非参照値の席だけを書く — 値は束の `session` が決める）。
+ * The expectations of one phase (only the bundle's non-reference options are written — the bundle's
+ * `session` decides the value).
  *
- * NOTE: 書いていない席（未導出）はこの相では本数を見ない。e2e はその席を `assertSeatsApplied`
- * の 1 本以上 / 0 本で見続ける。
+ * NOTE: an option that is not written (not derived) has no count check in this phase. The e2e tests
+ * keep checking it with `assertSeatsApplied`'s at least one / zero.
  */
 export type PhaseCensus = { readonly [Seat in NumericSeat]?: SeatCount<Seat> };
 
-/** 系列ごとの部品 → 相（`onRunDiagnostics` が名乗る部品名・相の綴り）。 */
+/**
+ * Per family, component → phase (the component names and phase spellings `onRunDiagnostics`
+ * reports).
+ */
 type FamilyAxes = {
   readonly gemma4: GemmaAxes;
   readonly "gemma4-qat": GemmaAxes;
   readonly irodori: { readonly dit: "step"; readonly "dit-context": "run" };
   readonly anima: { readonly transformer: "step" };
   readonly sbv2: { readonly front: "run"; readonly voice: "run" };
-  /** 相 `pass` は DiT の 1 forward（CFG の 1 ステップは条件つき / 条件なしの 2 パス）。 */
+  /** Phase `pass` is one DiT forward (one CFG step is two passes, conditional / unconditional). */
   readonly wan: { readonly transformer: "pass" };
-  /** Wan2.2 TI2V も同じ（部品名・相は共有モジュールの DiT 段が名乗る — 2.1 と同じ綴り）。 */
+  /**
+   * Wan2.2 TI2V likewise (the shared modules' DiT stage reports the component name and phase — the
+   * same spelling as 2.1).
+   */
   readonly "wan-ti2v": { readonly transformer: "pass" };
   /** MOSS-Image: the DiT pair's two graphs; phase `pass` is one forward of a graph. */
   readonly "moss-image": { readonly dit: "pass"; readonly dit_skip22: "pass" };
 };
 
-/** gemma の部品（製品グラフ = target・投機の drafter）と相（`GenerationRunPhase["kind"]`）。 */
+/**
+ * gemma's components (the product graph = target, speculation's drafter) and phases
+ * (`GenerationRunPhase["kind"]`).
+ */
 type GemmaAxes = {
   readonly target: "prefill" | "decode" | "verify";
   readonly drafter: "draft";
 };
 
-/** 表に行を持つ系列（manifest の pipeline 名）。 */
+/** The families that have rows in the table (manifest pipeline names). */
 export type CensusFamily = keyof FamilyAxes;
 
 type ComponentCensus<Family extends CensusFamily> = {
@@ -242,12 +272,12 @@ type ComponentCensus<Family extends CensusFamily> = {
   };
 };
 
-/** 表の 1 行（系列 × モデル群 × 束）。 */
+/** One table row (family × models × bundle). */
 type FamilyBundleRow<Family extends CensusFamily> = {
   readonly family: Family;
-  /** 同じグラフ（同じ本数）を持つモデル（manifest の models のキー）。 */
+  /** The models with the same graph (the same counts) (keys of the manifest's models). */
   readonly models: readonly string[];
-  /** 束（実効 SessionOptions — 鍵は {@link bundleKey}）。 */
+  /** The bundle (effective SessionOptions — the key is {@link bundleKey}). */
   readonly session: SessionOverrides;
   readonly census: ComponentCensus<Family>;
 };
@@ -256,8 +286,7 @@ export type BundleCensusRow = {
   readonly [Family in CensusFamily]: FamilyBundleRow<Family>;
 }[CensusFamily];
 
-// ---------------------------------------------------------------------------
-// 表
+// --------------------------------------------------------------------------- Table
 // ---------------------------------------------------------------------------
 
 /**
@@ -280,15 +309,15 @@ const GEMMA4_E2B_GEMV = { variant: 276, reference: 1 } as const;
  */
 const GEMMA4_E2B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
 /**
- * gemma4-qat E2B（製品グラフ）: linear 277 本のうち並列 GEMV は 275 本（i2 60 + i4 145 + i8 70）。
- * 残り 2 本は逐次へ落ちる — i2 の lm_head 262144×1536（実測表に無い形）と f32 格納の
- * per_layer_model_projection 8960×1536。
+ * gemma4-qat E2B (product graph): of the 277 linears, 275 take the parallel GEMV (i2 60 + i4 145 +
+ * i8 70). The other 2 fall to the sequential path — the i2 lm_head 262144×1536 (a shape the
+ * measured table does not have) and the f32-stored per_layer_model_projection 8960×1536.
  */
 const GEMMA4_QAT_E2B_GEMV = { variant: 275, reference: 2 } as const;
-/** RMS→add 融合（M に依らない — `e2e_*_fusion_counts_test.ts` が M 1〜64 で固定）。 */
+/** RMS→add fusion (independent of M — `e2e_*_fusion_counts_test.ts` pins it at M 1–64). */
 const GEMMA4_E2B_RMS_ADD = { variant: 106 } as const;
 const GEMMA4_E2B_DRAFTER_RMS_ADD = { variant: 24 } as const;
-/** linear→SRQ 融合（並列 GEMV に落ちる 275 本の全て — M ≤ 8）。 */
+/** linear→SRQ fusion (all 275 that land in the parallel GEMV — M ≤ 8). */
 const GEMMA4_QAT_E2B_LINEAR_SRQ = { variant: 275 } as const;
 /**
  * gelu_tanh → mul → SRQ fold (perf-ledger K-48 step 1b): the per-layer-input gate of each of the 35
@@ -296,33 +325,47 @@ const GEMMA4_QAT_E2B_LINEAR_SRQ = { variant: 275 } as const;
  */
 const GEMMA4_QAT_E2B_GELU_MUL_SRQ = { variant: 35 } as const;
 /**
- * packed int8 活性（ADR 0105）: 生産側の単体 SRQ（packed 変種）70 本 + それを読む並列 GEMV の
- * packed 変種 70 本（linear→SRQ 融合の有無で消費側の族は変わるが、どちらも packed 断片を持つ）。
+ * Packed int8 activations (ADR 0105): 70 standalone SRQs on the producer side (packed variant) + 70
+ * packed variants of the parallel GEMV that reads them (whether linear→SRQ fusion is on changes the
+ * consumer's kernel family, but both carry the packed fragment).
  */
 const GEMMA4_QAT_E2B_PACKED = { variant: 140 } as const;
-/** states 形 attention: 製品グラフの 35 層 × ①' / ③' 各 1 本（M ≤ 8・行ブロック 1 枚）。 */
+/**
+ * States-form attention: the product graph's 35 layers × one each of ①' / ③' (M ≤ 8, one row
+ * block).
+ */
 const GEMMA4_E2B_STATE_PARALLEL = { variant: 70, reference: 0 } as const;
-/** drafter の readonly attention 12 本 × ①' / ③' 各 1 本（readonly は席に依らず常に並列形）。 */
+/**
+ * The drafter's 12 readonly attention nodes × one each of ①' / ③' (readonly is always the parallel
+ * form, whatever the option).
+ */
 const GEMMA4_E2B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const;
 
 /**
- * gemma4-qat E4B（製品グラフ・42 層）: linear 344 本のうち並列 GEMV は 342 本 — 形ごとの内訳は
- * runtime `gpu_linear_gemv_parallel_test.ts` の QAT E4B の describe が固定している。残り 2 本は
- * E2B と同じ機序（i2 の lm_head と f32 格納の per_layer_model_projection）で逐次へ落ちる。
+ * gemma4-qat E4B (product graph, 42 layers): of the 344 linears, 342 take the parallel GEMV — the
+ * per-shape breakdown is pinned by the QAT E4B describe of runtime's
+ * `gpu_linear_gemv_parallel_test.ts`. The other 2 fall to the sequential path for the same reason
+ * as E2B (the i2 lm_head and the f32-stored per_layer_model_projection).
  */
 const GEMMA4_QAT_E4B_GEMV = { variant: 342, reference: 2 } as const;
-/** RMS→add 融合（M 1〜8 の decode 計画と M 32 / 768 の prefill 計画で同じ本数）。 */
+/**
+ * RMS→add fusion (the same count in the decode plans at M 1–8 and the prefill plans at M 32 / 768).
+ */
 const GEMMA4_QAT_E4B_RMS_ADD = { variant: 127 } as const;
-/** linear→SRQ 融合（並列 GEMV に落ちる 342 本の全て — M ≤ 8）。 */
+/** linear→SRQ fusion (all 342 that land in the parallel GEMV — M ≤ 8). */
 const GEMMA4_QAT_E4B_LINEAR_SRQ = { variant: 342 } as const;
 /** gelu_tanh → mul → SRQ fold: one per layer (42 — M ≤ 8, as E2B). */
 const GEMMA4_QAT_E4B_GELU_MUL_SRQ = { variant: 42 } as const;
 /**
- * packed int8 活性: 生産側の単体 SRQ（packed 変種）84 本 + それを読む並列 GEMV の packed 変種 84 本
- * （o 42 + down 42 — g2048 / g4096 の l32。E2B の 70 + 70 と同じ内訳の取り方）。
+ * Packed int8 activations: 84 standalone SRQs on the producer side (packed variant) + 84 packed
+ * variants of the parallel GEMV that reads them (o 42 + down 42 — l32 of g2048 / g4096; broken down
+ * the same way as E2B's 70 + 70).
  */
 const GEMMA4_QAT_E4B_PACKED = { variant: 168 } as const;
-/** states 形 attention: 製品グラフの 42 層 × ①' / ③' 各 1 本（M ≤ 8・行ブロック 1 枚）。 */
+/**
+ * States-form attention: the product graph's 42 layers × one each of ①' / ③' (M ≤ 8, one row
+ * block).
+ */
 const GEMMA4_QAT_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
 
 /**
@@ -348,18 +391,21 @@ const E2B = ["e2b"] as const;
 const E4B = ["e4b"] as const;
 
 /**
- * irodori v4 系の DiT: linear 245 本（分割前の 317 本の k ∈ {32, 192, 512, 768, 1280, 3680} — 全て
- * i8 × k % 4 == 0）。
+ * The irodori v4 DiT: 245 linears (of the 317 before the split, k ∈ {32, 192, 512, 768, 1280, 3680}
+ * — all i8 × k % 4 == 0).
  *
- * 期待値の変更（317 → 245 / `dit_context` 72）はグラフが変わったため（ADR 0114 — 条件側 K/V
- * 射影 72 本〈12 ブロック × text / speaker / caption × K / V〉を `dit_context` へ割り出した）。
- * 本数を緩めたのではない。合計 317 の検査は置かない（部品ごとにちょうどで縛れば足り、合計は
- * 片方の取り違えを打ち消しうる）。
+ * The expected value changed (317 → 245 / `dit_context` 72) because the graph changed (ADR 0114 —
+ * the 72 context K/V projections (12 blocks × text / speaker / caption × K / V) were split out into
+ * `dit_context`). The count was not loosened. There is no check of the 317 total (pinning each
+ * component exactly is enough, and a total can cancel out a mix-up on one side).
  */
 const IRODORI_DIT_A8 = { variant: 245, reference: 0 } as const;
-/** irodori v4 系の `dit_context`: 条件側 K/V 射影の linear 72 本（k ∈ {512, 768} — 生成 1 回に run 1 回）。 */
+/**
+ * The irodori v4 `dit_context`: the 72 linears of the context K/V projections (k ∈ {512, 768} — one
+ * run per generation).
+ */
 const IRODORI_DIT_CONTEXT_A8 = { variant: 72, reference: 0 } as const;
-/** anima DiT: linear 454 本（公式 5 変種・追加 2 変種とも同じグラフ）。 */
+/** anima DiT: 454 linears (the 5 official variants and the 2 additional ones share the graph). */
 const ANIMA_DIT_LINEARS = { variant: 454, reference: 0 } as const;
 const ANIMA_MODELS = [
   "anima-turbo-v1.1",
@@ -372,14 +418,15 @@ const ANIMA_MODELS = [
 ] as const;
 const SBV2_MODELS = ["F1", "F2", "M1", "M2"] as const;
 /**
- * Wan2.1 T2V 1.3B の DiT: linear 307 本（k ∈ {64, 256, 1536, 4096, 8960} — 全て i8 × k % 4 == 0。
- * M = 1 の時刻 MLP と `time_proj` も含む — ADR 0120 決定 2・調査 §2.2）。
+ * The Wan2.1 T2V 1.3B DiT: 307 linears (k ∈ {64, 256, 1536, 4096, 8960} — all i8 × k % 4 == 0,
+ * including the M = 1 time MLP and `time_proj` — ADR 0120 decision 2, research §2.2).
  */
 const WAN_DIT_LINEARS = { variant: 307, reference: 0 } as const;
 /**
- * Wan2.2 TI2V 5B の DiT: linear の dispatch 310 本（i8 の重みは 307 本で 2.1 と同じ構成だが、時刻の MLP〈2 本と
- * `time_proj`〉を M = 1 で 2 回回すので同じ重みのノードが 3 本増える — ADR 0121 決定 2・段 1 の IR の検査で 310。
- * k ∈ {192, 256, 3072, 4096, 14336} — 全て k % 4 == 0）。
+ * The Wan2.2 TI2V 5B DiT: 310 linear dispatches (307 i8 weights, the same layout as 2.1, but the
+ * time MLP (2 linears and `time_proj`) runs twice at M = 1, which adds 3 nodes on the same weights
+ * — ADR 0121 decision 2; 310 in the IR check of step 1. k ∈ {192, 256, 3072, 4096, 14336} — all k %
+ * 4 == 0).
  */
 const WAN22_DIT_LINEARS = { variant: 310, reference: 0 } as const;
 
@@ -394,16 +441,18 @@ const MOSS_DIT_LINEARS = { variant: 258, reference: 0 } as const;
 const MOSS_DIT_SKIP22_LINEARS = { variant: 252, reference: 0 } as const;
 
 /**
- * 束の census 表。
+ * The per-bundle census table.
  *
- * MUST: 数値を変える非参照値を 1 つでも持つ配布ミラーの quant 席は、ここに行が要る
- * （`census_table_test.ts` が GPU 無しで落とす — census 無しで束が増えるのを防ぐ）。
- * 行の中身（相・席）は導出できた分だけ（未導出の相は書かない — ファイル冒頭）。
+ * MUST: every quant preset of a distribution mirror with at least one number-changing non-reference
+ * value needs a row here (`census_table_test.ts` fails without a GPU — it keeps bundles from
+ * growing without a census). A row holds only what could be derived (phases not derived are not
+ * written — see the file header).
  */
 export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   // --- gemma4 E2B (the q4_0 mirror, with its QAT drafter) -------------------
   {
-    // e2e_gemma4_quant_test の `i4-gemvpar` 差し替え席 / 明示 sequential で ③ を戻した `i4-gemvpar`。
+    // The `i4-gemvpar` override preset of e2e_gemma4_quant_test / `i4-gemvpar` with ③ set back by
+    // an explicit sequential.
     family: "gemma4",
     models: E2B,
     session: { linearGemvReduce: "parallel" },
@@ -416,7 +465,8 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // e2e_gemma4_quant_test の `i4-fast` 差し替え席（投機の検査は ③ を明示 sequential へ倒す）。
+    // The `i4-fast` override preset of e2e_gemma4_quant_test (the speculation check sets ③ to an
+    // explicit sequential).
     family: "gemma4",
     models: E2B,
     session: { linearGemvReduce: "parallel", fuseRmsNormAdd: true },
@@ -435,7 +485,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // 配布ミラーの `i4-gemvpar`。
+    // The distribution mirror's `i4-gemvpar`.
     family: "gemma4",
     models: E2B,
     session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
@@ -459,7 +509,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // 配布ミラーの `i4-fast`（③ の parallel-fused は未導出 — ファイル冒頭）。
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4",
     models: E2B,
     session: {
@@ -529,9 +579,9 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       },
     },
   },
-  // --- gemma4-qat E2B（drafter を持たない）----------------------------------
+  // --- gemma4-qat E2B (no drafter) -----------------------------------------
   {
-    // e2e_gemma4_quant_test の `i4-gemvpar` 差し替え席。
+    // The `i4-gemvpar` override preset of e2e_gemma4_quant_test.
     family: "gemma4-qat",
     models: E2B,
     session: { linearGemvReduce: "parallel" },
@@ -543,7 +593,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // 配布ミラーの `i4-gemvpar`。
+    // The distribution mirror's `i4-gemvpar`.
     family: "gemma4-qat",
     models: E2B,
     session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
@@ -561,7 +611,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // 配布ミラーの `i4-fast`（③ の parallel-fused は未導出 — ファイル冒頭）。
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4-qat",
     models: E2B,
     session: {
@@ -593,7 +643,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // e2e_gemma4_quant_test の `i4-fast` 差し替え席（既定 / explicit-fast）。
+    // The `i4-fast` override preset of e2e_gemma4_quant_test (default / explicit-fast).
     family: "gemma4-qat",
     models: E2B,
     session: {
@@ -615,7 +665,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // e2e_gemma4_quant_test の disable-rms。
+    // disable-rms of e2e_gemma4_quant_test.
     family: "gemma4-qat",
     models: E2B,
     session: {
@@ -634,7 +684,8 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // e2e_gemma4_quant_test の disable-srq（packed の消費側は素の並列 GEMV の packed 変種）。
+    // disable-srq of e2e_gemma4_quant_test (the packed consumer is the packed variant of the plain
+    // parallel GEMV).
     family: "gemma4-qat",
     models: E2B,
     session: { linearGemvReduce: "parallel", fuseRmsNormAdd: true, packedStaticQuantize: true },
@@ -650,7 +701,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // e2e_gemma4_quant_test の disable-both。
+    // disable-both of e2e_gemma4_quant_test.
     family: "gemma4-qat",
     models: E2B,
     session: { linearGemvReduce: "parallel", packedStaticQuantize: true },
@@ -663,9 +714,9 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       },
     },
   },
-  // --- gemma4-qat E4B（drafter を持たない）----------------------------------
+  // --- gemma4-qat E4B (no drafter) -----------------------------------------
   {
-    // 配布ミラーの `i4-gemvpar`。
+    // The distribution mirror's `i4-gemvpar`.
     family: "gemma4-qat",
     models: E4B,
     session: { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },
@@ -683,7 +734,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     },
   },
   {
-    // 配布ミラーの `i4-fast`（③ の parallel-fused は未導出 — ファイル冒頭）。
+    // The distribution mirror's `i4-fast` (③'s parallel-fused is not derived — file header).
     family: "gemma4-qat",
     models: E4B,
     session: {
@@ -714,7 +765,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       },
     },
   },
-  // --- irodori（quant の session は dit と dit_context にだけ渡る）-----------
+  // --- irodori (the preset's session reaches only dit and dit_context) ------
   {
     family: "irodori",
     models: ["v4-small", "v4.1-small"],
@@ -724,7 +775,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       "dit-context": { run: { linearCompute: IRODORI_DIT_CONTEXT_A8 } },
     },
   },
-  // --- anima（quant の session は DiT = transformer にだけ渡る）---------------
+  // --- anima (the preset's session reaches only the DiT = transformer) ------
   {
     family: "anima",
     models: ANIMA_MODELS,
@@ -732,30 +783,30 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   {
-    // attentionCompute は未導出（ファイル冒頭）。
+    // attentionCompute is not derived (file header).
     family: "anima",
     models: ANIMA_MODELS,
     session: { linearCompute: "a8", attentionCompute: "a8" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   {
-    // attentionCompute / attentionScoreStorage は未導出（ファイル冒頭）。
+    // attentionCompute / attentionScoreStorage are not derived (file header).
     family: "anima",
     models: ANIMA_MODELS,
     session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
   {
-    // f16 格納の linear は全て c16 の GEMM 骨格へ（M=1 の GEMV は f32 計算だけ）。
-    // attentionCompute は未導出（ファイル冒頭）。
+    // Every f16-stored linear goes to the c16 GEMM skeleton (the M=1 GEMV computes in f32 only).
+    // attentionCompute is not derived (file header).
     family: "anima",
     models: ANIMA_MODELS,
     session: { linearCompute: "f16", attentionCompute: "f16" },
     census: { transformer: { step: { linearCompute: ANIMA_DIT_LINEARS } } },
   },
-  // --- sbv2（quant の session は front / voice にだけ渡る）---------------------
+  // --- sbv2 (the preset's session reaches only front / voice) ---------------
   {
-    // front は linear 2 本・voice は 4 本（残りは conv1d で linearCompute の対象外）。
+    // front has 2 linears and voice 4 (the rest are conv1d, outside linearCompute's scope).
     family: "sbv2",
     models: SBV2_MODELS,
     session: { linearCompute: "a8" },
@@ -764,18 +815,19 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       voice: { run: { linearCompute: { variant: 4, reference: 0 } } },
     },
   },
-  // --- wan（quant の session は DiT = transformer にだけ渡る）-----------------
+  // --- wan (the preset's session reaches only the DiT = transformer) --------
   {
-    // 配布ミラーの実用席 `f16+dit8-a8-attn8-s16`（ADR 0120 決定 4）。
-    // attentionCompute / attentionScoreStorage は未導出（ファイル冒頭）。
+    // The distribution mirror's practical preset `f16+dit8-a8-attn8-s16` (ADR 0120 decision 4).
+    // attentionCompute / attentionScoreStorage are not derived (file header).
     family: "wan",
     models: ["t2v-1.3b"],
     session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
     census: { transformer: { pass: { linearCompute: WAN_DIT_LINEARS } } },
   },
   {
-    // Wan2.2 の配布ミラーの実用席 `f16+dit8-a8-attn8-s16`（ADR 0121 段 8a — 2.1 と同じ束）。
-    // attentionCompute / attentionScoreStorage は 2.1 の行と同じく未導出（ファイル冒頭）。
+    // The Wan2.2 distribution mirror's practical preset `f16+dit8-a8-attn8-s16` (ADR 0121 step 8a —
+    // the same bundle as 2.1). attentionCompute / attentionScoreStorage are not derived, as in the
+    // 2.1 row (file header).
     family: "wan-ti2v",
     models: ["ti2v-5b"],
     session: { linearCompute: "a8", attentionCompute: "a8", attentionScoreStorage: "f16" },
@@ -824,11 +876,13 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
   },
 ];
 
-// ---------------------------------------------------------------------------
-// 引く・検査する
+// --------------------------------------------------------------------------- Lookup and checks
 // ---------------------------------------------------------------------------
 
-/** (系列, モデル, 実効 SessionOptions) の行。無ければ `undefined`（= census は 1 本以上 / 0 本）。 */
+/**
+ * The row of (family, model, effective SessionOptions). `undefined` when there is none (= the
+ * census is at least one / zero).
+ */
 export const censusRowOf = (
   family: string,
   model: string,
@@ -840,7 +894,10 @@ export const censusRowOf = (
   );
 };
 
-/** 行の相の表（部品・相を文字列で引くため — 型は行の系列で決まる）。 */
+/**
+ * The row's phase table (to look up component and phase by string — the type is set by the row's
+ * family).
+ */
 const phaseOf = (
   row: BundleCensusRow,
   component: string,
@@ -853,10 +910,11 @@ const phaseOf = (
 };
 
 /**
- * 行の (部品, 相) の期待列。相が未記入なら `undefined`。
+ * The expectations of the row's (component, phase). `undefined` when the phase is not filled in.
  *
- * 席ごとに「非参照値の変種キーが `variant` 本ちょうど」と、参照変種の述語を持つ席では
- * 「その席の参照経路に残ったキーが `reference` 本ちょうど」の 2 件を出す。
+ * Per option it yields "exactly `variant` variant keys of the non-reference value" and, for options
+ * with a reference-variant predicate, also "exactly `reference` keys left on that option's
+ * reference path".
  */
 export const phaseExpectations = (
   row: BundleCensusRow,
@@ -874,12 +932,12 @@ export const phaseExpectations = (
     const predicate = value === undefined ? undefined : signatures[String(value)];
     if (predicate === undefined) {
       throw new Error(
-        `census 表: ${row.family} [${bundleKey(row.session)}] の ${component}/${phase} が束に` +
-          `無い（または参照値の）席 ${seat} の本数を持っている`,
+        `census table: ${row.family} [${bundleKey(row.session)}]: ${component}/${phase} holds a ` +
+          `count for option ${seat}, which the bundle does not set (or sets to its reference value)`,
       );
     }
     const variant: CensusExpectation = {
-      label: `${seat}=${String(value)} の変種`,
+      label: `variant of ${seat}=${String(value)}`,
       match: predicate,
       count: count.variant,
     };
@@ -888,7 +946,7 @@ export const phaseExpectations = (
     return [
       variant,
       {
-        label: `${seat} の参照経路に残った dispatch`,
+        label: `dispatches left on the reference path of ${seat}`,
         match: reference,
         count: count.reference,
       },
@@ -897,13 +955,14 @@ export const phaseExpectations = (
 };
 
 /**
- * 相ごとの run の census を、行の期待と**run 1 回ずつ**突き合わせる（本数は run 1 回あたり）。
+ * Checks each phase's run censuses against the row's expectations **one run at a time** (the counts
+ * are per run).
  *
- * 返り値は検査した run の数。MUST: 呼び手は 0 を通さない — 行はあるのに期待を持つ相が 1 度も
- * 走っていなければ、ちょうどの検査は 1 つも行われていない。
+ * Returns the number of runs checked. MUST: callers do not accept 0 — if a row exists but no phase
+ * with expectations ever ran, not a single exact check was made.
  *
- * @param runs 相 → その相の run の `lastRunPipelines` 列。
- * @param componentOf 相 → 部品（gemma は draft だけが drafter）。
+ * @param runs Phase → the `lastRunPipelines` of that phase's runs.
+ * @param componentOf Phase → component (for gemma only draft is the drafter).
  */
 export const assertRowCensus = (
   row: BundleCensusRow,
@@ -924,6 +983,9 @@ export const assertRowCensus = (
   return checked;
 };
 
-/** gemma の相 → 部品（投機の draft だけが drafter の Session・他は製品グラフ）。 */
+/**
+ * gemma's phase → component (only speculation's draft is the drafter's Session; the rest is the
+ * product graph).
+ */
 export const gemmaComponentOf = (phase: string): string =>
   phase === "draft" ? "drafter" : "target";

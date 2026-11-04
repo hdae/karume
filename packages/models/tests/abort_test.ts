@@ -1,35 +1,42 @@
-// 段の境目の中断検査（`src/concurrency/abort.ts` の `settleAbort`）の門。GPU も資産も要らない。
+// Tests of the abort check at stage boundaries (`settleAbort` in `src/concurrency/abort.ts`). Needs
+// neither a GPU nor assets.
 //
-// 縛るのは 4 点:
+// It pins four points:
 //
-// ① `signal` 未指定なら**1 度も譲らない**（購読していない呼び出しにタスク 1 往復を乗せない）。
-// ② 既に中断済みなら `signal.reason` **そのもの**を投げる（包み直さない）。
-// ③ **譲っている間に届いた中断を観測する**（本命）。`abort()` の配送はタスクなので、譲り先を
-//    マイクロタスク（`await Promise.resolve()`）へ書き換えると「現在のタスクの中に留まったまま」
-//    になり、中断が**効かない**という沈黙で退行する。恒真でないことは、同じ形をマイクロタスク
-//    譲りで書いた擬似実装がその中断を拾わないことで示す（陽性対照）。
-// ④ 中断しなければ resolve する（門が常に投げる形へ倒れていない）。
+// ① Without a `signal` it **never yields** (a caller that does not subscribe pays no task round
+//   trip).
+// ② When already aborted it throws `signal.reason` **itself** (no re-wrapping).
+// ③ It **observes an abort that arrives while it is yielding** (the main point). `abort()` is
+//   delivered as a task, so rewriting the yield as a microtask (`await Promise.resolve()`) would
+//   "stay inside the current task", and the regression would be silent: the abort would **not take
+//   effect**. That the check is not vacuous is shown by a fake implementation of the same shape
+//   that yields to a microtask and misses that abort (positive control).
+// ④ Without an abort it resolves (the check has not collapsed into always throwing).
 //
-// NOTE: 譲り先が `setTimeout` か `MessageChannel` かは③④の観測では区別できない（どちらも
-// タスク）。実装は timer で届く中断との順序を保つために `setTimeout(0)` に固定し、非表示タブの
-// timer throttling を受け入れている — 理由の正本は `src/concurrency/abort.ts` の NOTE。ブラウザ
-// 実測の話なのでここでは縛らない。ここが縛るのは「マクロタスクへ譲っている」こと。
+// NOTE: Whether the yield goes through `setTimeout` or `MessageChannel` cannot be told apart by
+// observing ③ and ④ (both are tasks). The implementation is fixed on `setTimeout(0)` to keep the
+// order relative to aborts delivered by timers, and accepts the timer throttling of hidden tabs —
+// the source of truth for the reason is the NOTE in `src/concurrency/abort.ts`. That is a matter of
+// browser measurement, so it is not pinned here. What this file pins is "it yields to a macrotask".
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { settleAbort } from "../src/concurrency/abort.ts";
 
-/** 譲り先をマイクロタスクにした擬似実装（③の陽性対照 — 退行したときの姿）。 */
+/**
+ * A fake implementation that yields to a microtask (③'s positive control — what a regression looks
+ * like).
+ */
 const settleAbortViaMicrotask = async (signal: AbortSignal | undefined): Promise<void> => {
   if (signal === undefined) return;
   await Promise.resolve();
   signal.throwIfAborted();
 };
 
-test("settleAbort: signal 未指定なら 1 度も譲らない（マクロタスクを挟まない）", async () => {
+test("settleAbort: without a signal it never yields (no macrotask in between)", async () => {
   const order: string[] = [];
-  // 対照 = 先に仕掛けたタスク 1 本。`settleAbort` が譲っていればこちらが先に決着する
-  // （マイクロタスクだけで済む決着は、既に待ち行列にあるタスクより必ず先に来る）。
+  // The control = one task scheduled first. If `settleAbort` yields, that task settles first (a
+  // settlement that needs only microtasks always comes before a task already in the queue).
   const task = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(() =>
     order.push("task"),
   );
@@ -38,11 +45,11 @@ test("settleAbort: signal 未指定なら 1 度も譲らない（マクロタス
   assertEquals(order, ["settleAbort", "task"]);
 });
 
-test("settleAbort: signal 付きならマクロタスクへ譲る（マイクロタスクより後に決着する）", async () => {
+test("settleAbort: with a signal it yields to a macrotask (settles after microtasks)", async () => {
   const order: string[] = [];
   const controller = new AbortController();
   const settled = settleAbort(controller.signal).then(() => order.push("settleAbort"));
-  // マイクロタスクを数段挟んでも、タスクへ譲っている限りこちらが先に終わる。
+  // Even with several microtask hops, this one finishes first as long as the yield goes to a task.
   const microtasks = Promise.resolve()
     .then(() => Promise.resolve())
     .then(() => order.push("microtask"));
@@ -50,28 +57,30 @@ test("settleAbort: signal 付きならマクロタスクへ譲る（マイクロ
   assertEquals(order, ["microtask", "settleAbort"]);
 });
 
-test("settleAbort: 既に中断済みなら reason そのものを投げる", async () => {
-  const reason = new Error("ロードを打ち切った");
+test("settleAbort: when already aborted it throws the reason itself", async () => {
+  const reason = new Error("the load was aborted");
   const caught = await assertRejects(
     () => settleAbort(AbortSignal.abort(reason)),
     Error,
-    "ロードを打ち切った",
+    "the load was aborted",
   );
   assertStrictEquals(caught, reason);
 });
 
-test("settleAbort: 譲っている間に届いた abort() を観測する", async () => {
-  const reason = new Error("マイクロタスク経由の中断");
+test("settleAbort: observes an abort() that arrives while it is yielding", async () => {
+  const reason = new Error("abort through a microtask");
   const controller = new AbortController();
   const settled = settleAbort(controller.signal);
-  // 中断はマイクロタスクチェーンから届く = `settleAbort` を呼んだ時点ではまだ中断していない。
+  // The abort arrives from a microtask chain = it has not happened yet when `settleAbort` is
+  // called.
   await Promise.resolve()
     .then(() => Promise.resolve())
     .then(() => controller.abort(reason));
-  const caught = await assertRejects(() => settled, Error, "マイクロタスク経由の中断");
+  const caught = await assertRejects(() => settled, Error, "abort through a microtask");
   assertStrictEquals(caught, reason);
 
-  // 陽性対照 — マイクロタスク譲りの擬似実装は同じ中断を**拾わない**（= このケースは恒真でない）。
+  // Positive control — the fake that yields to a microtask **misses** the same abort (= this case
+  // is not vacuous).
   const other = new AbortController();
   const missed = settleAbortViaMicrotask(other.signal);
   await Promise.resolve()
@@ -80,7 +89,7 @@ test("settleAbort: 譲っている間に届いた abort() を観測する", asyn
   await missed;
 });
 
-test("settleAbort: 中断されなければ解決する", async () => {
+test("settleAbort: resolves when not aborted", async () => {
   const controller = new AbortController();
   await settleAbort(controller.signal);
   assertEquals(controller.signal.aborted, false);

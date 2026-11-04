@@ -1,31 +1,38 @@
-// 投機的デコード（ADR 0096 段 3）の挙動テスト。GPU も実資産も要らない。
+// Behaviour tests of speculative decoding (ADR 0096 step 3). Neither a GPU nor real assets are
+// needed.
 //
-// ここで縛るのは「投機は速さだけを変え、**出力は変えない**」という契約である:
+// What this pins is the contract that "speculation changes only the speed and **does not change the
+// output**":
 //
-// - token 列・位置・停止理由・`tokens` の勘定が、同じ要求を**非投機で走らせた参照走行**と
-//   厳密に一致する（受理 0 でも全受理でも部分受理でも）。ここが割れる退行は例外を出さず、
-//   「たまに文章が変わる」形でしか現れない。**温度に依らない** — 受理は行ごとに `sampler.next`
-//   を非投機の decode と同じ logits・同じ history・同じ順で 1 回ずつ（確定 token 1 個につき
-//   1 回）呼ぶので、RNG の消費列も列も一致する（T3′）。
-// - 会話に入るのは「消費者が受け取った token + frontier 1 個」だけである（`commit(rows)` の
-//   行数）。棄却行・停止 token より後ろの確定候補・`break` 後の未配送 token は KV に入らない。
-// - 保留（deferred run）を残したまま抜ける経路が無い（停止・`break`・例外・中断のどれでも）。
-//   保留が残った context は dispose しか受け付けなくなるので、次のターンが必ず落ちる。
+// - The token sequence, positions, stop reason and the `tokens` count match **a reference run of
+//   the same request without speculation** exactly (with 0 accepted, all accepted, or partly
+//   accepted). A regression that breaks this raises no exception and shows up only as "the text
+//   sometimes changes". **Independent of the temperature** — acceptance calls `sampler.next` once
+//   per row (once per committed token) with the same logits, the same history and in the same order
+//   as non-speculative decode, so the RNG consumption and the sequence both match (T3′).
+// - Only "the tokens the consumer received + one frontier" enter the conversation (the row count
+//   of `commit(rows)`). Rejected rows, committed candidates after a stop token, and tokens not yet
+//   delivered after a `break` do not enter the KV.
+// - No path exits with a deferred run still pending (stop, `break`, exception or interruption
+//   alike). A context with a pending run accepts only dispose, so the next turn would surely fail.
 //
-// 参照走行との突合を「同じ fake・同じ後続関数」で採れるのは、fake の logits が
-// {@link FakeOptions.successor}（その行の入力 token → その行の argmax）で決まるからである。
-// 実装が verify の行を取り違えれば、参照走行と違う列が出る。
+// The comparison with the reference run can use "the same fake and the same successor function"
+// because the fake's logits are set by {@link FakeOptions.successor} (the row's input token → the
+// row's argmax). If the implementation mixed up the verify rows, a sequence different from the
+// reference run would come out.
 //
-// T1〜T15 は**ゲート抜き**（`policy: "always"`）の契約である — 自己採算ゲート（段 4-B ④）が
-// 割り込むと 1 cycle = draft + verify の勘定が崩れ、壁時計にも依存する。ゲートの席は T16 が
-// 偽時計で見る（ゲートそのものの判断は `generation_gate_test.ts`）。
+// T1–T15 are the contract **without the gate** (`policy: "always"`) — when the self-accounting gate
+// (step 4-B ④) cuts in, the accounting of 1 cycle = draft + verify breaks down and it depends on
+// the wall clock too. The gate is checked by T16 with a fake clock (the gate's own decisions are in
+// `generation_gate_test.ts`).
 //
-// T17 は観測席が運ぶ**壁と局面**（`wallMs` / `delivered` / `gate`）の席である。run の種別と番号
-// だけを見る門（T7 / T9）は `runShape` で壁の欄を落として比べる — 非投機の sequence には偽時計を
-// 差せないので、壁の実値はそれらの門では見られない。
+// T17 covers **the wall time and the phase** (`wallMs` / `delivered` / `gate`) that the observation
+// hook carries. The checks that look only at the run kind and number (T7 / T9) compare with the
+// wall fields dropped by `runShape` — a fake clock cannot be injected into a non-speculative
+// sequence, so those checks cannot see the actual wall values.
 //
-// T18 は分岐（`fork`）の投機側の席である — drafter は複製した context に対して開き直し、ゲートは
-// 観測状態を写す（ADR 0083 追記 2026-10-11）。
+// T18 is the speculation side of forking (`fork`) — the drafter is reopened on the duplicated
+// context, and the gate copies its observation state (ADR 0083 addendum 2026-10-11).
 
 import { describe, it, test } from "vite-plus/test";
 import {
@@ -69,42 +76,53 @@ import {
   VOCAB,
 } from "./helpers/generation-fake.ts";
 
-// ---- fake target（後続関数）と配線 ------------------------------------------
+// ---- the fake target (successor function) and the wiring -----------------------------
 
 /**
- * fake target の後続関数（行の入力 token → その行の argmax）。
+ * The fake target's successor function (the row's input token → the row's argmax).
  *
- * 像は 2..14 なので **0 / 1 / 15 は絶対に出ない** — 0 は pad 行の値、15 は
- * {@link REJECTED}（必ず棄却される draft）として使える。
+ * Its image is 2..14, so **0 / 1 / 15 never come out** — 0 is the pad-row value, and 15 can serve
+ * as {@link REJECTED} (a draft that is always rejected).
  */
 const SUCCESSOR: readonly number[] = Array.from(
   { length: VOCAB },
   (_unused, token) => ((token * 7 + 3) % 13) + 2,
 );
 
-/** target が選びえない token（`SUCCESSOR` の像の外）= 必ず棄却される draft。 */
+/**
+ * A token the target cannot choose (outside the image of `SUCCESSOR`) = a draft that is always
+ * rejected.
+ */
 const REJECTED = 15;
 
 /**
- * 温度 > 0 のターンで実際に 2 択になる logits（第 1 候補 10 / 対抗馬 9.5 ≒ 62% : 38%）。
+ * Logits that really give two choices on a temperature > 0 turn (first candidate 10 / runner-up 9.5
+ * ≒ 62% : 38%).
  *
- * 既定の fake は「狙った id だけ 10・他は全部 0」の単峰なので、温度を上げても抽選が実質 1 点に
- * 潰れる — RNG は消費されるが**列が動かない**ので、「投機と非投機で RNG の消費列が並ぶ」ことを
- * 見たことにならない。対抗馬の id は `SUCCESSOR` の像（2..14）の外に取る（行の第 1 候補と
- * 衝突すると、その行だけ単峰へ戻る）。
+ * The default fake is unimodal ("10 for the targeted id, 0 for every other"), so raising the
+ * temperature still collapses the draw to effectively one point — the RNG is consumed but **the
+ * sequence does not move**, so it would not show that "speculative and non-speculative runs consume
+ * the RNG in step". The runner-up id is taken outside the image of `SUCCESSOR` (2..14) (if it
+ * collided with a row's first candidate, that row alone would go back to unimodal).
  */
 const RUNNER_UP = 1;
 const TWO_WAY: FakeOptions = { successor: SUCCESSOR, runnerUp: { id: RUNNER_UP, logit: 9.5 } };
-/** 抽選が第 1 候補と対抗馬の両方を引く seed（下の step が「違う列になる」ことで縛る）。 */
+/**
+ * A seed whose draws pick both the first candidate and the runner-up (pinned by the step below
+ * "giving a different sequence").
+ */
 const TWO_WAY_SEED = 7;
 
-/** そのターンの prompt（末尾 2 から `SUCCESSOR` を辿ると 6, 8, 9, 3, 13, 5, … と続く）。 */
+/** The turn's prompt (following `SUCCESSOR` from the trailing 2 gives 6, 8, 9, 3, 13, 5, …). */
 const PROMPT: readonly number[] = [1, 2];
 
-/** draft の段数（配布形の drafter に相当）。 */
+/** The number of draft steps (corresponds to the distribution's drafter). */
 const K = 3;
 
-/** 投機の配線: verify の `k+1 = 4` 行を載せるバケットが要る（chunkLength は別形として残す）。 */
+/**
+ * The speculation wiring: a bucket that holds verify's `k+1 = 4` rows is needed (chunkLength stays
+ * as another shape).
+ */
 const SPEC_CHUNK_LENGTH = 8;
 const SPEC_BUCKETS: readonly number[] = [4];
 
@@ -115,7 +133,7 @@ const specProgram = (fake: FakeSession, override: Partial<GenerationProgramSpec>
     ...override,
   });
 
-/** `token` の次から `count` 個ぶん、target が本当に出す列（= 全部当たる draft）。 */
+/** The `count` tokens after `token` that the target really emits (= drafts that all hit). */
 const chainFrom = (token: number, count: number): number[] => {
   const chain: number[] = [];
   let current = token;
@@ -126,9 +144,12 @@ const chainFrom = (token: number, count: number): number[] => {
   return chain;
 };
 
-// ---- fake drafter（DI で差す借り手の面）--------------------------------------
+// ---- the fake drafter (the borrower's surface, injected by DI) -------------------------
 
-/** drafter が受け取った 1 cycle ぶんの入力（写しで持つ — 呼び手が使い回しても記録は動かない）。 */
+/**
+ * The input of one cycle the drafter received (held as a copy — the record does not move if the
+ * caller reuses it).
+ */
 type DraftRecord = {
   readonly token: number;
   readonly position: number;
@@ -138,29 +159,33 @@ type DraftRecord = {
 type FakeDrafter = ReturnType<typeof fakeDrafter>;
 
 const fakeDrafter = (options: {
-  /** 1 run で出す本数（既定 {@link K}）。呼び手はこのうち先頭 `k'` 本しか使わない。 */
+  /** The count emitted per run (default {@link K}). The caller uses only the first `k'` of them. */
   readonly steps?: number;
-  /** cycle ごとの draft（`index` は 0 始まりの cycle 番号）。 */
+  /** The draft per cycle (`index` is the 0-based cycle number). */
   readonly draft: (cycle: DraftCycle, index: number) => readonly number[];
-  /** dispose の順序を見るための記録先（`"drafter"` を積む）。 */
+  /** Where to record for checking the dispose order (pushes `"drafter"`). */
   readonly disposeLog?: string[];
 }) => {
   const steps = options.steps ?? K;
   const calls: DraftRecord[] = [];
   let disposals = 0;
-  /** 貸し手（{@link watch} で結ぶ）— 借り手 run が実 runtime で拒まれる条件をここで写す。 */
+  /**
+   * The lender (tied by {@link watch}) — the condition under which the real runtime rejects a
+   * borrower run is mirrored here.
+   */
   let lender: FakeSession | undefined;
   const face: DraftFace = {
     steps,
     draft: (cycle) => {
-      // MUST: 実 runtime では借り手 run が**貸し手のリースも**取るので、貸し手に未 commit の
-      // deferred run が残っている間の draft は拒否される（`generation-context.ts` の
-      // `acquireRun`）。draft を verify の直前から受理直後へ前倒しする最適化はこの規則を破るが、
-      // 貸し手を見ない fake だと GPU 無しでは 1 本も赤くならない。
+      // MUST: in the real runtime a borrower run **also takes the lender's lease**, so a draft is
+      // rejected while the lender still has an uncommitted deferred run (`acquireRun` in
+      // `generation-context.ts`). An optimization that moves the draft from just before verify to
+      // just after acceptance breaks this rule, but with a fake that ignores the lender nothing
+      // would turn red without a GPU.
       assertEquals(
         lender?.pendingCommit(),
         undefined,
-        "貸し手に保留（未 commit の verify）が残ったまま draft を採った",
+        "a draft was taken while the lender still had a pending (uncommitted verify) run",
       );
       const index = calls.length;
       calls.push({ token: cycle.token, position: cycle.position, hidden: [...cycle.hidden] });
@@ -176,37 +201,46 @@ const fakeDrafter = (options: {
     face,
     calls,
     disposals: (): number => disposals,
-    /** 貸し手を結ぶ（sequence を組む側が呼ぶ — 借り手は貸し手の後に作られる）。 */
+    /**
+     * Ties the lender (called by the side that builds the sequence — the borrower is created after
+     * the lender).
+     */
     watch: (fake: FakeSession): void => {
       lender = fake;
     },
   };
 };
 
-/** 常に外れる drafter（受理 0 を強制する）。 */
+/** A drafter that always misses (forces 0 accepted). */
 const wrongDrafter = (disposeLog?: string[]): FakeDrafter =>
   fakeDrafter({
     draft: () => Array.from({ length: K }, () => REJECTED),
     disposeLog,
   });
 
-/** target の未来をそのまま写す drafter（全受理を強制する）。 */
+/** A drafter that copies the target's future as is (forces all accepted). */
 const oracleDrafter = (steps = K): FakeDrafter =>
   fakeDrafter({ steps, draft: (cycle) => chainFrom(cycle.token, steps) });
 
-/** 先頭 `accept` 本だけ当てる drafter（部分受理 — `accept` 本目の次で必ず外す）。 */
+/**
+ * A drafter that hits only the first `accept` (partial acceptance — it always misses right after
+ * the `accept`-th).
+ */
 const partialDrafter = (accept: number): FakeDrafter =>
   fakeDrafter({
     draft: (cycle) =>
       chainFrom(cycle.token, K).map((id, index) => (index < accept ? id : REJECTED)),
   });
 
-// ---- 走行のひな型 -------------------------------------------------------------
+// ---- run templates ---------------------------------------------------------------
 
 const verifyCalls = (fake: FakeSession): RunCall[] =>
   fake.calls.filter((call) => call.commit === "deferred");
 
-/** `speculation` 欄を落とした停止（非投機の参照走行と比べるため）。 */
+/**
+ * The stop with the `speculation` field dropped (to compare with the non-speculative reference
+ * run).
+ */
 const withoutSpeculation = (stop: GenerationStop): Record<string, unknown> => {
   const fields: Record<string, unknown> = { ...stop };
   delete fields.speculation;
@@ -219,21 +253,23 @@ const openSpeculative = async (options: {
   readonly program?: Partial<GenerationProgramSpec>;
   readonly session?: FakeOptions;
   /**
-   * 投機の張り方（既定 `"always"`）。
+   * How speculation is set up (default `"always"`).
    *
-   * このファイルの門は**ゲート抜きの契約**（1 cycle = draft + verify）なので、既定を
-   * `"always"` に倒してある — 自己採算ゲートの席は T16 が偽時計で別に見る。
+   * The checks in this file are **the contract without the gate** (1 cycle = draft + verify), so
+   * the default is `"always"` — the self-accounting gate is checked separately by T16 with a fake
+   * clock.
    */
   readonly policy?: "auto" | "always";
   /**
-   * ゲートのノブ（`policy: "auto"` のときだけ効く）。
+   * The gate's knobs (effective only with `policy: "auto"`).
    *
-   * 既定のブロックは 16 cycle × 2 本連続なので、20 token のターンでは**一度も判定が出ない**。
-   * ゲートの配線（落ちた step の勘定・hidden の繋がり・観測に混ぜない cycle）を見る席では
-   * ブロックを縮めて、判定そのものは `generation_gate_test.ts` で見る。
+   * The default block is 16 cycles × 2 in a row, so a 20-token turn **never reaches a decision**.
+   * Checks that look at the gate's wiring (accounting of dropped steps, the hidden-state
+   * continuity, cycles not mixed into the observation) shrink the block, and the decisions
+   * themselves are checked in `generation_gate_test.ts`.
    */
   readonly gate?: SpeculationGateOptions;
-  /** 偽時計（`policy: "auto"` のときだけ読まれる）。 */
+  /** The fake clock (read only with `policy: "auto"`). */
   readonly now?: () => number;
   readonly clock?: { readonly now: () => number; readonly afterRun: () => void };
   readonly onRun?: (phase: GenerationRunPhase) => void;
@@ -283,7 +319,10 @@ const runSpeculative = async (options: {
   return { ...opened, ...drained };
 };
 
-/** **非投機**（drafter を差さない）sequence を組む — 投機と同じ不変条件を見る対の側。 */
+/**
+ * Builds a **non-speculative** sequence (no drafter injected) — the counterpart side that checks
+ * the same invariants as speculation.
+ */
 const openPlain = async (
   program: Partial<GenerationProgramSpec> = {},
   session: FakeOptions = {},
@@ -300,7 +339,7 @@ const openPlain = async (
   return { fake, phases, sequence };
 };
 
-/** 同じ要求を**非投機**で走らせた参照走行。 */
+/** The reference run of the same request **without speculation**. */
 const runPlain = async (
   request: GenerationRequest,
   program: Partial<GenerationProgramSpec> = {},
@@ -312,9 +351,11 @@ const runPlain = async (
 };
 
 /**
- * 投機の走行が非投機の走行と**同じ出力**であることを見る（この契約の芯）。
+ * Checks that a speculative run gives **the same output** as a non-speculative run (the core of
+ * this contract).
  *
- * 比べるのはイベント列（token id と位置・prefill の進捗）と停止（`speculation` 欄を除く全欄）。
+ * Compared are the event sequence (token ids and positions, prefill progress) and the stop (every
+ * field except `speculation`).
  */
 const assertMatchesPlain = async (
   request: GenerationRequest,
@@ -323,28 +364,32 @@ const assertMatchesPlain = async (
   session: FakeOptions = {},
 ): Promise<void> => {
   const plain = await runPlain(request, program, session);
-  assertEquals(speculated.events, plain.events, "投機の token 列 / 位置が非投機と一致しない");
+  assertEquals(
+    speculated.events,
+    plain.events,
+    "the speculative token sequence / positions differ from the non-speculative run",
+  );
   assertEquals(
     withoutSpeculation(speculated.stop),
     withoutSpeculation(plain.stop),
-    "投機の停止が非投機と一致しない",
+    "the speculative stop differs from the non-speculative run",
   );
   assertEquals(
     Object.hasOwn(plain.stop, "speculation"),
     false,
-    "非投機の sequence の停止に speculation 欄がある",
+    "the non-speculative sequence's stop has a speculation field",
   );
 };
 
-// ---- T1〜T3: 受理数と出力の同一性 ---------------------------------------------
+// ---- T1–T3: acceptance counts and identical output ------------------------------------
 
-test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（cycle ごとに frontier 1 個だけ確定）", async () => {
+test("T1 forced rejection: drafts that all miss still give the non-speculative sequence (one frontier committed per cycle)", async () => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 5 };
   const run = await runSpeculative({ drafter: wrongDrafter(), request });
   await assertMatchesPlain(request, run);
 
-  // 受理 0 の cycle が確定させるのは b′ 1 個だけ = 非投機の decode 1 step への退化。
-  assertEquals(run.fake.commits, [1, 1, 1, 1], "受理 0 の cycle が 1 行より多く commit した");
+  // A 0-accepted cycle commits only b′ = it degenerates to one non-speculative decode step.
+  assertEquals(run.fake.commits, [1, 1, 1, 1], "a 0-accepted cycle committed more than one row");
   assertEquals(run.stop.speculation, {
     cycles: 4,
     draftRuns: 3,
@@ -353,7 +398,8 @@ test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（cycle
     delivered: 4,
     acceptedHistogram: [4, 0, 0, 0],
   });
-  // 予算の残り（`k' = min(k, 残り − 1)`）で本数が縮み、最後の cycle は draft を採らない。
+  // The remaining budget (`k' = min(k, remaining − 1)`) shrinks the count, and the last cycle takes
+  // no draft.
   assertEquals(run.drafter.calls.length, 3);
   assertEquals(
     verifyCalls(run.fake).map((call) => call.queryLength),
@@ -361,12 +407,12 @@ test("T1 強制棄却: 全部外れる draft でも非投機と同じ列（cycle
   );
 });
 
-test("T2 全受理: 未来をそのまま写す draft は 1 verify で k+1 個を確定させる", async () => {
+test("T2 all accepted: drafts that copy the future as is commit k+1 tokens per verify", async () => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
   const run = await runSpeculative({ drafter: oracleDrafter(), request });
   await assertMatchesPlain(request, run);
 
-  assertEquals(run.fake.commits, [4, 4], "全受理の cycle は k+1 行を確定させる");
+  assertEquals(run.fake.commits, [4, 4], "an all-accepted cycle commits k+1 rows");
   assertEquals(run.stop.speculation, {
     cycles: 2,
     draftRuns: 2,
@@ -375,18 +421,19 @@ test("T2 全受理: 未来をそのまま写す draft は 1 verify で k+1 個�
     delivered: 8,
     acceptedHistogram: [0, 0, 0, 2],
   });
-  // 貸し手の run は prefill 1 + verify 2 の 3 本（非投機は prefill 1 + decode 8 の 9 本）。
+  // The lender issues 3 runs, prefill 1 + verify 2 (non-speculative: 9 runs, prefill 1 + decode 8).
   assertEquals(run.fake.calls.length, 3);
   assertEquals((await runPlain(request)).fake.calls.length, 9);
 });
 
-describe("T3 部分受理: 先頭一致で止まった位置が受理数になる（a = 1 / 2）", () => {
-  it("a = 1（1 本目だけ当たる）", async () => {
+describe("T3 partial acceptance: the position where the prefix match stops is the accepted count (a = 1 / 2)", () => {
+  it("a = 1 (only the first hits)", async () => {
     const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 7 };
     const run = await runSpeculative({ drafter: partialDrafter(1), request });
     await assertMatchesPlain(request, run);
 
-    // 確定は `[d₁, b′]` の 2 個ずつ（棄却行 d₂ / d₃ は会話に入らない）。
+    // Each commit is the 2 tokens `[d₁, b′]` (the rejected rows d₂ / d₃ do not enter the
+    // conversation).
     assertEquals(run.fake.commits, [2, 2, 2]);
     assertEquals(run.stop.speculation, {
       cycles: 3,
@@ -398,7 +445,7 @@ describe("T3 部分受理: 先頭一致で止まった位置が受理数にな�
     });
   });
 
-  it("a = 2（2 本目まで当たる）", async () => {
+  it("a = 2 (the first two hit)", async () => {
     const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 7 };
     const run = await runSpeculative({ drafter: partialDrafter(2), request });
     await assertMatchesPlain(request, run);
@@ -456,17 +503,18 @@ describe("speculative acceptance masks the wiring's suppressed set", () => {
   }
 });
 
-describe("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列は非投機と厳密一致する", () => {
-  // 受理は行ごとに `sampler.next` を「非投機の decode が同じ位置で行う抽選」と同じ logits・
-  // 同じ history・同じ順で **確定 token 1 個につき 1 回**呼ぶ。RNG の消費列が非投機と 1 対 1 に
-  // 並ぶので、温度 > 0 でも token 列は変わらない（one-hot draft の speculative sampling）。
+describe("T3′ temperature > 0: speculation is set up even on turns that draw, and the sequence matches the non-speculative one exactly", () => {
+  // Acceptance calls `sampler.next` per row with the same logits, the same history and in the same
+  // order as "the draw non-speculative decode makes at the same position", **once per committed
+  // token**. The RNG consumption lines up one to one with the non-speculative run, so the token
+  // sequence does not change at temperature > 0 either (speculative sampling with a one-hot draft).
   const request = (seed: number): GenerationRequest => ({
     prompt: PROMPT,
     maxNewTokens: 9,
     sampler: { temperature: 1, topK: 2, seed },
   });
 
-  it("投機 / 非投機の列・位置・停止が一致し、勘定が載る", async () => {
+  it("the speculative / non-speculative sequences, positions and stops match, and the accounting is present", async () => {
     const run = await runSpeculative({
       drafter: oracleDrafter(),
       request: request(TWO_WAY_SEED),
@@ -475,18 +523,19 @@ describe("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列�
     await assertMatchesPlain(request(TWO_WAY_SEED), run, {}, TWO_WAY);
 
     const speculation = run.stop.speculation;
-    assert(speculation !== undefined, "温度 > 0 のターンに speculation 欄が載っていない");
-    assert(speculation.cycles > 0, "verify run が 1 本も回っていない");
+    assert(speculation !== undefined, "a temperature > 0 turn carries no speculation field");
+    assert(speculation.cycles > 0, "not a single verify run happened");
     assertEquals(withoutSpeculation(run.stop), { reason: "max-tokens", tokens: 9 });
-    // draft（= 温度 0 の連鎖）が当たる cycle と外れる cycle の両方を通る = 受理判定が抽選の
-    // 結果で分岐している（全受理／全棄却に張り付いていない）。
+    // It passes through both cycles where the draft (= the temperature-0 chain) hits and cycles
+    // where it misses = the acceptance decision branches on the draw's result (it is not stuck at
+    // all accepted / all rejected).
     assert(
       speculation.accepted > 0 && speculation.accepted < speculation.drafted,
-      `受理が全部か 0 に張り付いている: ${JSON.stringify(speculation)}`,
+      `acceptance is stuck at all or 0: ${JSON.stringify(speculation)}`,
     );
   });
 
-  it("抽選は実際に走っている（温度 0 の列とは違う列になる）", async () => {
+  it("the draw really runs (it gives a different sequence from temperature 0)", async () => {
     const sampled = await runSpeculative({
       drafter: oracleDrafter(),
       request: request(TWO_WAY_SEED),
@@ -497,20 +546,22 @@ describe("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列�
       request: { prompt: PROMPT, maxNewTokens: 9 },
       session: TWO_WAY,
     });
-    // 温度 0 の列は後続関数そのもの（対抗馬 9.5 は第 1 候補 10 を越えない）。
+    // The temperature-0 sequence is the successor function itself (the runner-up's 9.5 does not
+    // exceed the first candidate's 10).
     assertEquals(tokenIds(greedy.events), chainFrom(PROMPT[PROMPT.length - 1], 9));
     assert(
       tokenIds(sampled.events).join() !== tokenIds(greedy.events).join(),
-      `温度 1 でも argmax の列しか出ていない（RNG が消費されていない）: ${tokenIds(
+      `only the argmax sequence at temperature 1 (the RNG is not consumed): ${tokenIds(
         sampled.events,
       ).join(",")}`,
     );
   });
 
-  it("自己採算ゲートが落とす plain step を挟んでも列は同じ", async () => {
-    // 温度 > 0 とゲートの積（負ける壁を偽時計で流す）。ゲートが落とす decode 形の step も、
-    // 抽選は「非投機の decode が同じ位置で行う抽選」そのもの（同じ logits・同じ history・
-    // 同じ順で 1 回）なので、RNG の消費列は投機 cycle と plain step が混ざっても並んだままである。
+  it("the sequence stays the same with the plain steps the self-accounting gate inserts", async () => {
+    // Temperature > 0 combined with the gate (a losing wall time fed through the fake clock). The
+    // decode-shaped steps the gate drops to also draw exactly as "the draw non-speculative decode
+    // makes at the same position" (the same logits, the same history, once in the same order), so
+    // the RNG consumption stays in step even when speculative cycles and plain steps mix.
     const drafter = oracleDrafter();
     const opened = await openSpeculative({
       drafter,
@@ -519,27 +570,32 @@ describe("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列�
       session: TWO_WAY,
       clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
     });
-    // ブロック（2 cycle）が満ちるまで回す必要があるので、この step だけ予算を伸ばす。
+    // The block (2 cycles) has to fill, so only this step gets a larger budget.
     const budgeted: GenerationRequest = { ...request(TWO_WAY_SEED), maxNewTokens: 24 };
     const gated = { ...opened, ...(await drain(opened.sequence.generate(budgeted))) };
-    // ゲートが本当に**倒れている**（`W1` の測り直し 1 手だけを見て「落ちた」と読まない）。
+    // The gate has really **switched** (do not read the single re-measurement move of `W1` as "it
+    // dropped").
     assertEquals(
       gated.stop.speculation?.switches,
       1,
-      `ゲートが plain へ倒れていない: ${JSON.stringify(gated.stop.speculation)}`,
+      `the gate did not switch to plain: ${JSON.stringify(gated.stop.speculation)}`,
     );
     await assertMatchesPlain(budgeted, gated, {}, TWO_WAY);
 
-    // `always`（ゲート無し）とも一致する = ゲートは速さだけを変えている。
+    // It also matches `always` (no gate) = the gate changes only the speed.
     const always = await runSpeculative({
       drafter: oracleDrafter(),
       request: budgeted,
       session: TWO_WAY,
     });
-    assertEquals(tokenIds(gated.events), tokenIds(always.events), "ゲート付きと always の列が違う");
+    assertEquals(
+      tokenIds(gated.events),
+      tokenIds(always.events),
+      "the gated and always sequences differ",
+    );
   });
 
-  it("seed が違えば列も違う（RNG 状態が生成 1 本に張り付いている）", async () => {
+  it("a different seed gives a different sequence (the RNG state is tied to one generation)", async () => {
     const first = await runSpeculative({
       drafter: oracleDrafter(),
       request: request(TWO_WAY_SEED),
@@ -553,15 +609,15 @@ describe("T3′ 温度 > 0: 抽選が走るターンでも投機を張り、列�
     await assertMatchesPlain(request(TWO_WAY_SEED + 1), second, {}, TWO_WAY);
     assert(
       tokenIds(first.events).join() !== tokenIds(second.events).join(),
-      "seed を変えても同じ列が出ている",
+      "changing the seed gives the same sequence",
     );
   });
 });
 
-// ---- T4 / T5: 停止 token -------------------------------------------------------
+// ---- T4 / T5: stop tokens ------------------------------------------------------------
 
-test("T4 停止 token が draft の途中: そこで受理を打ち切り、後ろの行は確定させない", async () => {
-  // 連鎖は 6 → 8 → 9 → 3 → 13。停止 token 9 は cycle 1 の d₂ に当たる。
+test("T4 a stop token in the middle of the draft: acceptance ends there and the rows after it are not committed", async () => {
+  // The chain is 6 → 8 → 9 → 3 → 13. The stop token 9 falls on d₂ of cycle 1.
   const stopTokens = [9];
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
   const run = await runSpeculative({
@@ -571,10 +627,11 @@ test("T4 停止 token が draft の途中: そこで受理を打ち切り、後�
   });
   await assertMatchesPlain(request, run, { stopTokens });
 
-  // 停止 token 自体は本文でないので `token` イベントに出さず、勘定には 1 個として入る。
+  // The stop token is not body text, so it is not emitted as a `token` event, but it counts as one.
   assertEquals(tokenIds(run.events), [6, 8]);
   assertEquals(withoutSpeculation(run.stop), { reason: "eos", token: 9, tokens: 3 });
-  // 受理は停止 token の 9 まで（d₃ の行は抽選もしない）= 確定列 `[8, 9]` そのものが配送列。
+  // Acceptance goes up to the stop token 9 (the d₃ row is not even drawn) = the committed sequence
+  // `[8, 9]` itself is what is delivered.
   const speculation = run.stop.speculation;
   assertEquals(speculation, {
     cycles: 1,
@@ -584,24 +641,36 @@ test("T4 停止 token が draft の途中: そこで受理を打ち切り、後�
     delivered: 2,
     acceptedHistogram: [0, 0, 1, 0],
   });
-  // token/cycle の正本が `delivered / cycles` である理由（この cycle は `1 + a` 個を確定させない）。
+  // Why the source of truth for token/cycle is `delivered / cycles` (this cycle does not commit
+  // `1 + a` tokens).
   assert(speculation !== undefined);
-  assertEquals(speculation.accepted + speculation.cycles, 3, "旧式の分子は 1 だけ過大になる");
-  assertEquals(run.fake.commits, [2], "停止 token より後ろの確定候補まで commit した");
-  assertEquals(verifyCalls(run.fake)[0].queryLength, 4, "物理 ring へは k+1 行が書かれている");
+  assertEquals(
+    speculation.accepted + speculation.cycles,
+    3,
+    "the old numerator would be too large by 1",
+  );
+  assertEquals(run.fake.commits, [2], "committed the candidates after the stop token too");
+  assertEquals(
+    verifyCalls(run.fake)[0].queryLength,
+    4,
+    "k+1 rows were written to the physical ring",
+  );
 
-  // 停止 token は会話に残る = 次ターンの prefill 先頭へ連結される（非投機と同じ後始末）。
+  // The stop token stays in the conversation = it is prepended to the next turn's prefill (the same
+  // cleanup as non-speculative).
   await drain(run.sequence.generate({ prompt: [4], maxNewTokens: 1 }));
   const next = run.fake.calls[run.fake.calls.length - 1];
   assertEquals(next.ids, [9, 4, 0, 0]);
   assertEquals(next.positions, [4, 5, 0, 0]);
 });
 
-test("T4′ 停止 token の先の行は抽選しない（非投機が触れない logits で落ちない）", async () => {
-  // 故障注入: verify（call 1）の**行 2 だけ**に NaN を混ぜる。行 2 は「停止 token 9 を確定した
-  // 後の行」= 非投機なら run そのものが出ない位置である。受理を停止 token で打ち切らない実装は
-  // ここでも `sampler.next` を呼ぶので `assertNoNaN` が投げる（範囲外 gather の行ごと NaN 汚染で
-  // 実際に起きる形 — 「投機のときだけ落ちる」= 出力が変わらないという契約の破れ）。
+test("T4′ rows after the stop token are not drawn (it does not fail on logits the non-speculative run never touches)", async () => {
+  // Fault injection: mix NaN into **row 2 only** of the verify (call 1). Row 2 is "the row after
+  // the stop token 9 was committed" = a position where the non-speculative run issues no run at
+  // all. An implementation that does not end acceptance at the stop token calls `sampler.next` here
+  // too, so `assertNoNaN` throws (the shape that really happens with the per-row NaN poisoning of
+  // an out-of-range gather — "fails only when speculating" = a breach of the contract that the
+  // output does not change).
   const stopTokens = [9];
   const session: FakeOptions = { successor: SUCCESSOR, nanAt: 1, nanRow: 2 };
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
@@ -611,7 +680,8 @@ test("T4′ 停止 token の先の行は抽選しない（非投機が触れな�
     program: { stopTokens },
     session,
   });
-  // 非投機の参照走行（decode は 1 行なので行 2 が無く、汚染に当たらない）と同じ列で閉じる。
+  // It closes with the same sequence as the non-speculative reference run (decode is one row, so
+  // there is no row 2 and it does not hit the poisoning).
   await assertMatchesPlain(request, run, { stopTokens }, session);
 
   assertEquals(tokenIds(run.events), [6, 8]);
@@ -619,9 +689,10 @@ test("T4′ 停止 token の先の行は抽選しない（非投機が触れな�
   assertEquals(run.fake.commits, [2]);
 });
 
-describe("T5 停止 token が b′: 受理した draft は届き、新 frontier で閉じる", () => {
-  it("受理 1 本の後に b′ が停止 token", async () => {
-    // 6 → 8（受理）→ b′ = 9（停止）。打ち切りは起きず、確定列がそのまま停止で閉じる形。
+describe("T5 a stop token as b′: the accepted drafts are delivered and it closes on the new frontier", () => {
+  it("b′ is a stop token after one accepted draft", async () => {
+    // 6 → 8 (accepted) → b′ = 9 (stop). No cutoff happens; the committed sequence closes on the
+    // stop as is.
     const stopTokens = [9];
     const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
     const run = await runSpeculative({
@@ -644,7 +715,7 @@ describe("T5 停止 token が b′: 受理した draft は届き、新 frontier 
     assertEquals(run.fake.commits, [2]);
   });
 
-  it("受理 0 で b′ が停止 token（確定列は 1 個）", async () => {
+  it("b′ is a stop token with 0 accepted (one committed token)", async () => {
     const stopTokens = [8];
     const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 9 };
     const run = await runSpeculative({ drafter: wrongDrafter(), request, program: { stopTokens } });
@@ -656,16 +727,20 @@ describe("T5 停止 token が b′: 受理した draft は届き、新 frontier 
   });
 });
 
-// ---- T6: 予算末尾 --------------------------------------------------------------
+// ---- T6: the end of the budget ---------------------------------------------------------
 
-test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 形の verify 1 行で閉じる", async () => {
+test("T6 end of the budget: a cycle with one token left takes no draft and closes with a one-row, decode-shaped verify", async () => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 6 };
   const run = await runSpeculative({ drafter: oracleDrafter(), request });
   await assertMatchesPlain(request, run);
 
-  // 1 cycle 目で 4 個確定（残り 1）→ 2 cycle 目は `k' = 0`。
+  // Cycle 1 commits 4 (1 left) → cycle 2 has `k' = 0`.
   assertEquals(run.fake.commits, [4, 1]);
-  assertEquals(run.drafter.calls.length, 1, "残り 1 個の cycle で draft run を出した");
+  assertEquals(
+    run.drafter.calls.length,
+    1,
+    "a draft run was issued on the cycle with one token left",
+  );
   const verifies = verifyCalls(run.fake);
   assertEquals(
     verifies.map((call) => call.queryLength),
@@ -681,15 +756,15 @@ test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 形�
       [1, 4],
       [1, 1],
     ],
-    "k'=0 は decode 形",
+    "k'=0 is the decode shape",
   );
   assertEquals(
     verifies.map((call) => call.commit),
     ["deferred", "deferred"],
   );
-  // `max-tokens` の tokens は要求した数そのもの（超えても足りなくてもいけない）。
+  // The tokens of `max-tokens` are exactly the requested number (neither more nor fewer).
   assertEquals(withoutSpeculation(run.stop), { reason: "max-tokens", tokens: 6 });
-  // `k' = 0` の cycle は draft を採らないので受理数 0 = histogram の添字 0 に入る。
+  // A `k' = 0` cycle takes no draft, so it accepts 0 = it goes into index 0 of the histogram.
   assertEquals(run.stop.speculation, {
     cycles: 2,
     draftRuns: 1,
@@ -700,11 +775,11 @@ test("T6 予算末尾: 残り 1 個の cycle は draft を採らず decode 形�
   });
 });
 
-// ---- T7: 中断・例外・break ------------------------------------------------------
+// ---- T7: interruption, exception, break -------------------------------------------------
 
-test("T7 中断: draft の前で止めれば run も draft も 1 本増えない", async () => {
+test("T7 interruption: stopping before the draft adds neither a run nor a draft", async () => {
   const controller = new AbortController();
-  const reason = new Error("draft の前で止めた");
+  const reason = new Error("stopped before the draft");
   const opened = await openSpeculative({ drafter: oracleDrafter() });
   const stream = opened.sequence.generate({
     prompt: PROMPT,
@@ -723,7 +798,7 @@ test("T7 中断: draft の前で止めれば run も draft も 1 本増えない
   } catch (error) {
     caught = error;
   }
-  assert(caught === reason, `中断が包まれている: ${String(caught)}`);
+  assert(caught === reason, `the interruption is wrapped: ${String(caught)}`);
   assertEquals(seen, [6]);
   assertEquals(await stream.done, {
     reason: "aborted",
@@ -738,13 +813,13 @@ test("T7 中断: draft の前で止めれば run も draft も 1 本増えない
     },
   });
   assertEquals(opened.drafter.calls.length, 0);
-  assertEquals(opened.fake.calls.length, 1, "prefill より後の run が出ている");
+  assertEquals(opened.fake.calls.length, 1, "a run after the prefill was issued");
   assertEquals(opened.fake.commits, []);
 });
 
-test("T7 中断: draft の後・verify の前で止めれば保留は 1 つも残らない", async () => {
+test("T7 interruption: stopping after the draft and before the verify leaves no pending run", async () => {
   const controller = new AbortController();
-  const reason = new Error("draft と verify の間で止めた");
+  const reason = new Error("stopped between the draft and the verify");
   const drafter = fakeDrafter({
     draft: (cycle) => {
       controller.abort(reason);
@@ -761,12 +836,12 @@ test("T7 中断: draft の後・verify の前で止めれば保留は 1 つも�
   let caught: unknown;
   try {
     for await (const _event of stream) {
-      /* 中断まで汲む */
+      /* drain until the interruption */
     }
   } catch (error) {
     caught = error;
   }
-  assert(caught === reason, `中断が包まれている: ${String(caught)}`);
+  assert(caught === reason, `the interruption is wrapped: ${String(caught)}`);
   assertEquals(await stream.done, {
     reason: "aborted",
     tokens: 1,
@@ -779,15 +854,19 @@ test("T7 中断: draft の後・verify の前で止めれば保留は 1 つも�
       acceptedHistogram: [0, 0, 0, 0],
     },
   });
-  assertEquals(opened.drafter.calls.length, 1, "draft は 1 本走っている");
-  assertEquals(opened.fake.calls.length, 1, "verify が出ている（中断は run の発行直前で効く）");
-  assertEquals(opened.fake.pendingCommit(), undefined, "保留が残っている");
+  assertEquals(opened.drafter.calls.length, 1, "one draft ran");
+  assertEquals(
+    opened.fake.calls.length,
+    1,
+    "the verify was issued (the interruption takes effect just before a run is issued)",
+  );
+  assertEquals(opened.fake.pendingCommit(), undefined, "a pending run remains");
   assertEquals(opened.fake.commits, []);
 });
 
-test("T7 中断: verify の後で止めても、その cycle の確定ぶんは配送も commit も済む", async () => {
+test("T7 interruption: stopping after the verify still delivers and commits that cycle's committed tokens", async () => {
   const controller = new AbortController();
-  const reason = new Error("配送の途中で止めた");
+  const reason = new Error("stopped in the middle of delivery");
   const opened = await openSpeculative({ drafter: oracleDrafter() });
   const stream = opened.sequence.generate({
     prompt: PROMPT,
@@ -801,14 +880,16 @@ test("T7 中断: verify の後で止めても、その cycle の確定ぶんは�
     for await (const event of stream) {
       if (event.kind !== "token") continue;
       seen.push(event.id);
-      // cycle 1 の 1 個目を受け取った時点で中断する（残りは同期区間なので配送され切る）。
+      // Interrupt on receiving the first token of cycle 1 (the rest is a synchronous section, so it
+      // is all delivered).
       if (seen.length === 2) controller.abort(reason);
     }
   } catch (error) {
     caught = error;
   }
-  assert(caught === reason, `中断が包まれている: ${String(caught)}`);
-  // 中断は**段の境目**（次の cycle の頭）で効く — 走行中の cycle を途中で捨てない。
+  assert(caught === reason, `the interruption is wrapped: ${String(caught)}`);
+  // The interruption takes effect at **a stage boundary** (the head of the next cycle) — a running
+  // cycle is not dropped midway.
   assertEquals(seen, [6, 8, 9, 3, 13]);
   assertEquals(await stream.done, {
     reason: "aborted",
@@ -822,10 +903,10 @@ test("T7 中断: verify の後で止めても、その cycle の確定ぶんは�
       acceptedHistogram: [0, 0, 0, 1],
     },
   });
-  assertEquals(opened.fake.commits, [4], "配送した token ぶんが commit されていない");
+  assertEquals(opened.fake.commits, [4], "the delivered tokens are not committed");
   assertEquals(opened.fake.pendingCommit(), undefined);
   assertEquals(opened.fake.calls.length, 2);
-  // run 1 本につき 1 通（中断で 2 度目の verify が出ない）。
+  // One report per run (no second verify is issued because of the interruption).
   assertEquals(runShape(opened.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
@@ -833,9 +914,10 @@ test("T7 中断: verify の後で止めても、その cycle の確定ぶんは�
   ]);
 });
 
-test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず、同じ sequence が次を通す", async () => {
-  // 故障注入: 1 本目の verify（call 1）だけが頼んだ行数と違う行数を返す。読み口の形検査が
-  // 落ちるのは「deferred run の戻り〜配送」の同期区間で、ここが保留を残す唯一の窓である。
+test("T7′ exception recovery: a failure on the verify's return leaves no pending run, and the same sequence passes the next turn", async () => {
+  // Fault injection: only the first verify (call 1) returns a row count different from the one
+  // requested. The reader's shape check fails in the synchronous section "from the deferred run's
+  // return to delivery", which is the only window that leaves a pending run.
   const opened = await openSpeculative({
     drafter: oracleDrafter(),
     session: { successor: SUCCESSOR, logitsRows: 2, logitsRowsAt: 1 },
@@ -845,17 +927,26 @@ test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず、�
     Error,
     `verify@1: 'logits' has shape [1,2,${VOCAB}], not [1,4,${VOCAB}]`,
   );
-  // `commit(0)` で畳む: b は未投入のまま・棄却行は次の run が上書きする。
-  assertEquals(opened.fake.commits, [0], "例外の経路が commit(0) を通っていない");
-  assertEquals(opened.fake.pendingCommit(), undefined, "保留が残っている（次の run が落ちる）");
-  assertEquals(opened.fake.pastLength(), PROMPT.length, "論理長が verify のぶん進んでいる");
-  // 出力を読み終える前に落ちた run は観測にも出さない（`onRun` は「読み終えた run」の口）。
+  // Folded with `commit(0)`: b stays unfed and the rejected rows are overwritten by the next run.
+  assertEquals(opened.fake.commits, [0], "the exception path did not go through commit(0)");
+  assertEquals(
+    opened.fake.pendingCommit(),
+    undefined,
+    "a pending run remains (the next run would fail)",
+  );
+  assertEquals(
+    opened.fake.pastLength(),
+    PROMPT.length,
+    "the logical length advanced by the verify",
+  );
+  // A run that failed before its output was read is not reported either (`onRun` is the hook for
+  // "runs that were read").
   assertEquals(runShape(opened.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
   ]);
 
-  // 同じ sequence で次のターンが通る（frontier 6 は連結され、1 token も落ちない）。
+  // The next turn passes on the same sequence (the frontier 6 is prepended and no token is lost).
   const next = await drain(opened.sequence.generate({ prompt: [4], maxNewTokens: 2 }));
   assertEquals(opened.fake.calls[2].ids, [6, 4, 0, 0]);
   assertEquals(opened.fake.calls[2].positions, [2, 3, 0, 0]);
@@ -863,7 +954,7 @@ test("T7′ 例外復旧: verify の戻りで落ちても保留は残らず、�
   assertEquals(withoutSpeculation(next.stop), { reason: "max-tokens", tokens: 2 });
 });
 
-test("T7″ 途中 break: 配送した token までが commit され、その最後が次ターンの先頭になる", async () => {
+test("T7″ break midway: up to the delivered tokens is committed, and the last of them heads the next turn", async () => {
   const opened = await openSpeculative({ drafter: oracleDrafter() });
   const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 });
 
@@ -871,12 +962,13 @@ test("T7″ 途中 break: 配送した token までが commit され、その最
   for await (const event of stream) {
     if (event.kind !== "token") continue;
     seen.push(event.id);
-    // cycle 1 の 2 個目（通算 3 個目）で打ち切る = `return()` 経由で finally へ入る。
+    // Stop at the second token of cycle 1 (the third overall) = enters finally through `return()`.
     if (seen.length === 3) break;
   }
   assertEquals(seen, [6, 8, 9]);
-  // `delivered` は受理が決まった時点で cycle ぶんを積む（`accepted` と同じ位置）ので、`break` で
-  // 配送が途中で閉じたこのターンでは消費者が受け取った数（2）より多い 4 になる。
+  // `delivered` adds the cycle's count when acceptance is decided (at the same point as
+  // `accepted`), so on this turn, whose delivery closed midway on `break`, it is 4 — more than the
+  // 2 the consumer received.
   assertEquals(await stream.done, {
     reason: "closed",
     tokens: 3,
@@ -889,10 +981,11 @@ test("T7″ 途中 break: 配送した token までが commit され、その最
       acceptedHistogram: [0, 0, 0, 1],
     },
   });
-  // 未配送の確定候補（3 / 13）は会話に入らない — 消費者の transcript と会話が一致する。
+  // The undelivered committed candidates (3 / 13) do not enter the conversation — the consumer's
+  // transcript and the conversation agree.
   assertEquals(opened.fake.commits, [2]);
   assertEquals(opened.fake.pendingCommit(), undefined);
-  // 配送が途中で閉じても、走った verify run は 1 通だけ報告される。
+  // Even when delivery closes midway, the verify run that ran is reported exactly once.
   assertEquals(runShape(opened.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
@@ -901,14 +994,20 @@ test("T7″ 途中 break: 配送した token までが commit され、その最
 
   await drain(opened.sequence.generate({ prompt: [4], maxNewTokens: 1 }));
   const next = opened.fake.calls[opened.fake.calls.length - 1];
-  assertEquals(next.ids, [9, 4, 0, 0], "break した位置の frontier が次ターンの先頭に来ていない");
+  assertEquals(
+    next.ids,
+    [9, 4, 0, 0],
+    "the frontier at the break position does not head the next turn",
+  );
   assertEquals(next.positions, [4, 5, 0, 0]);
 });
 
-// ---- T8: 門（sequence 生成時・sampler）-----------------------------------------
+// ---- T8: checks (at sequence creation, sampler) ---------------------------------------
 
-describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面は全部畳まれる", () => {
-  /** 生成時に拒まれること + 借り手 → 貸し手の順で畳まれることを 1 本で見る。 */
+describe("T8 checks: a speculation spec fails at sequence creation, and every opened surface is torn down", () => {
+  /**
+   * Checks in one place that it is rejected at creation + torn down in the order borrower → lender.
+   */
   const assertRejected = async (
     options: {
       readonly k?: number;
@@ -939,55 +1038,57 @@ describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面�
       Error,
       message,
     );
-    assertEquals(drafter.disposals(), 1, "drafter の面が畳まれていない");
-    assertEquals(fake.disposals(), 1, "貸し手 context が畳まれていない");
-    assertEquals(disposeLog, ["drafter", "context"], "畳む順が 借り手 → 貸し手 でない");
+    assertEquals(drafter.disposals(), 1, "the drafter's surface was not torn down");
+    assertEquals(fake.disposals(), 1, "the lender context was not torn down");
+    assertEquals(disposeLog, ["drafter", "context"], "the teardown order is not borrower → lender");
     assertEquals(fake.calls.length, 0);
   };
 
-  it("k + 1 が sliding ring の余裕を超える", async () => {
+  it("k + 1 exceeds the sliding ring's slack", async () => {
     await assertRejected(
       { k: K, session: { slidingSlack: K } },
       `speculative.k ${K} does not fit in the sliding ring's slack ${K}`,
     );
   });
 
-  it("k が drafter の段数を超える", async () => {
+  it("k exceeds the drafter's step count", async () => {
     await assertRejected(
       { k: K + 1 },
       `speculative.k ${K + 1} is outside 1..${K} (the drafter's step count)`,
     );
   });
 
-  it("k が 1 未満", async () => {
+  it("k is below 1", async () => {
     await assertRejected({ k: 0 }, `speculative.k 0 is outside 1..${K} (the drafter's step count)`);
   });
 
-  it("drafter が名乗る段数が 1 以上の整数でない", async () => {
-    // `k` を省くと `k = steps` になるので、段数を見ない実装では `k` の検査が素通りする
-    // （NaN はどの比較も false・1.5 は `1.5 > 1.5` が false）。段数の門が `k` の門より
-    // **前**に立っていることを、文言（段数の側）で縛る。
+  it("the drafter's declared step count is not a positive integer", async () => {
+    // Omitting `k` gives `k = steps`, so an implementation that does not check the step count lets
+    // the `k` check pass (every comparison with NaN is false, and `1.5 > 1.5` is false). The
+    // message (on the step-count side) pins that the step-count check stands **before** the `k`
+    // check.
     await assertRejected({ steps: Number.NaN }, "Drafter step count NaN is not a positive integer");
     await assertRejected({ steps: 0 }, "Drafter step count 0 is not a positive integer");
     await assertRejected({ steps: 1.5 }, "Drafter step count 1.5 is not a positive integer");
   });
 
-  it("k + 1 行が chunkLength を超える", async () => {
+  it("the k + 1 rows exceed chunkLength", async () => {
     await assertRejected(
       { k: K, program: { chunkLength: K, chunkBuckets: [] } },
       `The verify of speculative.k ${K} (${K + 1} rows) exceeds chunkLength ${K}`,
     );
   });
 
-  it("k + 1 行を載せるバケットが無い", async () => {
+  it("no bucket holds the k + 1 rows", async () => {
     await assertRejected(
       { k: K, program: { chunkBuckets: [2] } },
       `No bucket holds the ${K + 1} verify rows (chunkBuckets [2])`,
     );
   });
 
-  it("sliding スロットが無い context は余裕の門を通さない", async () => {
-    // `slidingSlack` が `undefined`（sliding 無し）なら棄却行が潰す過去 KV も無い。
+  it("a context without a sliding slot does not go through the slack check", async () => {
+    // With `slidingSlack` `undefined` (no sliding), there is no past KV for rejected rows to
+    // overwrite either.
     const run = await runSpeculative({
       drafter: oracleDrafter(),
       request: { prompt: PROMPT, maxNewTokens: 5 },
@@ -996,7 +1097,7 @@ describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面�
     assertEquals(run.fake.commits, [4]);
   });
 
-  it('policy "always" にゲートのノブを渡すと open の前に落ち、貸し手は畳まれる', async () => {
+  it('passing gate knobs with policy "always" fails before open, and the lender is torn down', async () => {
     const fake = fakeSession({ successor: SUCCESSOR });
     let caught: unknown;
     try {
@@ -1004,7 +1105,7 @@ describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面�
         session: fake.session,
         program: specProgram(fake),
         speculative: {
-          open: () => Promise.reject(new Error("open まで届いてはいけない")),
+          open: () => Promise.reject(new Error("must not reach open")),
           policy: "always",
           gate: { burstAbort: 10 },
         },
@@ -1012,14 +1113,18 @@ describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面�
     } catch (error) {
       caught = error;
     }
-    assert(caught instanceof Error, `落ちていない: ${String(caught)}`);
+    assert(caught instanceof Error, `did not fail: ${String(caught)}`);
     assertStringIncludes(caught.message, '"always" has no gate');
-    assertEquals(fake.disposals(), 1, "門で落ちた借り手の巻き添えで貸し手が漏れている");
+    assertEquals(
+      fake.disposals(),
+      1,
+      "the lender leaked along with the borrower that failed the check",
+    );
   });
 
-  it("open が投げたら貸し手 context を畳んでから素通しする", async () => {
+  it("when open throws, the lender context is torn down and the error passes through as is", async () => {
     const fake = fakeSession({ successor: SUCCESSOR });
-    const reason = new Error("drafter が開けない");
+    const reason = new Error("the drafter cannot be opened");
     let caught: unknown;
     try {
       await createGenerationSequence({
@@ -1030,12 +1135,16 @@ describe("T8 門: 投機の指定は sequence 生成時に落ち、開いた面�
     } catch (error) {
       caught = error;
     }
-    assert(caught === reason, `open の失敗が包まれている: ${String(caught)}`);
-    assertEquals(fake.disposals(), 1, "開けなかった借り手の巻き添えで貸し手が漏れている");
+    assert(caught === reason, `the open failure is wrapped: ${String(caught)}`);
+    assertEquals(
+      fake.disposals(),
+      1,
+      "the lender leaked along with the borrower that could not be opened",
+    );
   });
 });
 
-test("T8 門: open は context 確保の直後に、貸し手 context そのものを受けて呼ばれる", async () => {
+test("T8 checks: open is called right after the context is allocated, with the lender context itself", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafter = oracleDrafter();
   const seen: unknown[] = [];
@@ -1045,7 +1154,7 @@ test("T8 門: open は context 確保の直後に、貸し手 context そのも�
     speculative: {
       open: (context) => {
         seen.push(context);
-        // 借り手を開くのは context 確保の直後（run は 1 本も出ていない）。
+        // The borrower is opened right after the context is allocated (no run has been issued).
         assertEquals(fake.specs.length, 1);
         assertEquals(fake.calls.length, 0);
         return Promise.resolve(drafter.face);
@@ -1054,9 +1163,9 @@ test("T8 門: open は context 確保の直後に、貸し手 context そのも�
     },
   });
   assertEquals(seen.length, 1);
-  assert(seen[0] === fake.context, "open が貸し手 context 以外を受け取っている");
+  assert(seen[0] === fake.context, "open received something other than the lender context");
 
-  // 借り手 → 貸し手の順で畳む（`dispose` の鎖）。
+  // Torn down in the order borrower → lender (the `dispose` chain).
   const disposeLog: string[] = [];
   const logged = fakeSession({ successor: SUCCESSOR, disposeLog });
   const loggedDrafter = fakeDrafter({ draft: () => chainFrom(1, K), disposeLog });
@@ -1070,7 +1179,7 @@ test("T8 門: open は context 確保の直後に、貸し手 context そのも�
   await sequence.dispose();
 });
 
-test("T8 門: speculative を渡さない sequence の停止には speculation 欄が無い", async () => {
+test("T8 checks: the stop of a sequence without speculative has no speculation field", async () => {
   const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
   assertEquals(Object.hasOwn(plain.stop, "speculation"), false);
   assertEquals(withoutSpeculation(plain.stop), { reason: "max-tokens", tokens: 3 });
@@ -1078,7 +1187,7 @@ test("T8 門: speculative を渡さない sequence の停止には speculation �
 
 // ---- T9: onRun hook ------------------------------------------------------------
 
-test("T9 onRun: 投機は prefill → (draft, verify) × cycle（cycle は 1 始まり）", async () => {
+test("T9 onRun: speculation is prefill → (draft, verify) × cycle (cycles start at 1)", async () => {
   const run = await runSpeculative({
     drafter: oracleDrafter(),
     request: { prompt: PROMPT, maxNewTokens: 9 },
@@ -1092,7 +1201,7 @@ test("T9 onRun: 投機は prefill → (draft, verify) × cycle（cycle は 1 始
   ]);
 });
 
-test("T9 onRun: k' = 0 の cycle は draft を名乗らず verify 1 行だけを報告する", async () => {
+test("T9 onRun: a k' = 0 cycle does not report a draft and reports only a one-row verify", async () => {
   const run = await runSpeculative({
     drafter: oracleDrafter(),
     request: { prompt: PROMPT, maxNewTokens: 6 },
@@ -1105,7 +1214,7 @@ test("T9 onRun: k' = 0 の cycle は draft を名乗らず verify 1 行だけを
   ]);
 });
 
-test("T9 onRun: 部分受理の accepted と、chunk が割れた prefill の進捗", async () => {
+test("T9 onRun: partial acceptance's accepted, and the progress of a prefill split into chunks", async () => {
   const prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9];
   const run = await runSpeculative({
     drafter: partialDrafter(1),
@@ -1119,7 +1228,7 @@ test("T9 onRun: 部分受理の accepted と、chunk が割れた prefill の進
   ]);
 });
 
-test("T9 onRun: 非投機は prefill → decode × (tokens − 1)（step は 1 始まり）", async () => {
+test("T9 onRun: non-speculative is prefill → decode × (tokens − 1) (steps start at 1)", async () => {
   const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
   assertEquals(runShape(plain.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
@@ -1128,24 +1237,26 @@ test("T9 onRun: 非投機は prefill → decode × (tokens − 1)（step は 1 �
   ]);
 });
 
-test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の verify も報告される", async () => {
-  // `onRun` は run の数を数える口である（診断・tok/s の分母）。停止 token で閉じた cycle の
-  // verify を落とすと、その 1 本が観測から消える（非投機の decode は停止した step も報告する）。
+test("T9 onRun: one report per run — the verify of a cycle closed by a stop is reported too", async () => {
+  // `onRun` is the hook that counts runs (the denominator of diagnostics and tok/s). Dropping the
+  // verify of a cycle closed by a stop token would remove that one run from the observation
+  // (non-speculative decode reports the step that stopped as well).
   const stopTokens = [9];
   const run = await runSpeculative({
     drafter: oracleDrafter(),
     request: { prompt: PROMPT, maxNewTokens: 9 },
     program: { stopTokens },
   });
-  assertEquals(run.fake.calls.length, 2, "走った run は prefill 1 + verify 1");
-  // 受理は停止 token（d₂ = 9）で打ち切られるので `accepted` は 2（配送した draft の数）。
+  assertEquals(run.fake.calls.length, 2, "the runs were prefill 1 + verify 1");
+  // Acceptance ends at the stop token (d₂ = 9), so `accepted` is 2 (the number of delivered
+  // drafts).
   assertEquals(runShape(run.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
     { kind: "draft", cycle: 1 },
     { kind: "verify", cycle: 1, rows: 4, accepted: 2 },
   ]);
 
-  // 対（非投機は停止した decode run も 1 通報告する）。
+  // The counterpart (non-speculative reports the decode run that stopped as one report too).
   const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 9 }, { stopTokens });
   assertEquals(runShape(plain.phases), [
     { kind: "prefill", chunk: 1, chunks: 1 },
@@ -1154,7 +1265,7 @@ test("T9 onRun: run 1 本につき 1 通 — 停止で閉じた cycle の verify
   ]);
 });
 
-test("T9 onRun: hook を渡さない sequence も同じ列を出す（観測席は挙動を変えない）", async () => {
+test("T9 onRun: a sequence without the hook gives the same sequence (the observation hook does not change behaviour)", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafter = oracleDrafter();
   const sequence = await createGenerationSequence({
@@ -1168,9 +1279,9 @@ test("T9 onRun: hook を渡さない sequence も同じ列を出す（観測席�
   assertEquals(fake.commits, [4, 4]);
 });
 
-// ---- T10: speculation の勘定 ---------------------------------------------------
+// ---- T10: speculation accounting -------------------------------------------------------
 
-describe("T10 勘定: histogram は長さ k+1・添字が受理数・合計が cycles / accepted と整合する", () => {
+describe("T10 accounting: the histogram has length k+1, its index is the accepted count, and its sums agree with cycles / accepted", () => {
   const tally = async (k: number, drafter: FakeDrafter, maxNewTokens: number) => {
     const run = await runSpeculative({
       drafter,
@@ -1178,32 +1289,32 @@ describe("T10 勘定: histogram は長さ k+1・添字が受理数・合計が c
       request: { prompt: PROMPT, maxNewTokens },
     });
     const speculation = run.stop.speculation;
-    assert(speculation !== undefined, "投機のターンに speculation 欄が載っていない");
+    assert(speculation !== undefined, "a speculative turn carries no speculation field");
     return speculation;
   };
 
-  it("k = 3（drafter の段数と同じ）", async () => {
+  it("k = 3 (the same as the drafter's step count)", async () => {
     const speculation = await tally(K, partialDrafter(2), 7);
     assertEquals(speculation.acceptedHistogram.length, K + 1);
     assertEquals(speculation.acceptedHistogram, [0, 0, 2, 0]);
     assertEquals(
       speculation.acceptedHistogram.reduce((sum, count) => sum + count, 0),
       speculation.cycles,
-      "histogram の総数が cycles と合わない",
+      "the histogram total does not match cycles",
     );
     assertEquals(
       speculation.acceptedHistogram.reduce((sum, count, accepted) => sum + count * accepted, 0),
       speculation.accepted,
-      "histogram の重み付き和が accepted と合わない",
+      "the histogram's weighted sum does not match accepted",
     );
-    // 停止 token で打ち切った cycle が 1 本も無いターンでは `delivered = accepted + cycles`
-    // （どの cycle も `1 + a` 個を確定させる）。停止で打ち切った cycle があるとここが割れる。
+    // On a turn without any cycle cut off by a stop token, `delivered = accepted + cycles` (every
+    // cycle commits `1 + a` tokens). A cycle cut off by a stop breaks this.
     assertEquals(speculation.delivered, speculation.accepted + speculation.cycles);
   });
 
-  it("k = 2（段数より短く取る）", async () => {
+  it("k = 2 (shorter than the step count)", async () => {
     const speculation = await tally(2, oracleDrafter(), 7);
-    // 1 cycle が 3 個ずつ確定 → 2 cycle（1 + 3 + 3 = 7）。
+    // Each cycle commits 3 → 2 cycles (1 + 3 + 3 = 7).
     assertEquals(speculation.acceptedHistogram.length, 3);
     assertEquals(speculation, {
       cycles: 2,
@@ -1215,7 +1326,7 @@ describe("T10 勘定: histogram は長さ k+1・添字が受理数・合計が c
     });
   });
 
-  it("k = 1（draft 1 本 = verify 2 行）", async () => {
+  it("k = 1 (1 draft = 2 verify rows)", async () => {
     const speculation = await tally(1, wrongDrafter(), 4);
     assertEquals(speculation, {
       cycles: 3,
@@ -1228,29 +1339,31 @@ describe("T10 勘定: histogram は長さ k+1・添字が受理数・合計が c
   });
 });
 
-// ---- T11: hidden の写し --------------------------------------------------------
+// ---- T11: the hidden-state copy --------------------------------------------------------
 
-test("T11 hidden: 次 cycle の drafter へ渡るのは b′ を出した行（行 a）の hidden", async () => {
-  // 受理 1 本の cycle が続くので、行 0 でも行 k でもない**行 1** が正解になる配置。
+test("T11 hidden: what reaches the next cycle's drafter is the hidden state of the row that emitted b′ (row a)", async () => {
+  // Cycles with one accepted draft follow one another, so the right answer is **row 1**, neither
+  // row 0 nor row k.
   const run = await runSpeculative({
     drafter: partialDrafter(1),
     request: { prompt: PROMPT, maxNewTokens: 7 },
   });
   assertEquals(run.drafter.calls.length, 3);
 
-  // cycle 1: prefill（run 0）の最終有効行（添字 1）の hidden。
+  // Cycle 1: the hidden state of the prefill's (run 0) last valid row (index 1).
   assertEquals(run.drafter.calls[0], {
     token: 6,
     position: 2,
     hidden: [hiddenMark(0, 1), 2, 0, 0],
   });
-  // cycle 2: verify（run 1）の行 1 = b′ 9 を出した行（行 0 なら 101・行 3 なら 104 になる）。
+  // Cycle 2: row 1 of the verify (run 1) = the row that emitted b′ 9 (row 0 would give 101, row 3
+  // 104).
   assertEquals(run.drafter.calls[1], {
     token: 9,
     position: 4,
     hidden: [hiddenMark(1, 1), 8, 0, 0],
   });
-  // cycle 3: verify（run 2）の行 1。
+  // Cycle 3: row 1 of the verify (run 2).
   assertEquals(run.drafter.calls[2], {
     token: 13,
     position: 6,
@@ -1258,15 +1371,16 @@ test("T11 hidden: 次 cycle の drafter へ渡るのは b′ を出した行（�
   });
 });
 
-test("T11 hidden: 最初の cycle の hidden は prefill の**最終 chunk** の行 0", async () => {
-  // chunk が 2 本に割れる prompt（9 token / chunkLength 8）— 先頭 chunk の hidden を掴む実装は
-  // ここで割れる（末尾 chunk は有効行 1 本 = decode 形なので行 0）。
+test("T11 hidden: the first cycle's hidden state is row 0 of the prefill's **last chunk**", async () => {
+  // A prompt that splits into 2 chunks (9 tokens / chunkLength 8) — an implementation that grabs
+  // the first chunk's hidden state breaks here (the last chunk has one valid row = the decode
+  // shape, so row 0).
   const prompt = [1, 2, 3, 4, 5, 6, 7, 8, 9];
   const run = await runSpeculative({
     drafter: oracleDrafter(),
     request: { prompt, maxNewTokens: 3 },
   });
-  assertEquals(run.fake.calls.length, 3, "prefill 2 本 + verify 1 本");
+  assertEquals(run.fake.calls.length, 3, "2 prefills + 1 verify");
   assertEquals(run.drafter.calls, [
     {
       token: SUCCESSOR[9],
@@ -1276,9 +1390,9 @@ test("T11 hidden: 最初の cycle の hidden は prefill の**最終 chunk** の
   ]);
 });
 
-// ---- T12 / T13: draft の値域門と last_row の pad ---------------------------------
+// ---- T12 / T13: the draft range check and last_row padding ------------------------------
 
-describe("T12 値域門: 語彙外・本数不足の draft は verify を出す前に fail loudly", () => {
+describe("T12 range check: an out-of-vocabulary or short draft fails loudly before the verify is issued", () => {
   const assertDraftRejected = async (
     draft: () => readonly number[],
     message: string,
@@ -1289,39 +1403,41 @@ describe("T12 値域門: 語彙外・本数不足の draft は verify を出す�
       Error,
       message,
     );
-    // draft は verify の `input_ids` と history に入る値なので、prompt と同じ位置で落とす。
-    assertEquals(opened.fake.calls.length, 1, "値域外の draft で verify が発行された");
+    // A draft is a value that enters the verify's `input_ids` and the history, so it fails at the
+    // same point as the prompt.
+    assertEquals(opened.fake.calls.length, 1, "a verify was issued with an out-of-range draft");
     assertEquals(opened.fake.commits, []);
     assertEquals(opened.fake.pendingCommit(), undefined);
-    // draft run 自体は**完了している**（借り手は draft を返し切った）ので 1 通名乗る。落ちるのは
-    // 戻り値の値域検査で、これは verify の形検査（T7′ — 読み終える前に落ちるので名乗らない）とは
-    // 別の位置である。
+    // The draft run itself **has completed** (the borrower returned its drafts in full), so it
+    // reports once. What fails is the range check of the return value, which is a different point
+    // from the verify's shape check (T7′ — that fails before the output is read, so it does not
+    // report).
     assertEquals(runShape(opened.phases), [
       { kind: "prefill", chunk: 1, chunks: 1 },
       { kind: "draft", cycle: 1 },
     ]);
   };
 
-  it("語彙の上を超える", async () => {
+  it("above the top of the vocabulary", async () => {
     await assertDraftRejected(
       () => [VOCAB, 8, 9],
       `draft[0] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`,
     );
   });
 
-  it("負の id", async () => {
+  it("a negative id", async () => {
     await assertDraftRejected(
       () => [8, -1, 9],
       `draft[1] -1 is outside the vocabulary 0..${VOCAB - 1}`,
     );
   });
 
-  it("本数が足りない", async () => {
+  it("too few drafts", async () => {
     await assertDraftRejected(() => [8, 9], "Only 2 drafts (3 needed)");
   });
 });
 
-describe("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字で pad）", () => {
+describe("T13 last_row: R stays k+1 when k' shrinks (padded with the last index)", () => {
   const verifyOnce = async (maxNewTokens: number) => {
     const run = await runSpeculative({
       drafter: oracleDrafter(),
@@ -1332,7 +1448,7 @@ describe("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字で
     return { call: verifyCalls(run.fake)[0], run };
   };
 
-  it("k' = 1（R は 4 本のまま・末尾を pad）", async () => {
+  it("k' = 1 (R stays 4, the tail is padded)", async () => {
     const { call, run } = await verifyOnce(3);
     assertEquals(call.queryLength, 2);
     assertEquals(call.lastRows, [0, 1, 1, 1]);
@@ -1343,7 +1459,7 @@ describe("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字で
     assertEquals(run.fake.commits, [2]);
   });
 
-  it("k' = 2（pad は 1 本だけ）", async () => {
+  it("k' = 2 (only one pad)", async () => {
     const { call, run } = await verifyOnce(4);
     assertEquals(call.queryLength, 3);
     assertEquals(call.lastRows, [0, 1, 2, 2]);
@@ -1352,7 +1468,7 @@ describe("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字で
     assertEquals(run.fake.commits, [3]);
   });
 
-  it("k' = 0（pad せず decode 形の [0]）", async () => {
+  it("k' = 0 (no pad, the decode-shaped [0])", async () => {
     const { call, run } = await verifyOnce(2);
     assertEquals(call.queryLength, 1);
     assertEquals(call.lastRows, [0]);
@@ -1364,14 +1480,16 @@ describe("T13 last_row: k' が縮んでも R は k+1 のまま（末尾添字で
   });
 });
 
-// ---- T14: 走行中の `used` -------------------------------------------------------
+// ---- T14: `used` during a run -------------------------------------------------------------
 
 /**
- * 配送の**直後**に `used` を読み、`position + 1` であることを見る（返すのは配送した位置の列）。
+ * Reads `used` **right after** each delivery and checks it is `position + 1` (returns the delivered
+ * positions).
  *
- * yield から戻った同期区間で読むので、投機では**保留中の verify が残っている窓**を観測できる。
- * ここが崩れると `used` を見て次ターンの予算を決める呼び手（`GenerationSequence.used` の doc の
- * 式）が、cycle の途中では最大 k だけ甘い上限を通してしまう。
+ * It reads in the synchronous section after returning from yield, so with speculation it can
+ * observe **the window where a pending verify still remains**. If this breaks, a caller that sets
+ * the next turn's budget from `used` (the formula in the doc of `GenerationSequence.used`) would
+ * let through a limit up to k too lenient in the middle of a cycle.
  */
 const drainAssertingUsed = async (
   sequence: GenerationSequence,
@@ -1384,29 +1502,30 @@ const drainAssertingUsed = async (
     assertEquals(
       sequence.used,
       event.position + 1,
-      `位置 ${event.position} の token を配送した直後の used`,
+      `used right after delivering the token at position ${event.position}`,
     );
   }
   return positions;
 };
 
-describe("T14 used: 配送の直後は常に「その token の position + 1」", () => {
+describe('T14 used: right after a delivery it is always "that token\'s position + 1"', () => {
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 7 };
-  /** 配送される位置の列（prompt 2 token の直後から 7 個）。 */
+  /** The delivered positions (7 of them, right after the 2 prompt tokens). */
   const expected = [2, 3, 4, 5, 6, 7, 8];
 
-  it("投機（部分受理 — cycle の途中で読む）", async () => {
+  it("speculative (partial acceptance — read in the middle of a cycle)", async () => {
     const opened = await openSpeculative({ drafter: partialDrafter(1) });
     assertEquals(
       await drainAssertingUsed(opened.sequence, opened.sequence.generate(request)),
       expected,
     );
-    // 決着後も同じ式（frontier 1 個は未 commit のまま = 次ターンの先頭へ連結される）。
+    // The same formula after it settles (one frontier stays uncommitted = it is prepended to the
+    // next turn).
     assertEquals(opened.sequence.used, 9);
     assertEquals(opened.fake.pendingCommit(), undefined);
   });
 
-  it("非投機（回帰の対）", async () => {
+  it("non-speculative (the regression counterpart)", async () => {
     const opened = await openPlain();
     assertEquals(
       await drainAssertingUsed(opened.sequence, opened.sequence.generate(request)),
@@ -1415,24 +1534,28 @@ describe("T14 used: 配送の直後は常に「その token の position + 1」"
     assertEquals(opened.sequence.used, 9);
   });
 
-  it("cycle の途中で break した後も、配送した最後の position + 1", async () => {
+  it("after a break in the middle of a cycle it is still the last delivered position + 1", async () => {
     const opened = await openSpeculative({ drafter: oracleDrafter() });
     const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 });
     let last = -1;
     for await (const event of stream) {
       if (event.kind !== "token") continue;
       last = event.position;
-      assertEquals(opened.sequence.used, last + 1, `配送直後（位置 ${last}）`);
-      // cycle 1 の 2 個目（= 保留がまだ残っている窓）で打ち切る。
+      assertEquals(opened.sequence.used, last + 1, `right after delivery (position ${last})`);
+      // Stop at the second token of cycle 1 (= the window where the pending run still remains).
       if (last === 4) break;
     }
     assertEquals((await stream.done).reason, "closed");
-    // commit は「未 commit 行 → pastLength」の付け替えなので、`used` は commit を跨いで動かない。
+    // A commit moves "uncommitted rows → pastLength", so `used` does not move across the commit.
     assertEquals(opened.fake.commits, [2]);
-    assertEquals(opened.sequence.used, 5, "break 後の used が配送した最後の position + 1 でない");
+    assertEquals(
+      opened.sequence.used,
+      5,
+      "used after the break is not the last delivered position + 1",
+    );
   });
 
-  it("配送中に消費者が例外を投げても（finally の commit）、最後の position + 1", async () => {
+  it("even when the consumer throws during delivery (the commit in finally), it is the last position + 1", async () => {
     const opened = await openSpeculative({ drafter: oracleDrafter() });
     const stream = opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 9 });
     let last = -1;
@@ -1441,53 +1564,63 @@ describe("T14 used: 配送の直後は常に「その token の position + 1」"
         for await (const event of stream) {
           if (event.kind !== "token") continue;
           last = event.position;
-          // break と同じ窓（cycle 1 の 2 個目 = 保留が残っている）で消費者側が落ちる。
+          // The consumer fails in the same window as the break (the second token of cycle 1 = a
+          // pending run remains).
           if (last === 4) throw new Error("consumer");
         }
       },
       Error,
       "consumer",
     );
-    // 消費者の例外は generator には入らない（`return()` 経由 = closed）。frontier までの commit と
-    // `frontierRows` の 0 戻しは同じ finally を通る。
+    // The consumer's exception does not enter the generator (through `return()` = closed). The
+    // commit up to the frontier and resetting `frontierRows` to 0 go through the same finally.
     assertEquals((await stream.done).reason, "closed");
     assertEquals(opened.fake.commits, [2]);
-    assertEquals(opened.sequence.used, 5, "例外後の used が配送した最後の position + 1 でない");
+    assertEquals(
+      opened.sequence.used,
+      5,
+      "used after the exception is not the last delivered position + 1",
+    );
   });
 });
 
-// ---- T15: 抽選が落ちた decode の後始末 -------------------------------------------
+// ---- T15: cleanup after a decode whose draw failed ----------------------------------------
 
 /**
- * 全 run の有効行を（位置, token）へ畳む = **KV に入った並び**（非投機の走行に限る — deferred な
- * verify は棄却行も物理 ring へ書くので、投機では commit 行数と併せて読む必要がある）。
+ * Folds the valid rows of every run into (position, token) = **the order that entered the KV**
+ * (non-speculative runs only — a deferred verify writes rejected rows to the physical ring too, so
+ * with speculation it has to be read together with the committed row counts).
  *
- * 同じ token が 2 つの位置に居る形は token 列の比較では見えない（次ターンの入力を作るのは
- * `pendingToken` で、消費者が受け取った列には現れない）。位置つきで畳むのが唯一の検出線である。
+ * The same token sitting at two positions is invisible to a comparison of token sequences (the next
+ * turn's input is built from `pendingToken`, which never appears in the sequence the consumer
+ * received). Folding with positions is the only line that detects it.
  */
 const placedRows = (fake: FakeSession): number[][] =>
   fake.calls.flatMap((call) =>
     call.ids.slice(0, call.queryLength).map((id, row) => [call.positions[row], id]),
   );
 
-test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 frontier は次ターンへ再投入されない", async () => {
-  // 故障注入: decode run（call 1）の logits に NaN を混ぜる。run 自体は**成功**しているので
-  // frontier b（= 6）は位置 2 の KV に入っており、`pendingToken` に残したまま次ターンへ行くと
-  // 同じ token が位置 3 にも入る（例外を出さない沈黙劣化 — 会話が 1 token 太る）。
+test("T15 draw failure: when the draw fails after the run went through, the old frontier is not fed again to the next turn", async () => {
+  // Fault injection: mix NaN into the logits of the decode run (call 1). The run itself
+  // **succeeded**, so the frontier b (= 6) is in the KV at position 2; leaving it in `pendingToken`
+  // for the next turn would put the same token at position 3 too (a silent degradation with no
+  // exception — the conversation grows by one token).
   const opened = await openPlain({}, { nanAt: 1 });
   await assertRejects(
     () => drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 5 })),
     Error,
-    // 落ちるのは抽選（`assertNoNaN`）— run の失敗ではない（汚染した id は fake の実装事情なので見ない）。
+    // What fails is the draw (`assertNoNaN`) — not the run (the poisoned id is an implementation
+    // detail of the fake, so it is not checked).
     "is NaN (non-finite)",
   );
   assertEquals(
     opened.fake.pastLength(),
     3,
-    "抽選が落ちた decode run は成功している（論理長は進む）",
+    "the decode run whose draw failed did succeed (the logical length advances)",
   );
 
-  // 同じ sequence で次のターン（frontier は既に KV に居るので prompt はそのまま流れる）。
+  // The next turn on the same sequence (the frontier is already in the KV, so the prompt runs as
+  // is).
   const next = await drain(opened.sequence.generate({ prompt: [4], maxNewTokens: 1 }));
   assertEquals(tokenIds(next.events), [SUCCESSOR[4]]);
   assertEquals(placedRows(opened.fake), [
@@ -1498,9 +1631,11 @@ test("T15 抽選の失敗: run が通った後に抽選が落ちても、旧 fro
   ]);
 });
 
-// ---- T16: 自己採算ゲート（`policy: "auto"`・偽時計）-------------------------------
+// ---- T16: the self-accounting gate (`policy: "auto"`, fake clock) ------------------------
 
-/** 時計を読む回数に依存せず、fake target run の完了時に cycle の費用を加える。 */
+/**
+ * Adds a cycle's cost when a fake target run completes, independent of how often the clock is read.
+ */
 const fakeClock = (
   drafter: FakeDrafter,
   wallOf: (cycle: number, drafted: boolean) => number,
@@ -1519,15 +1654,18 @@ const fakeClock = (
 };
 
 /**
- * ゲートを 2 ブロックぶん待たずに倒すノブ（既定は 16 cycle × 2 本連続）。
+ * Knobs that make the gate switch without waiting for 2 blocks (the default is 16 cycles × 2 in a
+ * row).
  *
- * ここで見るのは**配線**（落ちた step の勘定・hidden の繋がり・観測に混ぜない cycle）で、
- * 「何 cycle 測ってから倒すか」の判断そのものは `generation_gate_test.ts` が持つ。
+ * What is checked here is **the wiring** (accounting of dropped steps, the hidden-state continuity,
+ * cycles not mixed into the observation); the decision of "how many cycles to measure before
+ * switching" itself belongs to `generation_gate_test.ts`.
  */
 const FAST_GATE: SpeculationGateOptions = { window: 2, confirm: 1 };
 
-test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、それでも列は非投機と同一", async () => {
-  // 投機 cycle 100ms で 4 個確定（25ms/token）・plain step 10ms/token = 投機が 2.5 倍遅い壁。
+test("T16 gate: with a wall time where speculation loses it drops to the decode shape, and the sequence still matches the non-speculative one", async () => {
+  // A speculative cycle commits 4 in 100ms (25ms/token), a plain step costs 10ms/token = a wall
+  // time where speculation is 2.5 times slower.
   const drafter = oracleDrafter();
   const request: GenerationRequest = { prompt: PROMPT, maxNewTokens: 20 };
   const opened = await openSpeculative({
@@ -1538,14 +1676,18 @@ test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、それで
   });
   const run = { ...opened, ...(await drain(opened.sequence.generate(request))) };
 
-  // 契約の芯は変わらない（ゲートは速さだけを変え、出力は変えない）。
+  // The core of the contract does not change (the gate changes only the speed, not the output).
   await assertMatchesPlain(request, run);
   const always = await runSpeculative({ drafter: oracleDrafter(), request });
-  assertEquals(tokenIds(run.events), tokenIds(always.events), "ゲート付きと always の列が違う");
+  assertEquals(
+    tokenIds(run.events),
+    tokenIds(always.events),
+    "the gated and always sequences differ",
+  );
 
-  // 落ちた step は投機の勘定に入らず、`plainSteps` が数える（cycle 番号も消費しない）。
-  // 予算末尾の強制 plain（`k' = 0`）は従来どおり verify として数える = `cycles` は 4 で、
-  // その 1 本が `acceptedHistogram[0]` に入る。
+  // The dropped steps are not part of the speculation accounting; `plainSteps` counts them (they do
+  // not consume cycle numbers either). The forced plain at the end of the budget (`k' = 0`) counts
+  // as a verify as before = `cycles` is 4, and that one goes into `acceptedHistogram[0]`.
   assertEquals(run.stop.speculation, {
     cycles: 4,
     draftRuns: 3,
@@ -1556,27 +1698,30 @@ test("T16 ゲート: 投機が負ける壁では decode 形へ落ち、それで
     plainSteps: 6,
     switches: 1,
   });
-  // 配送は 4 →（`W1` の初回サンプル）1 → 4 → 4（ここでブロック 2 本目が満ちて倒れる）→
-  // plain 5 本 → 予算末尾の 1（= 20 token）。2 本目が plain なのは「`W1` の初回サンプルは
-  // 2 回目の決定」だからで、ゲートが倒れるのは 2 本目の投機 cycle を**観測した**時である。
+  // Deliveries are 4 → (the first sample of `W1`) 1 → 4 → 4 (here the second block fills and it
+  // switches) → 5 plain → the 1 at the end of the budget (= 20 tokens). The second one is plain
+  // because "the first sample of `W1` is the second decision"; the gate switches when it has
+  // **observed** the second speculative cycle.
   assertEquals(run.fake.commits, [4, 1, 4, 4, 1, 1, 1, 1, 1, 1]);
-  // ゲートの plain step は `decode` を名乗る（公開型に枝を足さない）。番号は 1 始まりの通し。
+  // The gate's plain steps report as `decode` (no branch added to the public type). Their numbers
+  // run on from 1.
   assertEquals(
     runShape(run.phases).filter((phase) => phase.kind === "decode"),
     Array.from({ length: 6 }, (_unused, index) => ({ kind: "decode", step: index + 1 })),
   );
-  // verify の cycle 番号は 1..4（plain step が番号を飛ばさない）。
+  // The verify cycle numbers are 1..4 (plain steps do not skip numbers).
   assertEquals(
     run.phases.filter((phase) => phase.kind === "verify").map((phase) => phase.cycle),
     [1, 2, 3, 4],
   );
 });
 
-test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と frontier）が繋がる", async () => {
-  // ゲートの plain step は verify 形の 1 行（deferred）なので `hidden` が読める。非投機の decode
-  // 経路（logits しか読まない）へ分岐すると、戻った cycle の draft が古い hidden を食う。
-  // 1 ターン（20 token）の中で「倒れる → plain 2 本 → 探索」まで回すため、バーストは 1 cycle・
-  // plain 側の間隔は 2 step に縮める（バーストを何 cycle 測るかは generation_gate_test.ts）。
+test("T16 gate: the drafter input (hidden state and frontier) stays connected across plain steps", async () => {
+  // The gate's plain step is a one-row verify-shaped run (deferred), so `hidden` can be read.
+  // Branching to the non-speculative decode path (which reads only logits) would make the draft of
+  // the cycle it returns to eat a stale hidden state. To go as far as "switch → 2 plain steps →
+  // explore" within one turn (20 tokens), the burst is shrunk to 1 cycle and the plain-side
+  // interval to 2 steps (how many cycles a burst measures is generation_gate_test.ts's concern).
   const drafter = oracleDrafter();
   const opened = await openSpeculative({
     drafter,
@@ -1586,23 +1731,30 @@ test("T16 ゲート: plain step を挟んでも drafter 入力（hidden と fron
   });
   await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
 
-  // 最後の draft は plain 側の探索バーストのもので、その直前は plain step が 2 本続いている
-  // （run 添字 6 と 7 — 添字 0 は prefill）。受け取るのは run 7 の行 0 の hidden と、run 7 が
-  // 配送した frontier（run 7 の入力 token 3 → `SUCCESSOR[3]` = 13）である。
+  // The last draft belongs to the exploration burst on the plain side, and right before it come two
+  // plain steps (run indices 6 and 7 — index 0 is the prefill). It receives the hidden state of row
+  // 0 of run 7 and the frontier run 7 delivered (run 7's input token 3 → `SUCCESSOR[3]` = 13).
   const last = opened.drafter.calls[opened.drafter.calls.length - 1];
   assertEquals(opened.drafter.calls.length, 4);
   assertEquals(last, { token: SUCCESSOR[3], position: 18, hidden: [hiddenMark(7, 0), 3, 0, 0] });
 });
 
-describe("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain は観測に混ぜない", () => {
-  // 最初の cycle は PLE gather の cold miss を含み、強制 plain は呼び手の予算で形が決まる —
-  // どちらも「投機が遅い」証拠にならない。故障注入で確かめる: その 2 種類にだけ 10,000ms を
-  // 置き、ゲートが 1 度も倒れないこと（混ぜる実装は即座に plain へ落ちる）。
+describe("T16 gate: the first cycle of a turn and the forced plain at the end of the budget are not mixed into the observation", () => {
+  // The first cycle includes the cold miss of the PLE gather, and the forced plain's shape is set
+  // by the caller's budget — neither is evidence that "speculation is slow". Checked by fault
+  // injection: put 10,000ms on those two kinds only, and the gate never switches (an implementation
+  // that mixes them in drops to plain immediately).
   const turn1: GenerationRequest = { prompt: PROMPT, maxNewTokens: 6 };
   const turn2: GenerationRequest = { prompt: [4], maxNewTokens: 20 };
-  /** ターン 1 は cycle 2 本（最初の cycle + 予算末尾の強制 plain）・ターン 2 の頭が 3 本目。 */
+  /**
+   * Turn 1 has 2 cycles (the first cycle + the forced plain at the end of the budget); the head of
+   * turn 2 is the third.
+   */
   const excluded = 3;
-  /** ターン 2 で最初に**観測に入る投機 cycle**（頭の 2 本は `W1` を採る plain step）。 */
+  /**
+   * The first **speculative cycle that enters the observation** in turn 2 (the first 2 are plain
+   * steps that take `W1`).
+   */
   const firstMeasuredCycle = 4;
 
   const play = async (slow: (cycle: number) => boolean) => {
@@ -1618,11 +1770,12 @@ describe("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain
     return second.stop.speculation;
   };
 
-  it("混ぜない: 2 ターン目も投機のまま（倒れない）", async () => {
-    // ターン 2 の頭 2 本が plain なのは `W1` がまだ未観測だからである（1 本目は混ぜない cycle
-    // なので観測を返さず、2 本目でようやく `W1` を採る）。定常の測り直しは 16 観測ごとなので、
-    // 20 token のターンには入らない = plain step は頭の 2 本だけである。最後の 1 本は予算末尾の
-    // 強制 plain（`k' = 0`）で、verify として数えつつ `acceptedHistogram[0]` に入る。
+  it("not mixed in: turn 2 stays speculative too (it does not switch)", async () => {
+    // The first 2 of turn 2 are plain because `W1` is not yet observed (the first is a cycle that
+    // is not mixed in, so it returns no observation, and the second finally takes `W1`). The steady
+    // re-measurement comes every 16 observations, so it does not fall within a 20-token turn = the
+    // only plain steps are the first 2. The last one is the forced plain at the end of the budget
+    // (`k' = 0`), counted as a verify and placed in `acceptedHistogram[0]`.
     assertEquals(await play((cycle) => cycle < excluded), {
       cycles: 5,
       draftRuns: 4,
@@ -1635,31 +1788,38 @@ describe("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain
     });
   });
 
-  it("対（同じ壁を観測に入る投機 cycle へ置くと落ちる）", async () => {
-    // 10,000ms を 1 本だけ、ターン 2 で最初に観測に入る**投機**の cycle へ置くと、ゲートは
-    // その観測の直後に plain へ倒れる。上の緑が「そもそも倒れない設定」ではないことの対。
-    // plain step（`W1` を採る cycle）へ置いてはいけない — `W1` が 10,000ms になると比が小さく
-    // なり、投機が有利に見えて倒れない = 対にならない。
+  it("the counterpart (it drops when the same wall time is put on a speculative cycle that enters the observation)", async () => {
+    // Putting a single 10,000ms on the first **speculative** cycle that enters the observation in
+    // turn 2 makes the gate switch to plain right after that observation. The counterpart showing
+    // that the green above is not "a setting that never switches at all". It must not go on a plain
+    // step (the cycle that takes `W1`) — with `W1` at 10,000ms the ratio shrinks, speculation looks
+    // favourable and it does not switch = no counterpart.
     const speculation = await play((cycle) => cycle === firstMeasuredCycle);
-    assertEquals(speculation?.switches, 1, "観測に入る遅い cycle でも倒れない");
+    assertEquals(
+      speculation?.switches,
+      1,
+      "it does not switch even with a slow cycle that enters the observation",
+    );
     assert(
       (speculation?.plainSteps ?? 0) > 3,
-      `倒れた後も plain へ落ちていない: ${JSON.stringify(speculation)}`,
+      `it did not drop to plain after switching: ${JSON.stringify(speculation)}`,
     );
   });
 
-  it("skip した cycle はブロックに入らないが、探索の周期は進む", async () => {
-    // 混ぜない cycle でも GPU の仕事は 1 本走っているので、探索の周期はそのぶん進める
-    // （ゲートの `skip()`）。1 ターンで見ると: 頭の cycle は観測に入らないまま周期を 1 進め、
-    // `W1` の初回サンプル（plain 1 手）は**2 本目**に来て、以後の探索は `exploreBase` ごとである。
-    // 周期が止まる実装だと、この 2 つがどちらも 1 本ずつ後ろへずれる。
+  it("a skipped cycle does not enter the block, but the exploration period advances", async () => {
+    // A cycle that is not mixed in still runs one piece of GPU work, so the exploration period
+    // advances by it (the gate's `skip()`). Over one turn: the head cycle advances the period by 1
+    // without entering the observation, the first sample of `W1` (one plain move) comes **second**,
+    // and exploration after that comes every `exploreBase`. An implementation where the period
+    // stops shifts both of these back by one.
     const drafter = oracleDrafter();
     const opened = await openSpeculative({
       drafter,
       policy: "auto",
-      // ブロックが 2 cycle なので、頭の 10,000ms が 1 本でも混ざれば最初のブロックで倒れる。
-      // 既定の測り直し間隔（16 観測）は 1 ターンの予算に入らないので、周期そのものは 4 に縮めて
-      // 見る（既定値の側は `generation_gate_test.ts` の T5 が持つ）。
+      // The block is 2 cycles, so a single 10,000ms at the head mixed in would switch at the first
+      // block. The default re-measurement interval (16 observations) does not fit one turn's
+      // budget, so the period itself is shrunk to 4 (the default side belongs to T5 of
+      // `generation_gate_test.ts`).
       gate: { ...FAST_GATE, exploreBase: 4 },
       clock: fakeClock(drafter, (cycle, drafted) => (cycle === 0 ? 10_000 : drafted ? 20 : 10)),
     });
@@ -1683,31 +1843,39 @@ describe("T16 ゲート: ターン最初の cycle と予算末尾の強制 plain
         "verify",
         "verify",
       ],
-      "探索の周期が混ぜない cycle のぶん進んでいない",
+      "the exploration period did not advance by the cycles not mixed in",
     );
-    assertEquals(run.stop.speculation?.switches, 0, "混ぜない cycle の壁がブロックに入っている");
+    assertEquals(
+      run.stop.speculation?.switches,
+      0,
+      "the wall time of a cycle not mixed in entered the block",
+    );
   });
 });
 
-// ---- T17: 観測席の壁と局面（`wallMs` / `delivered` / `gate`）------------------------
+// ---- T17: wall time and phase on the observation hook (`wallMs` / `delivered` / `gate`) ------
 
-/** 生成相の観測（壁と局面を名乗る 2 種別 — prefill と draft は名乗らない）。 */
+/**
+ * Observations of the generation phase (the two kinds that report wall time and phase — prefill and
+ * draft do not).
+ */
 type StepPhase = Extract<GenerationRunPhase, { kind: "decode" | "verify" }>;
 
 const stepsOf = (phases: readonly GenerationRunPhase[]): readonly StepPhase[] =>
   phases.flatMap((phase) => (phase.kind === "decode" || phase.kind === "verify" ? [phase] : []));
 
-/** 期待値 1 通ぶんのゲートの状態。 */
+/** The gate state of one expected report. */
 const gateOf = (
   mode: "speculate" | "plain",
   switches: number,
   measured: boolean,
 ): GenerationGateTrace => ({ mode, switches, measured });
 
-describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、消費者の遅れを含まない", () => {
-  it("T16 と同じ壁を流すと、run ごとの wallMs が偽時計の刻みと一致する", async () => {
-    // T16 と**同じ設定**（投機 cycle 100ms / plain step 10ms・ブロックは 2 cycle）。あちらが
-    // 「勘定と決定列」を見る席で、ここは同じ走行の**壁と局面**を見る席である。
+describe("T17 wall time on the observation hook: the wall times of speculative cycles and plain steps are present and exclude consumer delay", () => {
+  it("feeding the same wall times as T16, each run's wallMs matches the fake clock's ticks", async () => {
+    // **The same settings** as T16 (speculative cycle 100ms / plain step 10ms, block of 2 cycles).
+    // That one checks "the accounting and the decision sequence"; this one checks **the wall time
+    // and the phase** of the same run.
     const drafter = oracleDrafter();
     const opened = await openSpeculative({
       drafter,
@@ -1721,8 +1889,9 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
     };
     const steps = stepsOf(run.phases);
 
-    // 配送は 4 →（`W1` の初回サンプル）1 → 4 → 4 → plain 5 本 → 予算末尾の 1（T16 の commits）。
-    // 壁はその形のとおり「draft を採った cycle だけ 100ms」である。
+    // Deliveries are 4 → (the first sample of `W1`) 1 → 4 → 4 → 5 plain → the 1 at the end of the
+    // budget (T16's commits). The wall time follows that shape: "100ms only for cycles that took a
+    // draft".
     assertEquals(
       steps.map((phase) => phase.kind),
       [
@@ -1741,11 +1910,11 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
     assertEquals(
       steps.map((phase) => phase.wallMs),
       [100, 10, 100, 100, 10, 10, 10, 10, 10, 10],
-      "run の壁が偽時計の刻みと一致しない",
+      "the run wall times do not match the fake clock's ticks",
     );
   });
 
-  it("ゲートの状態は観測の**後**の値（先頭 cycle は measured が立たない）", async () => {
+  it("the gate state is the value **after** the observation (measured is not set on the first cycle)", async () => {
     const drafter = oracleDrafter();
     const opened = await openSpeculative({
       drafter,
@@ -1758,14 +1927,16 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
       ...(await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }))),
     };
 
-    // 3 本目の投機 cycle（run 添字 3）でブロック 2 本目が満ちて倒れる = その観測の**結果**が
-    // `mode: "plain"` / `switches: 1` である。観測の前に読む実装だと 1 本ぶん後ろへずれる。
+    // At the third speculative cycle (run index 3) the second block fills and it switches = the
+    // **result** of that observation is `mode: "plain"` / `switches: 1`. An implementation that
+    // reads before the observation shifts it back by one.
     assertEquals(
       stepsOf(run.phases).map((phase) => phase.gate),
       [
-        // ターン最初の cycle は壁の観測に混ぜない（`skip()` — 混ぜない 2 種類の 1 つ）。
+        // The first cycle of a turn is not mixed into the wall-time observation (`skip()` — one of
+        // the two kinds not mixed in).
         gateOf("speculate", 0, false),
-        // `W1` の初回サンプル（2 回目の決定で 1 step だけ plain を挟む）。
+        // The first sample of `W1` (the second decision inserts one plain step).
         gateOf("speculate", 0, true),
         gateOf("speculate", 0, true),
         gateOf("plain", 1, true),
@@ -1774,17 +1945,24 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
         gateOf("plain", 1, true),
         gateOf("plain", 1, true),
         gateOf("plain", 1, true),
-        // 予算末尾の強制 plain も混ぜない（呼び手の予算で形が決まった cycle）。
+        // The forced plain at the end of the budget is not mixed in either (a cycle whose shape the
+        // caller's budget set).
         gateOf("plain", 1, false),
       ],
     );
-    assertEquals(run.stop.speculation?.switches, 1, "T16 と同じ位置で倒れていない");
+    assertEquals(
+      run.stop.speculation?.switches,
+      1,
+      "it did not switch at the same position as T16",
+    );
   });
 
-  it("消費者が配送の合間に時計を進めても壁は動かない（フォールト注入）", async () => {
-    // 壁を「配送の後」で採る実装だと、遅い消費者ほど投機が遅く見える（= ゲートが投機を切る）。
-    // 偽時計を cycle の**中**（draft の中）と配送の**合間**（消費者）の 2 箇所で進め、run の壁に
-    // 前者だけが乗ることを見る。ゲートは要らない（`policy: "always"` でも壁は載る）。
+  it("the wall time does not move when the consumer advances the clock between deliveries (fault injection)", async () => {
+    // An implementation that takes the wall time "after delivery" makes speculation look slower the
+    // slower the consumer is (= the gate cuts speculation). The fake clock is advanced in two
+    // places, **inside** the cycle (in the draft) and **between** deliveries (the consumer), and
+    // only the former must land on the run's wall time. No gate is needed (the wall time is present
+    // with `policy: "always"` too).
     const cycleMs = 100;
     const deliveryMs = 1000;
     let elapsed = 0;
@@ -1804,23 +1982,23 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
     }
     assertEquals((await stream.done).reason, "max-tokens");
 
-    // 故障注入が効いていること（消費者のぶんが時計の大半である）。
+    // The fault injection takes effect (the consumer's share is most of the clock).
     assertEquals(delivered, 9);
     assertEquals(elapsed, 2 * cycleMs + 9 * deliveryMs);
     assertEquals(
       stepsOf(opened.phases).map((phase) => phase.wallMs),
       [cycleMs, cycleMs],
-      "run の壁に配送（消費者）の時間が入っている",
+      "the run wall times include the delivery (consumer) time",
     );
-    // `policy: "always"` はゲートを作らないので、局面の欄も生えない。
+    // `policy: "always"` creates no gate, so no phase field appears either.
     assertEquals(
       stepsOf(opened.phases).map((phase) => Object.hasOwn(phase, "gate")),
       [false, false],
-      "ゲート無しのターンに gate の欄がある",
+      "a turn without a gate has a gate field",
     );
   });
 
-  it("非投機の decode も壁を載せ、ゲートの欄は持たない", async () => {
+  it("non-speculative decode carries the wall time too and has no gate field", async () => {
     const plain = await runPlain({ prompt: PROMPT, maxNewTokens: 3 });
     const steps = stepsOf(plain.phases);
     assertEquals(
@@ -1829,19 +2007,25 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
     );
     for (const phase of steps) {
       const wallMs = phase.wallMs;
-      // 非投機の sequence は偽時計を差せない（`now` は投機の指定の欄）ので、実値ではなく
-      // 「載っていること」だけを見る。刻みの一致は上の投機の席が見る。
+      // A fake clock cannot be injected into a non-speculative sequence (`now` is a field of the
+      // speculation spec), so only "it is present" is checked, not the actual value. Matching ticks
+      // is checked by the speculative cases above.
       assert(
         wallMs !== undefined && Number.isFinite(wallMs) && wallMs >= 0,
-        `非投機の decode に壁が載っていない: ${JSON.stringify(phase)}`,
+        `non-speculative decode carries no wall time: ${JSON.stringify(phase)}`,
       );
-      assertEquals(Object.hasOwn(phase, "gate"), false, "非投機の観測にゲートの欄がある");
+      assertEquals(
+        Object.hasOwn(phase, "gate"),
+        false,
+        "a non-speculative observation has a gate field",
+      );
     }
   });
 
-  it("delivered はその cycle が確定させた token 数（accepted + 1 から作らない）", async () => {
-    // 停止 token で列挙を打ち切った cycle は `accepted + 1` 個を確定させない（T4 と同じ配置 —
-    // 連鎖 6 → 8 → 9 で 9 が停止 token）。導出している実装はここで 1 だけ多く名乗る。
+  it("delivered is the number of tokens the cycle committed (not derived from accepted + 1)", async () => {
+    // A cycle whose enumeration was cut off at a stop token does not commit `accepted + 1` tokens
+    // (the same layout as T4 — in the chain 6 → 8 → 9, 9 is the stop token). An implementation that
+    // derives it reports one too many here.
     const stopTokens = [9];
     const run = await runSpeculative({
       drafter: oracleDrafter(),
@@ -1858,12 +2042,13 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
     assertEquals(
       verifies.reduce((sum, phase) => sum + (phase.delivered ?? 0), 0),
       run.stop.speculation?.delivered,
-      "観測の delivered の合計が勘定の delivered と合わない",
+      "the sum of the observed delivered does not match the accounting's delivered",
     );
   });
 
-  it("delivered の合計は勘定と一致する（受理が散るターン）", async () => {
-    // 部分受理（a = 1）の cycle が続くターン: 1 cycle 2 個ずつ = 観測の合計も勘定と並ぶ。
+  it("the sum of delivered matches the accounting (a turn with scattered acceptance)", async () => {
+    // A turn of consecutive partially accepted (a = 1) cycles: 2 per cycle = the observed sum lines
+    // up with the accounting too.
     const run = await runSpeculative({
       drafter: partialDrafter(1),
       request: { prompt: PROMPT, maxNewTokens: 7 },
@@ -1876,33 +2061,37 @@ describe("T17 観測席の壁: 投機の cycle と plain step の壁が載り、
   });
 });
 
-// ---- 純関数（`src/generation/speculation.ts`）------------------------------------
+// ---- pure functions (`src/generation/speculation.ts`) -------------------------------------
 
-test("planDraftLength: 確定は最大 k'+1 個なので残り予算を超えない", () => {
-  assertEquals(planDraftLength(3, 9), 3, "予算が余っていれば k そのもの");
-  assertEquals(planDraftLength(3, 4), 3, "ちょうど k+1 個ぶん残っている");
+test("planDraftLength: at most k'+1 tokens are committed, so it does not exceed the remaining budget", () => {
+  assertEquals(planDraftLength(3, 9), 3, "k itself when the budget has room");
+  assertEquals(planDraftLength(3, 4), 3, "exactly k+1 left");
   assertEquals(planDraftLength(3, 3), 2);
   assertEquals(planDraftLength(3, 2), 1);
-  assertEquals(planDraftLength(3, 1), 0, "残り 1 個は draft を採らず verify 1 行で確定する");
+  assertEquals(
+    planDraftLength(3, 1),
+    0,
+    "with 1 left, no draft is taken and a one-row verify commits it",
+  );
   assertEquals(planDraftLength(1, 5), 1);
 });
 
-test("verifyRowIndices: R は常に k+1（k' が縮む cycle も末尾添字で埋める）", () => {
+test("verifyRowIndices: R is always k+1 (a cycle where k' shrinks is filled with the last index)", () => {
   assertEquals(verifyRowIndices(3, 3), [0, 1, 2, 3]);
   assertEquals(verifyRowIndices(2, 3), [0, 1, 2, 2]);
   assertEquals(verifyRowIndices(1, 3), [0, 1, 1, 1]);
-  // `k' = 0` だけは decode 形そのもの（PreparedPlan の鍵まで decode と同一になる）。
+  // Only `k' = 0` is the decode shape itself (identical to decode down to the PreparedPlan key).
   assertEquals(verifyRowIndices(0, 3), [0]);
   assertEquals(verifyRowIndices(1, 1), [0, 1]);
 });
 
-describe("takeDrafts: 先頭 k' 本だけを取り、語彙の外と本数不足は fail loudly", () => {
-  it("先頭 k' 本（余りは無視する）", () => {
+describe("takeDrafts: takes only the first k', and out-of-vocabulary ids or too few drafts fail loudly", () => {
+  it("the first k' (the rest is ignored)", () => {
     assertEquals(takeDrafts(Int32Array.from([8, 9, 3]), 2, VOCAB), [8, 9]);
     assertEquals(takeDrafts(Int32Array.from([8, 9, 3]), 0, VOCAB), []);
   });
 
-  it("本数が足りない", () => {
+  it("too few drafts", () => {
     assertThrows(
       () => takeDrafts(Int32Array.from([8, 9]), 3, VOCAB),
       Error,
@@ -1910,7 +2099,7 @@ describe("takeDrafts: 先頭 k' 本だけを取り、語彙の外と本数不足
     );
   });
 
-  it("語彙の外（範囲外 gather は行ごと NaN 汚染になる）", () => {
+  it("outside the vocabulary (an out-of-range gather poisons the whole row with NaN)", () => {
     assertThrows(
       () => takeDrafts(Int32Array.from([8, VOCAB]), 2, VOCAB),
       Error,
@@ -1924,12 +2113,15 @@ describe("takeDrafts: 先頭 k' 本だけを取り、語彙の外と本数不足
   });
 });
 
-/** 行 `j` が `tokens[j]` を argmax にする logits の読み口（読んだ行の添字も記録する）。 */
+/**
+ * A logits reader where row `j` makes `tokens[j]` the argmax (it also records the indices of the
+ * rows read).
+ */
 const rowsOf = (tokens: readonly number[]) => {
   const read: number[] = [];
   const row = (index: number): Float32Array<ArrayBuffer> => {
     read.push(index);
-    if (index >= tokens.length) throw new Error(`用意していない行 ${index} を読んだ`);
+    if (index >= tokens.length) throw new Error(`read row ${index}, which was not prepared`);
     const data = new Float32Array(new ArrayBuffer(VOCAB * 4));
     data[tokens[index]] = 10;
     return data;
@@ -1937,7 +2129,10 @@ const rowsOf = (tokens: readonly number[]) => {
   return { row, read };
 };
 
-/** 抽選の履歴を記録する sampler（実体は温度 0 の本物 — 判定は argmax）。 */
+/**
+ * A sampler that records the draw history (actually the real temperature-0 one — the decision is
+ * argmax).
+ */
 const recordingSampler = (): { readonly sampler: Sampler; readonly histories: number[][] } => {
   const inner = createSampler();
   const histories: number[][] = [];
@@ -1952,32 +2147,32 @@ const recordingSampler = (): { readonly sampler: Sampler; readonly histories: nu
   };
 };
 
-/** 停止 token が 1 つも無いターン（受理は先頭一致だけで決まる）。 */
+/** A turn without any stop token (acceptance is set by the prefix match alone). */
 const noStop = (): boolean => false;
 
-describe("acceptDrafts: 先頭一致で止まった位置が受理数・その行の抽選が b′", () => {
-  it("全受理（行 k' が b′ を出す）", () => {
+describe("acceptDrafts: the position where the prefix match stops is the accepted count, and that row's draw is b′", () => {
+  it("all accepted (row k' emits b′)", () => {
     const { row, read } = rowsOf([8, 9, 3, 13]);
     const { sampler } = recordingSampler();
     assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], noStop), {
       accepted: 3,
       confirmed: [8, 9, 3, 13],
     });
-    assertEquals(read, [0, 1, 2, 3], "全受理では draft の本数 + 1 行を読む");
+    assertEquals(read, [0, 1, 2, 3], "all accepted reads the draft count + 1 rows");
   });
 
-  it("途中で外れたら以降の行は読まない（早期打ち切り）", () => {
-    // 行 1 の抽選は 7 で、draft の 9 と食い違う → そこで止まり b′ = 7。
+  it("after a miss midway the later rows are not read (early exit)", () => {
+    // Row 1's draw is 7, which disagrees with the draft's 9 → it stops there and b′ = 7.
     const { row, read } = rowsOf([8, 7, 3, 13]);
     const { sampler } = recordingSampler();
     assertEquals(acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], noStop), {
       accepted: 1,
       confirmed: [8, 7],
     });
-    assertEquals(read, [0, 1], "棄却した行より後ろの logits を読んでいる");
+    assertEquals(read, [0, 1], "logits after the rejected row were read");
   });
 
-  it("受理 0 でも b′ は必ず 1 個確定する（decode 1 step への退化）", () => {
+  it("even with 0 accepted, b′ always commits one token (degenerating to one decode step)", () => {
     const { row, read } = rowsOf([8, 9, 3, 13]);
     const { sampler } = recordingSampler();
     assertEquals(acceptDrafts(row, [REJECTED, REJECTED, REJECTED], sampler, [1, 2, 6], noStop), {
@@ -1987,7 +2182,7 @@ describe("acceptDrafts: 先頭一致で止まった位置が受理数・その�
     assertEquals(read, [0]);
   });
 
-  it("行 j の抽選には「その行までの確定列」を渡す", () => {
+  it('row j\'s draw receives "the committed sequence up to that row"', () => {
     const { row } = rowsOf([8, 9, 3, 13]);
     const { sampler, histories } = recordingSampler();
     const history: readonly number[] = [1, 2, 6];
@@ -1998,11 +2193,12 @@ describe("acceptDrafts: 先頭一致で止まった位置が受理数・その�
       [1, 2, 6, 8, 9],
       [1, 2, 6, 8, 9, 3],
     ]);
-    // 呼び手の `history` は触らない（確定列は呼び手が配送しながら伸ばす）。
+    // The caller's `history` is not touched (the caller extends the committed sequence as it
+    // delivers).
     assertEquals(history, [1, 2, 6]);
   });
 
-  it("棄却した行の draft は履歴に積まない", () => {
+  it("the draft of a rejected row is not added to the history", () => {
     const { row } = rowsOf([8, 7, 3, 13]);
     const { sampler, histories } = recordingSampler();
     acceptDrafts(row, [8, 9, 3], sampler, [1, 2, 6], noStop);
@@ -2012,9 +2208,10 @@ describe("acceptDrafts: 先頭一致で止まった位置が受理数・その�
     ]);
   });
 
-  it("受理した draft が停止 token なら列挙を止め、後続行の抽選をしない", () => {
-    // 行 2 以降を**用意しない**読み口（読めば投げる）= 停止で止めない実装だけが赤くなる。
-    // 非投機はこの位置で生成を終えるので、その先の logits には触れないのが正しい。
+  it("when an accepted draft is a stop token the enumeration stops and later rows are not drawn", () => {
+    // A reader that does **not prepare** rows 2 and up (reading them throws) = only an
+    // implementation that does not stop at the stop turns red. The non-speculative run ends
+    // generation at this position, so not touching the logits beyond it is correct.
     const { row, read } = rowsOf([8, 9]);
     const { sampler, histories } = recordingSampler();
     assertEquals(
@@ -2024,16 +2221,18 @@ describe("acceptDrafts: 先頭一致で止まった位置が受理数・その�
         confirmed: [8, 9],
       },
     );
-    assertEquals(read, [0, 1], "停止 token の先の行を読んでいる");
-    // 抽選も 2 回だけ（確定 token 1 個につき 1 回 = RNG の消費列が非投機と並ぶ）。
+    assertEquals(read, [0, 1], "rows beyond the stop token were read");
+    // Only 2 draws as well (once per committed token = the RNG consumption lines up with the
+    // non-speculative run).
     assertEquals(histories, [
       [1, 2, 6],
       [1, 2, 6, 8],
     ]);
   });
 
-  it("棄却時の b′ が停止 token なら確定列は accepted + 1 個のまま", () => {
-    // 行 1 で外れて b′ = 7 を引き、その 7 が停止 token。列は `[d₁, b′]` = 長さ accepted + 1。
+  it("when b′ on rejection is a stop token the committed sequence stays accepted + 1 long", () => {
+    // It misses at row 1 and draws b′ = 7, and that 7 is a stop token. The sequence is `[d₁, b′]` =
+    // length accepted + 1.
     const { row, read } = rowsOf([8, 7, 3, 13]);
     const { sampler } = recordingSampler();
     assertEquals(
@@ -2047,7 +2246,7 @@ describe("acceptDrafts: 先頭一致で止まった位置が受理数・その�
   });
 });
 
-test("投機の診断負荷は cycle の壁とゲート判断に混ざらない", async () => {
+test("speculation's diagnostics load does not mix into the cycle wall time or the gate decision", async () => {
   const results = [];
   for (const observerMs of [0, 5, 50]) {
     let elapsed = 0;
@@ -2081,10 +2280,10 @@ test("投機の診断負荷は cycle の壁とゲート判断に混ざらない"
   assertEquals(results[2], results[0]);
 });
 
-test("空 draft の抽選は不要な履歴の読み取りをしない", () => {
+test("drawing for an empty draft does not read the history needlessly", () => {
   const history = new Proxy([1, 2, 6], {
     get: () => {
-      throw new Error("抽選に不要な履歴をコピーした");
+      throw new Error("copied history the draw does not need");
     },
   });
   let draws = 0;
@@ -2107,13 +2306,14 @@ test("空 draft の抽選は不要な履歴の読み取りをしない", () => {
   assertEquals(draws, 1);
 });
 
-// ---- T18: 分岐（`fork` — ADR 0083 追記 2026-10-11・裁定 8）--------------------------
+// ---- T18: forking (`fork` — ADR 0083 addendum 2026-10-11, ruling 8) ---------------------------
 //
-// 分岐の drafter は**複製した context に対して開き直す**（借り手は context ごと）。drafter の
-// 取り違えは token 列に出ない（draft は受理率にしか効かない）ので、`open` が受けた context と
-// 「どの drafter が draft したか」でしか縛れない。ゲートは観測状態を写す（判断の続きから回る）。
+// A fork's drafter is **reopened on the duplicated context** (borrowers are per context). A drafter
+// mix-up does not show in the token sequence (drafts affect only the acceptance rate), so it can
+// only be pinned through the context `open` received and "which drafter drafted". The gate copies
+// its observation state (it continues from where its decisions left off).
 
-test("T18 分岐: drafter は複製した context に対して開き直し、元の drafter を共有しない", async () => {
+test("T18 fork: the drafter is reopened on the duplicated context and the original drafter is not shared", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafters = [oracleDrafter(), oracleDrafter()];
   for (const drafter of drafters) drafter.watch(fake);
@@ -2125,7 +2325,7 @@ test("T18 分岐: drafter は複製した context に対して開き直し、元
       open: (context) => {
         seen.push(context);
         const drafter = drafters[seen.length - 1];
-        assert(drafter !== undefined, "open が想定より多く呼ばれた");
+        assert(drafter !== undefined, "open was called more often than expected");
         return Promise.resolve(drafter.face);
       },
       policy: "always",
@@ -2133,25 +2333,41 @@ test("T18 分岐: drafter は複製した context に対して開き直し、元
   });
   await drain(sequence.generate({ prompt: PROMPT, maxNewTokens: 6 }));
   const forked = await sequence.fork();
-  assertEquals(seen.length, 2, "分岐で drafter を開き直していない");
-  assert(seen[0] === fake.context, "元の drafter が元の context 以外で開いた");
-  assert(seen[1] === fake.forks[0], "分岐の drafter が複製した context 以外で開いた");
+  assertEquals(seen.length, 2, "the fork did not reopen the drafter");
+  assert(
+    seen[0] === fake.context,
+    "the original drafter opened on a context other than the original",
+  );
+  assert(
+    seen[1] === fake.forks[0],
+    "the fork's drafter opened on a context other than the duplicate",
+  );
 
-  // 分岐のターンの draft は分岐の drafter だけが出し、verify は複製した context で走る。
+  // The drafts of the fork's turn come only from the fork's drafter, and the verify runs on the
+  // duplicated context.
   const draftsOfMain = drafters[0].calls.length;
   const atBranch = fake.calls.length;
   const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 6 }));
-  assertEquals(drafters[0].calls.length, draftsOfMain, "分岐のターンで元の drafter が draft した");
-  assert(drafters[1].calls.length > 0, "分岐の drafter が 1 度も draft していない");
+  assertEquals(
+    drafters[0].calls.length,
+    draftsOfMain,
+    "the original drafter drafted on the fork's turn",
+  );
+  assert(drafters[1].calls.length > 0, "the fork's drafter never drafted");
   assert(
     fake.runContexts.slice(atBranch).every((context) => context === fake.forks[0]),
-    "分岐のターンが複製した context 以外で走った",
+    "the fork's turn ran on a context other than the duplicate",
   );
-  // 同じ状態・同じ要求なら、元で回した列と同じ（投機は列を変えない — 分岐でも）。
+  // With the same state and the same request, it gives the same sequence as the original
+  // (speculation does not change the sequence — on a fork either).
   const main = await drain(sequence.generate({ prompt: [3], maxNewTokens: 6 }));
-  assertEquals(branch.events, main.events, "分岐と元で同じ要求の列が違う");
+  assertEquals(
+    branch.events,
+    main.events,
+    "the fork and the original give different sequences for the same request",
+  );
 
-  // 寿命: 分岐の dispose は分岐の drafter → 複製した context だけを畳む。
+  // Lifetime: the fork's dispose tears down only the fork's drafter → the duplicated context.
   await forked.dispose();
   assertEquals([drafters[0].disposals(), drafters[1].disposals()], [0, 1]);
   assertEquals([fake.disposals(), fake.disposalsOf(fake.forks[0])], [0, 1]);
@@ -2159,7 +2375,7 @@ test("T18 分岐: drafter は複製した context に対して開き直し、元
   assertEquals(drafters[0].disposals(), 1);
 });
 
-test("T18 分岐: drafter の開き直しに失敗したら複製した context を畳んで投げ、元は無傷", async () => {
+test("T18 fork: if reopening the drafter fails, the duplicated context is torn down before throwing and the original is untouched", async () => {
   const fake = fakeSession({ successor: SUCCESSOR });
   const drafter = oracleDrafter();
   drafter.watch(fake);
@@ -2172,7 +2388,7 @@ test("T18 分岐: drafter の開き直しに失敗したら複製した context 
         opens += 1;
         return opens === 1
           ? Promise.resolve(drafter.face)
-          : Promise.reject(new Error("注入: 開き直しの失敗"));
+          : Promise.reject(new Error("injected: reopening failed"));
       },
       policy: "always",
     },
@@ -2180,20 +2396,25 @@ test("T18 分岐: drafter の開き直しに失敗したら複製した context 
   await drain(sequence.generate({ prompt: PROMPT, maxNewTokens: 4 }));
   const used = sequence.used;
 
-  await assertRejects(() => sequence.fork(), Error, "注入: 開き直しの失敗");
+  await assertRejects(() => sequence.fork(), Error, "injected: reopening failed");
   assertEquals(fake.forks.length, 1);
-  assertEquals(fake.disposalsOf(fake.forks[0]), 1, "開けなかった分岐の context が漏れた");
-  assertEquals(drafter.disposals(), 0, "元の drafter が巻き添えで畳まれた");
-  assertEquals(fake.disposals(), 0, "元の context が巻き添えで畳まれた");
-  // 元はそのまま続けられる。
+  assertEquals(
+    fake.disposalsOf(fake.forks[0]),
+    1,
+    "the context of the fork that could not be opened leaked",
+  );
+  assertEquals(drafter.disposals(), 0, "the original drafter was torn down as collateral");
+  assertEquals(fake.disposals(), 0, "the original context was torn down as collateral");
+  // The original can continue as is.
   assertEquals(sequence.used, used);
   const next = await drain(sequence.generate({ prompt: [3], maxNewTokens: 2 }));
   assertEquals(next.stop.reason, "max-tokens");
   await sequence.dispose();
 });
 
-test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初の cycle は元のゲートのモードで決まる）", async () => {
-  // T16 と同じ壁（投機が 2.5 倍遅い）で元のゲートを plain へ倒してから分岐する。
+test("T18 fork: the gate's observation state is inherited (the fork's first cycle is set by the original gate's mode)", async () => {
+  // Switch the original gate to plain with the same wall times as T16 (speculation 2.5 times
+  // slower), then fork.
   const drafter = oracleDrafter();
   const opened = await openSpeculative({
     drafter,
@@ -2202,23 +2423,34 @@ test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初の c
     clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? 100 : 10)),
   });
   const first = await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
-  assertEquals(first.stop.speculation?.switches, 1, "前提: 元のゲートが plain へ倒れていない");
+  assertEquals(
+    first.stop.speculation?.switches,
+    1,
+    "premise: the original gate did not switch to plain",
+  );
 
   const forked = await opened.sequence.fork();
   const mark = opened.phases.length;
   const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 4 }));
-  /** cycle を名乗る通知（draft は verify の前に届く補助の通知なので除く）。 */
+  /**
+   * Reports that name a cycle (draft is an auxiliary report that arrives before the verify, so it
+   * is excluded).
+   */
   const isCycle = (phase: GenerationRunPhase): boolean =>
     phase.kind === "verify" || phase.kind === "decode";
   const cycles = opened.phases.slice(mark).filter(isCycle);
-  // 分岐の最初の cycle は元のゲートの定常モード（plain）で決まる = decode 形。測り直す実装は
-  // 新しいゲートの初手（speculate = verify）になる。
+  // The fork's first cycle is set by the original gate's steady mode (plain) = the decode shape. An
+  // implementation that re-measures takes a new gate's first move (speculate = verify).
   const head = cycles[0];
-  assert(head?.kind === "decode", `分岐の最初の cycle が decode 形でない: ${JSON.stringify(head)}`);
+  assert(
+    head?.kind === "decode",
+    `the fork's first cycle is not the decode shape: ${JSON.stringify(head)}`,
+  );
   assertEquals(head.gate?.mode, "plain");
-  assertEquals(branch.stop.speculation?.switches, 0, "分岐のターンで切替が起きた");
+  assertEquals(branch.stop.speculation?.switches, 0, "a switch happened on the fork's turn");
 
-  // 陽性対照: 観測の無いゲート（新しい sequence）の最初の cycle は投機（verify）。
+  // Positive control: the first cycle of a gate without observations (a new sequence) is
+  // speculative (verify).
   const fresh = await openSpeculative({
     drafter: oracleDrafter(),
     policy: "auto",
@@ -2228,21 +2460,24 @@ test("T18 分岐: ゲートの観測状態を引き継ぐ（分岐の最初の c
   assertEquals(
     fresh.phases.filter(isCycle)[0]?.kind,
     "verify",
-    "観測の無いゲートの初手が投機でない（上の門が空振りする）",
+    "the first move of a gate without observations is not speculative (the check above would miss)",
   );
   await forked.dispose();
   await fresh.sequence.dispose();
   await opened.sequence.dispose();
 });
 
-test("T18 分岐: ゲートは写して共有しない（分岐だけを倒しても元のモードは動かない）", async () => {
-  // 投機が勝つ壁（投機 cycle 20ms で 4 個確定・plain step 10ms/token）で元を投機のまま置き、
-  // 分岐のターンだけを T16 の壁（投機 100ms）にして分岐のゲートを plain へ倒す。sequence 層で
-  // ゲートを写さず共有する実装（`gate?.fork()` を `gate` にする退行）では、倒れたのが元のゲート
-  // そのものなので、元の次のターンの最初の cycle が decode 形（plain）になる。
-  // NOTE: 通知の `gate.switches` と停止の `switches` は**ターン内**の数（ターン開始時の累計との
-  // 差）なので、分岐の切替が元の累計に入ったことはそこからは見えない — 縛るのはモードと、元の
-  // ターンの中で切替が起きないこと。
+test("T18 fork: the gate is copied, not shared (switching only the fork does not move the original's mode)", async () => {
+  // With wall times where speculation wins (a speculative cycle commits 4 in 20ms, plain step
+  // 10ms/token) the original stays speculative, and only the fork's turn gets T16's wall times
+  // (speculation 100ms) so the fork's gate switches to plain. In an implementation that shares the
+  // gate instead of copying it at the sequence layer (a regression from `gate?.fork()` to `gate`),
+  // what switched is the original gate itself, so the first cycle of the original's next turn
+  // becomes the decode shape (plain).
+  // NOTE: the report's `gate.switches` and the stop's `switches` are counts **within the turn**
+  // (the difference from the running total at the start of the turn), so they cannot show that the
+  // fork's switch entered the original's total — what is pinned is the mode, and that no switch
+  // happens within the original's turn.
   const drafter = oracleDrafter();
   let slow = false;
   const opened = await openSpeculative({
@@ -2252,17 +2487,25 @@ test("T18 分岐: ゲートは写して共有しない（分岐だけを倒し�
     clock: fakeClock(drafter, (_cycle, drafted) => (drafted ? (slow ? 100 : 20) : 10)),
   });
   const first = await drain(opened.sequence.generate({ prompt: PROMPT, maxNewTokens: 20 }));
-  assertEquals(first.stop.speculation?.switches, 0, "前提: 元のゲートが投機のまま残っていない");
+  assertEquals(
+    first.stop.speculation?.switches,
+    0,
+    "premise: the original gate did not stay speculative",
+  );
   assertEquals(
     stepsOf(opened.phases).at(-1)?.gate?.mode,
     "speculate",
-    "前提: 元のゲートの定常モードが投機でない",
+    "premise: the original gate's steady mode is not speculative",
   );
 
   const forked = await opened.sequence.fork();
   slow = true;
   const branch = await drain(forked.generate({ prompt: [3], maxNewTokens: 20 }));
-  assertEquals(branch.stop.speculation?.switches, 1, "前提: 分岐のゲートが plain へ倒れていない");
+  assertEquals(
+    branch.stop.speculation?.switches,
+    1,
+    "premise: the fork's gate did not switch to plain",
+  );
 
   slow = false;
   const mark = opened.phases.length;
@@ -2270,10 +2513,10 @@ test("T18 分岐: ゲートは写して共有しない（分岐だけを倒し�
   const head = stepsOf(opened.phases.slice(mark))[0];
   assert(
     head?.kind === "verify",
-    `元の次のターンの最初の cycle が投機でない: ${JSON.stringify(head)}`,
+    `the first cycle of the original's next turn is not speculative: ${JSON.stringify(head)}`,
   );
   assertEquals(head.gate?.mode, "speculate");
-  assertEquals(next.stop.speculation?.switches, 0, "元のターンで切替が起きた");
+  assertEquals(next.stop.speculation?.switches, 0, "a switch happened on the original's turn");
   await forked.dispose();
   await opened.sequence.dispose();
 });

@@ -1,16 +1,19 @@
-// Wan2.2 の I2V の DiT の条件づけのホスト関数（`src/wan/dit-loop.ts` の `wanConditionMask` と
-// `withWanFirstFrameCondition` — ADR 0121 決定 11）の門。純関数なので GPU も資産も要らない。
+// Checks of the host functions for conditioning Wan2.2's I2V DiT (`wanConditionMask` and
+// `withWanFirstFrameCondition` of `src/wan/dit-loop.ts` — ADR 0121 decision 11). Pure functions, so
+// neither a GPU nor assets are needed.
 //
-// 縛るのは 3 点:
+// Three things are pinned:
 //
-// ① 条件マスクの防御の枝（fail loudly）— 入力の形 "t2v" に条件を渡す・時間の patch ≠ 1 で I2V を組む。
-//    今の公開 API からは届かない（計画が 2.1 の image を先に拒む・`wanDitPatch` の時間の patch は 1 固定）
-//    ので、配線を変えたときに黙って通らないことをここで固定する。
-// ② 条件マスクの真の範囲が先頭の潜在フレームのトークン `[0, rows·cols)` だけであること。
-// ③ 置き換えが上流 diffusers の式 `(1 − m)·condition + m·latents` を逐語に計算すること — 符号付きゼロ
-//    まで上流と同じ値になる。「先頭フレームを写す」への簡約は ±0 の要素で上流と割れる（下の期待値は
-//    f32 の上流の式の値を手で引いたもの）。I2V の sha 行も ±0 の差を拾うが、遠くで赤になると帰属に
-//    手間がかかるので、ここで直接縛る。
+// (1) The defensive branches of the condition mask (fail loudly) — passing a condition with the input
+//     form "t2v", and building I2V with a temporal patch ≠ 1. The current public API cannot reach them
+//     (the plan rejects 2.1's image first, and `wanDitPatch` fixes the temporal patch at 1), so this
+//     pins that they do not silently pass when the wiring changes.
+// (2) The condition mask is true only on the tokens of the first latent frame, `[0, rows·cols)`.
+// (3) The replacement computes upstream diffusers' formula `(1 − m)·condition + m·latents` verbatim —
+//     giving the same values as upstream down to signed zeros. Simplifying it to "copy the first frame"
+//     diverges from upstream on ±0 elements (the expected values below were worked out by hand from
+//     upstream's formula in f32). The I2V sha rows also catch a ±0 difference, but a red far away takes
+//     effort to attribute, so it is pinned directly here.
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -19,21 +22,21 @@ import { type WanPatchGeometry, wanTokenGrid } from "../src/wan/dit-tokens.ts";
 
 const OWNER = "test";
 
-/** I2V の patch（時間 1・空間 2×2 — `wanDitPatch` と同じ刻み）。 */
+/** The I2V patch (temporal 1, spatial 2×2 — the same stride as `wanDitPatch`). */
 const PATCH: WanPatchGeometry = { channels: 4, patchFrames: 1, patchHeight: 2, patchWidth: 2 };
 
-/** 潜在 `[4, 3, 4, 6]` → トークン格子 3 × 2 × 3（先頭の潜在フレームは 6 トークン）。 */
+/** Latent `[4, 3, 4, 6]` → token grid 3 × 2 × 3 (the first latent frame has 6 tokens). */
 const GRID = wanTokenGrid([4, 3, 4, 6], PATCH);
 
-/** 符号付きゼロを区別して表示する（`assertEquals` の差分表示は −0 と +0 を同じ "0" と書く）。 */
+/** Shows signed zeros distinctly (the diff display of `assertEquals` writes −0 and +0 both as "0"). */
 const signed = (value: number): string => (Object.is(value, -0) ? "-0" : String(value));
 
-/** `Object.is` で符号付きゼロまで一致することを確かめる。 */
+/** Checks with `Object.is` that the values match down to signed zeros. */
 const assertSameValue = (actual: number, expected: number, label: string): void =>
-  assert(Object.is(actual, expected), `${label}: ${signed(actual)}（期待 ${signed(expected)}）`);
+  assert(Object.is(actual, expected), `${label}: ${signed(actual)} (expected ${signed(expected)})`);
 
-describe("wanConditionMask（I2V の条件マスク）", () => {
-  it("入力の形 't2v' に条件の潜在を渡すと、条件マスクの入力が無いと投げる", () => {
+describe("wanConditionMask (the I2V condition mask)", () => {
+  it("passing a condition latent with the input form 't2v' throws that there is no condition-mask input", () => {
     assertThrows(
       () => wanConditionMask("t2v", GRID, PATCH, true, OWNER),
       Error,
@@ -41,9 +44,10 @@ describe("wanConditionMask（I2V の条件マスク）", () => {
     );
   });
 
-  it("時間の patch が 1 でない I2V は、先頭の潜在フレームがトークンのフレームに揃わないと投げる", () => {
+  it("I2V with a temporal patch other than 1 throws that the first latent frame does not align with a token frame", () => {
     const patch: WanPatchGeometry = { ...PATCH, patchFrames: 2 };
-    // 潜在の 4 フレームを時間の patch 2 で割った格子（patch と格子の整合は保ったまま patch だけを変える）。
+    // A grid of the 4 latent frames divided by a temporal patch of 2 (only the patch changes, keeping
+    // the patch and the grid consistent).
     const grid = wanTokenGrid([4, 4, 4, 6], patch);
     assertThrows(
       () => wanConditionMask("ti2v", grid, patch, true, OWNER),
@@ -52,17 +56,17 @@ describe("wanConditionMask（I2V の条件マスク）", () => {
     );
   });
 
-  it("I2V は先頭の潜在フレームのトークン [0, rows·cols) だけが真で、他は全て偽", () => {
+  it("in I2V only the tokens of the first latent frame [0, rows·cols) are true, all others false", () => {
     const mask = wanConditionMask("ti2v", GRID, PATCH, true, OWNER);
-    assertEquals(GRID.rows * GRID.cols, 6, "前提: 先頭の潜在フレームは 2 × 3 トークン");
+    assertEquals(GRID.rows * GRID.cols, 6, "precondition: the first latent frame is 2 × 3 tokens");
     const expected = new Uint32Array(GRID.count);
     expected.fill(1, 0, 6);
     assertEquals(mask, expected);
   });
 });
 
-describe("withWanFirstFrameCondition（モデル入力の先頭フレームの置き換え）", () => {
-  it("潜在の要素数が潜在の形と合わなければ投げる", () => {
+describe("withWanFirstFrameCondition (replacing the first frame of the model input)", () => {
+  it("throws when the latent's element count does not match the latent shape", () => {
     assertThrows(
       () => withWanFirstFrameCondition(new Float32Array(7), new Float32Array(4), [1, 2, 1, 4]),
       Error,
@@ -70,7 +74,7 @@ describe("withWanFirstFrameCondition（モデル入力の先頭フレームの�
     );
   });
 
-  it("条件が 1 フレームの要素数でなければ投げる（2 フレームぶんの条件を渡す）", () => {
+  it("throws when the condition is not the element count of one frame (a condition for 2 frames is passed)", () => {
     assertThrows(
       () => withWanFirstFrameCondition(new Float32Array(8), new Float32Array(8), [1, 2, 1, 4]),
       Error,
@@ -78,34 +82,34 @@ describe("withWanFirstFrameCondition（モデル入力の先頭フレームの�
     );
   });
 
-  it("符号付きゼロまで上流の式の値になる（先頭フレームを写すだけの値とは割れる）", () => {
-    // 潜在 `[C=1, F=2, H=1, W=4]`・条件 `[1, 1, 1, 4]`。条件は全フレームへ broadcast される。
+  it("matches upstream's formula down to signed zeros (diverging from values that just copy the first frame)", () => {
+    // Latent `[C=1, F=2, H=1, W=4]`, condition `[1, 1, 1, 4]`. The condition is broadcast to every frame.
     const condition = Float32Array.of(-0, -0, -2, 3);
     const latents = Float32Array.of(
-      // 先頭フレーム（m = 0 → 1·cond + 0·lat）
+      // first frame (m = 0 → 1·cond + 0·lat)
       +0,
       1,
       5,
       7,
-      // 2 フレーム目（m = 1 → 0·cond + 1·lat）
+      // 2nd frame (m = 1 → 0·cond + 1·lat)
       11,
       13,
       -0,
       -0,
     );
     const out = withWanFirstFrameCondition(latents, condition, [1, 2, 1, 4]);
-    // cond = −0・lat = +0 → −0 + 0·(+0) = −0 + +0 = +0（写すと −0）。
-    assertSameValue(out[0], +0, "先頭フレーム [0]");
-    // cond = −0・lat = 1 → −0 + +0 = +0（写すと −0）。
-    assertSameValue(out[1], +0, "先頭フレーム [1]");
-    // 非ゼロの要素は、先頭フレームが条件・2 フレーム目が潜在そのもの。
-    assertSameValue(out[2], -2, "先頭フレーム [2]");
-    assertSameValue(out[3], 3, "先頭フレーム [3]");
-    assertSameValue(out[4], 11, "2 フレーム目 [0]");
-    assertSameValue(out[5], 13, "2 フレーム目 [1]");
-    // cond = −2 < 0・lat = −0 → 0·(−2) + −0 = −0 + −0 = −0。
-    assertSameValue(out[6], -0, "2 フレーム目 [2]");
-    // cond = 3 > 0・lat = −0 → 0·3 + −0 = +0 + −0 = +0（潜在をそのまま残すと −0）。
-    assertSameValue(out[7], +0, "2 フレーム目 [3]");
+    // cond = −0, lat = +0 → −0 + 0·(+0) = −0 + +0 = +0 (copying gives −0).
+    assertSameValue(out[0], +0, "first frame [0]");
+    // cond = −0, lat = 1 → −0 + +0 = +0 (copying gives −0).
+    assertSameValue(out[1], +0, "first frame [1]");
+    // The non-zero elements are the condition in the first frame and the latent itself in the 2nd frame.
+    assertSameValue(out[2], -2, "first frame [2]");
+    assertSameValue(out[3], 3, "first frame [3]");
+    assertSameValue(out[4], 11, "2nd frame [0]");
+    assertSameValue(out[5], 13, "2nd frame [1]");
+    // cond = −2 < 0, lat = −0 → 0·(−2) + −0 = −0 + −0 = −0.
+    assertSameValue(out[6], -0, "2nd frame [2]");
+    // cond = 3 > 0, lat = −0 → 0·3 + −0 = +0 + −0 = +0 (keeping the latent as is gives −0).
+    assertSameValue(out[7], +0, "2nd frame [3]");
   });
 });

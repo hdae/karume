@@ -1,19 +1,22 @@
-// BiRefNet の α マットの後処理（`src/birefnet/matte.ts`）の 2 つの手順を、系列ごとの上流の関数で
-// 作った golden と突き合わせる（ADR 0125 — GPU 不要・資産不要）。
+// Compares the two procedures of BiRefNet's α-matte postprocessing (`src/birefnet/matte.ts`) with
+// goldens made by each series' upstream function (ADR 0125 — no GPU, no assets).
 //
-// golden は git 追跡の `fixtures/birefnet-matte/matte.{json,safetensors}`（書き手は recipe の
-// `tools/export-recipes/birefnet/matte_fixture.py` — 上流の関数をそのまま呼び、量子化だけを四捨五入へ
-// 差し替えたもの）。無ければ SKIP ではなく赤（上流との一致を誰も見ていない状態を緑にしない）。
+// The golden is the git-tracked `fixtures/birefnet-matte/matte.{json,safetensors}` (its writer is
+// the recipe's `tools/export-recipes/birefnet/matte_fixture.py` — it calls the upstream functions
+// as they are, with only the quantisation replaced by round-half-up). If it is missing the result
+// is red, not SKIP (a state where nobody checks upstream parity must not be green).
 //
-// - `u8-pil-bicubic`（HR の上流の意図）: golden の `<case>.hr`（Pillow の 8bit の BICUBIC の最終 α）と
-//   **0 不一致**。
-// - `float-bilinear`（Lucida の上流の意図 = 手順を宣言で選ぶ前のパイプラインの経路そのもの）: golden の
-//   `<case>.lucida`（torch の丸める前の `255α`）を四捨五入した最終 α と一致するか、golden の `255α` が
-//   `k + 0.5` から ε（fixture の `lucida.epsilon`）以内のときだけ 1 段ずれてよい（torch の f32 の座標と
-//   重みの丸め — ADR 0125）。
+// - `u8-pil-bicubic` (HR's upstream intent): **zero mismatches** against the golden's `<case>.hr`
+//   (Pillow's 8-bit BICUBIC final α).
+// - `float-bilinear` (Lucida's upstream intent = the very path of the pipeline before the procedure
+//   was chosen by declaration): matches the final α obtained by rounding the golden's
+//   `<case>.lucida` (torch's `255α` before rounding) half up, or may be off by one step only when
+//   the golden's `255α` lies within ε (the fixture's `lucida.epsilon`) of `k + 0.5` (rounding of
+//   torch's f32 coordinates and weights — ADR 0125).
 //
-// 加えて fixture の作り方に依らない仕様（量子化は四捨五入・手順の既定は無い・未知の手順は落とす・
-// 非有限の logit は画素座標つきで落ちる）を直接縛る。
+// It also pins directly the spec that does not depend on how the fixture is made (quantisation
+// rounds half up, there is no default procedure, an unknown procedure is rejected, a non-finite
+// logit fails with pixel coordinates).
 
 import { readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -24,14 +27,17 @@ import { floatsOf, readBuffer, viewOf } from "./helpers/safetensors.ts";
 
 const FIXTURE = new URL("fixtures/birefnet-matte/matte.json", import.meta.url);
 
-/** fixture の入力表の 1 行（logit は safetensors の `<name>.logits`）。 */
+/** One row of the fixture's input table (the logits are `<name>.logits` in the safetensors). */
 type MatteInputRow = {
   readonly name: string;
   readonly width: number;
   readonly height: number;
 };
 
-/** fixture のケース表の 1 行（期待値は safetensors の `<name>.hr` / `<name>.lucida`）。 */
+/**
+ * One row of the fixture's case table (the expected values are `<name>.hr` / `<name>.lucida` in the
+ * safetensors).
+ */
 type MatteCaseRow = {
   readonly name: string;
   readonly input: string;
@@ -67,8 +73,9 @@ const isCaseRow = (value: unknown): value is MatteCaseRow =>
   isPositiveInteger(value.outHeight);
 
 /**
- * fixture（入力表・ケース表の JSON + テンソルの safetensors）を読む。形が書き手の doc から外れたら
- * fail loudly。MUST: 無ければ投げる（git 追跡の fixture なので、無いのは取り違えか書き損じ）。
+ * Reads the fixture (the JSON of the input and case tables + the safetensors of the tensors). Fails
+ * loudly if the shape departs from the writer's doc. MUST: throw when it is missing (it is a
+ * git-tracked fixture, so a missing one is a mix-up or a botched write).
  */
 const readFixture = async (): Promise<MatteFixture> => {
   const raw: unknown = JSON.parse(await readTextFile(FIXTURE));
@@ -85,13 +92,13 @@ const readFixture = async (): Promise<MatteFixture> => {
     !raw.cases.every(isCaseRow)
   ) {
     throw new Error(
-      `${FIXTURE.pathname}: 形が {source.versions, lucida.epsilon, tensors, inputs, cases} でない`,
+      `${FIXTURE.pathname}: the shape is not {source.versions, lucida.epsilon, tensors, inputs, cases}`,
     );
   }
   const versions: Record<string, string> = {};
   for (const [name, version] of Object.entries(raw.source.versions)) {
     if (typeof version !== "string") {
-      throw new Error(`${FIXTURE.pathname}: 版 ${name} が文字列でない`);
+      throw new Error(`${FIXTURE.pathname}: version ${name} is not a string`);
     }
     versions[name] = version;
   }
@@ -106,43 +113,41 @@ const readFixture = async (): Promise<MatteFixture> => {
 
 const fixture = await readFixture();
 
-/** 入力の logit（F32 `[height, width]` — 形の食い違いは fail loudly）。 */
+/** The input logits (F32 `[height, width]` — a shape mismatch fails loudly). */
 const logitsOf = (row: MatteInputRow): Float32Array<ArrayBuffer> => {
   const key = `${row.name}.logits`;
-  assertEquals(
-    [...viewOf(fixture.tensors, key, "matte の fixture").shape],
-    [row.height, row.width],
-  );
-  return floatsOf(fixture.tensors, key, "matte の fixture");
+  assertEquals([...viewOf(fixture.tensors, key, "matte fixture").shape], [row.height, row.width]);
+  return floatsOf(fixture.tensors, key, "matte fixture");
 };
 
-/** ケースの HR の最終 α（U8 `[outHeight, outWidth]`）。 */
+/** The case's HR final α (U8 `[outHeight, outWidth]`). */
 const hrOf = (row: MatteCaseRow): Uint8Array<ArrayBuffer> => {
   const key = `${row.name}.hr`;
-  const view = viewOf(fixture.tensors, key, "matte の fixture");
-  assertEquals(view.dtype, "U8", `${key} の dtype`);
-  assertEquals([...view.shape], [row.outHeight, row.outWidth], `${key} の形`);
+  const view = viewOf(fixture.tensors, key, "matte fixture");
+  assertEquals(view.dtype, "U8", `dtype of ${key}`);
+  assertEquals([...view.shape], [row.outHeight, row.outWidth], `shape of ${key}`);
   return new Uint8Array(fixture.tensors.buffer, view.byteOffset, view.byteLength);
 };
 
-/** ケースの Lucida の丸める前の `255α`（F32 `[outHeight, outWidth]`）。 */
+/** The case's Lucida `255α` before rounding (F32 `[outHeight, outWidth]`). */
 const lucidaOf = (row: MatteCaseRow): Float32Array<ArrayBuffer> => {
   const key = `${row.name}.lucida`;
   assertEquals(
-    [...viewOf(fixture.tensors, key, "matte の fixture").shape],
+    [...viewOf(fixture.tensors, key, "matte fixture").shape],
     [row.outHeight, row.outWidth],
-    `${key} の形`,
+    `shape of ${key}`,
   );
-  return floatsOf(fixture.tensors, key, "matte の fixture");
+  return floatsOf(fixture.tensors, key, "matte fixture");
 };
 
 const inputOf = (row: MatteCaseRow): MatteInputRow => {
   const input = fixture.inputs.get(row.input);
-  if (input === undefined) throw new Error(`ケース ${row.name} の入力 ${row.input} が入力表に無い`);
+  if (input === undefined)
+    throw new Error(`case ${row.name}: input ${row.input} is not in the input table`);
   return input;
 };
 
-/** ケースを手順に通す。 */
+/** Runs a case through a procedure. */
 const run = (row: MatteCaseRow, procedure: MatteProcedure): Uint8Array<ArrayBuffer> => {
   const input = inputOf(row);
   const matte = matteFromLogits(
@@ -153,12 +158,16 @@ const run = (row: MatteCaseRow, procedure: MatteProcedure): Uint8Array<ArrayBuff
     row.outHeight,
     procedure,
   );
-  assertEquals([matte.width, matte.height], [row.outWidth, row.outHeight], `${row.name} の寸法`);
+  assertEquals(
+    [matte.width, matte.height],
+    [row.outWidth, row.outHeight],
+    `dimensions of ${row.name}`,
+  );
   return matte.data;
 };
 
-describe("u8-pil-bicubic（HR の上流の意図 — Pillow の 8bit の BICUBIC）", () => {
-  it("fixture の全ケースが上流の関数の最終 α と 0 不一致", () => {
+describe("u8-pil-bicubic (HR's upstream intent — Pillow's 8-bit BICUBIC)", () => {
+  it("every fixture case has zero mismatches against the upstream function's final α", () => {
     const failures: string[] = [];
     for (const row of fixture.cases) {
       const expected = hrOf(row);
@@ -172,29 +181,29 @@ describe("u8-pil-bicubic（HR の上流の意図 — Pillow の 8bit の BICUBIC
       }
       if (mismatches > 0) {
         failures.push(
-          `${row.name}: ${mismatches} / ${expected.length} 標本が違う` +
-            `（最初は ${first}: ${actual[first]} 対 ${expected[first]}）`,
+          `${row.name}: ${mismatches} / ${expected.length} samples differ` +
+            ` (the first is ${first}: ${actual[first]} vs ${expected[first]})`,
         );
       }
     }
     assertEquals(
       failures,
       [],
-      `Pillow ${fixture.versions.pillow} の golden と ${fixture.cases.length} ケース中 ` +
-        `${failures.length} ケースが違う`,
+      `Pillow ${fixture.versions.pillow} golden: of ${fixture.cases.length} cases, ` +
+        `${failures.length} differ`,
     );
   });
 
-  it("量子化は 0.5 を切り上げる（上流の切り捨てではない）", () => {
-    // 恒等寸法では resize が写しになり、量子化だけが残る。logit 0 → 255σ = 127.5 → 128（切り捨てなら
-    // 127）、logit 7 → 254.77 → 255（切り捨てなら 254）。
+  it("quantisation rounds 0.5 up (not the upstream truncation)", () => {
+    // At identity dimensions resize is a copy and only the quantisation remains. logit 0 → 255σ =
+    // 127.5 → 128 (truncation would give 127), logit 7 → 254.77 → 255 (truncation would give 254).
     const matte = matteFromLogits(Float32Array.of(0, 7, -40, 40), 2, 2, 2, 2, "u8-pil-bicubic");
     assertEquals([...matte.data], [128, 255, 0, 255]);
   });
 });
 
-describe("float-bilinear（Lucida の上流の意図）", () => {
-  it("fixture の全ケースが上流の関数の最終 α と一致し、ずれは ε の内の 1 段だけ", () => {
+describe("float-bilinear (Lucida's upstream intent)", () => {
+  it("every fixture case matches the upstream function's final α, off by one step only within ε", () => {
     const { epsilon } = fixture;
     const failures: string[] = [];
     for (const row of fixture.cases) {
@@ -211,67 +220,72 @@ describe("float-bilinear（Lucida の上流の意図）", () => {
           continue;
         }
         failures.push(
-          `${row.name}[${index}]: ${actual[index]} 対 ${expected}（golden の 255α = ${
+          `${row.name}[${index}]: ${actual[index]} vs ${expected} (the golden's 255α = ${
             scaled[index]
-          }）`,
+          })`,
         );
       }
     }
-    assertEquals(failures.slice(0, 8), [], `ε ${epsilon} の外の不一致が ${failures.length} 標本`);
+    assertEquals(
+      failures.slice(0, 8),
+      [],
+      `outside ε ${epsilon}: ${failures.length} mismatching samples`,
+    );
   });
 });
 
-describe("手順の共通の約束", () => {
-  it("fixture は拡大・縮小・横と縦の逆向き・片軸だけ・恒等を含み、グラフの 1024² を狙わない", () => {
+describe("the shared contract of the procedures", () => {
+  it("the fixture includes upscaling, downscaling, opposite directions per axis, one axis only and identity, and avoids the graph's 1024²", () => {
     const shapes = fixture.cases.map((row) => ({ ...row, input: inputOf(row) }));
     const has = (predicate: (shape: (typeof shapes)[number]) => boolean, what: string): void =>
-      assert(shapes.some(predicate), `${what}のケースが無い`);
+      assert(shapes.some(predicate), `no ${what} case`);
     has(
       ({ input, outWidth, outHeight }) => outWidth > input.width && outHeight > input.height,
-      "拡大",
+      "upscaling",
     );
     has(
       ({ input, outWidth, outHeight }) => outWidth < input.width && outHeight < input.height,
-      "縮小",
+      "downscaling",
     );
     has(
       ({ input, outWidth, outHeight }) => outWidth < input.width && outHeight > input.height,
-      "横は縮小・縦は拡大",
+      "horizontal downscaling with vertical upscaling",
     );
     has(
       ({ input, outWidth, outHeight }) => outWidth !== input.width && outHeight === input.height,
-      "横だけ",
+      "horizontal-only",
     );
     has(
       ({ input, outWidth, outHeight }) => outWidth === input.width && outHeight !== input.height,
-      "縦だけ",
+      "vertical-only",
     );
     has(
       ({ input, outWidth, outHeight }) =>
         outWidth === input.width && outHeight === input.height && input.width > 1,
-      "恒等",
+      "identity",
     );
     assert(
       shapes.every(({ outWidth, outHeight }) => outWidth !== 1024 || outHeight !== 1024),
-      "グラフの寸法 1024² のケースがある（resize が恒等になり補間を見ない）",
+      "there is a case at the graph's dimensions 1024² (resize becomes the identity and does not exercise interpolation)",
     );
   });
 
-  it("2 つの手順は段差の拡大で値が割れる（手順の取り違えを掴む）", () => {
-    // 段差の拡大は bicubic の負のローブで bilinear と値が割れる（R6B-001 の 4 → 8 の実測の 1 例）。
+  it("the two procedures give different values when upscaling a step (catches a mix-up of procedures)", () => {
+    // Upscaling a step makes bicubic's negative lobe differ from bilinear (one measured example,
+    // R6B-001's 4 → 8).
     const step = Float32Array.of(-12, -12, 12, 12);
     const bilinear = matteFromLogits(step, 4, 1, 8, 1, "float-bilinear").data;
     const bicubic = matteFromLogits(step, 4, 1, 8, 1, "u8-pil-bicubic").data;
     assert(
       [...bilinear].some((value, index) => value !== bicubic[index]),
-      "2 つの手順が同じ値",
+      "the two procedures give the same values",
     );
   });
 
-  it("未知の手順の名前は落とす（Object.prototype のメンバも手順として受けない）", () => {
+  it("rejects an unknown procedure name (Object.prototype members are not accepted as procedures either)", () => {
     for (const name of ["bilinear", "toString", "__proto__"]) {
       assertThrows(
-        // 型の外の綴り（JS の呼び手）を模すための変換。
+        // A cast to mimic a spelling outside the type (a JS caller).
         () => matteFromLogits(new Float32Array(4), 2, 2, 2, 2, name as MatteProcedure),
         Error,
         "postprocessing procedure",
@@ -279,9 +293,11 @@ describe("手順の共通の約束", () => {
     }
   });
 
-  it("matteFromLogits は手順の既定を持たない（宣言を渡さない呼び手は落ちる）", () => {
-    // 手順の引数は配布形の宣言（`pipelineConfig.postprocess`）の受け口。既定があると、宣言を渡し
-    // 忘れた呼び手が片方の系列の手順で黙って走る。型の外（JS の呼び手）で引数を省いた形を模す。
+  it("matteFromLogits has no default procedure (a caller that passes no declaration fails)", () => {
+    // The procedure argument is where the distribution's declaration (`pipelineConfig.postprocess`)
+    // is received. With a default, a caller that forgot to pass the declaration would silently run
+    // one series' procedure. It mimics a call outside the type (a JS caller) that omits the
+    // argument.
     assertThrows(
       () => Reflect.apply(matteFromLogits, undefined, [new Float32Array(4), 2, 2, 2, 2]),
       Error,
@@ -289,10 +305,12 @@ describe("手順の共通の約束", () => {
     );
   });
 
-  it("非有限の logit はどの手順でも画素座標つきで落ちる（NaN が透明画素に化けない）", () => {
-    // `Uint8Array` 代入は NaN を 0 = 完全に透明な画素へ黙って丸めるので、検査が無いと
-    // 「正常に見えるマット」が返る。±Inf は σ を通れば 0/1 に落ちるが、そこまで来ている時点で
-    // グラフが壊れているので同じく落とす（他 3 家族の量子化出口と同じ綴り）。両手順とも同じ検査点を通る。
+  it("a non-finite logit fails with pixel coordinates in every procedure (NaN does not turn into a transparent pixel)", () => {
+    // Assigning into a `Uint8Array` silently rounds NaN to 0 = a fully transparent pixel, so
+    // without the check "a matte that looks normal" would come back. ±Inf would fall to 0/1 through
+    // σ, but reaching that point means the graph is broken, so it is rejected too (the same wording
+    // as the quantisation exits of the other three families). Both procedures go through the same
+    // check point.
     for (const procedure of MATTE_PROCEDURES) {
       assertThrows(
         () => matteFromLogits(Float32Array.of(0, 0, NaN, 0), 2, 2, 3, 3, procedure),

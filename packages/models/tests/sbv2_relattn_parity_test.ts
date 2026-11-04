@@ -10,26 +10,32 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../src/sbv2/relattn-tables.ts";
 
-test("相対位置表: 窓幅が違えば表も違う（パリティ検査が恒真でない）", () => {
-  // 故障注入 — 上のパリティ検査は「両側が同じ定数を見ている」ことに依存する。窓幅が
-  // 1 ずれても表が同じなら、検査は誤りを通す形になっている。
+test("relative-position tables: a different window width gives different tables (the parity check is not vacuous)", () => {
+  // Fault injection — the parity check above depends on both sides reading the same constant. If
+  // the tables stayed the same with the window width off by one, the check would let the error
+  // through.
   const correct = buildRelattnTables(9, RELATTN_WINDOW_SIZE);
   const shifted = buildRelattnTables(9, RELATTN_WINDOW_SIZE + 1);
 
-  assertEquals(correct.idxK.shape, shifted.idxK.shape, "shape は同じ（= 検出できない形）");
+  assertEquals(
+    correct.idxK.shape,
+    shifted.idxK.shape,
+    "the shapes are equal (= a fault the shape cannot detect)",
+  );
   assert(
     correct.idxK.data.some((value, index) => value !== shifted.idxK.data[index]),
-    "窓幅を 1 ずらしても idx_k が変わらない",
+    "idx_k does not change with the window width off by one",
   );
   assert(
     correct.valid.data.some((value, index) => value !== shifted.valid.data[index]),
-    "窓幅を 1 ずらしても valid が変わらない",
+    "valid does not change with the window width off by one",
   );
 });
 
-test("相対位置表: 窓の内外で idx_k と valid が対で効く", () => {
-  // 表の意味そのものの固定（Python 側の写しではなく、gather の前提を式で書く）:
-  // 窓内は `w + (j − i)` を素直に指し valid=1、窓外は clamp で端へ張り付き valid=0。
+test("relative-position tables: idx_k and valid act as a pair inside and outside the window", () => {
+  // Pinning the meaning of the tables itself (the gather's premise written as a formula, not a copy
+  // of the Python side): inside the window the index points plainly at `w + (j − i)` with valid=1;
+  // outside, the clamp pins it to the edge with valid=0.
   const length = 12;
   const { idxK, valid } = buildRelattnTables(length, RELATTN_WINDOW_SIZE);
   const upper = 2 * RELATTN_WINDOW_SIZE;
@@ -39,8 +45,9 @@ test("相対位置表: 窓の内外で idx_k と valid が対で効く", () => {
       const at = i * length + j;
       const inside = Math.abs(j - i) <= RELATTN_WINDOW_SIZE;
       assertEquals(valid.data[at], inside ? 1 : 0, `valid[${i}][${j}]`);
-      // clamp 済みなので窓外でも常に埋め込みの範囲内（gather の範囲外規約に頼らない）。
-      assert(idxK.data[at] >= 0 && idxK.data[at] <= upper, `idx_k[${i}][${j}] が範囲外`);
+      // Already clamped, so always within the embedding even outside the window (no reliance on the
+      // gather's out-of-range convention).
+      assert(idxK.data[at] >= 0 && idxK.data[at] <= upper, `idx_k[${i}][${j}] is out of range`);
       if (inside) {
         assertEquals(idxK.data[at], RELATTN_WINDOW_SIZE + j - i, `idx_k[${i}][${j}]`);
       }
@@ -48,7 +55,7 @@ test("相対位置表: 窓の内外で idx_k と valid が対で効く", () => {
   }
 });
 
-test("相対位置表: 不正な長さ・窓幅は落とす", () => {
+test("relative-position tables: rejects an invalid length or window width", () => {
   assertThrows(() => buildRelattnTables(0), RangeError, "length");
   assertThrows(() => buildRelattnTables(1.5), RangeError, "length");
   assertThrows(() => buildRelattnTables(4, -1), RangeError, "Window size");

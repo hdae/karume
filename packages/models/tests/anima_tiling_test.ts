@@ -1,8 +1,9 @@
-// タイル decode の幾何と貼り合わせ（VAE tiling — ADR 0033）。
+// The geometry and the stitching of the tiled decode (VAE tiling — ADR 0033).
 //
-// 実 GPU / 実重みでの参照突合は E2E（P3 波 2）。ここは GPU も資産も要らない純関数側で、
-// **幾何の不変条件**（固定形の decoder が食える配置であること）と**貼り合わせの解析解**を
-// 押さえる。
+// The comparison with the reference on a real GPU / real weights is the E2E test (P3, iteration 2).
+// This file is the pure-function side that needs neither a GPU nor assets, and covers the
+// **geometric invariants** (a layout the fixed-shape decoder can consume) and the **analytic
+// solution of the stitching**.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -23,29 +24,33 @@ import {
   tileCount,
 } from "../src/anima/tiling.ts";
 
-test("planTileAxis: 1024px（latent 128）は 3 タイル・開始 [0,32,64]・ブレンド 256px", () => {
-  // 旧規則（整除スナップ）と同じ配置になる辺。**出荷解像度のバイト不変**がここに乗って
-  // いるので、値は literal で凍結する（1824×1248 の枚数変更で巻き添えにしない）。
+test("planTileAxis: 1024px (latent 128) is 3 tiles, starts [0,32,64], blend 256px", () => {
+  // A side that gets the same layout as the old rule (divisor snapping). **Byte-unchanged output at
+  // the shipped resolutions** rests on this, so the values are frozen as literals (so that the
+  // tile-count change of 1824×1248 does not drag it along).
   const axis = planTileAxis(128, 64, 8);
   assertEquals([...axis.starts], [0, 32, 64]);
   assertEquals([blendExtentAt(axis, 8, 1), blendExtentAt(axis, 8, 2)], [256, 256]);
 });
 
 /**
- * 受理集合の全 97 辺（512〜2048px・刻み 16px）の開始位置（latent）— `[辺, starts]`。
+ * The start positions (latent) of all 97 sides of the accepted set (512–2048px, step 16px) —
+ * `[side, starts]`.
  *
- * 下の不変条件ループは丸めの**寄せ方**を決めない（`Math.round` を `Math.floor` に替えても
- * 先頭 0 / 末尾スナップ / 本数 / 重なり下限 / 間隔のばらつき ≤ 1 は全て成立する）。配置が
- * 1 latent ずれても例外は出ず、継ぎ目のブレンド位置が動いて絵が滲むだけなので、**値で**凍結
- * する。e2e の PNG 門も拾えない — 実 GPU が回す 1024 系は span が本数−1 で割り切れて丸めが
- * 恒等になる辺だから。
+ * The invariant loop below does not decide the rounding **direction** (with `Math.round` replaced
+ * by `Math.floor`, start 0 / snap at the end / count / overlap lower bound / spacing spread ≤ 1 all
+ * still hold). A layout shifted by 1 latent throws nothing; it only moves the blend position of the
+ * seams and blurs the image, so it is frozen **by value**. The e2e PNG check cannot catch it either
+ * — the 1024 family a real GPU runs consists of sides where the span divides by count−1 and the
+ * rounding is the identity.
  *
- * 出所は旧規則（整除スナップ）との全数突合: 本数が変わるのは 24 辺だけで
- * `anima_resolution_test.ts` の `RECOUNTED_SIDES` と一致し、残る 73 辺は開始位置まで旧規則と
- * 同一（= 出荷バイト不変）。`i·span/(本数−1)` がちょうど半分になるのは 1872 / 1904 / 1936 /
- * 1968 / 2000 / 2032px の 6 辺で、そこは 0.5 切り上げに寄る（1872px = `(0,43,85,128,170)`）—
- * Python 側の整数式が偶数丸めへ退行すると (0,42,85,128,170) になり、鏡像の突合
- * （`tools/export-recipes/anima/tests/test_tiling.py` の `MIRRORED_STARTS`）が割れる。
+ * Origin: an exhaustive comparison with the old rule (divisor snapping): the count changes on only
+ * 24 sides, which match `RECOUNTED_SIDES` in `anima_resolution_test.ts`, and the remaining 73 sides
+ * match the old rule down to the start positions (= shipped bytes unchanged). `i·span/(count−1)`
+ * lands exactly on a half on six sides, 1872 / 1904 / 1936 / 1968 / 2000 / 2032px, and there it
+ * rounds half up (1872px = `(0,43,85,128,170)`) — if the integer formula on the Python side
+ * regressed to round-half- even it would give (0,42,85,128,170), and the mirrored comparison
+ * (`MIRRORED_STARTS` in `tools/export-recipes/anima/tests/test_tiling.py`) would break.
  */
 const AXIS_STARTS: readonly (readonly [number, readonly number[]])[] = [
   [512, [0]],
@@ -147,73 +152,79 @@ const AXIS_STARTS: readonly (readonly [number, readonly number[]])[] = [
   [2048, [0, 48, 96, 144, 192]],
 ];
 
-test("planTileAxis: 受理集合の全 97 辺の開始位置を値で凍結する（丸めの寄せ方まで）", () => {
-  // 表が受理集合を**覆っている**ことを先に見る。辺の下限 / 天井 / 刻みが動いたとき、表が
-  // 黙って部分被覆になるのではなくここで割れる。
+test("planTileAxis: freezes the start positions of all 97 sides of the accepted set by value (down to the rounding direction)", () => {
+  // First checks that the table **covers** the accepted set. When the side lower bound / ceiling /
+  // step moves, it breaks here instead of the table silently becoming a partial cover.
   const sides: number[] = [];
   for (let side = MIN_RESOLUTION_SIDE; side <= MAX_RESOLUTION_SIDE; side += RESOLUTION_GRANULARITY)
     sides.push(side);
   assertEquals(
     AXIS_STARTS.map(([side]) => side),
     sides,
-    "表が覆う辺",
+    "sides the table covers",
   );
 
   const tile = MIN_RESOLUTION_SIDE / ANIMA_SPATIAL_COMPRESSION;
   for (const [side, starts] of AXIS_STARTS) {
     const axis = planTileAxis(side / ANIMA_SPATIAL_COMPRESSION, tile, MIN_TILE_OVERLAP_LATENT);
-    assertEquals([...axis.starts], [...starts], `${side}px の開始位置`);
+    assertEquals([...axis.starts], [...starts], `start positions of ${side}px`);
   }
 });
 
-test("planTileAxis: latent 64（512px）は 1 タイルに縮退しブレンド対が無い", () => {
+test("planTileAxis: latent 64 (512px) degenerates to one tile with no blend pair", () => {
   const axis = planTileAxis(64, 64, 8);
   assertEquals([...axis.starts], [0]);
   assertThrows(() => blendExtentAt(axis, 8, 1), RangeError, "out of range");
 });
 
-test("planTileAxis: どの latent 全長でも配置の不変条件が成り立つ", () => {
-  // 182 / 228 / 242 は旧規則で本数が跳ねた辺（1456 / 1824 / 1936px）— 撤廃の対象そのもの。
+test("planTileAxis: the layout invariants hold for every latent length", () => {
+  // 182 / 228 / 242 are the sides whose count jumped under the old rule (1456 / 1824 / 1936px) —
+  // the very target of the removal.
   for (const extent of [64, 80, 96, 112, 128, 160, 182, 192, 228, 242, 256, 384, 512]) {
     const axis = planTileAxis(extent, 64, 8);
     const where = `extent=${extent}`;
     const span = extent - 64;
     assertEquals(axis.starts[0], 0, where);
-    // 末端へのスナップ = 固定形の decoder が最後のタイルも食えることの条件。
-    assertEquals(axis.starts.at(-1), span, `${where}: 末端へスナップ`);
-    // 本数は「重なりの下限だけを制約にした最小」の解析式そのもの。安全側に倒して間隔 1 に
-    // する実装も、旧規則の約数探索も、ここで割れる。
+    // Snapping to the end = the condition for the fixed-shape decoder to consume the last tile too.
+    assertEquals(axis.starts.at(-1), span, `${where}: snaps to the end`);
+    // The count is exactly the analytic formula "the minimum constrained only by the overlap lower
+    // bound". An implementation that plays safe with spacing 1, and the old rule's divisor search,
+    // both break here.
     assertEquals(
       axis.starts.length,
       span === 0 ? 1 : Math.ceil(span / (64 - 8)) + 1,
-      `${where}: 本数`,
+      `${where}: count`,
     );
     const gaps = axis.starts.slice(1).map((start, index) => start - axis.starts[index]);
     for (const [index, gap] of gaps.entries()) {
-      assert(64 - gap >= 8, `${where}: 対 ${index} の重なり ${64 - gap} が下限 8 未満`);
-      assertEquals(blendExtentAt(axis, 8, index + 1), (64 - gap) * 8, `${where}: 対 ${index}`);
+      assert(
+        64 - gap >= 8,
+        `${where}: pair ${index} has overlap ${64 - gap}, below the lower bound 8`,
+      );
+      assertEquals(blendExtentAt(axis, 8, index + 1), (64 - gap) * 8, `${where}: pair ${index}`);
     }
-    // 丸め等間隔の実体 = 間隔（したがってブレンド幅）の差は高々 1 latent。上流同型の
-    // 「固定 stride + 末尾だけスナップ」に退行すると最後の対だけ大きく開いてここで割れる。
+    // The substance of rounded equal spacing = the spacing (and so the blend width) differs by at
+    // most 1 latent. A regression to the upstream-style "fixed stride + snap only the last one"
+    // opens only the last pair wide and breaks here.
     if (gaps.length > 0) {
-      assert(Math.max(...gaps) - Math.min(...gaps) <= 1, `${where}: 間隔のばらつき ${gaps}`);
+      assert(Math.max(...gaps) - Math.min(...gaps) <= 1, `${where}: spacing spread ${gaps}`);
     }
   }
 });
 
-test("planTileAxis: タイルより短い latent と広すぎる重なりは落とす", () => {
+test("planTileAxis: rejects a latent shorter than a tile and an overlap that is too wide", () => {
   assertThrows(() => planTileAxis(32, 64, 8), Error, "tile width");
   assertThrows(() => planTileAxis(128, 64, 64), Error, "overlap");
 });
 
-test("planVaeTiling: 縮尺は資産の入出力形から割り出し、軸は独立に配置する", () => {
+test("planVaeTiling: derives the scale from the asset's input and output shapes and lays out each axis independently", () => {
   const geometry = planVaeTiling([1, 16, 128, 64], [1, 16, 64, 64], [1, 3, 512, 512]);
   assertEquals(geometry.scale, 8);
   assertEquals(geometry.channels, 16);
   assertEquals(geometry.rows.starts.length, 3);
-  assertEquals(geometry.cols.starts.length, 1, "H = W でなくても軸ごとに独立");
+  assertEquals(geometry.cols.starts.length, 1, "each axis is independent even when H ≠ W");
   assertEquals(tileCount(geometry), 3);
-  // 入口の受理集合（チャネル不一致 / 軸で揃わない縮尺 / B>1）。
+  // The entry's accepted set (channel mismatch / scale that differs between axes / B>1).
   assertThrows(
     () => planVaeTiling([1, 8, 128, 128], [1, 16, 64, 64], [1, 3, 512, 512]),
     Error,
@@ -231,8 +242,8 @@ test("planVaeTiling: 縮尺は資産の入出力形から割り出し、軸は�
   );
 });
 
-test("latentTile: 平面ごとに正しい矩形を切り出す（軸とチャネルの取り違え検出）", () => {
-  // [1,2,4,4]。値は `channel*100 + y*10 + x` で全要素が識別可能。
+test("latentTile: cuts the right rectangle out of each plane (detects axis and channel mix-ups)", () => {
+  // [1,2,4,4]. The values are `channel*100 + y*10 + x`, so every element is identifiable.
   const geometry = planVaeTiling([1, 2, 4, 4], [1, 2, 2, 2], [1, 1, 2, 2], 1);
   assertEquals([...geometry.rows.starts], [0, 1, 2]);
   const latents = new Float32Array(2 * 16);
@@ -246,9 +257,9 @@ test("latentTile: 平面ごとに正しい矩形を切り出す（軸とチャ�
   assertThrows(() => latentTile(latents, geometry, 3, 0), RangeError);
 });
 
-test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイルを返さずに落とす", () => {
-  // 大小比較だけの範囲検査は 0.5 と NaN を通し、`starts[0.5]` が undefined → 空の subarray でゼロの
-  // タイルを黙って返す。
+test("latentTile: a non-integer index (0.5, NaN) is rejected instead of returning a zero tile", () => {
+  // A range check made only of comparisons lets 0.5 and NaN through, and `starts[0.5]` is undefined
+  // → an empty subarray silently returns a zero tile.
   const geometry = planVaeTiling([1, 2, 4, 4], [1, 2, 2, 2], [1, 1, 2, 2], 1);
   const latents = new Float32Array(2 * 16).fill(1);
   for (const [row, col] of [
@@ -266,7 +277,7 @@ test("latentTile: 整数でない添字（0.5・NaN）はゼロのタイルを�
   }
 });
 
-test("assembleTiles: 1 枚（縮退）は decode 出力の素の写し（ビット同一）", () => {
+test("assembleTiles: a single tile (degenerate) is a plain copy of the decode output (bit-identical)", () => {
   const geometry = planVaeTiling([1, 2, 8, 8], [1, 2, 8, 8], [1, 3, 8, 8], 2);
   assertEquals(tileCount(geometry), 1);
   const decoded = new Float32Array(3 * 64);
@@ -278,12 +289,12 @@ test("assembleTiles: 1 枚（縮退）は decode 出力の素の写し（ビッ�
   );
 });
 
-test("assembleTiles: 位置依存の decode 出力を線形ランプが解析解どおりに畳む", () => {
-  // extent 16 / tile 8 / stride 4（重なり 4）で開始位置は 0,4,8。タイル内の値が行番号
-  // `0..7` の傾斜のとき、貼り合わせ後は `0,1,2,3` → 中間は全て 4 → 末尾が `4,5,6,7`。
-  // 重なりの値がタイルごとに**違う**ので、ブレンドの向き反転 / stride の off-by-one /
-  // 末端タイルのスナップ落とし / 担当領域の取り違えが全てここで割れる（同じ値が重なる
-  // 作りだと向きを反転しても緑のまま通る）。
+test("assembleTiles: linear ramps fold a position-dependent decode output exactly as the analytic solution", () => {
+  // extent 16 / tile 8 / stride 4 (overlap 4) gives start positions 0,4,8. When the values inside a
+  // tile are the row-number slope `0..7`, after stitching it is `0,1,2,3` → all 4 in the middle →
+  // `4,5,6,7` at the end. The overlap values **differ** per tile, so a reversed blend direction /
+  // an off-by-one stride / a dropped snap of the last tile / a mix-up of the owned regions all
+  // break here (with equal values overlapping, a reversed direction would still pass green).
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   assertEquals([...geometry.rows.starts], [0, 4, 8]);
   const rowRamp = new Float32Array(64);
@@ -299,15 +310,15 @@ test("assembleTiles: 位置依存の decode 出力を線形ランプが解析解
     Array.from({ length: 9 }, () => rowRamp),
     geometry,
   );
-  assertEquals([...Array.from({ length: 16 }, (_, y) => rows[y * 16])], expected, "行方向");
+  assertEquals([...Array.from({ length: 16 }, (_, y) => rows[y * 16])], expected, "row direction");
   const cols = assembleTiles(
     Array.from({ length: 9 }, () => colRamp),
     geometry,
   );
-  assertEquals([...cols.subarray(0, 16)], expected, "列方向");
+  assertEquals([...cols.subarray(0, 16)], expected, "column direction");
 });
 
-test("assembleTiles: 末端まで覆う（stride 幅で切り詰めるだけだと欠ける）", () => {
+test("assembleTiles: covers up to the end (truncating at the stride width alone would leave a gap)", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const flat = new Float32Array(64).fill(7);
   const image = assembleTiles(
@@ -317,11 +328,11 @@ test("assembleTiles: 末端まで覆う（stride 幅で切り詰めるだけだ�
   assertEquals(image.length, 16 * 16);
   assert(
     image.every((value) => value === 7),
-    "覆われていない画素が残っている",
+    "uncovered pixels remain",
   );
 });
 
-test("assembleTiles: 渡されたタイルを破壊しない（in-place ブレンドは写しの上）", () => {
+test("assembleTiles: does not destroy the tiles passed in (the in-place blend works on a copy)", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const tiles = Array.from({ length: 9 }, (_, index) => new Float32Array(64).fill(index + 1));
   const before = tiles.map((tile) => [...tile]);
@@ -332,7 +343,7 @@ test("assembleTiles: 渡されたタイルを破壊しない（in-place ブレ�
   );
 });
 
-test("assembleTiles: タイル枚数と要素数の食い違いを落とす", () => {
+test("assembleTiles: rejects a mismatch between the tile count and the element count", () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const flat = new Float32Array(64);
   assertThrows(() => assembleTiles([flat], geometry), Error, "geometry's");
@@ -343,7 +354,7 @@ test("assembleTiles: タイル枚数と要素数の食い違いを落とす", ()
   );
 });
 
-test("decodeTiled: 行優先で全タイルを 1 度ずつ回す", async () => {
+test("decodeTiled: runs every tile once in row-major order", async () => {
   const geometry = planVaeTiling([1, 1, 16, 16], [1, 1, 8, 8], [1, 1, 8, 8], 2);
   const visited: string[] = [];
   await decodeTiled(new Float32Array(256), geometry, (_tile, row, col) => {
@@ -353,11 +364,11 @@ test("decodeTiled: 行優先で全タイルを 1 度ずつ回す", async () => {
   assertEquals(visited, ["0,0", "0,1", "0,2", "1,0", "1,1", "1,2", "2,0", "2,1", "2,2"]);
 });
 
-test("decodeTiled: decode の返り値は所有権ごと受け取り、写しを挟まず畳む", async () => {
+test("decodeTiled: takes ownership of the decode return values and folds them without an intervening copy", async () => {
   const geometry = planVaeTiling([1, 2, 16, 16], [1, 2, 8, 8], [1, 1, 8, 8], 2);
   const colCount = geometry.cols.starts.length;
-  // タイルごとに・タイル内でも値が違う（重なりの両側が同値だとブレンドが恒等になり、
-  // 写しの有無も畳み方の違いも見えなくなる）。
+  // The values differ per tile and within a tile (if both sides of an overlap were equal the blend
+  // would be the identity, hiding both whether a copy exists and differences in how it folds).
   const makeTiles = () =>
     Array.from({ length: 9 }, (_, index) => {
       const tile = new Float32Array(64);
@@ -373,15 +384,16 @@ test("decodeTiled: decode の返り値は所有権ごと受け取り、写しを
     Promise.resolve(handed[row * colCount + col]),
   );
 
-  // 所有権を取っても畳み方は公開面と 1 ビットも変わらない。
+  // Taking ownership does not change the folding by a single bit compared with the public surface.
   const expected = assembleTiles(pristine, geometry);
   assertEquals(
     new Uint32Array(image.buffer, image.byteOffset, image.length),
     new Uint32Array(expected.buffer, expected.byteOffset, expected.length),
   );
-  // 渡した配列そのものが畳まれた側 = 所有権移転の契約。内部にまた写し層が戻るとここで割れる。
+  // The array passed in is the one that was folded = the ownership-transfer contract. If a copy
+  // layer came back inside, this breaks.
   assert(
     handed.some((tile, index) => tile.some((value, at) => value !== pristine[index][at])),
-    "decode の返り値が in-place に畳まれていない（写しが挟まっている）",
+    "the decode return value was not folded in place (a copy sits in between)",
   );
 });

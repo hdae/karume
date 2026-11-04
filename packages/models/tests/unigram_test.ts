@@ -1,8 +1,9 @@
-// Unigram 共通層（src/text/unigram.ts）の振る舞い検証。
+// Behaviour check of the shared Unigram layer (src/text/unigram.ts).
 //
-// 実資産には依存しない — 合成した小語彙で「格子探索の同点規則」「未知の融合」「byte_fallback の
-// 展開」を直接見る。実資産との突合（id 列が Python と一致するか）はファミリ側のパリティテスト
-// （anima_tokenizer_test.ts）の担当で、ここは**規則そのもの**を落とせる形に置く。
+// Independent of real assets — a small synthetic vocabulary exercises "the tie rule of the lattice
+// search", "unknown fusion" and "the byte_fallback expansion" directly. Comparison with the real
+// assets (whether the id sequence matches Python) belongs to the family's parity test
+// (anima_tokenizer_test.ts); this file keeps **the rules themselves** in a form that can fail.
 
 import { assertEquals } from "@std/assert";
 import { beforeAll, describe, it, test } from "vite-plus/test";
@@ -10,10 +11,10 @@ import { toCodePoints } from "../src/text/code-points.ts";
 import { type UnigramModel, unigramTokenize } from "../src/text/unigram.ts";
 
 const UNK_ID = 2;
-/** byte_fallback の `<0x00>` に当たる id。実資産と重ならない値にして展開先を見分ける。 */
+/** The id of byte_fallback's `<0x00>`. A value that does not collide with the real asset, to tell the expansion apart. */
 const BYTE_BASE = 100;
 
-/** `[トークン, id, スコア]` の並びから模型を組む。minScore / maxTokenLength は語彙全体から導く。 */
+/** Builds a model from `[token, id, score]` rows. minScore / maxTokenLength are derived from the whole vocabulary. */
 const buildModel = (
   vocab: readonly (readonly [string, number, number])[],
   options: { readonly byteBaseId?: number } = {},
@@ -28,11 +29,11 @@ const buildModel = (
 const tokenize = (model: UnigramModel, text: string): number[] =>
   unigramTokenize(model, toCodePoints(text));
 
-describe("格子探索: 経路はスコアの和で決まる", () => {
-  it("同点なら長い断片が勝つ（比較は厳密な `>`）", () => {
-    // a(-1) + b(-1) と ab(-2) がちょうど同点。正本（tokenizers の Unigram）は同じ位置で終わる
-    // ノードを開始位置の昇順に積み、同点なら先に積まれた = 長い方を残す。`>=` にすると
-    // [4, 5] へ黙って変わる。
+describe("lattice search: the path is decided by the sum of scores", () => {
+  it("on a tie the longer piece wins (the comparison is a strict `>`)", () => {
+    // a(-1) + b(-1) and ab(-2) tie exactly. The reference (tokenizers' Unigram) pushes the nodes
+    // ending at the same position in ascending order of start position and, on a tie, keeps the one
+    // pushed first = the longer one. With `>=` the result silently changes to [4, 5].
     const model = buildModel([
       ["a", 4, -1],
       ["b", 5, -1],
@@ -41,9 +42,9 @@ describe("格子探索: 経路はスコアの和で決まる", () => {
     assertEquals(tokenize(model, "ab"), [6]);
   });
 
-  it("同点でなければスコアの高い経路が勝つ（常に最長ではない）", () => {
-    // 同じ形で ab だけを -3 に落とすと、短い 2 個の方が和で上回る。上の規則が
-    // 「いつも最長を返すだけ」に退化していないことをここで捕まえる。
+  it("without a tie the higher-scoring path wins (not always the longest)", () => {
+    // In the same shape with only ab lowered to -3, the two short pieces win on the sum. This catches
+    // the rule above degenerating into "always return the longest".
     const model = buildModel([
       ["a", 4, -1],
       ["b", 5, -1],
@@ -53,48 +54,48 @@ describe("格子探索: 経路はスコアの和で決まる", () => {
   });
 });
 
-describe("未知の扱い: byte_fallback なし", () => {
+describe("unknowns: without byte_fallback", () => {
   let model: UnigramModel;
   beforeAll(() => {
     model = buildModel([["a", 4, -1]]);
   });
 
-  it("連続する未知は 1 つの unk に融合される（fuse_unk）", () => {
-    // 融合しないと未知が 1 文字ずつ並び [4, 2, 2, 4] になる。
+  it("consecutive unknowns are fused into one unk (fuse_unk)", () => {
+    // Without fusion the unknowns line up one character each, giving [4, 2, 2, 4].
     assertEquals(tokenize(model, "axya"), [4, UNK_ID, 4]);
   });
 
-  it("既知を挟んだ未知は別々の unk になる（融合は連続したものだけ）", () => {
+  it("unknowns separated by a known piece become separate unks (only consecutive ones fuse)", () => {
     assertEquals(tokenize(model, "xay"), [UNK_ID, 4, UNK_ID]);
   });
 
-  it("全文が未知でも unk 1 個", () => {
+  it("a text that is entirely unknown is still one unk", () => {
     assertEquals(tokenize(model, "xyz"), [UNK_ID]);
   });
 });
 
-describe("未知の扱い: byte_fallback あり", () => {
+describe("unknowns: with byte_fallback", () => {
   let model: UnigramModel;
   beforeAll(() => {
     model = buildModel([["a", 4, -1]], { byteBaseId: BYTE_BASE });
   });
 
-  it("3 バイト文字は UTF-8 の 3 バイトぶんの id に展開される", () => {
-    // U+3042「あ」= E3 81 82 → 100 + 各バイト。
+  it("a 3-byte character expands into the ids of its 3 UTF-8 bytes", () => {
+    // U+3042 "あ" = E3 81 82 → 100 + each byte.
     assertEquals(tokenize(model, "あ"), [327, 229, 230]);
   });
 
-  it("4 バイト文字（BMP 外）も同じ規則で 4 id になる", () => {
-    // U+1F600「😀」= F0 9F 98 80。サロゲート対ではなくコードポイントで数えていないと
-    // 3 id や不正なバイトになる。
+  it("a 4-byte character (outside the BMP) gives 4 ids by the same rule", () => {
+    // U+1F600 "😀" = F0 9F 98 80. Counting by surrogate pair instead of by code point gives 3 ids or
+    // invalid bytes.
     assertEquals(tokenize(model, "😀"), [340, 259, 252, 228]);
   });
 
-  it("融合された未知断片は全体がバイト列になる（unk へは落ちない）", () => {
+  it("a fused unknown piece becomes bytes in full (it does not fall back to unk)", () => {
     assertEquals(tokenize(model, "aあ😀a"), [4, 327, 229, 230, 340, 259, 252, 228, 4]);
   });
 
-  it("語彙にある断片はバイト展開されない", () => {
+  it("a piece in the vocabulary is not expanded into bytes", () => {
     const withKana = buildModel(
       [
         ["a", 4, -1],
@@ -106,25 +107,26 @@ describe("未知の扱い: byte_fallback あり", () => {
   });
 });
 
-describe("縮退: 空入力と空語彙", () => {
-  it("空文字列は空の id 列（unk も出ない）", () => {
+describe("degenerate cases: empty input and empty vocabulary", () => {
+  it("the empty string gives an empty id sequence (no unk either)", () => {
     assertEquals(tokenize(buildModel([["a", 4, -1]]), ""), []);
     assertEquals(tokenize(buildModel([], { byteBaseId: BYTE_BASE }), ""), []);
   });
 
-  it("語彙が空なら全文が 1 つの unk になる", () => {
+  it("with an empty vocabulary the whole text becomes one unk", () => {
     assertEquals(tokenize(buildModel([]), "abc"), [UNK_ID]);
   });
 
-  it("語彙が空 + byte_fallback なら全文がバイト列になる", () => {
-    // "abc" = 61 62 63 → 100 + 各バイト。
+  it("with an empty vocabulary + byte_fallback the whole text becomes bytes", () => {
+    // "abc" = 61 62 63 → 100 + each byte.
     assertEquals(tokenize(buildModel([], { byteBaseId: BYTE_BASE }), "abc"), [197, 198, 199]);
   });
 });
 
-test("長い未知断片: 引数展開の上限を超える byte 列でも id 列になる", () => {
-  // 「あ」× 50,000 = 150,000 byte の未知断片 1 片。展開を可変長引数（`push(...ids)`）で渡すと
-  // V8 の引数上限（約 13 万）で素の RangeError になり、入力の長さとは無関係な形で落ちる。
+test("long unknown piece: a byte sequence past the argument-spread limit still gives an id sequence", () => {
+  // "あ" × 50,000 = one unknown piece of 150,000 bytes. Passing the expansion as variadic arguments
+  // (`push(...ids)`) hits V8's argument limit (about 130K) with a bare RangeError, failing in a way
+  // unrelated to the input's length.
   const model = buildModel([["a", 4, -1]], { byteBaseId: BYTE_BASE });
   const ids = tokenize(model, "a" + "あ".repeat(50_000) + "a");
   assertEquals(ids.length, 150_002);

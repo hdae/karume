@@ -1,25 +1,30 @@
-// `Pipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る（実 GPU の突合は
-// `e2e_irodori_*_test.ts` 群が持つ）。
+// The **build guards** of `Pipeline`. Only the range that needs neither a GPU nor real assets is
+// checked here (the real-GPU comparisons belong to the `e2e_irodori_*_test.ts` files).
 //
-// ここで押さえるのは 2 点:
-//  ① `fromAssets` は **manifest の契約違反を GPU を取りに行く前**に落とす
-//     （`src/irodori/admission.ts` の `admitIrodori` が掲げる MUST）。順序がずれると、GPU の
-//     無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
-//  ② 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
-//     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る —
-//     それより先の境界は実資産と GPU が要るのでここでは見られない。
+// Two points are pinned here:
+//  ① `fromAssets` rejects **a violation of the manifest contract before going to acquire the GPU**
+//     (the MUST that `admitIrodori` of `src/irodori/admission.ts` states). If the order drifts, in
+//     an environment without a GPU it turns into another exception and the reader cannot tell
+//     "what was wrong".
+//  ② The build's `signal` works **both at the entry and after execution has started** (if the
+//     assembly after the download cannot be aborted, there is a window where the UI's cancel button
+//     does nothing). The latter is checked with empty assets up to "the first stage boundary" —
+//     the boundaries after that need real assets and a GPU, so they cannot be checked here.
 //
-// 観測の仕掛け: **全ケースで容器 9 本は揃えて**おく（中身は宣言だけ）。したがって
-//  - manifest 契約の違反ケースが「その違反の文言」で落ちる = 資産が揃っていても manifest の
-//    門が先（容器を開くのは admission の前 — `assetComponentOpener` は同期の供給口を返すため
-//    先に全部品を開く）
-//  - 空の Record は `部品 'backbone' の容器が無い` で落ちる（受け口の診断）
-// の 2 つが噛み合って、門の順序そのものを縛る。グラフ宣言との 12 点突合は
-// `irodori_admission_test.ts` が実物と同じ宣言で踏むので、ここでは扱わない。
-// 資産 JSON の decode 門（`assetJson`）も同じ理由で `fromAssets` からは届かないので、末尾の 2 本
-// だけは**門を直接叩く**。`denoise-step` の `copyLatents`（`latentSnapshot`）も GPU 無しで
-// 縛れる純関数なので、最後の 1 本で同じく直接叩く — ここが壊れると購読側へ**別 step の潜在が
-// 黙って**届き、実 GPU の WAV 門は観測席を通らないので緑のままになる。
+// The observation setup: **every case has the 9 containers present** (declarations only). So
+//  - a manifest-contract violation case fails with "that violation's message" = even with the
+//    assets present, the manifest check comes first (the containers are opened before admission —
+//    `assetComponentOpener` returns a synchronous supply entry, so it opens every component first)
+//  - an empty Record fails with `component 'backbone' has no container` (the receiving side's
+//    diagnostic)
+// and the two together pin the order of the checks itself. The 12-point check against the graph
+// declarations is exercised by `irodori_admission_test.ts` with the same declarations as the real
+// thing, so it is not covered here. The decode check of asset JSON (`assetJson`) cannot be reached
+// from `fromAssets` for the same reason, so the 2 tests near the end **drive the check directly**.
+// `copyLatents` of `denoise-step` (`latentSnapshot`) is also a pure function that can be pinned
+// without a GPU, so the last test drives it directly as well — if it breaks, **another step's
+// latent silently** reaches the subscriber, and the real-GPU WAV check stays green because it does
+// not go through the observation hook.
 
 import { test } from "vite-plus/test";
 import {
@@ -43,7 +48,7 @@ const FILE = {
   sha256: "a".repeat(64),
 };
 
-/** グラフ資産の名前（`openIrodoriState` が `assetBuffer` で引く順に並べる）。 */
+/** The graph assets' names (in the order `openIrodoriState` looks them up with `assetBuffer`). */
 const WEIGHT_NAMES = [
   "backbone",
   "text_proj",
@@ -56,7 +61,7 @@ const WEIGHT_NAMES = [
   "codec_encoder",
 ] as const;
 
-/** `models/karume-irodori-v4-small/karume.json` の `pipelineConfig` 実物（23 欄）。 */
+/** The real `pipelineConfig` of `models/karume-irodori-v4-small/karume.json` (23 fields). */
 const PIPELINE_CONFIG: Record<string, unknown> = {
   maxTextLen: 256,
   maxCaptionLen: 512,
@@ -83,7 +88,10 @@ const PIPELINE_CONFIG: Record<string, unknown> = {
   cfgGuidanceMode: "independent",
 };
 
-/** 配布形の骨格（検査に要る欄だけ）。`patch` は `models["v4-small"]` の中身を上書きする。 */
+/**
+ * The distribution's skeleton (only the fields the checks need). `patch` overwrites the contents of
+ * `models["v4-small"]`.
+ */
 const manifestText = (patch: Record<string, unknown> = {}): string => {
   let weights: Record<string, unknown> = {};
   let mapping: Record<string, string> = {};
@@ -112,8 +120,9 @@ const manifestText = (patch: Record<string, unknown> = {}): string => {
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
 /**
- * 開ける容器 9 本（宣言は最小 — グラフ突合そのものは `irodori_admission_test.ts` が実物と同じ
- * 宣言で踏む）。`tokenizer` は入れない: 門を全部通った先で落ちる 1 本として残す。
+ * The 9 containers that can be opened (minimal declarations — the graph check itself is exercised
+ * by `irodori_admission_test.ts` with the same declarations as the real thing). `tokenizer` is not
+ * included: it is left as the one that fails after every check has passed.
  */
 const COMPONENTS: Record<string, Uint8Array<ArrayBuffer>> = {};
 for (const name of WEIGHT_NAMES) {
@@ -129,11 +138,11 @@ for (const name of WEIGHT_NAMES) {
   );
 }
 
-/** `pipelineConfig` だけを差し替えた manifest（残りは骨格のまま）。 */
+/** A manifest with only `pipelineConfig` replaced (the rest stays the skeleton). */
 const withConfig = (config: Record<string, unknown>): string =>
   manifestText({ pipelineConfig: config });
 
-test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: a missing model fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "nope" }),
@@ -142,7 +151,7 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipeline の契約名が irodori でない manifest を落とす", async () => {
+test("fromAssets: rejects a manifest whose pipeline contract name is not irodori", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -151,8 +160,9 @@ test("fromAssets: pipeline の契約名が irodori でない manifest を落と�
   );
 });
 
-test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
-  // 「古い実装 × 新しいリポ」の沈黙劣化を止める唯一の門。hub は major を検査しない。
+test("fromAssets: an unknown major fails loudly (the check is the models side's job — ADR 0038 §1)", async () => {
+  // The only check that stops the silent degradation of "an old implementation × a new repo". The
+  // hub does not check the major.
   const manifest = parseManifest(manifestText({ pipeline: "irodori/2" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -161,7 +171,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   );
 });
 
-test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: a missing quant fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "nope" }),
@@ -170,8 +180,9 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async () => {
-  // 綴り違い（`steps` に対する `step`）が黙って既定へ縮退する経路を作らない（config.ts の MUST）。
+test("fromAssets: an unknown pipelineConfig key fails at build time", async () => {
+  // No path where a misspelling (`step` for `steps`) silently degrades to a default (the MUST of
+  // config.ts).
   const manifest = parseManifest(withConfig({ ...PIPELINE_CONFIG, step: 40 }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -180,9 +191,10 @@ test("fromAssets: pipelineConfig の未知キーは構築時に落ちる", async
   );
 });
 
-test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ちる", async () => {
-  // 欠けた欄が既定で埋まると、ホストだけが別の数を持ったまま **shape は合う**形で沈黙誤値になる
-  // （config.ts 冒頭の MUST — モデル固有の数は manifest が正本）。
+test("fromAssets: a missing pipelineConfig field fails at build time", async () => {
+  // If a missing field were filled with a default, only the host would hold another number while
+  // **the shapes still match**, a silent wrong value (the MUST at the top of config.ts — the
+  // manifest is the source of truth for model-specific numbers).
   const { hopLength: _dropped, ...missing } = PIPELINE_CONFIG;
   const manifest = parseManifest(withConfig(missing));
   await assertRejects(
@@ -192,9 +204,10 @@ test("fromAssets: pipelineConfig の欄が欠けていれば構築時に落ち�
   );
 });
 
-test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 上の 6 ケースの裏返し。容器が揃っていない Record では**部品の不在**で落ちる（manifest の
-  // 文言では落ちない）= 上のケースが資産の不在に巻き添えられていないことの対偶。
+test("fromAssets: a missing component container fails with the spellings of the 2 forms (the receiving side's diagnostic)", async () => {
+  // The flip side of the 6 cases above. A Record without the containers fails on **the missing
+  // component** (not with a manifest message) = the contrapositive showing that the cases above are
+  // not dragged in by missing assets.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
@@ -203,32 +216,34 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   );
 });
 
-// ---- 構築の中断（`options.signal`）----------------------------------------
+// ---- Aborting the build (`options.signal`) ----------------------------------------
 //
-// UI の中止ボタンは DL 完了後の組み立て（資産解析 → acquireGpu）にも効かなければならない。
-// 上の門と同じ manifest + 空資産で見る: signal 無しなら「資産 'backbone' が無い」で落ちる形が、
-// 中断済み / 実行中の中断では `signal.reason` で落ちる。
+// The UI's cancel button must also work during the assembly after the download (asset parsing →
+// acquireGpu). Checked with the same manifest + empty assets as the checks above: what fails with
+// "asset 'backbone' is missing" without a signal fails with `signal.reason` when already
+// aborted / aborted while running.
 
-test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
+test("fromAssets: an already aborted signal rejects with the reason itself before touching the assets", async () => {
   const manifest = parseManifest(manifestText());
   const controller = new AbortController();
-  const reason = new Error("中止ボタン");
+  const reason = new Error("cancel button");
   controller.abort(reason);
   const error = await assertRejects(() =>
     Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
-  // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
+  // Not wrapped (the consumer can identify its own abort by `error === controller.signal.reason`).
   assertStrictEquals(error, reason);
 });
 
-test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
-  // 上の門は「呼ぶ前に中断済み」だけを見る。中止ボタンは**組み立てが走っている最中**に
-  // 押されるので、段境界の検査はイベントループへ譲ってからでなければ死文になる
-  // （abort() の届き方はタスク配送 — 同期解析中は 1 度も観測されない）。
-  // 仕掛けてから呼ぶと、資産エラー（「資産 'backbone' が無い」）ではなく reason で落ちる。
+test("fromAssets: an abort that arrives after execution has started also works at the first stage boundary", async () => {
+  // The check above sees only "aborted before the call". The cancel button is pressed **while the
+  // assembly is running**, so a stage-boundary check is a dead letter unless it yields to the event
+  // loop first (abort() is delivered as a task — it is never observed during synchronous parsing).
+  // Set up before the call, it fails with the reason instead of the asset error ("asset
+  // 'backbone' is missing").
   const manifest = parseManifest(manifestText());
   const controller = new AbortController();
-  const reason = new Error("中止ボタン（実行中）");
+  const reason = new Error("cancel button (while running)");
   setTimeout(() => controller.abort(reason), 0);
   const error = await assertRejects(() =>
     Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
@@ -236,9 +251,11 @@ test("fromAssets: 実行開始後に届いた中断も最初の段境界で効�
   assertStrictEquals(error, reason);
 });
 
-// ---- 資産 JSON の decode（不正 UTF-8 を黙って置換しない）------------------
+// ---- Decoding asset JSON (invalid UTF-8 is not silently replaced) ------------------
 
-/** JSON としては閉じているが、文字列値に不正 UTF-8（0xff）を 1 バイト混ぜた資産。 */
+/**
+ * An asset that is closed as JSON but has one invalid UTF-8 byte (0xff) mixed into a string value.
+ */
 const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
   Uint8Array.from([
     ...new TextEncoder().encode('{"unkId":'),
@@ -248,14 +265,14 @@ const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
     ...new TextEncoder().encode("}"),
   ]);
 
-test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
+test("assetJson: an invalid UTF-8 asset fails with the decode-stage message (it does not reach the JSON stage)", () => {
   const broken = brokenUtf8Asset();
-  // 前提の固定: 既定の TextDecoder は 0xff を U+FFFD へ置換するので、置換して読むと
-  // **内容の違う valid JSON** が黙って通ってしまう。塞いだのはこの経路。
+  // Pinning the premise: the default TextDecoder replaces 0xff with U+FFFD, so reading with
+  // replacement silently lets **valid JSON with different contents** through. That path is closed.
   assertEquals(
     JSON.parse(new TextDecoder().decode(broken)),
     { unkId: "�" },
-    "置換 decode が valid JSON にならない前提が崩れた（このテストの主題が消える）",
+    "the premise that the replacing decode does not give valid JSON broke (this test's subject is gone)",
   );
   assertThrows(
     () => assetJson({ tokenizer: broken }, "tokenizer"),
@@ -264,27 +281,28 @@ test("assetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSO
   );
 });
 
-test("assetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
+test("assetJson: a JSON syntax error fails with a message different from decode (the valid domain is unchanged)", () => {
   const truncated = new TextEncoder().encode('{"unkId":');
   assertThrows(
     () => assetJson({ tokenizer: truncated }, "tokenizer"),
     Error,
     "irodori: asset 'tokenizer' cannot be read as JSON",
   );
-  // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
+  // Correct UTF-8 passes as is, even with multi-byte characters.
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
   assertEquals(assetJson({ tokenizer: valid }, "tokenizer"), { unkId: 0, space: "あ" });
 });
 
-test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に入る前に落ちる", () => {
-  // これらの門は本来 latent 生成の**後**（`planCodecTiles` は decode 直前・`Randn` は段 ⑦）に
-  // しかなく、重み 1.26GB のロードと DiT の全 step を消費してから落ちていた。入口で同じ
-  // 受理集合を借りることで、綴り違いの代償が計算時間にならない。
+test("assertIrodoriRequest: a misspelled request knob fails before the heavy computation", () => {
+  // These checks originally existed only **after** latent generation (`planCodecTiles` right before
+  // decode, `Randn` at stage ⑦), so they failed after consuming the 1.26GB weight load and every
+  // DiT step. Borrowing the same accepted set at the entry keeps a misspelling from costing compute
+  // time.
   const config = parseIrodoriPipelineConfig(PIPELINE_CONFIG);
   const text = "テスト";
 
-  // codecTileFrames は「halo 2 枚ぶんより大きい整数」。既定 halo 8 に対し 10 は採用区間が
-  // 残らない値（`10 <= 16`）で、素通しすると decode 直前まで走ってから落ちる。
+  // codecTileFrames is "an integer larger than 2 halos". Against the default halo 8, 10 leaves no
+  // taken range (`10 <= 16`), and passed through it would run up to right before decode and fail.
   for (const codecTileFrames of [10, 0, 1.5]) {
     assertThrows(
       () => assertIrodoriRequest({ text, codecTileFrames }, config),
@@ -305,21 +323,23 @@ test("assertIrodoriRequest: 要求ノブの綴り違いは重い計算に入る�
     "durationSeconds",
   );
 
-  // 正常値は通る（門が恒真に落ちていない証拠は上の 6 ケース側が持つ）。
+  // Valid values pass (the evidence that the check does not always fail is on the side of the 6
+  // cases above).
   assertIrodoriRequest({ text, codecTileFrames: 182, seed: 0, durationSeconds: 3 }, config);
   assertIrodoriRequest({ text }, config);
 });
 
-test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim(min=2)）に満たなければ GPU を回す前に落ちる", () => {
-  // 参照は段 ④ で patch される（hop 1920 サンプル = codec の 1 フレーム・patch 幅 4 フレーム =
-  // 1 トークン）。入口で落とさないと、text / caption の段と codec encoder を GPU で回してから
-  // 0 トークンなら素の Error、1 トークンなら下限の外の S = 1 が speaker グラフへ届く。
+test("assertIrodoriRequest: a speaker reference shorter than 2 tokens (the export's Dim(min=2)) fails before the GPU runs", () => {
+  // The reference is patched at stage ④ (hop 1920 samples = 1 codec frame, patch width 4 frames =
+  // 1 token). Without the check at the entry, after running the text / caption stages and the codec
+  // encoder on the GPU, 0 tokens give a plain Error and 1 token sends S = 1, below the lower bound,
+  // to the speaker graph.
   const config = parseIrodoriPipelineConfig(PIPELINE_CONFIG);
   const text = "テスト";
   const audio = (samples: number) => ({
     audio: { data: new Float32Array(samples), sampleRate: 48000 },
   });
-  // 0 サンプル・80ms（2 フレーム = 0 トークン）・7 フレームちょうど（1 トークン）。
+  // 0 samples, 80ms (2 frames = 0 tokens), exactly 7 frames (1 token).
   for (const samples of [0, 3840, 7 * 1920]) {
     assertThrows(
       () => assertIrodoriRequest({ text, speaker: audio(samples) }, config),
@@ -327,7 +347,8 @@ test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim
       "tokens",
     );
   }
-  // 末尾は reflect pad で hop の倍数へ切り上がるので、7 フレーム + 1 サンプルは 8 フレーム = 2 トークン。
+  // The tail is rounded up to a multiple of hop by reflect pad, so 7 frames + 1 sample is 8 frames
+  // = 2 tokens.
   assertIrodoriRequest({ text, speaker: audio(7 * 1920 + 1) }, config);
   assertThrows(
     () =>
@@ -353,9 +374,10 @@ test("assertIrodoriRequest: speaker の参照が 2 トークン（export の Dim
   assertIrodoriRequest({ text, speaker: latent(8) }, config);
 });
 
-test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既定タイルを検査する", () => {
-  // 呼び手は `codecTileFrames` を渡す義務を負っていないので、「渡さなければ通る」形にすると
-  // 既定タイルと `codecHaloFrames` の関係が壊れた配布形が**必ず** DiT ループ後に落ちる。
+test("assertIrodoriRequest: checks the default tile even for a request that does not pass codecTileFrames", () => {
+  // Callers are not obliged to pass `codecTileFrames`, so a form where "not passing it passes"
+  // would make a distribution with a broken relation between the default tile and
+  // `codecHaloFrames` **always** fail after the DiT loop.
   const config = parseIrodoriPipelineConfig({ ...PIPELINE_CONFIG, codecHaloFrames: 91 });
   assertThrows(
     () => assertIrodoriRequest({ text: "テスト" }, config),
@@ -364,23 +386,25 @@ test("assertIrodoriRequest: codecTileFrames を渡さない要求でも既定タ
   );
 });
 
-test("latentSnapshot: 束縛した時点の潜在を写す（step を進めても写しは変わらない）", () => {
+test("latentSnapshot: copies the latent as of binding (advancing the step does not change the copy)", () => {
   const shape = [2, 2];
-  // DiT ループの再現: `eulerStep` は純関数なので `x` は step ごとに**新しい配列**へ
-  // 差し替わる。イベントの口は step ごとに作って渡す。
+  // Reproducing the DiT loop: `eulerStep` is a pure function, so `x` is replaced by **a new array**
+  // every step. The event entry is made and passed per step.
   const step1 = Float32Array.from([1, 2, 3, 4]);
   const first = latentSnapshot(step1, shape);
   const step2 = Float32Array.from([5, 6, 7, 8]);
   const second = latentSnapshot(step2, shape);
 
-  // 生成が全部終わってから呼んでも「作った時点」の値が返る。ループ変数を閉じ込める実装だと
-  // ここが両方 [5, 6, 7, 8] になる（購読側からは検出できない取り違え）。
+  // Even called after all generation is done, it returns the value "as of creation". An
+  // implementation that captures the loop variable would give [5, 6, 7, 8] for both here (a mix-up
+  // the subscriber cannot detect).
   assertEquals(Array.from(first().data), [1, 2, 3, 4]);
   assertEquals(Array.from(second().data), [5, 6, 7, 8]);
   assertEquals(first().shape, shape);
 
-  // 返すのは毎回**別の写し**。購読側が受け取った配列を書き換えても、次の写しにも
-  // パイプライン側の配列にも波及しない（参照を握られる事故の構造的な排除）。
+  // What it returns is **a separate copy** every time. Even if the subscriber rewrites the array it
+  // received, neither the next copy nor the pipeline's array is affected (structurally ruling out
+  // the accident of a held reference).
   const copy = first();
   assertNotStrictEquals(copy.data, step1);
   copy.data[0] = 99;
@@ -388,12 +412,13 @@ test("latentSnapshot: 束縛した時点の潜在を写す（step を進めて�
   assertEquals(Array.from(step1), [1, 2, 3, 4]);
   assertNotStrictEquals(copy.data, first().data);
 
-  // `shape` も同じ扱い（anima 側 `latentSnapshot` と同じ MUST）。参照のまま返すと、同じ step の
-  // `copyLatents()` を 2 回呼んだ写しが同一の配列を共有し、購読側が 1 回目の `shape` を
-  // 書き換えると 2 回目の写しが黙って別の形を名乗る。
+  // `shape` gets the same treatment (the same MUST as anima's `latentSnapshot`). Returned by
+  // reference, two copies from calling `copyLatents()` twice in the same step would share one
+  // array, and if the subscriber rewrote the first one's `shape`, the second copy would silently
+  // claim another shape.
   assertNotStrictEquals(copy.shape, shape);
-  // 2 回呼んだ写しが `shape` を共有していない（W-Q6-2 の破れはここに出る — 参照のままだと
-  // 1 回目の写しの書き換えが 2 回目の写しへ波及する）。
+  // The two copies do not share `shape` (the W-Q6-2 breakage shows up here — by reference,
+  // rewriting the first copy would spread to the second copy).
   assertNotStrictEquals(copy.shape, first().shape);
   shape[0] = 99;
   assertEquals(copy.shape, [2, 2]);

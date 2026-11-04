@@ -1,23 +1,24 @@
-// `depth-anything/1` の `pipelineConfig` スキーマ（`src/depth-anything/config.ts`）。**焼く側**は
-// `tools/export-recipes/depth_anything/distribution.py` で、そちらの pytest が同じ欄名を別方向から
-// 押さえている（欄名が片側だけ動くと、配布形はできるのにロードが parse で落ちる）。
+// The `pipelineConfig` schema of `depth-anything/1` (`src/depth-anything/config.ts`). The **writing side** is
+// `tools/export-recipes/depth_anything/distribution.py`, whose pytest pins the same field names from the other
+// direction (if a field name moves on one side only, the distribution is produced but the load fails in parse).
 //
-// 見るのは 3 点:
+// Three things are checked:
 //
-// ① 受理集合の**外側**を全部落とす（未知キー・欠落・値域外）。既定へ黙って縮退しない。
-// ② `imageStd` の 0 を落とす — 0 除算は例外を出さず `±Infinity` の `pixel_values` を作り、
-//    グラフは NaN を吐きながら shape だけ合う。
-// ③ `interpolation` の受理集合は **`bicubic` の 1 値**（BiRefNet / SigLIP2 の `bilinear` と
-//    **逆向き**）。DA-V2 の上流は `resample: 3` = PIL の BICUBIC で、bilinear を宣言した
-//    配布形を通すと `pixel_values` が uint8 1 LSB の 34 倍ずれる。受理集合がファミリごとに
-//    違うことが、スキーマを共有しない理由そのものなので、両向きに固定する。
+// ① Everything **outside** the accepted set is rejected (unknown keys, missing fields, out-of-range values).
+//    Nothing silently falls back to a default.
+// ② `imageStd` of 0 is rejected — a division by 0 throws nothing and produces `±Infinity` `pixel_values`, and
+//    the graph emits NaN while only the shape matches.
+// ③ The accepted set of `interpolation` is **the single value `bicubic`** (the **opposite** of BiRefNet /
+//    SigLIP2's `bilinear`). DA-V2's upstream is `resample: 3` = PIL's BICUBIC, and passing a distribution that
+//    declares bilinear shifts `pixel_values` by 34 times one uint8 LSB. The accepted set differing per family is
+//    the very reason the schema is not shared, so both directions are pinned.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { ModelInputError } from "../src/errors.ts";
 import { parseDepthAnythingPipelineConfig } from "../src/depth-anything/config.ts";
 
-/** `models/karume-depth-anything-v2/karume.json` の `small` の `pipelineConfig` 実物（5 欄）。 */
+/** The actual `pipelineConfig` of `small` in `models/karume-depth-anything-v2/karume.json` (5 fields). */
 const CONFIG: Record<string, unknown> = {
   imageWidth: 518,
   imageHeight: 518,
@@ -37,7 +38,7 @@ const without = (key: string): Record<string, unknown> => {
   return copy;
 };
 
-test("配布形の pipelineConfig をそのまま読める（5 欄・値はそのまま）", () => {
+test("reads the distribution's pipelineConfig as is (5 fields, values unchanged)", () => {
   const config = parseDepthAnythingPipelineConfig(CONFIG);
   assertEquals(config.imageWidth, 518);
   assertEquals(config.imageHeight, 518);
@@ -46,7 +47,7 @@ test("配布形の pipelineConfig をそのまま読める（5 欄・値はそ�
   assertEquals(config.interpolation, "bicubic");
 });
 
-test("未知キーは落とす（綴り違いが黙って既定へ縮退しない）", () => {
+test("rejects unknown keys (a misspelling does not silently fall back to a default)", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ image_mean: [0.5, 0.5, 0.5] })),
     Error,
@@ -54,9 +55,9 @@ test("未知キーは落とす（綴り違いが黙って既定へ縮退しな�
   );
 });
 
-test("上流 config の余った欄も落とす（keep_aspect_ratio / ensure_multiple_of）", () => {
-  // 上流 `preprocessor_config.json` にはこの 2 欄があるが、焼かれたグラフは正方 1 点しか
-  // 受け取らないので宣言に席は無い。素通しで写した配布形はここで止まる。
+test("also rejects leftover fields of the upstream config (keep_aspect_ratio / ensure_multiple_of)", () => {
+  // The upstream `preprocessor_config.json` has these 2 fields, but the exported graph accepts only one square
+  // size, so the declaration has no place for them. A distribution that copied them through stops here.
   for (const key of ["keepAspectRatio", "ensureMultipleOf"]) {
     assertThrows(
       () => parseDepthAnythingPipelineConfig(withPatch({ [key]: 14 })),
@@ -67,7 +68,7 @@ test("上流 config の余った欄も落とす（keep_aspect_ratio / ensure_mul
 });
 
 for (const key of Object.keys(CONFIG)) {
-  test(`欄の欠落は落とす: ${key}`, () => {
+  test(`rejects a missing field: ${key}`, () => {
     assertThrows(
       () => parseDepthAnythingPipelineConfig(without(key)),
       Error,
@@ -76,7 +77,7 @@ for (const key of Object.keys(CONFIG)) {
   });
 }
 
-test("寸法は正の整数だけ（0 / 小数 / 文字列を落とす）", () => {
+test("sizes are positive integers only (rejects 0 / fractions / strings)", () => {
   for (const bad of [0, -518, 518.5, "518"]) {
     assertThrows(
       () => parseDepthAnythingPipelineConfig(withPatch({ imageWidth: bad })),
@@ -86,7 +87,7 @@ test("寸法は正の整数だけ（0 / 小数 / 文字列を落とす）", () =
   }
 });
 
-test("imageStd の 0 を落とす（0 除算は ±Infinity を静かに作る）", () => {
+test("rejects imageStd of 0 (a division by 0 silently produces ±Infinity)", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ imageStd: [0.229, 0, 0.225] })),
     Error,
@@ -94,17 +95,20 @@ test("imageStd の 0 を落とす（0 除算は ±Infinity を静かに作る）
   );
 });
 
-test("imageMean / imageStd の組で正規化後の値が f32 で溢れる配布形は資産の不正として落とす", () => {
-  // 個々の欄は有限でも商が f32 で溢れる。構築時に落とさないと、生成のたびに入力起因の型で落ちる。
+test("rejects as invalid assets a distribution whose imageMean / imageStd pair overflows f32 after normalization", () => {
+  // Each field is finite, but the quotient overflows f32. Unless it is rejected at build time, every generation fails with an input-caused type.
   const error = assertThrows(
     () => parseDepthAnythingPipelineConfig({ ...CONFIG, imageStd: [1e-50, 0.5, 0.5] }),
     Error,
     "pipelineConfig.imageMean / imageStd: channel 0: the normalized range",
   );
-  assert(!(error instanceof ModelInputError), "資産の不正が入力起因に分類された");
+  assert(
+    !(error instanceof ModelInputError),
+    "invalid assets were classified as caused by the input",
+  );
 });
 
-test("チャネル定数は長さ 3 の数の配列だけ", () => {
+test("channel constants are arrays of 3 numbers only", () => {
   for (const bad of [[0.485, 0.456], [0.485, 0.456, 0.406, 0.5], [0.485, "0.456", 0.406], 0.485]) {
     assertThrows(
       () => parseDepthAnythingPipelineConfig(withPatch({ imageMean: bad })),
@@ -114,14 +118,14 @@ test("チャネル定数は長さ 3 の数の配列だけ", () => {
   }
 });
 
-test("imageMean は負も受ける（平行移動なので値域を狭めない）", () => {
+test("imageMean also accepts negative values (it is a shift, so the range is not narrowed)", () => {
   assertEquals(
     parseDepthAnythingPipelineConfig(withPatch({ imageMean: [-0.5, 0, 0.5] })).imageMean,
     [-0.5, 0, 0.5],
   );
 });
 
-test("非有限な定数は落とす（全画素が NaN になる）", () => {
+test("rejects non-finite constants (every pixel would become NaN)", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ imageMean: [0.485, Number.NaN, 0.406] })),
     Error,
@@ -137,7 +141,7 @@ test("非有限な定数は落とす（全画素が NaN になる）", () => {
   );
 });
 
-test("bilinear を宣言した配布形は受理しない（BiRefNet / SigLIP2 と逆向き）", () => {
+test("does not accept a distribution that declares bilinear (the opposite of BiRefNet / SigLIP2)", () => {
   assertThrows(
     () => parseDepthAnythingPipelineConfig(withPatch({ interpolation: "bilinear" })),
     Error,

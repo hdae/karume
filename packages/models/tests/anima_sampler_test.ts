@@ -1,9 +1,10 @@
-// Anima のサンプラ（IR に載らない段）の挙動テスト。GPU も資産も要らない純関数。
+// Behaviour tests of Anima's sampler (the stage that is not in the IR). Pure functions that need
+// neither a GPU nor assets.
 //
-// 参照フィクスチャとの数値パリティ（timesteps_proj 表の突合）は **実 GPU / 実資産の E2E と
-// 同じ波**で復帰させる（P3 波 2）。ここは形と不変条件を押さえる。
-// NOTE: `latents_mean` / `latents_std` のビット一致は資産不要の門になった（参照フィクスチャを
-// 切り出して commit してある — `anima_latents_test.ts`）。
+// Numerical parity with the reference fixture (comparing the timesteps_proj table) comes back **in
+// the same iteration as the E2E with a real GPU and real assets** (P3, iteration 2). This file
+// covers shapes and invariants. NOTE: The bit identity of `latents_mean` / `latents_std` became an
+// asset-free check (the reference fixture was cut out and committed — `anima_latents_test.ts`).
 
 import { assert, assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
@@ -17,31 +18,35 @@ import {
 import { assertPromptTokenLengths } from "../src/anima/text/tokenizer.ts";
 import { ModelInputError } from "../src/errors.ts";
 import { assertEncodableText } from "../src/text/code-points.ts";
-// `needsUncond` の定義は更新則に依らない共通処理側にある（`sampler.ts` は import して使う）。
+// `needsUncond` is defined on the shared side that does not depend on the update rule (`sampler.ts`
+// imports it).
 import { needsUncond } from "../src/generation/dpm-solver-multistep.ts";
 
-/** `models/karume-anima/karume.json` の `pipelineConfig.scheduler` と同じ値（形の検査用）。 */
+/**
+ * The same values as `pipelineConfig.scheduler` in `models/karume-anima/karume.json` (for the shape
+ * checks).
+ */
 const SHIFT = 3;
 const NUM_TRAIN_TIMESTEPS = 1000;
 
-test("sigmaSchedule: 長さ steps+1・終端 0・単調減少", () => {
+test("sigmaSchedule: length steps+1, ends at 0, strictly decreasing", () => {
   const sigmas = sigmaSchedule(8, SHIFT);
   assertEquals(sigmas.length, 9);
-  assertEquals(sigmas[0], 1, "始点は linspace の start=1（shift を掛けても 3/3 = 1）");
-  assertEquals(sigmas[8], 0, "終端 0 が 1 つ足される");
+  assertEquals(sigmas[0], 1, "the start is linspace's start=1 (still 3/3 = 1 after the shift)");
+  assertEquals(sigmas[8], 0, "one terminal 0 is appended");
   for (let index = 1; index < 8; index += 1) {
-    assert(sigmas[index] < sigmas[index - 1], `σ が単調減少でない（index=${index}）`);
+    assert(sigmas[index] < sigmas[index - 1], `σ is not strictly decreasing (index=${index})`);
   }
 });
 
-test("sigmaSchedule: steps < 2 は linspace の分母が 0 になるので落とす", () => {
+test("sigmaSchedule: rejects steps < 2 because the linspace denominator becomes 0", () => {
   assertThrows(() => sigmaSchedule(1, SHIFT), ModelInputError);
   assertThrows(() => sigmaSchedule(2.5, SHIFT), ModelInputError);
 });
 
-test("sigmaSchedule: shift は manifest の値で効く（1 なら素の linspace）", () => {
-  // shift=1 では `1·σ / (0·σ + 1) = σ` に潰れる。scheduler の値を manifest から取る配線が
-  // 死んで定数に固定されていたら、この 1 本が落ちる。
+test("sigmaSchedule: the shift takes the manifest's value (1 gives the plain linspace)", () => {
+  // With shift=1 it collapses to `1·σ / (0·σ + 1) = σ`. If the wiring that takes the scheduler
+  // values from the manifest were dead and fixed to a constant, this one case would fail.
   const plain = sigmaSchedule(4, 1);
   assertEquals(
     [...plain].slice(0, 4).map((value) => Math.fround(value)),
@@ -53,41 +58,46 @@ test("sigmaSchedule: shift は manifest の値で効く（1 なら素の linspac
     ],
   );
   const shifted = sigmaSchedule(4, SHIFT);
-  assert(shifted[1] !== plain[1], "shift が効いていない");
+  assert(shifted[1] !== plain[1], "the shift has no effect");
 });
 
-test("sigmaSchedule: 代表 shift で梯子の先頭が厳密に 1（DPM++ 2M の前提）", () => {
-  // `dpm-solver-multistep.ts` は「先頭が厳密に 1」から step 0 の `alphaS0 = 0` を導き、自身は
-  // 例外を出さない。上側のずれは `sigmaSchedule` の門が拒否し、下側の ulp 級のずれは受理する
-  // （下の describe）。代表 shift のこの 4 値は先頭が厳密に 1 になることを固定する。
+test("sigmaSchedule: with the representative shifts the ladder starts at exactly 1 (DPM++ 2M's premise)", () => {
+  // `dpm-solver-multistep.ts` derives step 0's `alphaS0 = 0` from "the start is exactly 1" and
+  // throws no exception itself. An upward drift is rejected by `sigmaSchedule`'s check, and a
+  // downward ulp-sized drift is accepted (the describe below). These four representative shifts pin
+  // a start of exactly 1.
   for (const shift of [1, 1.5, 3, 12]) {
-    assertStrictEquals(sigmaSchedule(8, shift)[0], 1, `shift=${shift} の先頭`);
+    assertStrictEquals(sigmaSchedule(8, shift)[0], 1, `start for shift=${shift}`);
   }
 });
 
-test("sigmaSchedule: 梯子の成立域の外は fail loudly（黙って別軌道を走らせない）", () => {
-  // 分母 `f32(shift−1)+1` が f32 で厳密に 0 へ潰れる域 → 先頭が +Inf。
+test("sigmaSchedule: fails loudly outside the region where the ladder is valid (no silently running another trajectory)", () => {
+  // The region where the denominator `f32(shift−1)+1` collapses to exactly 0 in f32 → the start is
+  // +Inf.
   assertThrows(
     () => sigmaSchedule(8, 1e-8),
     RangeError,
     "is outside the range where the ladder holds",
   );
-  // 潰れはしないが先頭が 1 でなくなる域（実測 0.8388…）。
+  // The region where it does not collapse but the start is no longer 1 (measured 0.8388…).
   assertThrows(
     () => sigmaSchedule(8, 1e-7),
     RangeError,
     "is outside the range where the ladder holds",
   );
-  // 先頭は 1 のまま、直後が f32 の刻みに潰れて同値になる域（狭義単調減少が破れる側）。
+  // The region where the start stays 1 but the next value collapses to the same f32 step (the side
+  // where strict monotonicity breaks).
   assertThrows(() => sigmaSchedule(8, 1e7), RangeError, "is not strictly decreasing");
 });
 
-describe("sigmaSchedule: 先頭が 1 から ulp 級にずれる小数 shift", () => {
-  // DPM++ 2M は step 0 で `log(1 − σ₀)` を取るので、σ₀ が 1 を 1 ulp でも超えると負数の log で
-  // NaN になり、全 step を NaN で走った末に遅れて落ちる。σ₀ < 1 側のずれは `alphaS0 ≈ 6e-8` で無害。
-  it("σ₀ が 1 を超える shift（1.32 → 1 + 2⁻²³）は GPU に触る前に RangeError で拒否する", () => {
-    // 「梯子の成立域の外」は単調性の門も出すので、先頭の門の文言と σ₀ の値まで照合して
-    // 上側の枝で落ちたことを固定する。
+describe("sigmaSchedule: fractional shifts whose start drifts from 1 by an ulp", () => {
+  // DPM++ 2M takes `log(1 − σ₀)` at step 0, so if σ₀ exceeds 1 by even one ulp the log of a
+  // negative number gives NaN, and it fails late after running every step on NaN. A drift to σ₀ < 1
+  // is harmless with `alphaS0 ≈ 6e-8`.
+  it("a shift with σ₀ above 1 (1.32 → 1 + 2⁻²³) is rejected with a RangeError before touching the GPU", () => {
+    // "Outside the region where the ladder is valid" is also raised by the monotonicity check, so
+    // the wording of the start check and the value of σ₀ are matched to pin that the upper branch
+    // failed.
     assertThrows(
       () => sigmaSchedule(8, 1.32),
       RangeError,
@@ -95,44 +105,44 @@ describe("sigmaSchedule: 先頭が 1 から ulp 級にずれる小数 shift", ()
     );
   });
 
-  it("σ₀ が 1 を下回る側にずれる shift（1.18 → 1 − 2⁻²³）は受理する", () => {
+  it("a shift with σ₀ drifting below 1 (1.18 → 1 − 2⁻²³) is accepted", () => {
     const sigmas = sigmaSchedule(8, 1.18);
     assertStrictEquals(
       sigmas[0],
       1 - 2 ** -23,
-      "1.18 は下側に 2 ulp（f32 の 1 未満の刻み 2⁻²⁴ × 2）ずれる",
+      "1.18 drifts down by 2 ulp (f32's step below 1, 2⁻²⁴ × 2)",
     );
   });
 });
 
-test("timestepsProj: 前半 cos・後半 sin（flip_sin_to_cos=true）", () => {
-  // sigma=0 → timestep=0 → 全周波数で angle=0 なので cos 側が 1・sin 側が 0 になる。
-  // 反転していると前半が 0・後半が 1 になり、この 1 本で落ちる。
+test("timestepsProj: cos in the first half, sin in the second (flip_sin_to_cos=true)", () => {
+  // sigma=0 → timestep=0 → angle=0 at every frequency, so the cos side is 1 and the sin side 0. If
+  // flipped, the first half would be 0 and the second 1, and this one case would fail.
   const proj = timestepsProj(0, 8, NUM_TRAIN_TIMESTEPS);
   assertEquals([...proj], [1, 1, 1, 1, 0, 0, 0, 0]);
 });
 
-test("timestepsProj: 幅と num_train_timesteps の受理集合", () => {
+test("timestepsProj: the accepted set of the width and num_train_timesteps", () => {
   assertThrows(() => timestepsProj(0.5, 7, NUM_TRAIN_TIMESTEPS), RangeError);
   assertThrows(() => timestepsProj(0.5, 0, NUM_TRAIN_TIMESTEPS), RangeError);
   assertThrows(() => timestepsProj(0.5, 8, 0), RangeError);
   assertThrows(() => timestepsProj(0.5, 8, 1000.5), RangeError);
 });
 
-test("needsUncond: CFG=1 だけが uncond 不要", () => {
+test("needsUncond: only CFG=1 needs no uncond", () => {
   assertEquals(needsUncond(1), false);
   assertEquals(needsUncond(4), true);
   assertEquals(needsUncond(0), true);
 });
 
-test("cfgEulerStep: CFG=1 は cond をそのまま使う（uncond を経由しない）", () => {
+test("cfgEulerStep: CFG=1 uses cond as is (does not go through uncond)", () => {
   const previous = Float32Array.from([1, 2, 3]);
   const cond = Float32Array.from([0.25, -0.5, 0.125]);
   const got = cfgEulerStep(previous, cond, undefined, -0.5, 1);
   assertEquals([...got], [1 - 0.125, 2 + 0.25, 3 - 0.0625]);
 });
 
-test("cfgEulerStep: uncond の有無が needsUncond と食い違ったら落とす", () => {
+test("cfgEulerStep: rejects a presence of uncond that disagrees with needsUncond", () => {
   const previous = Float32Array.from([0, 0]);
   const cond = Float32Array.from([1, 1]);
   const uncond = Float32Array.from([2, 2]);
@@ -148,17 +158,18 @@ test("cfgEulerStep: uncond の有無が needsUncond と食い違ったら落と�
   );
 });
 
-test("cfgEulerStep: CFG!=1 は uncond + scale·(cond − uncond) を Euler へ渡す", () => {
+test("cfgEulerStep: CFG!=1 passes uncond + scale·(cond − uncond) to Euler", () => {
   const previous = Float32Array.from([0]);
   const got = cfgEulerStep(previous, Float32Array.from([1]), Float32Array.from([0.5]), -2, 4);
   // noise = 0.5 + 4·(1 − 0.5) = 2.5 → 0 + (−2)·2.5 = −5
   assertEquals([...got], [-5]);
 });
 
-test("cfgEulerStep: f32 で表せない倍率は先に f32 へ丸めてから掛ける（torch と最終桁まで一致）", () => {
-  // torch は Python float の倍率を f32 テンソルとの積の前に f32 へ落とす。f64 のまま掛けると、
-  // この組では合成が 1 ulp ずれる（0.03789997100830078）。期待値は torch 2.13.0 の CPU で
-  // `uncond + 1.1 * (cond - uncond)` を f32 テンソルで評価した値。
+test("cfgEulerStep: a factor not representable in f32 is rounded to f32 before multiplying (matches torch to the last digit)", () => {
+  // torch rounds a Python float factor to f32 before the product with an f32 tensor. Multiplying in
+  // f64 makes the combination drift by 1 ulp for this pair (0.03789997100830078). The expected
+  // value is `uncond + 1.1 * (cond - uncond)` evaluated with f32 tensors on the CPU with torch
+  // 2.13.0.
   const got = cfgEulerStep(
     Float32Array.from([0]),
     Float32Array.from([0.011]),
@@ -174,31 +185,42 @@ test("cfgEulerStep: f32 で表せない倍率は先に f32 へ丸めてから掛
 // cases were dropped as literal duplicates of `anima_resolution_test.ts`, `anima_random_test.ts`
 // and `anima_tokenizer_test.ts`; what stays here is what no family test checks.
 //
-// 併せて**逆側**も縛る: 内部不変条件の破れがこの型で飛ぶと、ホストは 500 相当を「入力を
-// 直せ」と呼び手へ返す。型を広げすぎた退行は入力側のテストでは捕まらない。
+// The **other side** is pinned too: if a broken internal invariant were raised with this type, the
+// host would return a 500-class failure to the caller as "fix your input". A regression that widens
+// the type is not caught by the input-side tests.
 
-describe("Anima の生成要求が受理できないとき", () => {
-  it("steps の門と sigma の梯子が同じ ModelInputError・同じ診断を出す", () => {
-    // 観測できるのは「2 経路の型と診断が一致する」ことまで。`generate` の入口がこの門を
-    // 先に呼ぶこと（ADR 0107 決定 6 の先行拒否）はここからは見えない — 入口へ届くには実資産と
-    // GPU が要るので、その順序は GPU レーンの e2e が受け持つ。
+describe("when Anima's generation request cannot be accepted", () => {
+  it("the steps check and the sigma ladder raise the same ModelInputError with the same diagnostic", () => {
+    // What can be observed stops at "the two paths agree on type and diagnostic". That `generate`'s
+    // entry calls this check first (the early rejection of ADR 0107 decision 6) is not visible from
+    // here — reaching the entry needs real assets and a GPU, so that order is covered by the e2e of
+    // the GPU lane.
     const direct = assertThrows(() => assertAcceptableSteps(1), ModelInputError);
     const viaSchedule = assertThrows(() => sigmaSchedule(1, 3), ModelInputError);
-    assertEquals(direct.message, viaSchedule.message, "steps の診断が 2 か所で割れている");
+    assertEquals(
+      direct.message,
+      viaSchedule.message,
+      "the steps diagnostic differs between the two places",
+    );
   });
 
-  it("steps の上限は 1000（ちょうどは梯子まで組め、超えると梯子を確保する前に ModelInputError）", () => {
+  it("the upper bound of steps is 1000 (exactly at it the ladder is built; above it, a ModelInputError before the ladder is allocated)", () => {
     assertAcceptableSteps(1000);
-    assertEquals(sigmaSchedule(1000, 3).length, 1001, "上限ちょうどは境界の内");
+    assertEquals(sigmaSchedule(1000, 3).length, 1001, "exactly at the bound is inside");
     const direct = assertThrows(
       () => assertAcceptableSteps(1001),
       ModelInputError,
       "is not at most 1000",
     );
     const viaSchedule = assertThrows(() => sigmaSchedule(1001, 3), ModelInputError);
-    assertEquals(direct.message, viaSchedule.message, "steps の診断が 2 か所で割れている");
-    // 門が配列の確保より先に効くことの証拠: 上限の無いコードでは `new Float32Array(2⁵³)` が即座に
-    // `RangeError`（Invalid typed array length）を投げるので、型が違ってこの 1 行が赤になる。
+    assertEquals(
+      direct.message,
+      viaSchedule.message,
+      "the steps diagnostic differs between the two places",
+    );
+    // Evidence that the check acts before the array is allocated: in code without the bound, `new
+    // Float32Array(2⁵³)` throws a `RangeError` (Invalid typed array length) at once, so the type
+    // differs and this one line turns red.
     assertThrows(
       () => sigmaSchedule(Number.MAX_SAFE_INTEGER, 3),
       ModelInputError,
@@ -206,40 +228,46 @@ describe("Anima の生成要求が受理できないとき", () => {
     );
   });
 
-  it("対にならないサロゲートを含む本文は ModelInputError で飛ぶ", () => {
+  it("a text with an unpaired surrogate is raised as a ModelInputError", () => {
     // Kept although `anima_tokenizer_test.ts` covers the rejecting side: the accepting side
     // (a paired surrogate) is checked only here, against the owner directly.
-    // 条件の正本は `toCodePoints` 1 本のまま。生成要求の本文として通ったときだけ型が上がる。
-    const error = assertThrows(
-      () => assertEncodableText("a\ud800b", "プロンプト"),
-      ModelInputError,
-    );
-    assert(error.cause instanceof Error, "所有者の診断を cause に残す");
-    assert(!(error.cause instanceof ModelInputError), "cause は共有ヘルパの素の Error");
-    assertEncodableText("a𐀀b", "プロンプト");
+    // The source of truth for the condition stays the one `toCodePoints`. The type is raised only
+    // when it passes as the text of a generation request.
+    const error = assertThrows(() => assertEncodableText("a\ud800b", "prompt"), ModelInputError);
+    assert(error.cause instanceof Error, "the owner's diagnostic is kept in cause");
+    assert(!(error.cause instanceof ModelInputError), "cause is the shared helper's plain Error");
+    assertEncodableText("a𐀀b", "prompt");
   });
 });
 
-describe("Anima の内部不変条件が破れたとき", () => {
-  it("プロンプトの id 列が上限を超えるのは ModelInputError ではない（切り詰めの破れ）", () => {
-    // 両トークナイザは `maxLength` で切り詰めてから返すので、上限超過はそこが壊れたときにしか
-    // 届かない = 呼び手がプロンプトを短くしても直らない 500 相当。
+describe("when an internal invariant of Anima is broken", () => {
+  it("a prompt id sequence over the bound is not a ModelInputError (the truncation broke)", () => {
+    // Both tokenizers truncate to `maxLength` before returning, so exceeding the bound can only
+    // happen when that breaks = a 500-class failure that the caller cannot fix by shortening the
+    // prompt.
     const error = assertThrows(
-      () => assertPromptTokenLengths("プロンプト", 513, 4, 512),
+      () => assertPromptTokenLengths("prompt", 513, 4, 512),
       Error,
       "upper bound 512",
     );
-    assert(!(error instanceof ModelInputError), "500 相当が入力起因の型で飛んでいる");
+    assert(
+      !(error instanceof ModelInputError),
+      "a 500-class failure is raised with the input-caused type",
+    );
   });
 
-  it("VAE 出力の要素数と寸法の食い違いは ModelInputError ではない（呼び手は直せない）", () => {
-    // `imageToRgba` の寸法は幾何（latent の全長 × 縮尺）から来るので、ここが割れているのは
-    // 開いた export か配線の破れであって、要求を直しても直らない = 500 相当。
+  it("a mismatch between the VAE output's element count and dimensions is not a ModelInputError (the caller cannot fix it)", () => {
+    // The dimensions of `imageToRgba` come from the geometry (the latent's full length × scale), so
+    // a break here is a broken export or wiring, not something fixing the request repairs = a
+    // 500-class failure.
     const error = assertThrows(
       () => imageToRgba(new Float32Array(5), 2, 1),
       Error,
       "element count",
     );
-    assert(!(error instanceof ModelInputError), "500 相当が入力起因の型で飛んでいる");
+    assert(
+      !(error instanceof ModelInputError),
+      "a 500-class failure is raised with the input-caused type",
+    );
   });
 });

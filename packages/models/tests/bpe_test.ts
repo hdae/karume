@@ -1,24 +1,26 @@
-// BPE 共通層（src/text/bpe.ts）と逐次復号器（src/text/detokenizer.ts）の振る舞い検証。
+// Behaviour checks of the shared BPE layer (src/text/bpe.ts) and the incremental decoder
+// (src/text/detokenizer.ts).
 //
-// 実資産には依存しない — 合成した小語彙で「rank と位置の優先順」「古くなった対の無効化」
-// 「byte_fallback の展開」「byte run の畳み方」を直接見る。実資産との突合（id 列が上流の
-// `tokenizers` と一致するか）はファミリ側（gemma4_tokenizer_test.ts）の担当で、ここは
-// **規則そのもの**と**計算量**を落とせる形に置く。
+// It does not depend on real assets — a small synthetic vocabulary looks directly at "the priority
+// of rank and position", "invalidating stale pairs", "expanding byte_fallback" and "how byte runs
+// fold". The comparison with real assets (whether the id sequence matches upstream `tokenizers`)
+// belongs to the family side (gemma4_tokenizer_test.ts); this file sets out the **rules
+// themselves** and the **complexity** in a form that can fail.
 
 import { beforeAll, describe, it, test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { bpeEncode, type BpeModel, createBpeModel } from "../src/text/bpe.ts";
 import { detokenize, StreamingDetokenizer } from "../src/text/detokenizer.ts";
 
-/** byte_fallback 語彙の綴り（資産側と同じ規約）。 */
+/** The spelling of the byte_fallback vocabulary (the same convention as the assets). */
 const byteToken = (byte: number): string =>
   `<0x${byte.toString(16).toUpperCase().padStart(2, "0")}>`;
 
 /**
- * 綴りの一覧と `[左, 右]` の併合規則から模型を組む。
+ * Builds a model from a list of spellings and `[left, right]` merge rules.
  *
- * byte 語彙 256 本は素の語彙の**後ろ**へ足す（`createBpeModel` が要求する 256 本を、
- * テストごとに書かずに済ませるため）。
+ * The 256 byte entries are appended **after** the plain vocabulary (so that each test does not have
+ * to write out the 256 entries `createBpeModel` requires).
  */
 const buildModel = (
   pieces: readonly string[],
@@ -35,12 +37,12 @@ const buildModel = (
   });
 };
 
-/** id 列を綴り列へ戻す（意図が読める形で突き合わせるため）。 */
+/** Maps an id sequence back to spellings (to compare in a form whose intent reads). */
 const spell = (model: BpeModel, ids: readonly number[]): string[] =>
   ids.map((id) => model.tokenOf.get(id) as string);
 
-describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
-  it("byteIds が 256 本でないと落ちる", () => {
+describe("asset checks: rejects shapes that would produce silently wrong values", () => {
+  it("fails when byteIds does not have 256 entries", () => {
     assertThrows(
       () => createBpeModel({ vocab: [[0, "a"]], merges: [], byteIds: [0] }),
       Error,
@@ -48,16 +50,17 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
     );
   });
 
-  it("byteIds が指す綴りが `<0xHH>` でないと落ちる", () => {
-    // `base + byte` の連番は実資産の実測事実であって schema の保証ではない。ずれた表を
-    // 通すと byte 展開が合法な別の行を指す（例外にならない配布破損）。
+  it("fails when a spelling byteIds points at is not `<0xHH>`", () => {
+    // The consecutive `base + byte` numbering is a measured fact about the real assets, not a
+    // schema guarantee. Letting a shifted table through would make the byte expansion point at
+    // another valid row (a broken distribution that raises no exception).
     const tokens = ["x", ...Array.from({ length: 256 }, (_, byte) => byteToken(byte))];
     assertThrows(
       () =>
         createBpeModel({
           vocab: tokens.map((token, id) => [id, token] as const),
           merges: [],
-          // 1 つ手前へずらす = 全部が 1 バイト分ずれた表。
+          // Shifted one back = a table where everything is off by one byte.
           byteIds: Array.from({ length: 256 }, (_, byte) => byte),
         }),
       Error,
@@ -65,7 +68,7 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
     );
   });
 
-  it("同じ対の併合規則が 2 本あると落ちる（上流は後勝ちで沈黙する）", () => {
+  it("fails when the same pair has two merge rules (upstream silently lets the last one win)", () => {
     assertThrows(
       () =>
         buildModel(
@@ -80,11 +83,11 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
     );
   });
 
-  it("併合先の綴りが語彙に無いと落ちる", () => {
+  it("fails when the merged spelling is not in the vocabulary", () => {
     assertThrows(() => buildModel(["a", "b"], [["a", "b"]]), Error, "is not in the vocabulary");
   });
 
-  it("語彙の綴りが重複すると落ちる（行番号 = id が引けなくなる）", () => {
+  it("fails when vocabulary spellings repeat (row number = id could no longer be looked up)", () => {
     assertThrows(
       () =>
         createBpeModel({
@@ -101,10 +104,10 @@ describe("資産の門: 通すと沈黙誤値になる形を落とす", () => {
   });
 });
 
-describe("併合の順序: rank が最小のものから、同点は左から", () => {
-  it("左から貪欲に取るのではなく rank の小さい対が先に潰れる", () => {
-    // ("b","c") が rank 0・("a","b") が rank 1。左から取ると [ab, c] になるが、正本は
-    // rank 順なので [a, bc] が正しい。
+describe("merge order: smallest rank first, ties from the left", () => {
+  it("the pair with the smaller rank collapses first, not a greedy left-to-right take", () => {
+    // ("b","c") is rank 0, ("a","b") rank 1. Taking from the left would give [ab, c], but the
+    // source of truth goes by rank, so [a, bc] is correct.
     const model = buildModel(
       ["a", "b", "c", "ab", "bc"],
       [
@@ -115,9 +118,10 @@ describe("併合の順序: rank が最小のものから、同点は左から", 
     assertEquals(spell(model, bpeEncode(model, "abc")), ["a", "bc"]);
   });
 
-  it("同じ rank が複数の位置に立つときは左が勝つ", () => {
-    // "aaa" は位置 0 と 1 の両方で ("a","a") rank 0。左が勝てば [aa, a] → ("aa","a") で
-    // [aaa] まで畳まれる。右を先に取ると [a, aa] で止まる（("a","aa") は規則に無い）。
+  it("when the same rank stands at several positions, the left one wins", () => {
+    // "aaa" has ("a","a") rank 0 at both position 0 and 1. If the left wins, [aa, a] → ("aa","a")
+    // folds all the way to [aaa]. Taking the right first stops at [a, aa] (("a","aa") is not a
+    // rule).
     const model = buildModel(
       ["a", "aa", "aaa"],
       [
@@ -128,9 +132,9 @@ describe("併合の順序: rank が最小のものから、同点は左から", 
     assertEquals(spell(model, bpeEncode(model, "aaa")), ["aaa"]);
   });
 
-  it("併合で入れ替わった位置の古い項目は捨てられる", () => {
-    // ("y","z") rank 0 が先に潰れると、位置 0 に積んであった ("x","y") rank 1 の相手は
-    // もう `y` ではない。同一性で照合しないと `x` と `yz` を `xy` として畳んでしまう。
+  it("stale entries at positions changed by a merge are discarded", () => {
+    // When ("y","z") rank 0 collapses first, the partner of ("x","y") rank 1 queued at position 0
+    // is no longer `y`. Without matching by identity, `x` and `yz` would be folded as `xy`.
     const model = buildModel(
       ["x", "y", "z", "yz", "xy"],
       [
@@ -141,8 +145,8 @@ describe("併合の順序: rank が最小のものから、同点は左から", 
     assertEquals(spell(model, bpeEncode(model, "xyz")), ["x", "yz"]);
   });
 
-  it("消えた位置の項目は読み飛ばされる", () => {
-    // ("a","b") → ab で位置 1 が消えるが、キューには ("b","c") が残っている。
+  it("entries at vanished positions are skipped", () => {
+    // ("a","b") → ab removes position 1, but ("b","c") is still in the queue.
     const model = buildModel(
       ["a", "b", "c", "d", "ab", "cd", "bc", "abcd"],
       [
@@ -156,37 +160,39 @@ describe("併合の順序: rank が最小のものから、同点は左から", 
   });
 });
 
-describe("byte_fallback: 語彙に無い文字は UTF-8 バイトへ割れる", () => {
+describe("byte_fallback: characters not in the vocabulary split into UTF-8 bytes", () => {
   let model: BpeModel;
   beforeAll(() => {
     model = buildModel(["a"]);
   });
 
-  it("多バイト文字は 1 バイト 1 記号になる", () => {
+  it("a multi-byte character becomes one symbol per byte", () => {
     assertEquals(spell(model, bpeEncode(model, "あ")), ["<0xE3>", "<0x81>", "<0x82>"]);
   });
 
-  it("語彙にある文字は割れない", () => {
+  it("characters in the vocabulary are not split", () => {
     assertEquals(spell(model, bpeEncode(model, "aあ")).slice(0, 1), ["a"]);
   });
 
-  it("空の断片は空の id 列", () => {
+  it("an empty chunk gives an empty id sequence", () => {
     assertEquals(bpeEncode(model, ""), []);
   });
 
-  it("対にならないサロゲートは落とす（正本の str に載らない値）", () => {
+  it("rejects an unpaired surrogate (a value the reference's str cannot hold)", () => {
     assertThrows(() => bpeEncode(model, "\ud800"), Error, "surrogate");
   });
 });
 
-test("併合キュー: 長文で計算量が線形に近い（O(n²) の全走査は落ちる）", () => {
-  // 2 のべき乗で倍化する語彙を合成し、日本語 1 文字 65,536 個を 1 断片として食わせる。
-  // 併合回数は 65,535 回で、素朴な「全隣接ペアを走査 → 最小 rank を splice」は
-  // 併合ごとに記号列を舐めるので 10^9 回規模の探索になる（分単位）。merge queue なら
-  // 押し込みと取り出しが記号数の定数倍で済む。
+test("merge queue: the complexity is close to linear on long text (an O(n²) full scan fails)", () => {
+  // A vocabulary that doubles by powers of two is synthesised, and 65,536 copies of one Japanese
+  // character are fed as a single chunk. That is 65,535 merges, and the naive "scan every adjacent
+  // pair → splice the minimum rank" walks the symbol sequence at each merge, a search on the order
+  // of 10^9 steps (minutes). A merge queue needs pushes and pops of a constant multiple of the
+  // symbol count.
   //
-  // MUST: この門は恒真でない — 実装を全走査へ書き戻すと確実に落ちる（時間予算は実測の
-  // 100 倍以上の余裕を採ってあるので、機械の速度差では落ちない）。
+  // MUST: this check is not vacuous — rewriting the implementation back to a full scan reliably
+  // fails it (the time budget keeps a margin of more than 100× the measurement, so machine speed
+  // differences do not fail it).
   const LEVELS = 16;
   const pieces = Array.from({ length: LEVELS + 1 }, (_, level) => "あ".repeat(2 ** level));
   const merges = Array.from(
@@ -203,13 +209,13 @@ test("併合キュー: 長文で計算量が線形に近い（O(n²) の全走�
   const BUDGET_MS = 5_000;
   if (elapsed > BUDGET_MS) {
     throw new Error(
-      `記号 ${2 ** LEVELS} 個の併合に ${elapsed.toFixed(0)}ms（予算 ${BUDGET_MS}ms）— ` +
-        "全走査へ退行していないか確かめる",
+      `merging ${2 ** LEVELS} symbols took ${elapsed.toFixed(0)}ms (budget ${BUDGET_MS}ms) — ` +
+        "check whether it regressed to a full scan",
     );
   }
 });
 
-/** 復号の口を合成する（byte 語彙 = `<0xHH>`・`skip` の id は綴りを返さない）。 */
+/** Synthesises a decode source (byte vocabulary = `<0xHH>`, ids in `skip` return no spelling). */
 const buildSource = (
   tokens: ReadonlyMap<number, string>,
   skip: ReadonlySet<number> = new Set(),
@@ -222,12 +228,12 @@ const buildSource = (
   textOf: (id: number): string | undefined => {
     if (skip.has(id)) return undefined;
     const token = tokens.get(id);
-    if (token === undefined) throw new Error(`復号: id ${id} が語彙に無い`);
+    if (token === undefined) throw new Error(`decode: id ${id} is not in the vocabulary`);
     return token;
   },
 });
 
-/** `<0xHH>` を id 200+byte・普通の綴りを 0..9 に割り当てた復号用の表。 */
+/** A decode table that assigns `<0xHH>` to id 200+byte and the ordinary spellings to 0..9. */
 const DECODE_TOKENS = new Map<number, string>([
   [0, "hello"],
   [1, "<eos>"],
@@ -235,18 +241,19 @@ const DECODE_TOKENS = new Map<number, string>([
   ...Array.from({ length: 256 }, (_, byte) => [200 + byte, byteToken(byte)] as const),
 ]);
 
-describe("逐次復号: byte run 以外は 1 トークンも溜めない", () => {
-  it("byte でないトークンは push のたびに確定して出る", () => {
-    // `finish()` まで溜めてから返す「偽 streaming」はここで落ちる（ADR 0084 決定 4）。
+describe("incremental decode: holds back no token except in a byte run", () => {
+  it("a non-byte token is emitted as soon as it is pushed", () => {
+    // A "fake streaming" that holds everything until `finish()` fails here (ADR 0084 decision 4).
     const detokenizer = new StreamingDetokenizer(buildSource(DECODE_TOKENS));
     assertEquals(detokenizer.push(0), "hello");
     assertEquals(detokenizer.push(2), "world");
     assertEquals(detokenizer.finish(), "");
   });
 
-  it("byte run は閉じるまで出ない（閉じる = 非 byte トークンか finish）", () => {
-    // 「3 バイト揃った時点で出す」にはできない。正本は run 全体を 1 単位で畳むので、後続の
-    // 1 バイトで**先頭の妥当な部分まで**置換文字に変わりうる（下の run の畳み方の節）。
+  it("a byte run is not emitted until it closes (close = a non-byte token or finish)", () => {
+    // It cannot be "emit once three bytes are in". The source of truth folds the whole run as one
+    // unit, so a following byte can turn **even the valid leading part** into replacement
+    // characters (the section on how runs fold below).
     const detokenizer = new StreamingDetokenizer(buildSource(DECODE_TOKENS));
     assertEquals(detokenizer.push(200 + 0xe3), "");
     assertEquals(detokenizer.push(200 + 0x81), "");
@@ -254,7 +261,7 @@ describe("逐次復号: byte run 以外は 1 トークンも溜めない", () =>
     assertEquals(detokenizer.finish(), "あ");
   });
 
-  it("run の直後の非 byte トークンと同時に確定する", () => {
+  it("is emitted together with the non-byte token right after the run", () => {
     const detokenizer = new StreamingDetokenizer(buildSource(DECODE_TOKENS));
     detokenizer.push(200 + 0xe3);
     detokenizer.push(200 + 0x81);
@@ -263,40 +270,45 @@ describe("逐次復号: byte run 以外は 1 トークンも溜めない", () =>
   });
 });
 
-describe("逐次復号: byte run の畳み方は正本の String::from_utf8 に合わせる", () => {
+describe("incremental decode: byte runs fold the way the reference's String::from_utf8 does", () => {
   let source: ReturnType<typeof buildSource>;
   beforeAll(() => {
     source = buildSource(DECODE_TOKENS);
   });
 
-  it("run 全体が不正なら 1 バイトにつき 1 個の置換文字", () => {
-    // 「先頭の妥当な部分だけを取り出す」形にはならない。
+  it("a run that is invalid as a whole gives one replacement character per byte", () => {
+    // It does not take the form "extract only the valid leading part".
     assertEquals(detokenize(source, [200 + 0xe3, 200 + 0x81]), "��");
   });
 
-  it("run が非 byte トークンで割れると別々に畳まれる", () => {
+  it("a run split by a non-byte token is folded separately", () => {
     assertEquals(detokenize(source, [200 + 0xe3, 200 + 0x81, 0, 200 + 0x82]), "��hello�");
   });
 
-  it("BOM は剥がされない（TextDecoder の既定は捨てる）", () => {
-    // `ignoreBOM: true` を外すと、`EF BB BF` の run だけが静かに消える。
+  it("a BOM is not stripped (TextDecoder drops it by default)", () => {
+    // Removing `ignoreBOM: true` makes only the `EF BB BF` run vanish quietly.
     assertEquals(detokenize(source, [200 + 0xef, 200 + 0xbb, 200 + 0xbf]), "﻿");
   });
 
-  it("終端の run は finish で確定する", () => {
+  it("a trailing run is emitted at finish", () => {
     const detokenizer = new StreamingDetokenizer(source);
     detokenizer.push(200 + 0x41);
     assertEquals(detokenizer.finish(), "A");
   });
 });
 
-test("逐次復号: skip した特殊トークンは byte run を切らない", () => {
-  // 正本は「id 列 → 綴り列」を作る段で skip し、デコーダ鎖はその後で走る。切ってしまうと
-  // 特殊トークンを挟んだだけで文字が置換文字 2 個に化ける。
+test("incremental decode: a skipped special token does not break a byte run", () => {
+  // The source of truth skips at the stage that builds "id sequence → spelling sequence", and the
+  // decoder chain runs after that. Breaking the run would turn a character into two replacement
+  // characters just because a special token sat in between.
   const source = buildSource(DECODE_TOKENS, new Set([1]));
   assertEquals(detokenize(source, [200 + 0xe3, 1, 200 + 0x81, 200 + 0x82]), "あ");
 });
 
-test("逐次復号: 語彙に無い id は落とす（正本は黙って読み飛ばす）", () => {
-  assertThrows(() => detokenize(buildSource(DECODE_TOKENS), [999]), Error, "語彙に無い");
+test("incremental decode: rejects an id not in the vocabulary (the source of truth silently skips it)", () => {
+  assertThrows(
+    () => detokenize(buildSource(DECODE_TOKENS), [999]),
+    Error,
+    "is not in the vocabulary",
+  );
 });

@@ -1,8 +1,10 @@
-// S 形 DiT のホストグルー（patchify / unpatchify / rope 表）と rope 素表の読み手。
+// The host glue of the sequence-form (S tokens) DiT (patchify / unpatchify / rope tables) and the
+// reader of the rope base tables.
 //
-// **軸の取り違えは「実測形では対合になって偶然一致する」クラス**なので、ここのケースは patch の
-// 高さ / 幅 / チャネル数を全部違う値にして、巡回長 3 以上の並べ替えでしか通らない形にしてある。
-// 実重み・実 GPU での門は E2E（P3 波 2）。
+// **Axis mix-ups belong to the class that "becomes an involution at the real shapes and matches by
+// accident"**, so the cases here give the patch height / width / channel count all different
+// values, a shape that passes only with a permutation of cycle length 3 or more. The check with
+// real weights on a real GPU is the E2E test (P3, iteration 2).
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -16,33 +18,33 @@ import {
 import { parseRopeBase, type RopeBase, ropeWidth } from "../src/anima/rope-base.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
-/** 非正方 patch（2×3）・チャネル 3 の幾何。C = ph = pw のどれも一致しない。 */
+/** Geometry with a non-square patch (2×3) and 3 channels. None of C, ph and pw coincide. */
 const TOKEN_GEOMETRY = { channels: 3, patchHeight: 2, patchWidth: 3 } as const;
 
-test("ditPatchGeometry: グラフの入出力幅から patch とチャネル数を割り出す", () => {
-  // Anima の実形（tokens 68 = 17·2·2 / 出力 64 = 2·2·16）。
+test("ditPatchGeometry: derives the patch and the channel count from the graph's input and output widths", () => {
+  // Anima's real shape (tokens 68 = 17·2·2 / output 64 = 2·2·16).
   assertEquals(ditPatchGeometry(68, 64), { channels: 16, patchHeight: 2, patchWidth: 2 });
-  // 差 = patch 体積、商 = チャネル数（呼び出し側に literal を置かないための割り出し）。
+  // Difference = patch volume, quotient = channel count (derived so that callers hold no literal).
   assertEquals(ditPatchGeometry(45, 36), { channels: 4, patchHeight: 3, patchWidth: 3 });
 });
 
-test("ditPatchGeometry: 割り出せない幅は落とす（黙って正方 patch を仮定しない）", () => {
+test("ditPatchGeometry: rejects widths it cannot derive from (does not silently assume a square patch)", () => {
   assertThrows(() => ditPatchGeometry(64, 68), Error, "Cannot derive");
   assertThrows(() => ditPatchGeometry(70, 64), Error, "Cannot derive");
-  // 差が平方数でない = pt=1・正方 patch の前提が崩れている。
+  // The difference is not a square number = the premise of pt=1 and a square patch is broken.
   assertThrows(() => ditPatchGeometry(72, 64), Error, "perfect square");
 });
 
-test("tokenCount: latent を patch で割った格子の積（S）", () => {
+test("tokenCount: the product of the grid of the latent divided by the patch (S)", () => {
   assertEquals(tokenCount([1, 3, 4, 9], TOKEN_GEOMETRY), 2 * 3);
-  // 1024px（latent 128・patch 2）は S = 4,096。
+  // 1024px (latent 128, patch 2) gives S = 4,096.
   assertEquals(
     tokenCount([1, 16, 128, 128], { channels: 16, patchHeight: 2, patchWidth: 2 }),
     4096,
   );
 });
 
-test("patchifyLatents: 最終次元は (c, ih, iw)・トークン添字は h·W'+w・padding は全ゼロ", () => {
+test("patchifyLatents: last dimension is (c, ih, iw), token index is h·W'+w, padding is all zero", () => {
   const { channels, patchHeight, patchWidth } = TOKEN_GEOMETRY;
   const [height, width] = [4, 9];
   const rows = height / patchHeight;
@@ -79,7 +81,8 @@ test("patchifyLatents: 最終次元は (c, ih, iw)・トークン添字は h·W'
       }
     }
   }
-  // padding channel（最後の 1 本）は恒常ゼロ — パイプラインが渡すマスクがゼロだから。
+  // The padding channel (the last one) is always zero — because the mask the pipeline passes is
+  // zero.
   for (let token = 0; token < rows * cols; token += 1) {
     for (let inner = 0; inner < patchVolume; inner += 1) {
       assertEquals(tokens[token * tokenWidth + channels * patchVolume + inner], 0);
@@ -87,7 +90,7 @@ test("patchifyLatents: 最終次元は (c, ih, iw)・トークン添字は h·W'
   }
 });
 
-test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順ではない", () => {
+test("unpatchifyTokens: last dimension is (ih, iw, c) — not the reverse order of patchify", () => {
   const { channels, patchHeight, patchWidth } = TOKEN_GEOMETRY;
   const [height, width] = [4, 9];
   const rows = height / patchHeight;
@@ -124,7 +127,7 @@ test("unpatchifyTokens: 最終次元は (ih, iw, c) — patchify の逆順では
   }
 });
 
-test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値にしない）", () => {
+test("patchify / unpatchify: rejects mismatched shapes (no silently wrong values)", () => {
   const shape = [1, TOKEN_GEOMETRY.channels, 4, 9];
   assertThrows(
     () => patchifyLatents(new Float32Array(4), shape, TOKEN_GEOMETRY),
@@ -148,7 +151,10 @@ test("patchify / unpatchify: 形の食い違いは落とす（沈黙誤値にし
   );
 });
 
-/** 軸ごとに違う幅・違う値を持つ素表（ブロック順と読み出し位置の取り違えが必ず露見する形）。 */
+/**
+ * Base tables with a different width and different values per axis (a shape where a mix-up of block
+ * order or read position always shows).
+ */
 const syntheticRopeBase = (rows: number): RopeBase => {
   const widths: readonly [number, number, number] = [1, 2, 3];
   const make = (axis: number, kind: number): Float32Array<ArrayBuffer> =>
@@ -165,7 +171,7 @@ const syntheticRopeBase = (rows: number): RopeBase => {
   };
 };
 
-test("ropeTables: 1 行は [t,h,w,t,h,w]・位置は t=0 / h=行 / w=列", () => {
+test("ropeTables: one row is [t,h,w,t,h,w], positions are t=0 / h=row / w=column", () => {
   const base = syntheticRopeBase(8);
   const geometry = { channels: 2, patchHeight: 2, patchWidth: 2 } as const;
   const [height, width] = [6, 8];
@@ -175,7 +181,7 @@ test("ropeTables: 1 行は [t,h,w,t,h,w]・位置は t=0 / h=行 / w=列", () =>
   const { cos, sin } = ropeTables(base, [1, geometry.channels, height, width], geometry);
 
   const rowWidth = ropeWidth(base);
-  assertEquals(rowWidth, 12, "1 行の幅は 2·(1+2+3)");
+  assertEquals(rowWidth, 12, "the row width is 2·(1+2+3)");
   assertEquals(cos.length, rows * cols * rowWidth);
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
@@ -198,7 +204,7 @@ test("ropeTables: 1 行は [t,h,w,t,h,w]・位置は t=0 / h=行 / w=列", () =>
   }
 });
 
-test("ropeTables: 素表の行数を超える解像度は落とす（モデル側の位置表の天井）", () => {
+test("ropeTables: rejects a resolution beyond the base tables' row count (the ceiling of the model's position table)", () => {
   const base = syntheticRopeBase(3);
   const geometry = { channels: 2, patchHeight: 2, patchWidth: 2 } as const;
 
@@ -211,7 +217,7 @@ const ropeTable = (rows: number, width: number, seed: number) => ({
   data: f32Bytes(Array.from({ length: rows * width }, (_, i) => seed + i)),
 });
 
-test("parseRopeBase: 6 本の素表を軸順（t → h → w）で読む", () => {
+test("parseRopeBase: reads the six base tables in axis order (t → h → w)", () => {
   const buffer = buildSafetensors([
     { name: "cos_t", ...ropeTable(4, 1, 100) },
     { name: "sin_t", ...ropeTable(4, 1, 200) },
@@ -224,19 +230,20 @@ test("parseRopeBase: 6 本の素表を軸順（t → h → w）で読む", () =>
   assertEquals(base.rows, 4);
   assertEquals(base.widths, [1, 2, 3]);
   assertEquals(ropeWidth(base), 12);
-  // 軸の並びが t → h → w であること（cos_h を w の位置で読む取り違えはここで割れる）。
+  // The axes are ordered t → h → w (a mix-up that reads cos_h at w's position breaks here).
   assertEquals([...base.cos[0]], [100, 101, 102, 103]);
   assertEquals([...base.cos[1]].slice(0, 2), [300, 301]);
   assertEquals([...base.sin[2]].slice(0, 3), [600, 601, 602]);
 });
 
-test("parseRopeBase: 軸ごとの行数が揃わない素表は落とす（黙って別軸の行を読ませない）", () => {
+test("parseRopeBase: rejects base tables whose per-axis row counts differ (does not silently read another axis's rows)", () => {
   const buffer = buildSafetensors([
     { name: "cos_t", ...ropeTable(4, 1, 0) },
     { name: "sin_t", ...ropeTable(4, 1, 0) },
     { name: "cos_h", ...ropeTable(4, 2, 0) },
     { name: "sin_h", ...ropeTable(4, 2, 0) },
-    // w だけ行数が違う = 「h の行を w の表から読む」取り違えが範囲内に収まる形。
+    // Only w has a different row count = a shape where the mix-up "read h's rows from w's table"
+    // stays in range.
     { name: "cos_w", ...ropeTable(3, 2, 0) },
     { name: "sin_w", ...ropeTable(3, 2, 0) },
   ]);
@@ -244,9 +251,10 @@ test("parseRopeBase: 軸ごとの行数が揃わない素表は落とす（黙�
   assertThrows(() => parseRopeBase(buffer), Error, "row count");
 });
 
-test("parseRopeBase: 想定外のテンソルが混ざった素表は落とす", () => {
-  // 余分な 1 本（`karume-anima-extra` のミラーを焼き直すときに踏みうる形）。読み飛ばすと
-  // 「素表と別物の表を同じ資産に同居させたまま気づかない」経路ができる。
+test("parseRopeBase: rejects base tables mixed with an unexpected tensor", () => {
+  // One extra tensor (a shape one can hit when rebuilding the `karume-anima-extra` mirror).
+  // Skipping it would open a path where "a table other than the base tables lives in the same asset
+  // unnoticed".
   const buffer = buildSafetensors([
     { name: "cos_t", ...ropeTable(4, 1, 0) },
     { name: "sin_t", ...ropeTable(4, 1, 0) },
@@ -260,9 +268,10 @@ test("parseRopeBase: 想定外のテンソルが混ざった素表は落とす",
   assertThrows(() => parseRopeBase(buffer), Error, "unexpected tensor 'cos_x'");
 });
 
-test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行数一致では捕まらない）", () => {
-  // 行数は全軸 4 で揃えたまま、h 軸の対だけ列幅を割る。行数の門は通り抜けるので、対ごとの
-  // shape 突合が無いと「cos は 2 列 / sin は 3 列」の表が黙って通る。
+test("parseRopeBase: rejects cos / sin of the same axis with different column widths (row-count agreement does not catch it)", () => {
+  // The row counts stay at 4 on every axis while only the h-axis pair gets different column widths.
+  // It passes the row-count check, so without a per-pair shape comparison a table with "cos 2
+  // columns / sin 3 columns" would pass silently.
   const buffer = buildSafetensors([
     { name: "cos_t", ...ropeTable(4, 1, 0) },
     { name: "sin_t", ...ropeTable(4, 1, 0) },
@@ -275,7 +284,7 @@ test("parseRopeBase: 同一軸の cos / sin で列幅が違えば落とす（行
   assertThrows(() => parseRopeBase(buffer), Error, "the shapes of cos / sin do not match");
 });
 
-test("parseRopeBase: 欠けた表・非 F32・rank 違いは落とす", () => {
+test("parseRopeBase: rejects a missing table, a non-F32 table or a wrong rank", () => {
   assertThrows(
     () =>
       parseRopeBase(

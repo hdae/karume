@@ -34,7 +34,7 @@ const small = (fake: FakeSession) => {
   };
   return { greedy, calls: () => calls };
 };
-test("greedy能力は温度0・加工無しの固定snapshotからだけ得る", () => {
+test("the greedy capability comes only from a fixed snapshot with temperature 0 and no logit processing", () => {
   for (const spec of [
     {},
     { temperature: 0 },
@@ -66,7 +66,7 @@ test("greedy能力は温度0・加工無しの固定snapshotからだけ得る",
   assert(s.greedy !== undefined);
 });
 
-test("小出力でも複数chunk・複数ターン・samplingへの切替が同じtokenと履歴を返す", async () => {
+test("the small output returns the same tokens and history across multiple chunks, multiple turns and a switch to sampling", async () => {
   const a = fakeSession({ successor: Array.from({ length: 16 }, (_, i) => (i + 1) % 16) });
   const b = fakeSession({ successor: Array.from({ length: 16 }, (_, i) => (i + 1) % 16) });
   const fast = small(b),
@@ -92,7 +92,7 @@ test("小出力でも複数chunk・複数ターン・samplingへの切替が同�
   }
 });
 
-test("penalty・bias・診断・投機は通常runを使う", async () => {
+test("penalty, bias, diagnostics and speculation use the regular run", async () => {
   const noGreedy = (): Promise<GreedyRunResult> => {
     throw new Error("must not call greedy");
   };
@@ -137,7 +137,7 @@ test("penalty・bias・診断・投機は通常runを使う", async () => {
 });
 
 for (const nanAt of [0, 1]) {
-  test(`小出力のNaN失敗後も書き込み済みfrontierを重複投入しない: ${nanAt}`, async () => {
+  test(`after a small-output NaN failure the already-written frontier is not fed again: ${nanAt}`, async () => {
     const options: FakeOptions = { tokens: [5, 6, 7, 8, 9], nanAt };
     const a = fakeSession(options),
       b = fakeSession(options),
@@ -163,7 +163,7 @@ for (const nanAt of [0, 1]) {
   });
 }
 
-test("中間prefillのNaNを最後のchunkの抽選と混同しない", async () => {
+test("a NaN in an intermediate prefill is not mistaken for the last chunk's sampling", async () => {
   const f = fakeSession({ tokens: [5, 6], nanAt: 0 }),
     fast = small(f);
   const sequence = await createGenerationSequence({
@@ -180,7 +180,7 @@ test("中間prefillのNaNを最後のchunkの抽選と混同しない", async ()
   }
 });
 
-test("小出力も早期終了・中断後の会話を通常runと同じ位置から再開する", async () => {
+test("the small output also resumes the conversation after an early exit or abort from the same position as the regular run", async () => {
   for (const how of ["break", "abort"]) {
     const results = [];
     for (const optimized of [false, true]) {

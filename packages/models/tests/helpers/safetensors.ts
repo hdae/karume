@@ -1,6 +1,7 @@
-// テスト用の safetensors 組み立て（safetensors 形式のバイト列を読む側 — rope 素表・
-// SBV2 のスタイル表など — を叩く最小ヘルパ）。
-// 期待する「正しい形」を 1 箇所に置き、異常系は各テストがそこから 1 点だけ壊す。
+// Builds safetensors for tests (a minimal helper that drives the code reading safetensors-format
+// bytes — the rope tables, the SBV2 style table and so on).
+// The expected "valid shape" lives in one place, and each failure-case test breaks exactly one
+// point of it.
 // The read side shared by the tests that load goldens and fixtures (readBuffer / viewOf / floatsOf)
 // lives here too.
 
@@ -19,7 +20,10 @@ export type TensorSpec = {
   readonly data: Uint8Array;
 };
 
-/** 隙間なく詰めた整合ファイルを作る（データ節は 8 バイト境界に置く — safetensors の慣例）。 */
+/**
+ * Builds a consistent file packed without gaps (the data section starts on an 8-byte boundary — the
+ * safetensors convention).
+ */
 export const buildSafetensors = (tensors: readonly TensorSpec[]): ArrayBuffer => {
   const header: Record<string, unknown> = {};
   let offset = 0;

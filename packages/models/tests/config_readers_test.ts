@@ -1,13 +1,17 @@
-// `pipelineConfig` を読む基本 reader（`src/config/readers.ts`）。family 横断の下位層なので、
-// ここが受理集合を勝手に広げたり狭めたりすると 8 family の parse が一斉にずれる。
+// The basic readers of `pipelineConfig` (`src/config/readers.ts`). They are a lower layer shared
+// across families, so if they widened or narrowed an accepted set on their own, the parse of eight
+// families would shift at once.
 //
-// 見るのは 3 点:
+// It checks three points:
 //
-// ① 受理集合の**外側**（未知キー・欠落・型違い・条件外）を全部落とす。既定へ黙って縮退しない。
-// ② エラー文言に呼び手が渡した文言（`where` / `key` / `requirement` / `why`）が入る — 各 family
-//    のテストは文言を逐語 assert しており、どの欄でどう外れたかは family 側の責任で決まる。
-// ③ 欄の有無は `Object.hasOwn` で見る（横断不変条件）— 継承した `toString` などを「有る」と
-//    読むと、未宣言の欄が prototype の値で黙って通る。
+// ① Everything **outside** the accepted set (unknown keys, missing fields, wrong types, unmet
+//   conditions) is rejected. No silent degrading to a default.
+// ② The error message contains the wording the caller passed (`where` / `key` / `requirement` /
+//   `why`) — each family's tests assert the wording verbatim, and which field failed how is the
+//   family's responsibility.
+// ③ Field presence is checked with `Object.hasOwn` (a cross-cutting invariant) — reading an
+//   inherited `toString` and the like as "present" would let an undeclared field pass silently with
+//   the prototype's value.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -15,12 +19,12 @@ import { assertAllowedKeys, readChannels, readNumber, readOnly } from "../src/co
 
 const isPositive = (value: number): boolean => Number.isFinite(value) && value > 0;
 
-test("assertAllowedKeys: 許可集合の内側だけなら通る（空オブジェクトも通る）", () => {
+test("assertAllowedKeys: passes when everything is inside the allowed set (an empty object passes too)", () => {
   assertAllowedKeys({ a: 1, b: 2 }, ["a", "b", "c"], "here");
   assertAllowedKeys({}, ["a"], "here");
 });
 
-test("assertAllowedKeys: 未知キーは落とし、文言に label と許可一覧が入る", () => {
+test("assertAllowedKeys: rejects an unknown key, and the message contains the label and the allowed list", () => {
   assertThrows(
     () => assertAllowedKeys({ a: 1, image_mean: 2 }, ["a", "b"], "pipelineConfig"),
     Error,
@@ -28,100 +32,109 @@ test("assertAllowedKeys: 未知キーは落とし、文言に label と許可一
   );
 });
 
-test("readNumber: 条件を満たす数はそのまま返す", () => {
-  assertEquals(readNumber({ n: 1024 }, "n", "here", isPositive, "正でない"), 1024);
+test("readNumber: returns a number that meets the condition as is", () => {
+  assertEquals(readNumber({ n: 1024 }, "n", "here", isPositive, "not positive"), 1024);
 });
 
-test("readNumber: 欄が無ければ落とし、文言に label.key が入る", () => {
+test("readNumber: rejects a missing field, and the message contains label.key", () => {
   assertThrows(
-    () => readNumber({}, "imageWidth", "pipelineConfig", isPositive, "正でない"),
+    () => readNumber({}, "imageWidth", "pipelineConfig", isPositive, "not positive"),
     Error,
     "pipelineConfig.imageWidth: missing",
   );
 });
 
-test("readNumber: 欄は Object.hasOwn で見る（継承した prototype の値を拾わない）", () => {
+test("readNumber: the field is checked with Object.hasOwn (an inherited prototype value is not picked up)", () => {
   assertThrows(
-    () => readNumber({} as Record<string, unknown>, "toString", "here", isPositive, "正でない"),
+    () => readNumber({} as Record<string, unknown>, "toString", "here", isPositive, "not positive"),
     Error,
     "here.toString: missing",
   );
 });
 
-test("readNumber: 値が undefined の欄は『無い』ではなく型違いとして落とす", () => {
-  // `Object.hasOwn` は値を見ないので、明示的に `undefined` を置いた欄は「有る」側に落ちる。
+test("readNumber: a field whose value is undefined is rejected as a wrong type, not as 'missing'", () => {
+  // `Object.hasOwn` does not look at the value, so a field explicitly set to `undefined` counts as
+  // "present".
   assertThrows(
-    () => readNumber({ n: undefined }, "n", "here", isPositive, "正でない"),
+    () => readNumber({ n: undefined }, "n", "here", isPositive, "not positive"),
     Error,
-    "here.n: 正でない (undefined)",
+    "here.n: not positive (undefined)",
   );
 });
 
-test("readNumber: 数でない値と条件外の数を同じ文言で落とす", () => {
+test("readNumber: rejects a non-number and a number outside the condition with the same message", () => {
   for (const bad of [0, -1, Number.NaN, "1024", null, [1]]) {
     assertThrows(
-      () => readNumber({ n: bad }, "n", "here", isPositive, "正の有限数でない"),
+      () => readNumber({ n: bad }, "n", "here", isPositive, "not a positive finite number"),
       Error,
-      "here.n: 正の有限数でない",
+      "here.n: not a positive finite number",
     );
   }
 });
 
-test("readChannels: 長さ 3 の数配列を受け、入力とは別の 3 要素として返す", () => {
-  // 生の配列をそのまま返すと、manifest 由来の可変配列が config に居座る（後から書き換わる）。
+test("readChannels: accepts a numeric array of length 3 and returns three elements separate from the input", () => {
+  // Returning the raw array as is would leave a mutable array from the manifest inside the config
+  // (to be rewritten later).
   const source = [0.485, 0.456, 0.406];
   const channels = readChannels(
     { c: source },
     "c",
     "here",
     Number.isFinite,
-    "有限でない要素がある",
+    "has a non-finite element",
   );
   assertEquals(channels, [0.485, 0.456, 0.406]);
   source[0] = 9;
   assertEquals(channels, [0.485, 0.456, 0.406]);
 });
 
-test("readChannels: 欄が無ければ落とす", () => {
+test("readChannels: rejects a missing field", () => {
   assertThrows(
-    () => readChannels({}, "imageMean", "pipelineConfig", Number.isFinite, "だめ"),
+    () => readChannels({}, "imageMean", "pipelineConfig", Number.isFinite, "bad"),
     Error,
     "pipelineConfig.imageMean: missing",
   );
 });
 
-test("readChannels: 配列でない / 長さが 3 でないものを落とす", () => {
+test("readChannels: rejects a non-array / an array whose length is not 3", () => {
   for (const bad of [0.5, "rgb", { 0: 1, 1: 2, 2: 3 }, [], [1, 2], [1, 2, 3, 4]]) {
     assertThrows(
-      () => readChannels({ c: bad }, "c", "here", Number.isFinite, "だめ"),
+      () => readChannels({ c: bad }, "c", "here", Number.isFinite, "bad"),
       Error,
       "here.c: not an array of length 3",
     );
   }
 });
 
-test("readChannels: 要素の型違い・条件外は要素ごとに落とし、文言に配列全体を出す", () => {
+test("readChannels: rejects a wrong element type or an unmet condition per element, and the message shows the whole array", () => {
   for (const bad of [
     [1, "2", 3],
     [1, 2, Number.NaN],
     [0.2, 0, 0.2],
   ]) {
     assertThrows(
-      () => readChannels({ c: bad }, "c", "here", isPositive, "正の有限数でない要素がある"),
+      () =>
+        readChannels(
+          { c: bad },
+          "c",
+          "here",
+          isPositive,
+          "has an element that is not a positive finite number",
+        ),
       Error,
-      "here.c: 正の有限数でない要素がある",
+      "here.c: has an element that is not a positive finite number",
     );
   }
 });
 
-test("readOnly: 受理する唯一の値ならその値を返す", () => {
+test("readOnly: returns the value when it is the only accepted value", () => {
   assertEquals(
-    readOnly({ i: "bilinear" }, "i", "here", "bilinear", "上流がそうだから"),
+    readOnly({ i: "bilinear" }, "i", "here", "bilinear", "because upstream does so"),
     "bilinear",
   );
 });
 
-test("readOnly: 欄が無ければ落とす", () => {
+test("readOnly: rejects a missing field", () => {
   assertThrows(
     () => readOnly({}, "interpolation", "pipelineConfig", "bilinear", "why"),
     Error,
@@ -129,13 +142,14 @@ test("readOnly: 欄が無ければ落とす", () => {
   );
 });
 
-test("readOnly: 綴り違いも対応外も同じ文言で落とし、label と理由が入る", () => {
+test("readOnly: rejects a misspelling and an unsupported value with the same message, which contains the label and the reason", () => {
   for (const bad of ["bicubic", "BILINEAR", 2, null]) {
     assertThrows(
-      () => readOnly({ i: bad }, "i", "pipelineConfig", "bilinear", "上流が bilinear で焼いている"),
+      () =>
+        readOnly({ i: bad }, "i", "pipelineConfig", "bilinear", "upstream bakes it with bilinear"),
       Error,
       "pipelineConfig.i: this implementation supports only 'bilinear'" +
-        ` (${String(bad)}) — 上流が bilinear で焼いている`,
+        ` (${String(bad)}) — upstream bakes it with bilinear`,
     );
   }
 });

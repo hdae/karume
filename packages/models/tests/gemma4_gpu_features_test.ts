@@ -1,23 +1,23 @@
-// gemma の **quant が宣言した GPU feature**（`gpuFeatures` — ADR 0038 §3）の結線の門（GPU 不要）。
+// Checks of the wiring of the **GPU features a gemma quant declares** (`gpuFeatures` — ADR 0038 §3) (no GPU needed).
 //
-// gemma は以前 `quant.gpuFeatures` を読んでいなかった（他家族は admission 席で共有 GPU の能力を
-// 見ていた）。ここで縛るのは `fromPretrained` の admission 閉包が**同じ 1 本**
-// （`session/gpu-features.ts` の `sessionGpuFeatures` → `assertGpuFeaturesGranted`）を通ること:
-// shader-f16 を宣言した配布形と shader-f16 の無い共有 GPU を渡すと、重みの part を取る前に
-// 席の名前つきで落ちる。
+// gemma used not to read `quant.gpuFeatures` (the other families checked the shared GPU's capabilities in the
+// admission step). What is pinned here is that the admission closure of `fromPretrained` goes through **the same
+// single path** (`sessionGpuFeatures` → `assertGpuFeaturesGranted` in `session/gpu-features.ts`): given a
+// distribution that declares shader-f16 and a shared GPU without shader-f16, it fails with the preset's name before
+// any weight part is fetched.
 // A distribution without the declaration passes this gate on the same shared GPU and goes on to a
 // later stage (the control that the gate is not always-failing).
 //
-// 配布形は疑似 HF（`helpers/container-loading-fixture.ts`）に載せた**宣言だけの容器**で、
-// `admitGemma4` の構造検査（RoPE 派生入力 4 本の幅・出力 2 本・容量記号 1 本）を通る最小形に
-// してある。
+// The distribution is a **declaration-only container** on a mock HF (`helpers/container-loading-fixture.ts`), the
+// minimal shape that passes `admitGemma4`'s structural checks (the widths of the 4 RoPE-derived inputs, 2 outputs,
+// 1 capacity symbol).
 // It has neither a per_layer_inputs input nor PLE assets, so admission takes it as a PLE-free model
 // (gemma-4-12B-it's form), and the manifest declares no tokenizer asset: the control that passes
 // the gate fails at the tokenizer stage, after admission and the weight fetch.
 //
-// NOTE: 共有 GPU は `runtime/tests/helpers/fake-gpu.ts` の実物の `GpuContext`（feature 集合は
-// device の `features` から読まれる — 空集合 = shader-f16 なし）。container_loading_test.ts の
-// NOTE と同じ理由で、ここだけ runtime のテスト道具を借りる。
+// NOTE: the shared GPU is a real `GpuContext` from `runtime/tests/helpers/fake-gpu.ts` (its feature set is read
+// from the device's `features` — an empty set = no shader-f16). For the same reason as the NOTE in
+// container_loading_test.ts, only this file borrows a runtime test tool.
 
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -33,16 +33,16 @@ import {
   SHA,
 } from "./helpers/container-loading-fixture.ts";
 
-/** gemma の weights 部品名（`src/gemma/pipeline.ts` の `MODEL`）= 容器の中のグラフ名。 */
+/** gemma's weights component name (`MODEL` in `src/gemma/pipeline.ts`) = the graph name inside the container. */
 const MODEL = "model";
 
-/** RoPE の層種別の幅（`gemma4_config_test.ts` の `ROPE` と同じ — 実配布形の sliding 256 / full 512）。 */
+/** The RoPE width per layer type (the same as `ROPE` in `gemma4_config_test.ts` — the real distribution's sliding 256 / full 512). */
 const ROPE = {
   sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 } as const;
 
-/** `parsePipelineConfig` を通る最小の宣言（`gemma4_config_test.ts` の `MINIMAL`）。 */
+/** The minimal declaration that passes `parsePipelineConfig` (`MINIMAL` in `gemma4_config_test.ts`). */
 const PIPELINE_CONFIG = {
   chunkLength: 32,
   maxChunkLength: 128,
@@ -52,11 +52,11 @@ const PIPELINE_CONFIG = {
 } as const;
 
 /**
- * `admitGemma4` の構造検査を通る最小の宣言（実行はしない）。
+ * The minimal declaration that passes `admitGemma4`'s structural checks (never runs).
  *
- * MUST: 構造検査は**通る**形で綴る — ここで落ちると、その後段に居る feature の門を踏んだことに
- * ならない。見られるのは RoPE 派生入力 4 本の `[1, M, headDim]`・出力 2 本（logits `[1,R,V]` /
- * hidden `[1,R,H]`）・入力から決まらない記号がちょうど 1 本（容量 `C`）の 3 点。
+ * MUST: write it in a shape that **passes** the structural checks — failing here would not exercise the feature
+ * check that sits after them. Three things are checked: `[1, M, headDim]` for the 4 RoPE-derived inputs, 2 outputs
+ * (logits `[1,R,V]` / hidden `[1,R,H]`), and exactly 1 symbol not determined by the inputs (the capacity `C`).
  */
 const gemmaComponent = (): ModelInput => {
   const rope = (name: string, width: number) => ({
@@ -83,8 +83,8 @@ const gemmaComponent = (): ModelInput => {
           logits: { dtype: "f32", shape: [1, "M", 8] },
           hidden: { dtype: "f32", shape: [1, "M", 4] },
         },
-        // 容量記号 `C` は states にしか現れない（入力 shape から決まらない記号 = 容量 — admission の
-        // 検査）。
+        // The capacity symbol `C` appears only in the states (a symbol not determined by the input shapes = the
+        // capacity — admission's check).
         states: { kv: { dtype: "f32", shape: [1, "C", 4] } },
         nodes: [
           {
@@ -99,7 +99,7 @@ const gemmaComponent = (): ModelInput => {
             outs: ["hidden"],
             attrs: {},
           },
-          // 宣言したスロットは参照されていなければならない（IR の参照完全性）。
+          // A declared slot must be referenced (the IR's referential completeness).
           {
             op: "state_append",
             ins: ["rope_sliding_attention_cos"],
@@ -117,7 +117,7 @@ const gemmaComponent = (): ModelInput => {
   };
 };
 
-/** gemma4 の配布形（容器 1 本）を疑似 HF に載せ、`quant` 欄だけを差し替える。 */
+/** Puts a gemma4 distribution (one container) on a mock HF and swaps only the `quant` field. */
 const loadWithQuant = async (quant: Record<string, unknown>): Promise<Pipeline> => {
   const served = await serveContainer(`${MODEL}/model.f32`, gemmaComponent());
   const rig = await serveRepo(
@@ -139,14 +139,14 @@ const loadWithQuant = async (quant: Record<string, unknown>): Promise<Pipeline> 
     {
       fetch: rig.mock.fetch,
       caches: rig.hubOptions.caches,
-      // shader-f16 を持たない共有 GPU（device の features が空集合）。
+      // A shared GPU without shader-f16 (the device's features are an empty set).
       gpu: fakeGpuContext(fakeDevice()),
     },
   );
 };
 
-describe("gemma.Pipeline.fromPretrained の gpuFeatures（共有 GPU）", () => {
-  it("shader-f16 を宣言した quant は、共有 GPU に無ければ admission で quant 名つきで落ちる", async () => {
+describe("gemma.Pipeline.fromPretrained gpuFeatures (shared GPU)", () => {
+  it("a quant that declares shader-f16 fails in admission with the quant name when the shared GPU lacks it", async () => {
     const error = await assertRejects(
       () => loadWithQuant({ gpuFeatures: { shaderF16: true } }),
       Error,

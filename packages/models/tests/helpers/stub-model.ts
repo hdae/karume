@@ -1,19 +1,24 @@
-// 構築ゲート（グラフ宣言と `pipelineConfig` の突合）を GPU も実資産も無しで叩くための
-// 最小 {@link GraphOwner}。
+// The minimal {@link GraphOwner} that drives the build check (graph declarations against
+// `pipelineConfig`) without a GPU or real assets.
 //
-// 門が読むのは `graph` の**宣言**（symbols / inputs / outputs / values）だけで、テンソル実体
-// にもノード列にも触らない。ここで組むのはその宣言だけを持つ形で、IR の構造検証も容器の合流も
-// 通していない — 通すと「壊れた宣言」がそちらで先に落ち、門そのものを踏めなくなる。
+// The check reads only the graph's **declarations** (symbols / inputs / outputs / values), never
+// tensor data or the node list. What is built here holds only those declarations; it does not go
+// through IR structural validation or the container merge — going through them would make a
+// "broken declaration" fail there first, and the check itself could not be reached.
 //
-// MUST: 正常系の宣言はここで作らず、各テストが**正しい形を 1 つ書いてから 1 点だけ壊す**
-// （`helpers/safetensors.ts` と同じ流儀）。共有の既定値を置くと、壊し方が既定へ吸われる。
+// MUST: the valid declaration is not built here; each test **writes one valid shape and then
+// breaks exactly one point** (the same convention as `helpers/safetensors.ts`). A shared default
+// would absorb the breakage.
 
 import type { GraphOwner } from "../../src/hub/components.ts";
 
-/** 宣言できる次元（記号次元は `format/dims.ts` の正準表記の文字列）。 */
+/**
+ * A declarable dimension (a symbolic dimension is a string in the canonical notation of
+ * `format/dims.ts`).
+ */
 export type StubDim = number | string;
 
-/** 宣言できる dtype（省けば f32）。 */
+/** A declarable dtype (f32 when omitted). */
 type StubDtype = GraphOwner["graph"]["inputs"][number]["dtype"];
 
 export type StubGraph = {
@@ -24,7 +29,7 @@ export type StubGraph = {
     readonly dtype?: StubDtype;
   }[];
   readonly outputs: readonly string[];
-  /** 値名 → 宣言 shape（門が見るのは `outputs[0]` の 1 本だけ）。 */
+  /** Value name → declared shape (the check looks only at the one value `outputs[0]`). */
   readonly values: Readonly<Record<string, readonly StubDim[]>>;
 };
 

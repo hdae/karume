@@ -1,17 +1,17 @@
-// gemma4 の RoPE 行のホスト生成（`src/gemma/rope.ts`）の門 —— GPU も資産も要らない。
+// Checks of the host generation of gemma4 RoPE rows (`src/gemma/rope.ts`) — needs neither a GPU nor assets.
 //
-// 正本は TS の式（f64 → 格納時 f32）で、上流 transformers の表（全経路 f32・SLEEF の 1 ULP）とは
-// ビット同一にならない（rope.ts 冒頭の数値契約）。ここで押さえるのは 4 つ:
+// The source of truth is the TS formula (f64 → f32 on storage), which is not bit-identical to upstream transformers'
+// tables (f32 throughout, SLEEF's 1 ULP) (the numeric contract at the top of rope.ts). Four things are pinned here:
 //
-//  ① **上流の実出力との許容差 parity** — fixture は exporter 側の生成器
-//     （tools/export-recipes/gemma4/tests/rope_fixture.py）が `Gemma4TextRotaryEmbedding` の出力を
-//     そのまま f32 で焼いたもの。許容差は位置比例（上流の f32 角度誤差の上界）で、同じ式を 2 回
-//     書いた恒真にはしない
-//  ② **故障注入** — 位置 1 ずらし・層種入れ替え・theta 違い・rotaryDim 違いが①の帯で落ちる
-//     （門が空振りでない証明）
-//  ③ **構造** — 回さない次元は cos = 1 / sin = 0 が厳密・前半と後半は同値・pad 行（位置 0）は
-//     cos = 1 / sin = 0・同じ入力の 2 回生成はビット同一
-//  ④ **グラフ入力の形** — 名前 4 本・shape `[1, rows, headDim]`・f32
+//  ① **Tolerance parity with upstream's actual output** — the fixture is the output of `Gemma4TextRotaryEmbedding`
+//     written as is in f32 by the exporter-side generator (tools/export-recipes/gemma4/tests/rope_fixture.py). The
+//     tolerance is proportional to the position (the upper bound of upstream's f32 angle error), not a tautology
+//     that writes the same formula twice
+//  ② **Fault injection** — a position shifted by 1, swapped layer types, a wrong theta and a wrong rotaryDim fail
+//     within ①'s band (proof that the check is not vacuous)
+//  ③ **Structure** — non-rotated dimensions have exactly cos = 1 / sin = 0, the first and second halves are equal,
+//     the pad row (position 0) is cos = 1 / sin = 0, and generating the same input twice is bit-identical
+//  ④ **The shape of the graph inputs** — 4 names, shape `[1, rows, headDim]`, f32
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -40,21 +40,22 @@ const FIXTURE_URL = new URL("./fixtures/gemma4-rope-upstream.json", import.meta.
 const loadFixture = async (): Promise<Fixture> =>
   JSON.parse(await readTextFile(FIXTURE_URL)) as Fixture;
 
-/** base64（f32 リトルエンディアン）→ Float32Array。 */
+/** base64 (f32 little endian) → Float32Array. */
 const decodeF32 = (base64: string): Float32Array<ArrayBuffer> => {
   const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
   return new Float32Array(bytes.buffer as ArrayBuffer, 0, bytes.byteLength / 4);
 };
 
 /**
- * 位置比例の許容差（要素ごと）。
+ * A position-proportional tolerance (per element).
  *
- * 上流は角度 `position × invFreq` を f32 で積むので、その丸め誤差は `position × invFreq × 2⁻²⁴`
- * 以下（invFreq ≤ 1）。cos / sin の傾きは 1 以下なので値の差もその上界で押さえられ、さらに
- * 両側の f32 格納丸め + SLEEF の 1 ULP を `2.5e-7` で持つ。係数 `1.2e-7` は `2⁻²³`（積の丸め 2 回分）。
- * 実測は**同じ式でも測定範囲ごとに別の数**になる（3 つとも帯の内側）: 本テストの fixture
- * 13 点の最大が 4.77e-3（P=131,071・帯 1.57e-2）/ 位置 0..131,071 を全掃引したときの最大が
- * 9.44e-3（最大点は P≈129,293）/ 位置 0..1,024 の全掃引では 6.9e-5。
+ * Upstream multiplies the angle `position × invFreq` in f32, so its rounding error is at most
+ * `position × invFreq × 2⁻²⁴` (invFreq ≤ 1). The slopes of cos / sin are at most 1, so the difference in value is
+ * bounded by the same, and `2.5e-7` covers the f32 storage rounding on both sides + SLEEF's 1 ULP. The coefficient
+ * `1.2e-7` is `2⁻²³` (two roundings of the product). The measurement **gives a different number per measured range
+ * even with the same formula** (all 3 inside the band): the maximum over this test's 13 fixture points is 4.77e-3
+ * (P=131,071, band 1.57e-2) / the maximum over a full sweep of positions 0..131,071 is 9.44e-3 (worst point
+ * P≈129,293) / a full sweep of positions 0..1,024 gives 6.9e-5.
  */
 const toleranceAt = (position: number): number => 2.5e-7 + position * 1.2e-7;
 
@@ -63,7 +64,7 @@ const maxAbsDiffPerRow = (
   expected: Float32Array,
   width: number,
 ): number[] => {
-  assertEquals(actual.length, expected.length, "長さ");
+  assertEquals(actual.length, expected.length, "length");
   const rows = actual.length / width;
   const worst: number[] = [];
   for (let row = 0; row < rows; row += 1) {
@@ -77,7 +78,7 @@ const maxAbsDiffPerRow = (
   return worst;
 };
 
-/** 上流 fixture との突合（行ごとの最悪差が位置比例の帯に収まるか）。 */
+/** Comparison with the upstream fixture (does each row's worst difference fit the position-proportional band). */
 const passesParity = (
   spec: RopeLayerSpec,
   positions: readonly number[],
@@ -91,13 +92,13 @@ const passesParity = (
   positions.forEach((position, row) => {
     const diff = Math.max(cosDiff[row], sinDiff[row]);
     worst = Math.max(worst, diff);
-    // MUST: 「帯の内側でなければ失敗」の形で書く。`diff > tol` だと NaN の差が false で素通りする。
+    // MUST: written in the form "fail unless inside the band". With `diff > tol`, a NaN difference is false and slips through.
     if (!(diff <= toleranceAt(position))) pass = false;
   });
   return { pass, worst };
 };
 
-test("上流 transformers の RoPE 表と位置比例の許容差で一致する（fixture parity）", async () => {
+test("matches upstream transformers' RoPE tables within a position-proportional tolerance (fixture parity)", async () => {
   const fixture = await loadFixture();
   assertGemma4RopeSpec("fixture", fixture.spec);
   for (const layerType of GEMMA4_ROPE_LAYER_TYPES) {
@@ -109,15 +110,18 @@ test("上流 transformers の RoPE 表と位置比例の許容差で一致する
     assertEquals(
       expected.cos.length,
       fixture.positions.length * spec.headDim,
-      `${layerType}: 行数`,
+      `${layerType}: row count`,
     );
     const report = passesParity(spec, fixture.positions, expected);
-    assert(report.pass, `${layerType}: 上流との差が帯を超えた（最悪 ${report.worst}）`);
-    console.log(`${layerType}: 上流との最悪差 ${report.worst.toExponential(2)}`);
+    assert(
+      report.pass,
+      `${layerType}: the difference from upstream exceeded the band (worst ${report.worst})`,
+    );
+    console.log(`${layerType}: worst difference from upstream ${report.worst.toExponential(2)}`);
   }
 });
 
-test("故障注入 — 位置ずらし / 層種入れ替え / theta / rotaryDim の誤りは parity で落ちる", async () => {
+test("fault injection — a shifted position / swapped layer types / wrong theta / wrong rotaryDim fail parity", async () => {
   const fixture = await loadFixture();
   const full = fixture.spec.full_attention;
   const sliding = fixture.spec.sliding_attention;
@@ -127,30 +131,30 @@ test("故障注入 — 位置ずらし / 層種入れ替え / theta / rotaryDim 
   };
   const shifted = fixture.positions.map((position) => position + 1);
   const cases: readonly [string, () => boolean][] = [
-    ["位置を 1 ずらす", () => passesParity(full, shifted, expectedFull).pass],
+    ["shift the position by 1", () => passesParity(full, shifted, expectedFull).pass],
     [
-      "層種を入れ替える（sliding の式で full を作る）",
+      "swap the layer types (build full with sliding's formula)",
       () =>
         passesParity({ ...sliding, headDim: full.headDim }, fixture.positions, expectedFull).pass,
     ],
     [
-      "theta を 1e5 にする",
+      "set theta to 1e5",
       () => passesParity({ ...full, theta: 1e5 }, fixture.positions, expectedFull).pass,
     ],
     [
-      "rotaryDim を headDim にする（partial rotary を無視）",
+      "set rotaryDim to headDim (ignore partial rotary)",
       () =>
         passesParity({ ...full, rotaryDim: full.headDim }, fixture.positions, expectedFull).pass,
     ],
   ];
   for (const [label, run] of cases) {
-    assertEquals(run(), false, `${label}: 変異が帯を通ってしまった`);
+    assertEquals(run(), false, `${label}: the mutation passed the band`);
   }
 });
 
-test("故障注入 — NaN を含む行と、NaN と大誤差が同居する行は parity で落ちる", async () => {
-  // `diff > tolerance` で失敗を判定すると NaN の差は false になって合格し、同じ行の大きな有限誤差も
-  // Math.max の NaN 伝播に巻き込まれて隠れる。fixture 側の 1 行を壊して、帯が非有限値を通さないことを見る。
+test("fault injection — a row with NaN, and a row with both NaN and a large error, fail parity", async () => {
+  // Judging failure with `diff > tolerance` makes a NaN difference false and passes it, and a large finite error in the
+  // same row is hidden too by Math.max's NaN propagation. One fixture row is broken to see that the band lets no non-finite value through.
   const fixture = await loadFixture();
   const full = fixture.spec.full_attention;
   const row = fixture.positions.length - 1;
@@ -160,9 +164,9 @@ test("故障注入 — NaN を含む行と、NaN と大誤差が同居する行�
     return { cos, sin: decodeF32(fixture.tables.full_attention.sin) };
   };
   const cases: readonly [string, { cos: Float32Array; sin: Float32Array }][] = [
-    ["cos の 1 要素が NaN", corrupt((cos, at) => (cos[at] = Number.NaN))],
+    ["one cos element is NaN", corrupt((cos, at) => (cos[at] = Number.NaN))],
     [
-      "NaN と大誤差（+999）が同じ行に同居",
+      "NaN and a large error (+999) in the same row",
       corrupt((cos, at) => {
         cos[at] = Number.NaN;
         cos[at + 1] += 999;
@@ -173,12 +177,12 @@ test("故障注入 — NaN を含む行と、NaN と大誤差が同居する行�
     assertEquals(
       passesParity(full, fixture.positions, expected).pass,
       false,
-      `${label}: 非有限値が帯を通ってしまった`,
+      `${label}: a non-finite value passed the band`,
     );
   }
 });
 
-test("回さない次元は cos = 1 / sin = 0 が厳密で、前半と後半は同値・位置 0 は恒等", () => {
+test("non-rotated dimensions have exactly cos = 1 / sin = 0, the halves are equal, and position 0 is the identity", () => {
   const spec: RopeLayerSpec = { theta: 1e6, headDim: 512, rotaryDim: 128 };
   const invFreq = gemma4RopeInverseFrequencies(spec);
   assertEquals(invFreq.length, 256);
@@ -188,17 +192,25 @@ test("回さない次元は cos = 1 / sin = 0 が厳密で、前半と後半は�
   for (let row = 0; row < 3; row += 1) {
     for (let j = 0; j < 256; j += 1) {
       const at = row * 512 + j;
-      assertEquals(rows.cos[at], rows.cos[at + 256], `row ${row} cos 前半 = 後半 (${j})`);
-      assertEquals(rows.sin[at], rows.sin[at + 256], `row ${row} sin 前半 = 後半 (${j})`);
+      assertEquals(
+        rows.cos[at],
+        rows.cos[at + 256],
+        `row ${row} cos first half = second half (${j})`,
+      );
+      assertEquals(
+        rows.sin[at],
+        rows.sin[at + 256],
+        `row ${row} sin first half = second half (${j})`,
+      );
       if (j >= 64 || row === 0) {
-        assert(Object.is(rows.cos[at], 1), `row ${row} cos[${j}] は厳密 1`);
-        assert(Object.is(rows.sin[at], 0), `row ${row} sin[${j}] は厳密 0`);
+        assert(Object.is(rows.cos[at], 1), `row ${row} cos[${j}] is exactly 1`);
+        assert(Object.is(rows.sin[at], 0), `row ${row} sin[${j}] is exactly 0`);
       }
     }
   }
 });
 
-test("同じ入力の 2 回生成はビット同一（決定性）", () => {
+test("generating the same input twice is bit-identical (determinism)", () => {
   const spec: RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
   const positions = [0, 1, 2, 511, 4096, 131071];
   const a = gemma4RopeRows(spec, positions);
@@ -207,7 +219,7 @@ test("同じ入力の 2 回生成はビット同一（決定性）", () => {
   assertEquals(new Uint32Array(a.sin.buffer), new Uint32Array(b.sin.buffer));
 });
 
-test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape [1, rows, headDim]・f32", () => {
+test("the graph inputs are 4, named by the fixed layer type × part form, shape [1, rows, headDim], f32", () => {
   const spec: RopeSpec = {
     sliding_attention: { theta: 1e4, headDim: 256, rotaryDim: 256 },
     full_attention: { theta: 1e6, headDim: 512, rotaryDim: 128 },
@@ -224,12 +236,12 @@ test("グラフ入力は 4 本・名前は層種 × 部の固定形・shape [1, 
       assertEquals(tensor.data.length, 4 * spec[layerType].headDim);
     }
   }
-  // pad 行（位置 0）は恒等
+  // The pad row (position 0) is the identity
   const cos = inputs.rope_full_attention_cos.data as Float32Array;
   assert(Object.is(cos[2 * 512], 1));
 });
 
-test("パラメータの値域門 — 奇数 / 範囲外 / 非有限は fail loudly・負の位置も落ちる", () => {
+test("range checks of the parameters — odd / out of range / non-finite fail loudly, and a negative position fails too", () => {
   const ok: RopeLayerSpec = { theta: 1e4, headDim: 256, rotaryDim: 256 };
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, headDim: 255 }), Error, "headDim");
   assertThrows(() => gemma4RopeInverseFrequencies({ ...ok, rotaryDim: 258 }), Error, "rotaryDim");

@@ -1,6 +1,6 @@
 /**
- * 配布形ミラー（`karume/5`）から gemma の全量面の入力（`Assets`）と PLE の読み口を組む
- * — **実資産 e2e が共有する 1 本**。
+ * Builds gemma's full-surface input (`Assets`) and the PLE reader from a distribution mirror
+ * (`karume/5`) — **the one helper the real-asset e2e tests share**.
  *
  * ## Why the mirror, not the series output
  *
@@ -12,9 +12,9 @@
  * it again. The weights and the PLE are the same bake as the series the goldens were taken from,
  * so a golden assertion holds on either.
  *
- * NOTE: hub / runtime の**テストの都合**は import しない（`helpers/memory-cache.ts` の規律）。
- * ここが触るのは公開面（`@karume/hub` / `@karume/hub/node` / `@karume/runtime` と models の
- * 公開サブパス）だけである。
+ * NOTE: nothing **test-only** from hub / runtime is imported (the rule of
+ * `helpers/memory-cache.ts`). This file touches only the public surface (`@karume/hub` /
+ * `@karume/hub/node` / `@karume/runtime` and the public subpaths of models).
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -51,24 +51,28 @@ const selectionOf = (mirror: URL, choice: MirrorChoice) =>
   selectMirrorComponent(mirror, MODEL, choice);
 
 /**
- * ミラーの `model` 容器を**区間読みで**開く（part 0 と、以後に触った block だけを読む）。
+ * Opens the mirror's `model` container with **range reads** (reads only part 0 and the blocks
+ * touched afterwards).
  *
- * 全 part を RAM に載せる {@link gemma4MirrorAssets} と違い、PLE の読み口はこちらから取る。
+ * Unlike {@link gemma4MirrorAssets}, which loads every part into RAM, the PLE reader is taken from
+ * here.
  */
 const openModelContainer = async (mirror: URL, choice: MirrorChoice): Promise<OpenedContainer> =>
   await openSelectedContainer(await selectionOf(mirror, choice));
 
-/** PLE の索引と block の読み口（`createGemma4Ple` / `createGemma4PleResident` の入力）。 */
+/**
+ * The PLE index and the block reader (the input of `createGemma4Ple` / `createGemma4PleResident`).
+ */
 export type Gemma4PleHandle = {
   readonly index: Gemma4PleIndex;
   readonly openBlock: (asset: string) => AssetReader;
 };
 
 /**
- * ミラーの `model` 容器から PLE の索引を読み、block の読み口を配る。
+ * Reads the PLE index from the mirror's `model` container and hands out the block reader.
  *
- * 索引と容器の資産の突合（`readGemma4PleIndex`）も通るので、片方だけ焼き直したミラーは
- * ここで落ちる。
+ * This also runs the cross-check of the index against the container's assets
+ * (`readGemma4PleIndex`), so a mirror where only one of the two was re-baked fails here.
  */
 export const openGemma4Ple = async (
   mirror: URL,
@@ -82,10 +86,10 @@ export const openGemma4Ple = async (
 };
 
 /**
- * ミラーから `fromAssets` の入力を組む（`model` 容器の part 列 + tokenizer）。
+ * Builds the input of `fromAssets` from the mirror (the `model` container's parts + the tokenizer).
  *
- * MUST: 長さ 0 の part も並べる — 添字が容器の中の part id なので、飛ばすと以降が 1 つずつ
- * 繰り上がって別の part として読まれる。
+ * MUST: zero-length parts are listed too — the index is the part id inside the container, so
+ * skipping one shifts every later part down by one and they are read as other parts.
  */
 export const gemma4MirrorAssets = async (
   mirror: URL,
@@ -95,7 +99,7 @@ export const gemma4MirrorAssets = async (
   const modelName = choice.model ?? loaded.manifest.defaultModel;
   const tokenizer = selection.assets["tokenizer"];
   if (tokenizer === undefined) {
-    throw new Error(`test: ${mirror.pathname} の manifest に資産 'tokenizer' が無い`);
+    throw new Error(`test: the manifest of ${mirror.pathname} has no asset 'tokenizer'`);
   }
   return {
     config: parsePipelineConfig(loaded.manifest.models[modelName].pipelineConfig),

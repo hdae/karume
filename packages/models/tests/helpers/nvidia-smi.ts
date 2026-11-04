@@ -1,57 +1,62 @@
 import { spawn } from "node:child_process";
 import { isNotFound } from "@karume/test-support/fs";
 /**
- * GPU 全体の VRAM 使用量・温度・クロックを下げた理由（`clocks_event_reasons.active`）の標本化（診断 — NVIDIA の
- * `nvidia-smi` がある機でだけ）。
+ * Samples the whole GPU's VRAM usage, temperature and clock-throttle reasons (`clocks_event_reasons.active`)
+ * (diagnostics — only on machines with NVIDIA's `nvidia-smi`).
  *
- * fdinfo（{@link "./drm-usage.ts"}）がこの process の確保を見るのに対し、ここが見るのは **GPU 全体**（画面や他の
- * process の確保を含む）で、ADR 0121 の「DiT の段の VRAM の山 11,361 MiB（nvidia-smi・GPU 全体）」と同じ測り方。
- * 温度とクロックを下げた理由は、壁時計の比較が熱制限で崩れていないかを読む材料（93 ℃・`sw_thermal` の前例 —
- * ADR 0121）。`nvidia-smi` が無い機は `undefined`（観測なし）を返し、呼び手はそれを記録に書く。
- * `-lms` の標本なので短い山は取りこぼしうる（門ではなく観測に使う）。
+ * Where fdinfo ({@link "./drm-usage.ts"}) sees this process's allocations, this sees **the whole GPU** (including the
+ * display's and other processes' allocations) — the same measurement as ADR 0121's "VRAM peak of the DiT stage,
+ * 11,361 MiB (nvidia-smi, whole GPU)". The temperature and throttle reasons are material for reading whether a
+ * wall-clock comparison was skewed by thermal limits (the precedent of 93 °C and `sw_thermal` — ADR 0121). A machine
+ * without `nvidia-smi` returns `undefined` (not observed), and the caller writes that into the record. The samples come
+ * from `-lms`, so short peaks can be missed (use it for observation, not as a check).
  */
 
-/** 区間 1 つぶんの観測。 */
+/** The observation of one phase. */
 export type NvidiaPhase = {
-  /** GPU 全体の VRAM 使用量の最大（MiB）。標本 0 の区間では 0（`samples` で見分ける）。 */
+  /** The maximum VRAM usage of the whole GPU (MiB). 0 for a phase with zero samples (tell them apart by `samples`). */
   readonly peakMemoryMiB: number;
-  /** 温度の最大（℃）。標本 0 の区間では 0。 */
+  /** The maximum temperature (°C). 0 for a phase with zero samples. */
   readonly maxTemperatureC: number;
-  /** クロックを下げた理由のビット列（`0x…` の綴りのまま・観測した全ての値の論理和）。 */
+  /** The bit set of clock-throttle reasons (in the `0x…` spelling; the OR of every observed value). */
   readonly eventReasons: string;
   readonly samples: number;
 };
 
-/** {@link monitorNvidiaSmi} の決着（`nvidia-smi` が無い機では `undefined`）。 */
+/** The outcome of {@link monitorNvidiaSmi} (`undefined` on a machine without `nvidia-smi`). */
 export type NvidiaTimeline =
   | {
-      /** 区間ごとの観測（`enter` した区間は標本 0 でも載る）。 */
+      /** The observation per phase (a phase that was `enter`ed is listed even with zero samples). */
       readonly phases: ReadonlyMap<string, NvidiaPhase>;
-      /** 標本として読めなかった行（古いドライバのエラー行など — {@link parseNvidiaSample}）。記録だけで、門にはしない。 */
+      /**
+       * Lines that could not be read as samples (error lines of old drivers and the like — {@link parseNvidiaSample}).
+       * Recorded only, not checked.
+       */
       readonly errorLines: readonly string[];
     }
   | undefined;
 
 const QUERY = "memory.used,temperature.gpu,clocks_event_reasons.active";
 
-/** `nvidia-smi --query-gpu=<QUERY> --format=csv,noheader,nounits` の 1 行を読んだ値。 */
+/** The values read from one line of `nvidia-smi --query-gpu=<QUERY> --format=csv,noheader,nounits`. */
 export type NvidiaSample = {
   readonly memoryMiB: number;
   readonly temperatureC: number;
-  /** `0x…` の綴りでない値（`[Not Supported]` など）は `undefined`。 */
+  /** `undefined` for a value not spelled `0x…` (`[Not Supported]` and the like). */
   readonly reasons: bigint | undefined;
 };
 
 /**
- * 1 行を標本として読む。カンマで 3 欄に割れない行と、使用量・温度が有限の数でない行は `undefined`（エラー行 —
- * 呼び手が記録に残す）。黙って捨てると、古いドライバの機で「標本 0」と「読めない行が来ていた」を区別できない。
- * 数でない欄をそのまま読むと、最大値が NaN に化ける。
+ * Reads one line as a sample. A line that does not split into 3 fields at the commas, or whose usage or temperature is
+ * not a finite number, is `undefined` (an error line — the caller keeps it in the record). Dropping it silently would
+ * make "zero samples" indistinguishable from "unreadable lines were arriving" on machines with old drivers. Reading a
+ * non-numeric field as is would turn the maximum into NaN.
  */
 export const parseNvidiaSample = (line: string): NvidiaSample | undefined => {
   const fields = line.split(",").map((field) => field.trim());
   if (fields.length !== 3) return undefined;
   const [memory, temperature, reasons] = fields;
-  // `Number("")` は 0 になるので、空の欄は数として読まない。
+  // `Number("")` is 0, so an empty field is not read as a number.
   if (memory === "" || temperature === "") return undefined;
   const memoryMiB = Number(memory);
   const temperatureC = Number(temperature);
@@ -63,14 +68,15 @@ export const parseNvidiaSample = (line: string): NvidiaSample | undefined => {
   };
 };
 
-/** 標本を待つ間隔（ms）。 */
+/** The interval between samples (ms). */
 const WAIT_STEP_MS = 50;
 
 /**
- * 標本化を始める。`enter(区間名)` で区間を切り替え、`stop()` で止めて区間ごとの最大を返す。区間は
- * 呼び手の時刻で切るので、切り替えの直後の標本が前の区間の山を持ち越すことがある（標本の間隔ぶん）。
- * `waitForSample(上限 ms)` は今の区間に標本が 1 本来るまで上限つきで待ち、来た本数を返す（`nvidia-smi` の
- * 起動は標本の間隔より遅いことがあり、短い区間は待たないと標本 0 になる）。
+ * Starts sampling. `enter(phase name)` switches the phase, and `stop()` stops and returns the maximum per phase. Phases
+ * are cut at the caller's time, so a sample right after a switch can carry over the previous phase's peak (by up to one
+ * sampling interval). `waitForSample(limit ms)` waits, up to the limit, until one sample of the current phase arrives
+ * and returns how many arrived (`nvidia-smi` can start slower than the sampling interval, and a short phase has zero
+ * samples unless it waits).
  */
 export const monitorNvidiaSmi = (
   intervalMs = 100,
@@ -107,7 +113,8 @@ export const monitorNvidiaSmi = (
       errorLines.push(line.trim());
       return;
     }
-    // 複数 GPU の機では行が GPU ごとに並び、ここは全 GPU の最大を取る（開発機は 1 枚 — 記録に書く前提）。
+    // On a multi-GPU machine the lines come one per GPU, and this takes the maximum over all GPUs (the development
+    // machine has one card — an assumption written into the record).
     const current = phases.get(phase) ?? empty();
     current.peak = Math.max(current.peak, sample.memoryMiB);
     current.temperature = Math.max(current.temperature, sample.temperatureC);
@@ -137,7 +144,7 @@ export const monitorNvidiaSmi = (
     waitForSample: async (timeoutMs) => {
       const deadline = performance.now() + timeoutMs;
       const samplesNow = (): number => phases.get(phase)?.samples ?? 0;
-      // 子が先に終わった（nvidia-smi が自分で落ちた）なら、待っても標本は来ない。
+      // If the child ended first (nvidia-smi exited on its own), no sample will come however long we wait.
       while (samplesNow() === 0 && !finished && performance.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, WAIT_STEP_MS));
       }
@@ -167,20 +174,21 @@ export const monitorNvidiaSmi = (
 };
 
 /**
- * 記録の 1 行（区間ごとの山・温度・理由と、読めなかった行）。観測なしはそう書き、標本 0 の区間は「標本 0」と
- * 明示する（山 0 MiB と読ませない）。
+ * One line of the record (the peak, temperature and reasons per phase, plus the unreadable lines). No observation is
+ * written as such, and a phase with zero samples says "zero samples" explicitly (so it is not read as a 0 MiB peak).
  */
 export const formatNvidiaTimeline = (timeline: NvidiaTimeline): string => {
   if (timeline === undefined) return "nvidia-smi なし（GPU 全体の VRAM は観測していない）";
   const phases = [...timeline.phases]
-    // 区間を切る前の既定の区間（start）は、標本が無ければ載せない（呼び手が切った区間だけを記録する）。
+    // The default phase before any cut (start) is listed only when it has samples (only the phases the caller cut are
+    // recorded).
     .filter(([name, value]) => name !== "start" || value.samples > 0)
     .map(([name, value]) =>
       value.samples === 0
         ? `[${name}] 標本 0（観測なし）`
         : `[${name}] VRAM 山 ${value.peakMemoryMiB} MiB・最高 ${value.maxTemperatureC} ℃・理由 ${value.eventReasons}`,
     );
-  // 同じエラー行は標本の間隔ごとに繰り返すので、本数と異なる行の綴りを残す。
+  // The same error line repeats every sampling interval, so the count and the distinct spellings are kept.
   const errors =
     timeline.errorLines.length === 0
       ? []

@@ -1,21 +1,22 @@
-// PLE のホスト gather（`src/gemma/ple.ts` — ADR 0085 / 0109 決定 4）の寿命・予算・読み方の門。
-// GPU も実資産も要らない（合成の索引と block は `helpers/ple-fixture.ts` が作る）。
+// Checks of the lifetime, budget and reading strategy of the PLE host gather (`src/gemma/ple.ts` — ADR 0085 / 0109
+// decision 4). Needs neither a GPU nor real assets (the synthetic index and blocks come from `helpers/ple-fixture.ts`).
 //
-// ここで縛るのは 6 つ:
+// Six things are pinned here:
 //
-// - **索引の受理集合**（`parseGemma4PleIndex`）: schema 3 だけ・未知キー・区間の連続性・
-//   `rowBytes` の整合。索引だけを焼き直した組み合わせはここでしか落ちない。
-// - **索引と容器の資産の突合**（`assertGemma4PleAssets` / `readGemma4PleIndex`）: block の実在・
-//   役割・論理長を**全件列挙**で見る。片方だけ焼き直した配布形は数十件が同時にずれるので、
-//   1 件ずつ直す往復にしない。
-// - **行の翻訳**: token → (block, 行 offset) が block 境界と block 跨ぎで正しいこと。ずれると
-//   OOB ではなく**別 token の有効な行**を引く（ADR 0085 決定 5 の沈黙誤値）。
-// - **方針表**: block ごとの一意行数と予算の空きから「全量読み / 行読み」が決まる。値は経路に
-//   依らずビット同一で、それを確かめる唯一の方法は「同じ id を両経路で引いて u32 で比べる」
-//   ことである（f32 の `===` は NaN / ±0 を取りこぼす）。
-// - **バイト予算**: 常駐上限は**本数ではなくバイト**（block 幅は資産世代で変わる）。既定・
-//   LRU の追い出し順・0（常駐なし）・1 本すら載らない予算の拒否を凍結する。
-// - **解放**: `dispose()` で常駐が空になり、以後の gather は fail loudly。
+// - **The index's accepted set** (`parseGemma4PleIndex`): schema 3 only, unknown keys, contiguous ranges, and
+//   consistency of `rowBytes`. A combination where only the index was rebuilt fails only here.
+// - **The comparison of the index and the container's assets** (`assertGemma4PleAssets` / `readGemma4PleIndex`):
+//   the existence, role and logical length of the blocks are checked by **listing every mismatch**. A distribution
+//   where only one side was rebuilt drifts in dozens of places at once, so it should not take one round trip per fix.
+// - **Row translation**: token → (block, row offset) is correct at block boundaries and across blocks. A shift reads
+//   not OOB but **a valid row of another token** (the silent wrong value of ADR 0085 decision 5).
+// - **The policy table**: the number of unique rows per block and the free budget decide "full read / row read". The
+//   values are bit-identical regardless of the path, and the only way to confirm that is "read the same ids on both
+//   paths and compare them as u32" (f32 `===` misses NaN / ±0).
+// - **The byte budget**: the residency limit is **in bytes, not in block count** (the block width changes with the
+//   asset generation). It freezes the default, the LRU eviction order, 0 (no residency), and the rejection of a
+//   budget that cannot hold even one block.
+// - **Release**: `dispose()` empties the residency, and any later gather fails loudly.
 
 import { beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -37,22 +38,22 @@ import {
 } from "./helpers/ple-fixture.ts";
 
 /**
- * 既定の寸法。`values` と `scales` の 1 行を**同じバイト数**（8 B）にしてあるので、block も
- * 同じ大きさ（2 行 = 16 B）になり、予算の勘定が本数でそのまま読める。
+ * The default dimensions. One row of `values` and of `scales` has **the same byte count** (8 B), so the blocks are
+ * the same size too (2 rows = 16 B) and the budget accounting reads directly as a block count.
  */
 const SPEC: PleFixtureSpec = {
   tokens: 6,
   layers: 2,
   dim: 4,
-  // 2 冪（f32 の乗算が厳密 — ADR 0085 決定 4 と同じ性質を合成側でも保つ）。
+  // Powers of 2 (f32 multiplication is exact — the synthetic side keeps the same property as ADR 0085 decision 4).
   embedScale: 4,
   valueRows: 2,
   scaleRows: 2,
 };
 
-/** block 1 本ぶん（この索引は 2 表とも同幅）。 */
+/** One block (both tables of this index have the same width). */
 const BLOCK_BYTES = SPEC.layers * SPEC.dim * (SPEC.valueRows as number);
-/** 1 行ぶん（values + scales）— 行キャッシュの単位。 */
+/** One row (values + scales) — the unit of the row cache. */
 const ROW_BYTES = SPEC.layers * SPEC.dim + SPEC.layers * 4;
 
 const fixture = (options: { readonly defer?: boolean } = {}) => pleFixture(SPEC, options);
@@ -65,7 +66,7 @@ const pleOf = (rig: ReturnType<typeof fixture>, maxResidentBytes?: number) =>
     ...(maxResidentBytes === undefined ? {} : { maxResidentBytes }),
   });
 
-/** `[1, ids, layers, dim]` の f32 を期待値と突き合わせる。 */
+/** Compares a `[1, ids, layers, dim]` f32 with the expected values. */
 const assertRows = (tensor: { readonly data: Float32Array }, ids: readonly number[]): void => {
   const stride = SPEC.layers * SPEC.dim;
   for (const [position, id] of ids.entries()) {
@@ -74,7 +75,7 @@ const assertRows = (tensor: { readonly data: Float32Array }, ids: readonly numbe
         assertEquals(
           tensor.data[position * stride + layer * SPEC.dim + column],
           expectedValue(SPEC, id, layer, column),
-          `位置 ${position}（token ${id}）/ 層 ${layer} / 列 ${column}`,
+          `position ${position} (token ${id}) / layer ${layer} / column ${column}`,
         );
       }
     }
@@ -92,19 +93,19 @@ const tensorOf = async (
   return { data: value.data };
 };
 
-// ---- 索引の受理集合 --------------------------------------------------------
+// ---- The index's accepted set --------------------------------------------------------
 
-describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
+describe("parseGemma4PleIndex: a broken index is not silently read", () => {
   let raw: ReturnType<typeof fixture>["document"];
   beforeAll(() => {
     raw = fixture().document;
   });
 
-  it("正常系（陰性対照 — 常に落ちる門になっていない）", () => {
+  it("normal case (negative control — the check does not always fail)", () => {
     assertEquals(parseGemma4PleIndex(raw).tokens, SPEC.tokens);
   });
 
-  it("旧 sidecar の版は読まない（両読みしない）", () => {
+  it("the old sidecar version is not read (no dual reading)", () => {
     // Schema 4 (grouped scales) is read since the q4_0 QAT line — `gemma4_ple_grouped_test.ts` —
     // and schema 5 (a bf16 table) since the original-weights preset — `gemma4_ple_bf16_test.ts`;
     // 6 stands for a version this reader does not know.
@@ -117,11 +118,11 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     }
   });
 
-  it("未知キー（綴り違いが黙って既定へ縮退しない）", () => {
+  it("unknown key (a misspelling does not silently fall back to a default)", () => {
     assertThrows(() => parseGemma4PleIndex({ ...raw, shards: [] }), Error, "unknown key 'shards'");
   });
 
-  it("storage は i8 / i4 / i2", () => {
+  it("storage is i8 / i4 / i2", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, storage: "i3" }),
       Error,
@@ -129,7 +130,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     );
   });
 
-  it("storage の欠落を i8 と読まない（schema 3 では必須）", () => {
+  it("a missing storage is not read as i8 (required in schema 3)", () => {
     const { storage: _, ...withoutStorage } = raw;
     assertThrows(
       () => parseGemma4PleIndex(withoutStorage),
@@ -138,7 +139,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     );
   });
 
-  it("embedScale は正の有限数（0 は行が全部 0 になる）", () => {
+  it("embedScale is a positive finite number (0 makes every row 0)", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, embedScale: 0 }),
       Error,
@@ -146,7 +147,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     );
   });
 
-  it("rowBytes は宣言（層数 / 次元 / 格納）から決まる値と一致する", () => {
+  it("rowBytes matches the value determined by the declaration (layers / dimension / storage)", () => {
     const values = raw.values as { rowBytes: number; blocks: unknown[] };
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, values: { ...values, rowBytes: values.rowBytes + 4 } }),
@@ -155,7 +156,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     );
   });
 
-  it("block 名の重複（同じ実体を 2 つの範囲が名乗る）", () => {
+  it("duplicate block names (two ranges naming the same data)", () => {
     assertThrows(
       () =>
         parseGemma4PleIndex({
@@ -178,7 +179,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     );
   });
 
-  it("範囲の非連続（引けない id が黙って生まれる）", () => {
+  it("non-contiguous ranges (ids that cannot be read appear silently)", () => {
     assertThrows(
       () =>
         parseGemma4PleIndex({
@@ -201,7 +202,7 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     );
   });
 
-  it("合計行数の不一致（索引だけ焼き直した組み合わせ）", () => {
+  it("total row count mismatch (a combination where only the index was rebuilt)", () => {
     assertThrows(
       () => parseGemma4PleIndex({ ...raw, tokens: SPEC.tokens + 1 }),
       Error,
@@ -209,27 +210,27 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
     );
   });
 
-  it("2 表は独立に分割できる（block 境界が揃っている必要は無い）", () => {
+  it("the 2 tables can be split independently (block boundaries need not be aligned)", () => {
     const index = pleFixture({ ...SPEC, valueRows: 2, scaleRows: 3 }).index;
     assertEquals(index.values.blocks.length, 3);
     assertEquals(index.scales.blocks.length, 2);
   });
 });
 
-// ---- 索引と容器の資産の突合（admission の席）-------------------------------
+// ---- Comparison of the index and the container's assets (the admission step) -------------------------------
 
-describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先を全件列挙で突合する", () => {
+describe("readGemma4PleIndex: reads the index from the container's assets and compares its targets, listing every mismatch", () => {
   let rig: ReturnType<typeof fixture>;
   beforeAll(() => {
     rig = fixture();
   });
 
-  it("正常系（陰性対照）", async () => {
+  it("normal case (negative control)", async () => {
     const index = await readGemma4PleIndex("test", pleComponentOf(rig));
     assertEquals(index, rig.index);
   });
 
-  it("索引そのものが無い", async () => {
+  it("the index itself is missing", async () => {
     await assertRejects(
       () => readGemma4PleIndex("test", pleComponentOf(rig, { ple_index: undefined })),
       Error,
@@ -237,7 +238,7 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
     );
   });
 
-  it("索引の役割が違う", async () => {
+  it("the index has a different role", async () => {
     await assertRejects(
       () => readGemma4PleIndex("test", pleComponentOf(rig, { ple_index: { role: "rope-base" } })),
       Error,
@@ -245,7 +246,7 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
     );
   });
 
-  it("指し先の block が容器に無い / 役割が違う / 長さが違う — 全件列挙", async () => {
+  it("a target block is missing from the container / has a different role / a different length — every mismatch listed", async () => {
     const error = await assertRejects(
       () =>
         readGemma4PleIndex(
@@ -264,7 +265,7 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
     assert(error.message.includes("ple.scales.2: logical length 1"), error.message);
   });
 
-  it("容器にあって索引が指していない block（1 本も読まないまま動く形）", () => {
+  it("a block in the container the index does not point at (the shape that runs without ever reading it)", () => {
     assertThrows(
       () =>
         assertGemma4PleAssets("test", rig.index, {
@@ -280,17 +281,17 @@ describe("readGemma4PleIndex: 容器の資産から索引を読み、指し先�
   });
 });
 
-// ---- 行の翻訳（block 境界と block 跨ぎ）------------------------------------
+// ---- Row translation (block boundaries and across blocks) ------------------------------------
 
-test("Gemma4Ple.gather: token → (block, 行 offset) の翻訳が境界で正しい", async () => {
+test("Gemma4Ple.gather: the token → (block, row offset) translation is correct at boundaries", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 0);
-  // 3 本の block の境界をまたぐ列（先頭・末尾・跨ぎ）。
+  // A sequence across the boundaries of 3 blocks (first, last, across).
   const ids = [0, 1, 2, 3, 4, 5];
   assertRows(await tensorOf(ple, ids), ids);
 
-  // 引いた区間が「その block の中の (id - start) 行目」ちょうどであること。恒真でない見方は
-  // 区間の実測しかない（値の一致だけなら、別 block を読んでも同じ式で合ってしまう）。
+  // The read range is exactly "row (id - start) inside that block". Measuring the range is the only check that is not
+  // always true (with value agreement alone, reading another block would also match through the same formula).
   const rowBytes = { values: rig.index.values.rowBytes, scales: rig.index.scales.rowBytes };
   const expected = ids.flatMap((id) => [
     {
@@ -310,8 +311,8 @@ test("Gemma4Ple.gather: token → (block, 行 offset) の翻訳が境界で正�
   );
 });
 
-test("Gemma4Ple.gather: 2 表の block 境界がずれていても同じ行を引く", async () => {
-  // `values` は 2 行 / `scales` は 3 行で切る（実資産では 1 行の byte 数が違うので普通に起きる）。
+test("Gemma4Ple.gather: reads the same row even when the 2 tables' block boundaries differ", async () => {
+  // `values` is cut every 2 rows and `scales` every 3 (in real assets the byte count of one row differs, so this happens normally).
   const spec: PleFixtureSpec = { ...SPEC, valueRows: 2, scaleRows: 3 };
   const rig = pleFixture(spec);
   const ple = createGemma4Ple({
@@ -334,7 +335,7 @@ test("Gemma4Ple.gather: 2 表の block 境界がずれていても同じ行を�
       }
     }
   }
-  // token 2 は values の block 1（行 0）と scales の block 0（行 2）— 表ごとに別の block。
+  // Token 2 is in block 1 of values (row 0) and block 0 of scales (row 2) — a different block per table.
   assert(
     rig.reads.some((read) => read.asset === "ple.values.1" && read.offset === 0),
     JSON.stringify(rig.reads),
@@ -347,7 +348,7 @@ test("Gemma4Ple.gather: 2 表の block 境界がずれていても同じ行を�
   );
 });
 
-test("Gemma4Ple.gather: 同じ id が並ぶ列でも各行は単発 gather とビット一致する", async () => {
+test("Gemma4Ple.gather: each row of a sequence with repeated ids is bit-identical to a single gather", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 0);
   const single = await tensorOf(ple, [3]);
@@ -357,20 +358,20 @@ test("Gemma4Ple.gather: 同じ id が並ぶ列でも各行は単発 gather と�
     assertEquals(
       [...new Uint32Array(repeated.data.buffer, position * stride * 4, stride)],
       [...new Uint32Array(single.data.buffer)],
-      `位置 ${position} が単発 gather とビット一致しない`,
+      `position ${position} is not bit-identical to a single gather`,
     );
   }
 });
 
-// ---- 方針表（全量読み ↔ 行読み）-------------------------------------------
+// ---- Policy table (full read ↔ row read) -------------------------------------------
 
-test("Gemma4Ple.gather: 1 行だけの gather は block 全量を読まない（decode 1 token）", async () => {
+test("Gemma4Ple.gather: a single-row gather does not read a whole block (decode of 1 token)", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   assertRows(await tensorOf(ple, [0]), [0]);
   const stats = ple.stats();
-  assertEquals(stats.loads, 0, "1 行なのに block 全量を読んでいる");
-  assertEquals(stats.rowReads, 2, "行読みは values / scales の 2 区間");
+  assertEquals(stats.loads, 0, "reads a whole block for a single row");
+  assertEquals(stats.rowReads, 2, "row reads are the 2 ranges of values / scales");
   assertEquals(stats.resident, 0);
   assertEquals(
     rig.reads.map((read) => read.length),
@@ -378,13 +379,13 @@ test("Gemma4Ple.gather: 1 行だけの gather は block 全量を読まない（
   );
 });
 
-test("Gemma4Ple.gather: block の全行を触る gather は全量読みへ倒れる", async () => {
+test("Gemma4Ple.gather: a gather that touches every row of a block switches to a full read", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
-  // block は 2 行なので、2 行触れば下限（= min(32, 行数)）に届く。
+  // A block has 2 rows, so touching 2 rows reaches the threshold (= min(32, row count)).
   assertRows(await tensorOf(ple, [0, 1]), [0, 1]);
   const stats = ple.stats();
-  assertEquals(stats.loads, 2, "values / scales の block を 1 本ずつ全量で読む");
+  assertEquals(stats.loads, 2, "reads one block each of values / scales in full");
   assertEquals(stats.rowReads, 0);
   assertEquals(stats.resident, 2);
   // Two blocks + copies of the two rows looked up (the row cache is outside the block budget —
@@ -393,36 +394,36 @@ test("Gemma4Ple.gather: block の全行を触る gather は全量読みへ倒れ
   assertEquals(
     rig.reads.map((read) => read.offset),
     [0, 0],
-    "全量読みなのに途中から読んでいる",
+    "reads from the middle despite a full read",
   );
 });
 
-test("Gemma4Ple.gather: 行読みと全量読みの値はビット同一", async () => {
+test("Gemma4Ple.gather: the values of row reads and full reads are bit-identical", async () => {
   const ids = [0, 1];
   const rows = await tensorOf(pleOf(fixture(), 0), ids);
   const blocks = await tensorOf(pleOf(fixture()), ids);
   assertEquals(
     [...new Uint32Array(rows.data.buffer)],
     [...new Uint32Array(blocks.data.buffer)],
-    "行読みの値が全量読みとビット一致しない",
+    "the row-read values are not bit-identical to the full read",
   );
   assertRows(rows, ids);
 });
 
-test("Gemma4Ple.gather: 全量読みは予算に追い出し無しで載るときだけ", async () => {
+test("Gemma4Ple.gather: a full read happens only when it fits the budget without eviction", async () => {
   const rig = fixture();
-  // 予算は block 1 本ぶん。values が載った時点で scales は載らない（同じ gather の中で
-  // 自分が載せたものを追い出さない）。
+  // The budget is one block. Once values is loaded, scales does not fit (a gather does not evict what it loaded
+  // itself).
   const ple = pleOf(rig, BLOCK_BYTES);
   assertRows(await tensorOf(ple, [0, 1]), [0, 1]);
   const stats = ple.stats();
-  assertEquals(stats.loads, 1, "予算 1 本ぶんなのに 2 本読んでいる");
+  assertEquals(stats.loads, 1, "reads 2 blocks with a budget of one");
   assertEquals(stats.resident, 1);
-  assertEquals(stats.rowReads, 2, "載らなかった表は行読みへ倒れる");
+  assertEquals(stats.rowReads, 2, "the table that did not fit falls back to row reads");
 });
 
-test("Gemma4Ple.gather: 32 行未満でも block が細ければ全量へ倒れる（端数 block）", async () => {
-  // 64 行の block 1 本（下限は 32 行）— 31 行なら行読み・32 行なら全量。
+test("Gemma4Ple.gather: below 32 rows it still switches to a full read when the block is small (a remainder block)", async () => {
+  // One block of 64 rows (the threshold is 32 rows) — 31 rows are row reads, 32 rows a full read.
   const wide: PleFixtureSpec = { tokens: 64, layers: 1, dim: 4, embedScale: 4 };
   const ids = Array.from({ length: 31 }, (_row, index) => index);
   const narrow = pleFixture(wide);
@@ -433,7 +434,7 @@ test("Gemma4Ple.gather: 32 行未満でも block が細ければ全量へ倒れ�
     maxResidentBytes: gemma4PleTotalBytes(narrow.index),
   });
   await rowPle.gather(ids);
-  assertEquals(rowPle.stats().loads, 0, "31 行で全量読みへ倒れている（下限は 32 行）");
+  assertEquals(rowPle.stats().loads, 0, "switches to a full read at 31 rows (the threshold is 32)");
   assertEquals(rowPle.stats().rowReads, 62);
 
   const full = pleFixture(wide);
@@ -444,12 +445,12 @@ test("Gemma4Ple.gather: 32 行未満でも block が細ければ全量へ倒れ�
     maxResidentBytes: gemma4PleTotalBytes(full.index),
   });
   await fullPle.gather([...ids, 31]);
-  assertEquals(fullPle.stats().loads, 2, "32 行なのに行読みのまま");
+  assertEquals(fullPle.stats().loads, 2, "still row reads at 32 rows");
   assertEquals(fullPle.stats().rowReads, 0);
 });
 
-test("Gemma4Ple.gather: 行読みの同時発行は上限を超えない（fd を枯らさない）", async () => {
-  // 1 block 1 行（= 常に行読み）の索引を 128 行ぶん引く。
+test("Gemma4Ple.gather: concurrent row reads do not exceed the limit (do not exhaust fds)", async () => {
+  // Reads 128 rows from an index with 1 row per block (= always row reads).
   const spec: PleFixtureSpec = { tokens: 128, layers: 1, dim: 4, embedScale: 4, valueRows: 1 };
   const rig = pleFixture(spec, { defer: true });
   const ple = createGemma4Ple({
@@ -460,11 +461,17 @@ test("Gemma4Ple.gather: 行読みの同時発行は上限を超えない（fd �
   });
   await ple.gather(Array.from({ length: 128 }, (_row, index) => index));
   assertEquals(ple.stats().rowReads, 256);
-  assert(rig.peak.inFlight <= 16, `同時発行のピーク ${rig.peak.inFlight} が上限 16 を超えた`);
-  assert(rig.peak.inFlight > 1, "そもそも重ねて発行していない（上限の門が空振り）");
+  assert(
+    rig.peak.inFlight <= 16,
+    `the concurrency peak ${rig.peak.inFlight} exceeded the limit of 16`,
+  );
+  assert(
+    rig.peak.inFlight > 1,
+    "reads were never issued concurrently (the limit check is vacuous)",
+  );
 });
 
-// ---- 行キャッシュ ----------------------------------------------------------
+// ---- Row cache ----------------------------------------------------------
 
 test("Gemma4Ple.gather: a row read by row reads stays in the row cache (headroom outside the block budget)", async () => {
   const rig = fixture();
@@ -477,32 +484,32 @@ test("Gemma4Ple.gather: a row read by row reads stays in the row cache (headroom
     "the kept row is not counted in residentBytes",
   );
   await ple.gather([0]);
-  assertEquals(rig.reads.length, first, "行キャッシュに当たらず読み直している");
+  assertEquals(rig.reads.length, first, "misses the row cache and reads again");
   assertEquals(ple.stats().rowReads, 2);
 });
 
-test("Gemma4Ple.gather: 予算 0 は行も保持しない（毎回読み直す）", async () => {
+test("Gemma4Ple.gather: a budget of 0 keeps no rows either (reads again every time)", async () => {
   const rig = fixture();
   const ple = pleOf(rig, 0);
   await ple.gather([0]);
   await ple.gather([0]);
   assertEquals(ple.stats().residentBytes, 0);
-  assertEquals(ple.stats().rowReads, 4, "予算 0 なのに行を保持している");
+  assertEquals(ple.stats().rowReads, 4, "keeps rows despite a budget of 0");
 });
 
-// ---- 予算と LRU ------------------------------------------------------------
+// ---- Budget and LRU ------------------------------------------------------------
 
-test("Gemma4Ple: 常駐バイトは索引だけから決まる（block 幅に依らない意味）", () => {
+test("Gemma4Ple: the resident bytes are decided by the index alone (a meaning independent of the block width)", () => {
   const rig = fixture();
   assertEquals(gemma4PleBlockBytes(rig.index.values, rig.index.values.blocks[0]), BLOCK_BYTES);
   assertEquals(gemma4PleTotalBytes(rig.index), 6 * BLOCK_BYTES);
-  // 既定は「最大 block 2 本ぶん」— 幅が変わっても意味（どの 2 本でも収まる）が保たれる。
+  // The default is "the 2 largest blocks" — the meaning (any 2 blocks fit) holds when the width changes.
   assertEquals(defaultGemma4PleResidentBytes(rig.index), 2 * BLOCK_BYTES);
   const wide = pleFixture({ ...SPEC, valueRows: 3, scaleRows: 3 }).index;
   assertEquals(defaultGemma4PleResidentBytes(wide), 2 * 3 * SPEC.layers * SPEC.dim);
 });
 
-test("Gemma4Ple: 追い出しは LRU（前の gather が載せた block から落ちる）", async () => {
+test("Gemma4Ple: eviction is LRU (the blocks an earlier gather loaded go first)", async () => {
   // Rows looked up stay in the row cache (ADR 0085 addendum 2026-10-27), so the block LRU is only
   // observable through rows not looked up yet. Blocks have 96 rows (three times the whole-read
   // threshold of 32), and the re-read uses another 32 rows of the same block.
@@ -525,7 +532,7 @@ test("Gemma4Ple: 追い出しは LRU（前の gather が載せた block から�
   const range = (from: number) => Array.from({ length: 32 }, (_row, row) => from + row);
   await ple.gather(range(0));
   assertEquals(ple.stats().resident, 2);
-  // 別の block 対を全量で載せると、前の対が落ちる（予算は 2 本ぶん）。
+  // Loading another pair of blocks in full evicts the earlier pair (the budget is 2 blocks).
   await ple.gather(range(96));
   assertEquals(ple.stats().resident, 2);
   assertEquals(
@@ -534,18 +541,18 @@ test("Gemma4Ple: 追い出しは LRU（前の gather が載せた block から�
     "two blocks + the 64 rows looked up",
   );
   const loads = ple.stats().loads;
-  // 落ちたのは古い方 — 引き直すと読みが増える。
+  // The older ones were evicted — reading them again adds reads.
   await ple.gather(range(32));
-  assertEquals(ple.stats().loads, loads + 2, "追い出された block が読み直されていない");
-  // 直前に触った block は生きている。
+  assertEquals(ple.stats().loads, loads + 2, "the evicted blocks were not read again");
+  // The blocks touched just before are still alive.
   const after = ple.stats().loads;
   const rowReads = ple.stats().rowReads;
   await ple.gather(range(64));
-  assertEquals(ple.stats().loads, after, "常駐している block を読み直している");
+  assertEquals(ple.stats().loads, after, "re-reads a resident block");
   assertEquals(ple.stats().rowReads, rowReads, "rows of a resident block were read by row reads");
 });
 
-test("Gemma4Ple.gather: 1 回の gather は自分の hit を追い出さない", async () => {
+test("Gemma4Ple.gather: a single gather does not evict its own hits", async () => {
   // Rows looked up stay in the row cache (ADR 0085 addendum 2026-10-27), so the block hit has to
   // come from a row not looked up yet. Blocks have 33 rows, and the first gather takes only 32 (the
   // whole-read threshold).
@@ -582,27 +589,34 @@ test("Gemma4Ple.gather: 1 回の gather は自分の hit を追い出さない",
       );
     }
   }
-  assertEquals(ple.stats().loads, loads, "hit のはずの block を読み直している");
+  assertEquals(ple.stats().loads, loads, "re-reads a block that should be a hit");
   assertEquals(ple.stats().resident, 2);
-  assertEquals(ple.stats().rowReads, rowReads + 33 * 2, "載らなかった miss は行読みへ倒れる");
+  assertEquals(
+    ple.stats().rowReads,
+    rowReads + 33 * 2,
+    "misses that did not fit fall back to row reads",
+  );
 });
 
-test("Gemma4Ple: block 1 本すら載らない予算は構築時に fail loudly", () => {
+test("Gemma4Ple: a budget that cannot hold even one block fails loudly at build time", () => {
   const rig = fixture();
   const error = assertThrows(
     () => pleOf(rig, BLOCK_BYTES - 1),
     ModelInputError,
     `maxResidentBytes ${BLOCK_BYTES - 1} is less than one PLE block, ${BLOCK_BYTES} bytes`,
   );
-  assert(error instanceof ModelInputError, "呼び手の指定なので入力起因（ADR 0107 決定 2）");
-  // 0 は「常駐させない」という正当な指定（陰性対照）。
+  assert(
+    error instanceof ModelInputError,
+    "the caller's setting, so caused by the input (ADR 0107 decision 2)",
+  );
+  // 0 is a legitimate setting meaning "no residency" (negative control).
   assertEquals(pleOf(rig, 0).stats().residentBytes, 0);
   assertThrows(() => pleOf(rig, -1), ModelInputError, "is not a non-negative integer");
 });
 
-// ---- id 空間の相互照合と値域 -----------------------------------------------
+// ---- Cross-checking the id space and ranges -----------------------------------------------
 
-test("createGemma4Ple: vocab の相互照合は読み口に触る前に落ちる", () => {
+test("createGemma4Ple: the vocab cross-check fails before the reader is touched", () => {
   const rig = fixture();
   const error = assertThrows(
     () =>
@@ -614,13 +628,13 @@ test("createGemma4Ple: vocab の相互照合は読み口に触る前に落ちる
     Error,
     `PLE index's row count ${SPEC.tokens} differs from the main embedding's vocab row count ${SPEC.tokens + 1}`,
   );
-  assertEquals(rig.opens.length, 0, "照合の前に block を開きに行っている");
-  // 焼いた組み合わせの齟齬なので、同じ関数の予算の門と違って入力起因では**ない**
-  // （呼び手が `maxResidentPleBytes` をどう直しても直らない — ADR 0107 決定 2）。
+  assertEquals(rig.opens.length, 0, "opens a block before the cross-check");
+  // A mismatch in the exported combination, so unlike the budget check of the same function it is **not** caused by
+  // the input (no change to `maxResidentPleBytes` by the caller fixes it — ADR 0107 decision 2).
   assert(!(error instanceof ModelInputError));
 });
 
-test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token の有効な行を引かせない）", async () => {
+test("Gemma4Ple.gather: an id out of range and an empty sequence fail loudly (no valid row of another token is read)", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   for (const bad of [SPEC.tokens, -1, 1.5]) {
@@ -631,12 +645,12 @@ test("Gemma4Ple.gather: id の値域と空列は fail loudly（別 token の有�
     );
   }
   await assertRejects(() => ple.gather([]), Error, "token sequence of the PLE gather is empty");
-  assertEquals(rig.opens.length, 0, "値域の門より先に block を開きに行っている");
+  assertEquals(rig.opens.length, 0, "opens a block before the range check");
 });
 
-// ---- 中断と解放 ------------------------------------------------------------
+// ---- Abort and release ------------------------------------------------------------
 
-test("Gemma4Ple.gather: 中断済みの signal では block を 1 本も開かない", async () => {
+test("Gemma4Ple.gather: an already aborted signal opens not a single block", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   const controller = new AbortController();
@@ -645,8 +659,8 @@ test("Gemma4Ple.gather: 中断済みの signal では block を 1 本も開か�
   assertEquals(rig.opens.length, 0);
 });
 
-test("Gemma4Ple.gather: 走行中の中断は段の境目で効き、読めた行は残さない", async () => {
-  // 1 block 1 行の索引（= 常に行読み）。1 本目の読みが決着した後の境目で中断が効く。
+test("Gemma4Ple.gather: an abort during the run takes effect at a step boundary and keeps no rows that were read", async () => {
+  // An index with 1 row per block (= always row reads). The abort takes effect at the boundary after the first read settles.
   const spec: PleFixtureSpec = { tokens: 64, layers: 1, dim: 4, embedScale: 4, valueRows: 1 };
   const rig = pleFixture(spec, { defer: true });
   const ple = createGemma4Ple({
@@ -662,13 +676,16 @@ test("Gemma4Ple.gather: 走行中の中断は段の境目で効き、読めた�
   );
   controller.abort(new Error("test abort"));
   await assertRejects(() => pending, Error, "test abort");
-  assert(rig.reads.length < 128, `中断後も全区間を読み切っている（${rig.reads.length} 本）`);
-  assert(rig.reads.length > 0, "そもそも 1 本も読んでいない（中断の門が空振り）");
+  assert(
+    rig.reads.length < 128,
+    `reads every range even after the abort (${rig.reads.length} reads)`,
+  );
+  assert(rig.reads.length > 0, "not a single read happened (the abort check is vacuous)");
 });
 
-test("Gemma4Ple.gather: 行読みが 1 本失敗したら新規発行を止め、開始済みの読みを待ってから落ちる", async () => {
-  // 1 block 1 行・予算 0（= 全 40 区間が行読み）。最初の読み 1 本だけを reject させる。
-  // 失敗の後も他の worker が発行を続けると、呼び手の retry と重なって同時発行の上限 16 を超える。
+test("Gemma4Ple.gather: when one row read fails, it stops issuing new reads and fails after the started reads settle", async () => {
+  // 1 row per block, budget 0 (= all 40 ranges are row reads). Only the first read rejects. If the other workers kept
+  // issuing after the failure, they would overlap with the caller's retry and exceed the concurrency limit of 16.
   const spec: PleFixtureSpec = { tokens: 20, layers: 1, dim: 4, embedScale: 4, valueRows: 1 };
   const rig = pleFixture(spec, { defer: true });
   let calls = 0;
@@ -703,15 +720,15 @@ test("Gemma4Ple.gather: 行読みが 1 本失敗したら新規発行を止め�
     Error,
     "injected read failure",
   );
-  assertEquals(inFlight, 0, "開始済みの読みが決着する前に reject した");
+  assertEquals(inFlight, 0, "rejected before the started reads settled");
   const callsAtReject = calls;
-  assert(callsAtReject < 40, `失敗後も全区間を発行している（${callsAtReject} 本）`);
-  // 失敗が届いた後に新しい読みが出ないこと（数マクロタスク待って観測する）。
+  assert(callsAtReject < 40, `issues every range even after the failure (${callsAtReject} reads)`);
+  // No new read is issued after the failure arrives (observed after waiting a few macrotasks).
   for (let tick = 0; tick < 8; tick += 1) await new Promise((resolve) => setTimeout(resolve, 0));
-  assertEquals(calls, callsAtReject, "reject の後に読みが新規発行された");
+  assertEquals(calls, callsAtReject, "a new read was issued after the reject");
 });
 
-test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fail loudly", async () => {
+test("Gemma4Ple: dispose empties the residency, and any later gather fails loudly", async () => {
   const rig = fixture();
   const ple = pleOf(rig);
   await ple.gather([0, 1]);
@@ -719,12 +736,12 @@ test("Gemma4Ple: dispose で常駐が空になり、以後の gather は fail lo
   ple.dispose();
   assertEquals(ple.stats(), { loads: 2, rowReads: 0, resident: 0, residentBytes: 0 });
   await assertRejects(() => ple.gather([0]), Error, "a disposed index cannot be looked up");
-  // 冪等。
+  // Idempotent.
   ple.dispose();
   assertEquals(ple.stats().residentBytes, 0);
 });
 
-test("Gemma4Ple: 先行読みが dispose 後に完了しても常駐を復活させない", async () => {
+test("Gemma4Ple: a read-ahead that completes after dispose does not bring the residency back", async () => {
   const rig = fixture({ defer: true });
   const ple = pleOf(rig);
   const pending = ple.gather([0, 1]);

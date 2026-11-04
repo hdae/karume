@@ -1,7 +1,8 @@
-// Pillow の 8bit の分離型 resample の共通の核（`src/image/pillow-resample.ts`）の**事前条件**。
-// 値の一致は呼び手ごとの fixture が縛る（BiRefNet の `birefnet_matte_test.ts`・Wan の LANCZOS の
-// fixture）ので、ここは入力・出力寸法・窓の食い違いを黙って途中まで読まずに `RangeError` で落とす
-// ことだけを見る（GPU 不要・資産不要）。
+// The **preconditions** of the shared core of Pillow's 8-bit separable resample
+// (`src/image/pillow-resample.ts`). Value equality is pinned by each caller's fixture (BiRefNet's
+// `birefnet_matte_test.ts`, Wan's LANCZOS fixture), so this only checks that a mismatch in the
+// input, the output size or the window fails with `RangeError` instead of being silently read
+// part-way (no GPU, no assets).
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -12,8 +13,8 @@ import {
   resizeU8PlaneBicubic,
 } from "../src/image/pillow-resample.ts";
 
-describe("resizeU8PlaneBicubic の事前条件", () => {
-  it("平面の長さが寸法と合わなければ RangeError（短くても長くても）", () => {
+describe("preconditions of resizeU8PlaneBicubic", () => {
+  it("throws RangeError when the plane's length does not match the size (shorter or longer)", () => {
     assertThrows(
       () => resizeU8PlaneBicubic(new Uint8Array(5), 3, 2, 4, 4),
       RangeError,
@@ -26,13 +27,13 @@ describe("resizeU8PlaneBicubic の事前条件", () => {
     );
   });
 
-  it("入力の寸法が正の整数でなければ RangeError（長さが積と合っていても）", () => {
-    // 0 × n は長さ 0 と積が合うので、長さの検査だけでは通ってしまう。
+  it("throws RangeError when an input dimension is not a positive integer (even when the length matches the product)", () => {
+    // 0 × n has a product matching length 0, so a length check alone would let it through.
     assertThrows(() => resizeU8PlaneBicubic(new Uint8Array(0), 0, 3, 2, 2), RangeError, "input");
     assertThrows(() => resizeU8PlaneBicubic(new Uint8Array(3), 1.5, 2, 2, 2), RangeError, "input");
   });
 
-  it("出力の寸法が正の整数でなければ RangeError", () => {
+  it("throws RangeError when an output dimension is not a positive integer", () => {
     for (const [width, height] of [
       [0, 2],
       [2, -1],
@@ -46,17 +47,17 @@ describe("resizeU8PlaneBicubic の事前条件", () => {
     }
   });
 
-  it("事前条件を満たす入力は通る（上の検査が恒真に落とすだけでないことの対照）", () => {
+  it("accepts an input meeting the preconditions (the control showing the checks above do not always fail)", () => {
     const out = resizeU8PlaneBicubic(new Uint8Array(6).fill(200), 3, 2, 5, 4);
     assertEquals(out.length, 20);
     assertEquals([...new Set(out)], [200]);
   });
 });
 
-describe("resampleU8Window の事前条件", () => {
+describe("preconditions of resampleU8Window", () => {
   const image = { data: new Uint8Array(4 * 3 * 3), width: 4, height: 3, channels: 3 };
 
-  it("窓が出力の内側に無ければ RangeError（はみ出し・負の座標・空の窓）", () => {
+  it("throws RangeError when the window is not inside the output (overhang, negative coordinates, empty window)", () => {
     for (const window of [
       { left: 6, top: 0, width: 2, height: 2 },
       { left: 0, top: 4, width: 2, height: 2 },
@@ -71,7 +72,7 @@ describe("resampleU8Window の事前条件", () => {
     }
   });
 
-  it("チャネル数が画素列の長さと合わなければ RangeError", () => {
+  it("throws RangeError when the channel count does not match the pixel array's length", () => {
     assertThrows(
       () =>
         resampleU8Window(

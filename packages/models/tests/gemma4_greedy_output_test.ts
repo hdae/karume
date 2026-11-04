@@ -33,13 +33,13 @@ const model = (): DeclarationJson => ({
     { op: "state_append", ins: ["z"], outs: [], attrs: {}, states: { slot: "slot" } },
   ],
 });
-/** 重み 0 本のグラフを `krm` で書いて開き、target の Session にする。 */
+/** Writes a graph with 0 weights as `krm`, opens it and makes it the target Session. */
 const targetSession = async (gpu: GpuContext): Promise<Session> =>
   await createSessionFromContainer(gpu, await openModelBytes(model(), []), GRAPH_NAME);
 const input = (values = [-1, -4, -4, -2]): Record<string, Tensor> => ({
   x: { dtype: "f32", shape: [1, 1, 4], data: Float32Array.from(values) },
 });
-test("greedy出力: 通常runとbatchが別contextで同時発行されても直列化される", async () => {
+test("greedy output: a normal run and a batch issued concurrently on separate contexts are serialised", async () => {
   const gpu = await acquireGpu(),
     target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4);
@@ -66,7 +66,7 @@ test("greedy出力: 通常runとbatchが別contextで同時発行されても直
     gpu.destroy();
   }
 });
-test("greedy出力: 準備失敗で部分確保を返し、次の発行で再試行する", async () => {
+test("greedy output: a failed preparation returns the partial allocations, and the next issue retries", async () => {
   const gpu = await acquireGpu(),
     target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4),
@@ -99,7 +99,7 @@ test("greedy出力: 準備失敗で部分確保を返し、次の発行で再試
     gpu.destroy();
   }
 });
-test("greedy出力: 未awaitの生成後のdisposeは完了を待ち全residentを返す", async () => {
+test("greedy output: dispose after an un-awaited generation waits for completion and returns every resident", async () => {
   const gpu = await acquireGpu(),
     target = await targetSession(gpu);
   const h = createGemmaGreedyOutput(gpu, target, "y", 4),

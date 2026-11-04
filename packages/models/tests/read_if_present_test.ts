@@ -1,11 +1,13 @@
-// 「在れば読む」読み口（`helpers/read-if-present.ts`）の挙動テスト。GPU も実資産も要らない。
+// Behaviour tests of the read-if-present helpers (`helpers/read-if-present.ts`). Needs neither a
+// GPU nor real assets.
 //
-// この読み口は資産系テストの SKIP 判定の源なので、「無い」と「読めない」を取り違えると
-// 実行されていない検証が SKIP として静かに緑になる。NotFound だけを `undefined` に畳み、
-// それ以外（ここではディレクトリを指す path）は投げることを縛る。
+// These helpers are where the asset tests decide whether to SKIP, so confusing "absent" with
+// "unreadable" would turn a check that never ran into a silent green SKIP. The tests pin that only
+// NotFound is folded into `undefined` and that anything else (here, a path to a directory) throws.
 //
-// NOTE: ディレクトリ読込の例外型は OS で違う（`Deno.errors.IsADirectory` が無い環境もある）
-// ので、型ではなく「`undefined` を返さずに投げた」ことで観測する。
+// NOTE: the error type for reading a directory differs between operating systems (some environments
+// have no `Deno.errors.IsADirectory`), so the tests observe "threw instead of returning
+// `undefined`" rather than the type.
 
 import { makeTempDir, mkdir, remove, writeTextFile } from "@karume/test-support/fs";
 import { assertEquals, assertRejects } from "@std/assert";
@@ -24,29 +26,29 @@ describe("readTextIfPresent / readFileIfPresent", () => {
     await remove(root, { recursive: true });
   });
 
-  describe("path が存在しないとき", () => {
-    it("テキスト読みは undefined を返す", async () => {
+  describe("when the path does not exist", () => {
+    it("the text read returns undefined", async () => {
       assertEquals(await readTextIfPresent(new URL("absent.txt", root)), undefined);
     });
-    it("バイト読みは undefined を返す", async () => {
+    it("the byte read returns undefined", async () => {
       assertEquals(await readFileIfPresent(new URL("absent.bin", root)), undefined);
     });
   });
 
-  describe("path がディレクトリを指すとき（NotFound 以外の失敗）", () => {
-    it("テキスト読みは undefined へ畳まずに投げる", async () => {
+  describe("when the path points to a directory (a failure other than NotFound)", () => {
+    it("the text read throws instead of folding into undefined", async () => {
       await assertRejects(() => readTextIfPresent(new URL("directory", root)));
     });
-    it("バイト読みは undefined へ畳まずに投げる", async () => {
+    it("the byte read throws instead of folding into undefined", async () => {
       await assertRejects(() => readFileIfPresent(new URL("directory", root)));
     });
   });
 
-  describe("path にファイルが在るとき", () => {
-    it("テキスト読みは中身を返す", async () => {
+  describe("when a file exists at the path", () => {
+    it("the text read returns the contents", async () => {
       assertEquals(await readTextIfPresent(new URL("present.txt", root)), "中身");
     });
-    it("バイト読みは中身のバイト列を返す", async () => {
+    it("the byte read returns the content bytes", async () => {
       assertEquals(
         await readFileIfPresent(new URL("present.txt", root)),
         new TextEncoder().encode("中身"),

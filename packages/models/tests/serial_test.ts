@@ -1,17 +1,22 @@
-// 直列化鎖（`src/concurrency/serial.ts`）の挙動テスト。GPU も実資産も要らない。
+// Behaviour tests of the serialisation chain (`src/concurrency/serial.ts`). Needs neither a GPU nor
+// real assets.
 //
-// パイプライン 3 家族が「グラフは 1 本ずつ」を公開 API 側で守る土台なので、実 GPU の並行
-// generate を待たずにここで縛る。決着の順を握るために、操作の中身は**手で決着させる
-// promise**（`Promise.withResolvers`）にしてある — タイマー待ちに頼ると順序が緩む。
+// It is the foundation on which three pipeline families keep "one graph at a time" on the public
+// API side, so it is pinned here rather than waiting for concurrent generate calls on a real GPU.
+// To control the settlement order, the operations' bodies are **promises settled by hand**
+// (`Promise.withResolvers`) — relying on timer waits would loosen the order.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertRejects } from "@std/assert";
 import { createOperationChain } from "../src/concurrency/serial.ts";
 
-/** 積まれた操作が進めるところまで進むのを待つ（microtask を全て流すマクロタスク 1 拍）。 */
+/**
+ * Waits until the queued operations have progressed as far as they can (one macrotask tick that
+ * drains all microtasks).
+ */
 const settleMicrotasks = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
 
-test("createOperationChain: 並行に積んでも 1 本ずつ走る（後発は先発の決着まで開始しない）", async () => {
+test("createOperationChain: operations queued concurrently run one at a time (a later one does not start until the earlier one settles)", async () => {
   const chain = createOperationChain();
   const events: string[] = [];
   const first = Promise.withResolvers<void>();
@@ -43,7 +48,7 @@ test("createOperationChain: 並行に積んでも 1 本ずつ走る（後発は�
   assertEquals(events, ["a:start", "a:end", "b:start", "b:end"]);
 });
 
-test("createOperationChain: 失敗は呼び出し側へそのまま届き、鎖は次へ解放される", async () => {
+test("createOperationChain: a failure reaches the caller as is, and the chain is released to the next operation", async () => {
   const chain = createOperationChain();
   const events: string[] = [];
 
@@ -62,7 +67,7 @@ test("createOperationChain: 失敗は呼び出し側へそのまま届き、鎖�
   await rejected;
 });
 
-test("createOperationChain: 後から積んだ操作は先行が全て決着してから走る（dispose が待つ形）", async () => {
+test("createOperationChain: an operation queued later runs after all earlier ones have settled (the way dispose waits)", async () => {
   const chain = createOperationChain();
   const done: string[] = [];
   const gate = Promise.withResolvers<void>();
@@ -76,7 +81,8 @@ test("createOperationChain: 後から積んだ操作は先行が全て決着し�
     throw new Error("boom");
   });
   const rejected = assertRejects(() => failing, Error, "boom");
-  // 破棄に相当する操作（同期）。先行が 1 本でも生きている間は走ってはならない。
+  // An operation standing in for disposal (synchronous). It must not run while any earlier one is
+  // still alive.
   const close = chain(() => {
     done.push("close");
   });

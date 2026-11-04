@@ -1,4 +1,5 @@
-// latent / 条件テンソルの整形と RGBA 化の挙動テスト。GPU も資産も要らない純関数。
+// Behaviour tests of shaping the latent / conditioning tensors and converting to RGBA. Pure
+// functions that need neither a GPU nor assets.
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -18,7 +19,10 @@ import {
 } from "../src/anima/latents.ts";
 import { imageToRgba } from "../src/anima/image.ts";
 
-/** 参照フィクスチャ（`fixtures/anima-latents/parity.json` — 生成元は同ファイルの `_doc`）。 */
+/**
+ * The reference fixture (`fixtures/anima-latents/parity.json` — its generator is described in the
+ * file's `_doc`).
+ */
 type LatentsFixture = {
   readonly mean: readonly number[];
   readonly std: readonly number[];
@@ -27,7 +31,7 @@ type LatentsFixture = {
 const FIXTURE_PATH = new URL("./fixtures/anima-latents/parity.json", import.meta.url);
 const fixture = JSON.parse(await readTextFile(FIXTURE_PATH)) as LatentsFixture;
 
-test("denormalizeLatents: B>1 と channel 数の食い違いを落とす", () => {
+test("denormalizeLatents: rejects B>1 and a channel-count mismatch", () => {
   const latents = new Float32Array(2 * 2 * 1 * 1);
   const mean = Float32Array.from([0, 0]);
   const std = Float32Array.from([1, 1]);
@@ -48,7 +52,7 @@ test("denormalizeLatents: B>1 と channel 数の食い違いを落とす", () =>
   );
 });
 
-test("denormalizeLatents: std の逆数で割る（掛け算に直すと最終桁が変わる）", () => {
+test("denormalizeLatents: divides by std's reciprocal (rewriting it as a multiplication changes the last digit)", () => {
   const latents = Float32Array.from([1, 1]);
   const mean = Float32Array.from([0, 0]);
   const std = Float32Array.from([3, 7]);
@@ -56,37 +60,40 @@ test("denormalizeLatents: std の逆数で割る（掛け算に直すと最終�
   for (const [index, scale] of [3, 7].entries()) {
     assertEquals(got[index], Math.fround(1 / Math.fround(1 / scale)), `channel ${index}`);
   }
-  // 掛け算版と**実際に割れる**ことを見せる（見せられないなら MUST に意味が無い）。
+  // Shows that it **actually differs** from the multiplication form (if it cannot be shown, the
+  // MUST means nothing).
   assert(
     got[0] !== Math.fround(1 * 3) || got[1] !== Math.fround(1 * 7),
-    "逆数で割る形と掛ける形が全チャネルで一致してしまい、この不変条件を固定できていない",
+    "dividing by the reciprocal and multiplying agree on every channel, so this invariant is not pinned",
   );
 });
 
-test("デモ定数: latents_mean / latents_std が参照フィクスチャとビット一致する", () => {
-  // `latents.ts` の MUST（手写しの数を検証なしで置かない）の実体。この 32 個は VAE の config
-  // にしかなく IR にも配布資産にも入らないので、写し間違いを捕まえる門はここだけになる
-  // （実 GPU の PNG sha256 門は資産と GPU が揃った参照環境でしか走らない）。
-  // 突合は素の f32 比較でよい — フィクスチャの値は torch の f32 テンソル由来で、
-  // `Float32Array.from` が同じ f32 へ落とす。
+test("demo constants: latents_mean / latents_std are bit-identical to the reference fixture", () => {
+  // The substance of the MUST in `latents.ts` (no hand-copied number without validation). These 32
+  // values exist only in the VAE config and are in neither the IR nor the distributed assets, so
+  // this is the only check that catches a copying mistake (the PNG sha256 check on a real GPU runs
+  // only in the reference environment that has both the assets and a GPU). A plain f32 comparison
+  // is enough — the fixture's values come from torch f32 tensors and `Float32Array.from` rounds
+  // them to the same f32.
   assertEquals([...ANIMA_LATENTS_MEAN], [...Float32Array.from(fixture.mean)]);
   assertEquals([...ANIMA_LATENTS_STD], [...Float32Array.from(fixture.std)]);
 });
 
-test("デモ定数: latents_mean / latents_std は 16 チャネル対で揃っている", () => {
-  // 値そのものは上のビット一致が固定する。ここは「片方だけ差し替えた」形の取りこぼしを
-  // 構造で止める。
+test("demo constants: latents_mean / latents_std come as a pair of 16 channels", () => {
+  // The values themselves are pinned by the bit identity above. This one stops, structurally, the
+  // case where "only one of them was replaced" would slip through.
   assertEquals(ANIMA_LATENTS_MEAN.length, 16);
   assertEquals(ANIMA_LATENTS_STD.length, ANIMA_LATENTS_MEAN.length);
   assert(
     ANIMA_LATENTS_STD.every((value) => value > 0),
-    "std に非正の値がある",
+    "std has a non-positive value",
   );
 });
 
-test("latentStats: 呼ぶたびに独立した写し（消費側の書き換えが実体へ波及しない）", () => {
-  // 公開面が出すのはこのアクセサだけ。実体を配ると、消費側が 1 要素書き換えただけで
-  // 以後の全 `generate` の逆正規化が黙って変わる（グローバル可変状態）。
+test("latentStats: each call returns an independent copy (a consumer's writes do not reach the original)", () => {
+  // This accessor is all the public surface exposes. Handing out the original would let a consumer
+  // that rewrites a single element silently change the denormalisation of every later `generate`
+  // (global mutable state).
   const first = latentStats();
   assertEquals([...first.mean], [...ANIMA_LATENTS_MEAN]);
   assertEquals([...first.std], [...ANIMA_LATENTS_STD]);
@@ -96,7 +103,7 @@ test("latentStats: 呼ぶたびに独立した写し（消費側の書き換え�
   first.mean[0] = 999;
   first.std[0] = 999;
 
-  // 内部実体も、次に取り直した写しも変わらない。
+  // Neither the internal original nor a copy fetched again changes.
   assertEquals(ANIMA_LATENTS_MEAN[0], meanBefore);
   assertEquals(ANIMA_LATENTS_STD[0], stdBefore);
   const second = latentStats();
@@ -106,7 +113,7 @@ test("latentStats: 呼ぶたびに独立した写し（消費側の書き換え�
   assertNotStrictEquals(second.std, first.std);
 });
 
-test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () => {
+test("padSequence: padding is zero, B>1 and too many rows are rejected", () => {
   const hidden = { dtype: "f32", shape: [1, 2, 3], data: Float32Array.from([1, 2, 3, 4, 5, 6]) };
   const padded = padSequence(hidden as never, 4);
   assertEquals([...padded], [1, 2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0]);
@@ -116,7 +123,8 @@ test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () => {
     Error,
     "assumes batch=1",
   );
-  // i32 / bool は `set` が黙って数値変換する（shape も長さも合ったまま値だけ別物）。
+  // For i32 / bool, `set` silently converts the numbers (shape and length still match, only the
+  // values are wrong).
   assertThrows(
     () => padSequence({ dtype: "i32", shape: [1, 2, 3], data: new Int32Array(6) } as never, 4),
     Error,
@@ -124,27 +132,28 @@ test("padSequence: 余白はゼロ・B>1 と行数超過は落とす", () => {
   );
 });
 
-test("imageToRgba: [-1,1] → [0,255]・planar から interleave・アルファ 255", () => {
-  // 1×2 の画像。R 面 / G 面 / B 面がこの順に並ぶ。
+test("imageToRgba: [-1,1] → [0,255], planar to interleaved, alpha 255", () => {
+  // A 1×2 image. The R plane / G plane / B plane come in this order.
   const image = Float32Array.from([
     -1,
     1, // R
     0,
-    -2, // G（-2 は clamp 対象）
+    -2, // G (-2 is clamped)
     2,
-    0.5, // B（2 は clamp 対象）
+    0.5, // B (2 is clamped)
   ]);
   const rgba = imageToRgba(image, 2, 1);
   assertEquals([...rgba], [0, 128, 255, 255, 255, 0, 191, 255]);
 });
 
-test("imageToRgba: 要素数とサイズの食い違いを落とす", () => {
+test("imageToRgba: rejects a mismatch between the element count and the size", () => {
   assertThrows(() => imageToRgba(new Float32Array(5), 2, 1), Error, "element count");
   assertThrows(() => imageToRgba(new Float32Array(6), 0, 1), RangeError);
 });
 
-test("imageToRgba: 寸法が正の整数でなければ、要素数が合っていても RangeError（wan.frameToRgba と同じ入口契約）", () => {
-  // どれも `image.length === 3·width·height` は満たす（長さの照合だけでは通る形）。
+test("imageToRgba: a dimension that is not a positive integer is a RangeError even when the element count matches (the same entry contract as wan.frameToRgba)", () => {
+  // Every one of them satisfies `image.length === 3·width·height` (a shape that a length check
+  // alone lets through).
   assertThrows(
     () => imageToRgba(new Float32Array(3), 0.5, 2),
     RangeError,
@@ -157,8 +166,9 @@ test("imageToRgba: 寸法が正の整数でなければ、要素数が合って�
   );
 });
 
-test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙変換しない）", () => {
-  // 2×2 の 3 面。土台は全て有限（clamp 対象の範囲外値も混ぜる）で、1 要素だけ壊す。
+test("imageToRgba: rejects a non-finite value with its coordinates (no silent conversion to a black pixel)", () => {
+  // Three planes of 2×2. The base is all finite (with out-of-range values that get clamped mixed
+  // in), and a single element is broken.
   const base = new Float32Array(2 * 2 * 3);
   base.set([-2, -1, 0, 1], 0); // R
   base.set([1, 0, -1, -2], 4); // G
@@ -168,10 +178,11 @@ test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙�
     image[offset] = value;
     return image;
   };
-  // 土台は落ちない — 検査するのは「有限か」であって「範囲内か」ではない。
+  // The base does not fail — what is checked is "finite", not "in range".
   assertEquals([...imageToRgba(base, 2, 2).slice(0, 4)], [0, 255, 128, 255]);
 
-  // 壊す位置を面ごとにずらし、座標が固定文言でなく実際の画素を指すことを見る。
+  // The broken position moves per plane, to see that the coordinates point at the actual pixel
+  // rather than a fixed wording.
   const nan = assertThrows(() => imageToRgba(spoil(3, NaN), 2, 2), Error);
   assertStringIncludes(nan.message, "x=1");
   assertStringIncludes(nan.message, "y=1");
@@ -188,9 +199,10 @@ test("imageToRgba: 非有限値は座標付きで落とす（黒画素へ沈黙�
   assertStringIncludes(negativeInfinity.message, "channel 2");
 });
 
-test("imageToRgba: 非正方（H≠W）でも行優先で走る", () => {
-  // 2×3（幅 2 / 高さ 3）。転置した実装だと同じ長さのまま画素の並びだけが変わるので、
-  // **面ごとに違う値**を配って位置で捕まえる（正方では検出できない取り違え）。
+test("imageToRgba: runs row-major even when non-square (H≠W)", () => {
+  // 2×3 (width 2 / height 3). A transposed implementation keeps the same length and changes only
+  // the pixel order, so **each plane gets different values** to catch it by position (a mix-up a
+  // square image cannot detect).
   const plane = Float32Array.from([-1, 1, 1, -1, -1, 1]);
   const image = new Float32Array(18);
   image.set(plane, 0); // R
@@ -198,9 +210,9 @@ test("imageToRgba: 非正方（H≠W）でも行優先で走る", () => {
   image.set(plane, 12); // B
   const rgba = imageToRgba(image, 2, 3);
   assertEquals(rgba.length, 2 * 3 * 4);
-  // 画素 (x=1, y=0) は plane[1] = 1 → 255、画素 (x=0, y=1) は plane[2] = 1 → 255。
+  // Pixel (x=1, y=0) is plane[1] = 1 → 255, pixel (x=0, y=1) is plane[2] = 1 → 255.
   assertEquals([...rgba.slice(4, 8)], [255, 255, 255, 255]);
   assertEquals([...rgba.slice(8, 12)], [255, 255, 255, 255]);
-  // 画素 (x=0, y=0) は plane[0] = -1 → 0。
+  // Pixel (x=0, y=0) is plane[0] = -1 → 0.
   assertEquals([...rgba.slice(0, 4)], [0, 0, 0, 255]);
 });

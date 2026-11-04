@@ -1,23 +1,30 @@
-// 公開配布リポの対応表（各家族の `SOURCES` — ADR 0092・値の pin は ADR 0073）の門。
-// **ネットワークには一切出ない** — 公開面の `fetch` 注入席へ記録用のスタブを渡し、取得層が
-// 組み立てた URL だけを見て落とす。
+// Checks of the tables of public distribution repositories (each family's `SOURCES` — ADR 0092; the
+// pinned values are ADR 0073). **Never touches the network** — a recording stub is passed to the
+// public surface's `fetch` injection option, and the request fails after only the URL the fetch
+// layer built is observed.
 //
-// ここで押さえるのは 3 つ:
-//  ① エントリの形 — owner が `hdae`・**キーが repo 名から導ける**こと
-//     （`"karume-" + key` === repo の basename）・revision が 40 桁 hex の commit SHA。
-//     SHA でなければ hub は revision 解決 API を叩きに出る（= オフライン起動が壊れ、かつ
-//     付け替え可能な ref に戻る）。キーの規則を門にするのは、表が「キー = リポ」の対応表
-//     だからで、綴りが自由になると `KARUME_SOURCES` のキーがリポを指さなくなる。
-//  ② `KARUME_SOURCES` が家族表の**和集合**であること。畳み込みはスプレッドなので、キーが
-//     重なると後勝ちで 1 本が黙って消える（型でも実行時でも何も起きない）。
-//  ③ そのエントリを `fromPretrained` へ渡すと、repo / revision がそのまま取得 URL に載ること。
-//     エントリが別のリポ参照へ滑っても型も shape も変わらないので、ここで見ないと沈黙する。
+// Three things are pinned here:
+//  ① The shape of an entry — the owner is `hdae`, **the key can be derived from the repo name**
+//     (`"karume-" + key` === the repo's basename), and the revision is a 40-digit hex commit SHA.
+//     Without a SHA, hub goes out to the revision-resolution API (= offline start-up breaks, and it
+//     falls back to a ref that can be moved). The key rule is checked because the table maps "key =
+//     repository"; with free spelling, the keys of `KARUME_SOURCES` would stop pointing at
+//     repositories.
+//  ② `KARUME_SOURCES` is the **union** of the family tables. The merge is a spread, so overlapping
+//   keys
+//     let the last one win and one entry silently disappears (nothing happens, neither in the types
+//     nor at run time).
+//  ③ Passing an entry to `fromPretrained` puts its repo / revision into the fetch URL as is. If an
+//   entry
+//     slid to another repository reference, neither the types nor the shapes would change, so
+//     without this it would go unnoticed.
 //
-// 綴りの正しさを見るのは①だけ（③は期待 URL をエントリから導くので、値が間違っていても通る）。
-// 2 本セットで「正しい repo が / 実際に使われる」を挟む。
+// Only ① checks that the spelling is correct (③ derives the expected URL from the entry, so it
+// passes even with wrong values). Together the two pin both "the right repo" and "it is actually
+// used".
 //
-// 公開リポを持たないファミリ（vowel-detector）は表自体を持たないので、この門の対象外
-// （ADR 0073 決定 1）。
+// A family without a public repository (vowel-detector) has no table at all and is outside this
+// check (ADR 0073 decision 1).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertMatch, assertRejects } from "@std/assert";
@@ -36,30 +43,34 @@ import * as moss from "../moss.ts";
 import { KARUME_SOURCES } from "../src/sources.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
-/** hub が解決要求を出さずに済む形（`@hdae/fetch-cache` の `isCommitSha` と同じ綴り）。 */
+/**
+ * The form that spares hub a resolution request (the same spelling as `isCommitSha` in
+ * `@hdae/fetch-cache`).
+ */
 const COMMIT_SHA = /^[0-9a-f]{40}$/;
 
-/** 取得 URL を記録して**その場で落とす** fetch（network へは 1 バイトも出ない）。 */
+/** A fetch that records the URL and **fails on the spot** (not one byte reaches the network). */
 const recordingFetch =
   (urls: string[]): typeof globalThis.fetch =>
   (input) => {
     urls.push(input instanceof Request ? input.url : String(input));
-    return Promise.reject(new Error("sources_test: ここから先へは出ない"));
+    return Promise.reject(new Error("sources_test: does not go any further"));
   };
 
 type LoadOptions = { fetch: typeof globalThis.fetch; caches: CacheStorage };
 
 /**
- * `fromPretrained` が最初に取りに行く URL の pathname 列を返す。
+ * Returns the pathnames of the URLs `fromPretrained` fetches first.
  *
- * host は伏せる（`hubUrl` の既定はミラー設定で動く — 見るべきは repo と revision）。
+ * The host is left out (the default `hubUrl` moves with the mirror setting — what matters is the
+ * repo and the revision).
  */
 const requestedPaths = async (
   load: (options: LoadOptions) => Promise<unknown>,
 ): Promise<string[]> => {
   const urls: string[] = [];
-  // MUST: `caches` も注入する — 実 Cache Storage に触れると、他テストの残骸でヒット経路に
-  // 化けて「network を叩かない」別の話を検査してしまう。
+  // MUST: inject `caches` too — touching the real Cache Storage could turn this into the hit path
+  // through leftovers of other tests, checking a different story ("does not hit the network").
   await assertRejects(() =>
     load({ fetch: recordingFetch(urls), caches: new MemoryCacheStorage() }),
   );
@@ -69,11 +80,16 @@ const requestedPaths = async (
 const manifestPath = (source: { repo: string; revision: string }): string =>
   `/${source.repo}/resolve/${source.revision}/karume.json`;
 
-/** 家族表 1 つぶんの素性（表そのもの + そのエントリを実際に読む `fromPretrained`）。 */
+/**
+ * What one family table consists of (the table itself + the `fromPretrained` that actually reads
+ * its entries).
+ */
 type Family = {
   readonly name: string;
   readonly sources: Record<string, HubRepoRef>;
-  /** 期待するキー集合（**外部の期待**として名指しで置く — 下の `keys` の門を参照）。 */
+  /**
+   * The expected key set (spelled out as **an external expectation** — see the `keys` check below).
+   */
   readonly keys: readonly string[];
   readonly load: (ref: HubRepoRef, options: LoadOptions) => Promise<unknown>;
 };
@@ -82,15 +98,18 @@ const FAMILIES: readonly Family[] = [
   {
     name: "anima.SOURCES",
     sources: anima.SOURCES,
-    // 公式モデル同居リポと第三者 fine-tune 同居リポ（ADR 0087）。extra は text stack を公式から
-    // 越境参照するが、**manifest 自体は自分のリポから取る**（越境は manifest の中の話）。
+    // The repository of the official models and the repository of third-party fine-tunes (ADR
+    // 0087). extra takes its text stack from the official one by cross-repository reference, but
+    // **the manifest itself comes from its own repository** (the cross-reference lives inside the
+    // manifest).
     keys: ["anima", "anima-extra"],
     load: (ref, options) => anima.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "irodori.SOURCES",
     sources: irodori.SOURCES,
-    // 世代・版が変わるものは別リポ（ADR 0092 決定 1）— v4 と v4.1 が並ぶ。
+    // A new generation or version gets its own repository (ADR 0092 decision 1) — v4 and v4.1 side
+    // by side.
     keys: ["irodori-v4-small", "irodori-v4.1-small"],
     load: (ref, options) => irodori.Pipeline.fromPretrained(ref, options),
   },
@@ -119,37 +138,41 @@ const FAMILIES: readonly Family[] = [
   {
     name: "siglip2.SOURCES",
     sources: siglip2.SOURCES,
-    // base と so400m は寸法だけが違う同じ経路なので 1 リポに同居する（既定 = base）。
+    // base and so400m are the same path differing only in size, so they share one repository
+    // (default = base).
     keys: ["siglip2"],
     load: (ref, options) => siglip2.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "depthAnything.SOURCES",
     sources: depthAnything.SOURCES,
-    // 世代はリポ名に入る（ADR 0092 決定 1）— V3 は別アーキなので別キーとして並ぶ。
+    // The generation goes into the repository name (ADR 0092 decision 1) — V3 is a different
+    // architecture, so it would sit alongside as a separate key.
     keys: ["depth-anything-v2"],
     load: (ref, options) => depthAnything.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "birefnet.SOURCES",
     sources: birefnet.SOURCES,
-    // checkpoint ごとに 1 リポ（派生 Lucida は別リポ — ADR 0092 決定 1）。各リポには解像度ごとの
-    // 別グラフが "1024" / "2048" の 2 モデルとして同居する（決定 9）。
+    // One repository per checkpoint (the derivative Lucida has its own — ADR 0092 decision 1). Each
+    // repository holds the per-resolution graphs as two models, "1024" / "2048" (decision 9).
     keys: ["birefnet-hr", "lucida"],
     load: (ref, options) => birefnet.Pipeline.fromPretrained(ref, options),
   },
   {
     name: "umt5.SOURCES",
     sources: umt5.SOURCES,
-    // Wan の text_encoder の越境参照先でもあるが、単体の入口（`umt5.Encoder`）を持つ 1 家族 1 リポ。
+    // Also the target of Wan's cross-repository text_encoder reference, but one family with one
+    // repository and its own entry point (`umt5.Encoder`).
     keys: ["umt5-xxl"],
     load: (ref, options) => umt5.Encoder.fromPretrained(ref, options),
   },
   {
     name: "wan.SOURCES",
     sources: wan.SOURCES,
-    // 世代は別リポ（ADR 0092 決定 1）。Wan2.1（`karume-wan2.1`）は HF に公開しないのでキーが無い
-    // （ADR 0118 追記（2026-10-15））— 表が持つのは `wan.Ti2vPipeline` が読む Wan2.2 だけ。
+    // A generation gets its own repository (ADR 0092 decision 1). Wan2.1 (`karume-wan2.1`) is not
+    // published on HF, so it has no key (ADR 0118 addendum (2026-10-15)) — the table holds only
+    // Wan2.2, which `wan.Ti2vPipeline` reads.
     keys: ["wan2.2"],
     load: (ref, options) => wan.Ti2vPipeline.fromPretrained(ref, options),
   },
@@ -162,18 +185,20 @@ const FAMILIES: readonly Family[] = [
   },
 ];
 
-// キーは repo 名から機械導出される（`"karume-" + key` === basename）ので、①の門は「キーと repo が
-// **互いに**整合すること」しか見ていない — 両方を同時に書き換える改名（`karume-gemma4-e2b` →
-// `karume-gemma4` の類）は素通りする。集合をここで外部の期待として固定すると、repo の綴りも
-// 間接的に固定される（改名はこのテストを落として初めて通る = リリース手順を踏ませる席になる）。
+// Keys are derived mechanically from the repo name (`"karume-" + key` === basename), so check ①
+// only sees that the key and the repo agree **with each other** — a rename that rewrites both at
+// once (of the kind `karume-gemma4-e2b` → `karume-gemma4`) passes through. Pinning the set here as
+// an external expectation pins the repo spellings indirectly too (a rename goes through only by
+// failing this test = the point where the release procedure must be followed).
 for (const { name, sources, keys } of FAMILIES) {
-  test(`${name}: キー集合が期待どおり`, () => {
+  test(`${name}: the key set is as expected`, () => {
     assertEquals(Object.keys(sources).toSorted(), [...keys].toSorted());
   });
 }
 
-// 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida・0.14.0 の umT5 / Wan2.2）は
-// ここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
+// The totals of families and public repositories are spelled out too. A new repository (birefnet-hr
+// / lucida in iteration b, umT5 / Wan2.2 in 0.14.0) fails this, so an entry missing from the merge
+// into `KARUME_SOURCES` cannot pass silently.
 test("11 families have a source table, with 15 published repositories", () => {
   assertEquals(
     FAMILIES.map(({ name }) => name),
@@ -196,9 +221,9 @@ test("11 families have a source table, with 15 published repositories", () => {
 
 for (const { name, sources } of FAMILIES) {
   for (const [key, source] of Object.entries(sources)) {
-    test(`${name}["${key}"]: キーが repo から導ける + 40 桁 hex の commit SHA`, () => {
+    test(`${name}["${key}"]: the key derives from the repo + a 40-digit hex commit SHA`, () => {
       const segments = source.repo.split("/");
-      assertEquals(segments.length, 2, `repo が 'owner/name' でない: ${source.repo}`);
+      assertEquals(segments.length, 2, `repo is not 'owner/name': ${source.repo}`);
       assertEquals(segments[0], "hdae");
       assertEquals(`karume-${key}`, segments[1]);
       assertMatch(source.revision ?? "", COMMIT_SHA);
@@ -206,37 +231,40 @@ for (const { name, sources } of FAMILIES) {
   }
 }
 
-// 畳み込みはスプレッドなので、キーが重なると後勝ちで 1 本が黙って消える（同じリポを 2 家族が
-// 持っていない限り起きないが、起きたときに気づく手段が他に無い）。
-test("KARUME_SOURCES: 家族表の和集合でキーの重複が無い", () => {
-  // リテラル型のままだとエントリ同士の比較が「別のキーの値」で型エラーになるので、表として
-  // 引ける形（キー = 任意の綴り）へ広げてから中身を突き合わせる。
+// The merge is a spread, so overlapping keys let the last one win and one entry silently disappears
+// (it cannot happen unless two families hold the same repository, but when it does there is no
+// other way to notice).
+test("KARUME_SOURCES: the union of the family tables, with no duplicate keys", () => {
+  // With the literal types, comparing entries is a type error ("the value of another key"), so the
+  // table is widened to a lookup shape (key = any spelling) before comparing the contents.
   const merged: Record<string, HubRepoRef> = KARUME_SOURCES;
   const entries = FAMILIES.flatMap(({ sources }) => Object.entries(sources));
   assertEquals(
     Object.keys(merged).length,
     entries.length,
-    "キーが重なって畳み込みで消えたエントリがある",
+    "an entry disappeared in the merge because keys overlapped",
   );
-  // 陽性対照 — 空の表を回して緑になる形にしない。
-  assert(entries.length >= 8, `家族表が痩せている（${entries.length} 件）`);
+  // Positive control — do not let iterating over empty tables come out green.
+  assert(entries.length >= 8, `the family tables have shrunk (${entries.length} entries)`);
   for (const [key, source] of entries) assertEquals(merged[key], source);
 });
 
-// SHA 固定なので revision 解決 API を 1 往復もしない（= オフライン起動可）。取得 URL が
-// `/api/models/.../revision/...` から始まったら pin が可変 ref へ戻っている。
+// Pinned to a SHA, so not one round trip to the revision-resolution API (= offline start-up works).
+// If the fetch URL starts with `/api/models/.../revision/...`, the pin has gone back to a movable
+// ref.
 for (const { name, sources, load } of FAMILIES) {
   for (const [key, source] of Object.entries(sources)) {
-    test(`${name}["${key}"]: pin がそのまま取得 URL に載る`, async () => {
+    test(`${name}["${key}"]: the pin goes into the fetch URL as is`, async () => {
       const paths = await requestedPaths((options) => load(source, options));
       assertEquals(paths, [manifestPath({ repo: source.repo, revision: source.revision ?? "" })]);
     });
   }
 }
 
-// 文字列 ref の意味（`{ repo }` = main 追従）は pin 導入後も ref 必須化後も不変。main は
-// commit SHA ではないので、manifest を取る**前に** revision 解決 API を 1 往復する。
-test("sbv2: 文字列 ref は main 追従のまま（revision 解決 API を経由する）", async () => {
+// The meaning of a string ref (`{ repo }` = tracks main) did not change with the pins or with ref
+// becoming required. main is not a commit SHA, so there is one round trip to the
+// revision-resolution API **before** the manifest is fetched.
+test("sbv2: a string ref still tracks main (through the revision-resolution API)", async () => {
   const paths = await requestedPaths((options) =>
     sbv2.Pipeline.fromPretrained("someone/karume-sbv2-fork", options),
   );

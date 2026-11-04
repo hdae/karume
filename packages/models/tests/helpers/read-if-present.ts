@@ -1,13 +1,14 @@
 import { isNotFound, readFile, readTextFile } from "@karume/test-support/fs";
 /**
- * ローカル資産の「在れば読む」読み口（無い = `undefined` を SKIP 判定の源にする門が使う）。
+ * Reads a local asset "if it is present" (used by the checks that take a missing file —
+ * `undefined` — as the source of their SKIP decision).
  *
- * MUST: NotFound 以外は伝播させる — 権限エラー・ディレクトリ・読込途中の失敗などを
- * 「資産が無い」と読み替えると、実行されていない検証が SKIP として静かに緑になる
- * （ADR 0005 の明示 SKIP・fail loudly）。
+ * MUST: anything other than NotFound propagates — reading a permission error, a directory or a
+ * failure part-way through a read as "the asset is missing" would turn a check that never ran into
+ * a silent green SKIP (ADR 0005's explicit SKIP; fail loudly).
  *
- * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
- * のみ（横断不変条件）。
+ * NOTE: only tests use `Deno.readFile` for local reads. The package itself uses Web standard APIs
+ * only (cross-cutting invariant).
  */
 
 const undefinedIfNotFound = (cause: unknown): undefined => {
@@ -15,10 +16,10 @@ const undefinedIfNotFound = (cause: unknown): undefined => {
   throw cause;
 };
 
-/** テキストとして読む。path が無ければ `undefined`、それ以外の失敗は投げる。 */
+/** Reads as text: `undefined` when the path is missing; any other failure throws. */
 export const readTextIfPresent = (path: URL): Promise<string | undefined> =>
   readTextFile(path).catch(undefinedIfNotFound);
 
-/** バイト列として読む。path が無ければ `undefined`、それ以外の失敗は投げる。 */
+/** Reads as bytes: `undefined` when the path is missing; any other failure throws. */
 export const readFileIfPresent = (path: URL): Promise<Uint8Array<ArrayBuffer> | undefined> =>
   readFile(path).catch(undefinedIfNotFound);

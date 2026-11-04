@@ -1,28 +1,35 @@
-// `Pipeline` の**構築ガード**。GPU も実資産も要らない範囲だけを見る
-// （実 GPU の E2E は P3 波 2）。
+// The **construction guards** of `Pipeline`. Only the part that needs neither a GPU nor real assets
+// (the E2E on a real GPU is P3, iteration 2).
 //
-// ここで押さえるのは 6 つ:
-//  ① `fromAssets` は GPU を取りに行く**前**に manifest の契約違反と資産の解析を落とす
-//     （未知 model / pipeline 名 / 未知 major / 未知 quant / 資産の不在）。落とす位置が
-//     ずれると、GPU の無い環境では別の例外に化けて「何が悪かったのか」が読み手に伝わらない。
-//  ② `generate` の入口ガード（`resolveNegativePrompt`）が「効かないノブを黙って受けない」。
-//     回帰しても実 GPU の PNG 門は緑のままなので、純関数として直接縛る。
-//  ③ `denoise-step` の `copyLatents`（`latentSnapshot`）が「作った時点の latent の写し」を
-//     返す。ここが壊れると購読側には**別 step の latent が黙って**届く（実 GPU の PNG 門は
-//     観測席を通らないので緑のまま）。
-//  ④ 構築の `signal` が**入口でも実行開始後でも**効く（DL 完了後の組み立てが中断不能だと、
-//     UI の中止ボタンが無反応になる窓ができる）。後者は「最初の段境界」までを空資産で見る
-//     — それより先の境界は実資産と GPU が要るのでここでは見られない。
-//  ⑤ denoise ループの更新則の選択点（`denoiseStep`）が実効サンプラー（request の `sampler`
-//     ↩ manifest の `scheduler.type`）どおりに分かれ、`"euler"` は履歴を持たない（実 GPU の
-//     PNG 門は両方の更新則を通るが、あちらは資産と GPU が要る）。
-//  ⑥ `residency`（DiT 常駐 — ADR 0112）の綴りを、構築オプションは admission 席で、request は
-//     `generate` の入口（GPU に触る前）で落とす。後者は偽の GPU で組んだ pipeline で結線ごと縛る
-//     （sampler と違って実 GPU の e2e に綴り違いのケースが無い）。状態遷移そのもの（持つ / 手放す /
-//     退避）は `anima_residency_test.ts` が見る。
+// It covers six things:
+//  ① `fromAssets` rejects manifest contract violations and asset parse failures **before**
+//    acquiring a GPU (unknown model / pipeline name / unknown major / unknown quant / missing
+//    asset). If the place of rejection moved, in an environment without a GPU it would turn into
+//    another exception and the reader would not learn "what was wrong".
+//  ② The entry guard of `generate` (`resolveNegativePrompt`) "does not silently accept a knob that
+//    has no effect". A regression would leave the PNG check on a real GPU green, so it is pinned
+//    directly as a pure function.
+//  ③ `copyLatents` of `denoise-step` (`latentSnapshot`) returns "a copy of the latent at the time
+//    it was made". If this broke, subscribers would **silently** receive **the latent of another
+//    step** (the PNG check on a real GPU does not go through the observation hook, so it stays
+//    green).
+//  ④ The construction `signal` takes effect **both at the entry and after execution has started**
+//    (if the assembly after the download finished could not be aborted, there would be a window in
+//    which the UI's cancel button does nothing). The latter is checked up to "the first stage
+//    boundary" with empty assets — the boundaries after that need real assets and a GPU, so they
+//    cannot be checked here.
+//  ⑤ The choice point of the denoise loop's update rule (`denoiseStep`) branches according to the
+//    effective sampler (the request's `sampler` ↩ the manifest's `scheduler.type`), and `"euler"`
+//    keeps no history (the PNG check on a real GPU goes through both update rules, but it needs
+//    assets and a GPU).
+//  ⑥ The spelling of `residency` (DiT residency — ADR 0112) is rejected at admission for the
+//    construction option and at the entry of `generate` (before touching the GPU) for the request.
+//    The latter is pinned together with its wiring, on a pipeline built with a fake GPU (unlike the
+//    sampler, the e2e on a real GPU has no misspelling case). The state transitions themselves
+//    (keep / release / evict) are checked by `anima_residency_test.ts`.
 //
-// NOTE: manifest の `session` → `SessionOptions` の写像は 7 家族共有になったので、門は
-// `session_options_test.ts` にある。
+// NOTE: The mapping from the manifest's `session` to `SessionOptions` is now shared by seven
+// families, so its check lives in `session_options_test.ts`.
 
 import { test } from "vite-plus/test";
 import {
@@ -53,12 +60,15 @@ import { declaredContainer, partAssets, tensorlessContainer } from "./helpers/co
 import { type DumpTensor, writeSafetensors } from "./helpers/safetensors-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
-/** この系列の weights 部品（`src/anima/pipeline.ts` の `COMPONENT_KEYS` と同じ 4 本）。 */
+/**
+ * This series' weight components (the same four as `COMPONENT_KEYS` in `src/anima/pipeline.ts`).
+ */
 const WEIGHT_NAMES = ["text_encoder", "text_conditioner", "transformer", "vae_decoder"] as const;
 
 /**
- * 開ける容器 4 本（宣言は最小）。anima の admission はグラフ突合を持たないので中身は問わない。
- * `tokenizer` は入れない: 門を全部通った先で落ちる 1 本として残す。
+ * Four containers that open (with minimal declarations). anima's admission does not compare graphs,
+ * so the content does not matter. `tokenizer` is left out: it stays as the one that fails after
+ * every check has passed.
  */
 const COMPONENTS: Record<string, Uint8Array<ArrayBuffer>> = {};
 for (const name of WEIGHT_NAMES) {
@@ -74,7 +84,7 @@ for (const name of WEIGHT_NAMES) {
   );
 }
 
-/** `models/karume-anima/karume.json` の骨格（検査に要る欄だけ）。 */
+/** The skeleton of `models/karume-anima/karume.json` (only the fields the checks need). */
 const manifestText = (patch: Record<string, unknown> = {}): string =>
   JSON.stringify({
     format: "karume/5",
@@ -109,7 +119,7 @@ const manifestText = (patch: Record<string, unknown> = {}): string =>
 
 const emptyAssets = {} as Record<string, Uint8Array<ArrayBuffer>>;
 
-test("fromAssets: pipeline の契約名が anima でない manifest を落とす", async () => {
+test("fromAssets: rejects a manifest whose pipeline contract name is not anima", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "sbv2/1" }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -118,9 +128,10 @@ test("fromAssets: pipeline の契約名が anima でない manifest を落とす
   );
 });
 
-test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — ADR 0038 §1）", async () => {
+test("fromAssets: an unknown major fails loudly (checking it is models' responsibility — ADR 0038 §1)", async () => {
   const manifest = parseManifest(manifestText({ pipeline: "anima/2" }));
-  // hub は `pipeline` の major を検査しない（読めるかどうかはパイプライン実装しか知らない）。
+  // The hub does not check the major of `pipeline` (only the pipeline implementation knows whether
+  // it can read it).
   assertEquals(manifest.models["anima-turbo"].pipeline, { name: "anima", major: 2 });
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -129,7 +140,7 @@ test("fromAssets: 未知 major は fail loudly（検査責務は models 側 — 
   );
 });
 
-test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ちる", async () => {
+test("fromAssets: a pipelineConfig schema violation fails at construction", async () => {
   const manifest = parseManifest(manifestText({ pipelineConfig: {} }));
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -138,16 +149,19 @@ test("fromAssets: pipelineConfig のスキーマ違反は構築時に落ちる",
   );
 });
 
-/** `manifestText` が焼いている `pipelineConfig` と同じ形（`scheduler.type` を差し替えるため）。 */
+/**
+ * The same shape as the `pipelineConfig` that `manifestText` bakes in (to replace
+ * `scheduler.type`).
+ */
 const pipelineConfig = (scheduler: Record<string, unknown>): Record<string, unknown> => ({
   scheduler,
   defaults: { steps: 10, guidanceScale: 1, resolution: { width: 1024, height: 1024 } },
 });
 
-test("fromAssets: scheduler.type を宣言した manifest も同じ位置まで進む（門の順序は不変）", async () => {
-  // 席を足しても構築段の順序（manifest 契約 → 資産 → GPU）が動いていないことを見る。
-  // 正しい type を宣言した manifest は契約検査を抜けて資産まで進み、「門の順序の対偶」と
-  // **同じ文言**で落ちる。
+test("fromAssets: a manifest that declares scheduler.type gets to the same point too (the order of the checks is unchanged)", async () => {
+  // Checks that adding the field did not move the order of the construction stages (manifest
+  // contract → assets → GPU). A manifest declaring a valid type passes the contract checks, goes on
+  // to the assets, and fails with **the same wording** as "the contrapositive of the check order".
   const manifest = parseManifest(
     manifestText({
       pipelineConfig: pipelineConfig({ type: "dpmpp-2m", shift: 3, numTrainTimesteps: 1000 }),
@@ -160,9 +174,10 @@ test("fromAssets: scheduler.type を宣言した manifest も同じ位置まで�
   );
 });
 
-test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる", async () => {
-  // 綴り違いが既定の euler へ黙って縮退すると、配布者が宣言した更新則と実行が食い違ったまま
-  // 気づけない。資産が空でも**型の文言**で落ちる = 契約検査が資産解析より先にある。
+test("fromAssets: an unknown scheduler.type fails before touching the assets", async () => {
+  // If a misspelling silently degraded to the default euler, the update rule the distributor
+  // declared and the one that runs would disagree unnoticed. It fails with **the type's wording**
+  // even with empty assets = the contract check comes before the asset parse.
   const manifest = parseManifest(
     manifestText({
       pipelineConfig: pipelineConfig({ type: "dpm-solver++", shift: 3, numTrainTimesteps: 1000 }),
@@ -175,7 +190,7 @@ test("fromAssets: scheduler.type の未知値は資産に触る前に落ちる",
   );
 });
 
-test("fromAssets: 存在しない quant は利用可能な一覧を添えて落とす", async () => {
+test("fromAssets: a nonexistent quant fails with the list of available ones", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { quant: "f16+dit8-a8" }),
@@ -184,9 +199,9 @@ test("fromAssets: 存在しない quant は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: 存在しない model は利用可能な一覧を添えて落とす", async () => {
-  // v2 で増えた軸。モデル名を打ち間違えたときに「では何があるのか」を一次情報で返す
-  // （ADR 0041 §8）。
+test("fromAssets: a nonexistent model fails with the list of available ones", async () => {
+  // An axis added in v2. When a model name is mistyped, it answers "then what is there" from the
+  // primary information (ADR 0041 §8).
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { model: "anima-xl" }),
@@ -195,10 +210,11 @@ test("fromAssets: 存在しない model は利用可能な一覧を添えて落�
   );
 });
 
-test("fromAssets: manifest 契約を全て満たして初めて資産へ触る（門の順序の対偶）", async () => {
-  // 上のケースが「資産が空でも manifest の文言で落ちる」ことの裏返し。正しい manifest なら
-  // 検査は資産まで進み、`tokenizer` の不在で落ちる（= 契約検査も資産の解析も GPU より前）。
-  // GPU の無い環境で `acquireGpu` の失敗に化けたらこの門が赤くなる。
+test("fromAssets: the assets are touched only after every manifest contract is met (the contrapositive of the check order)", async () => {
+  // The flip side of the cases above, which "fail with the manifest's wording even with empty
+  // assets". With a valid manifest the checks go on to the assets and fail on the missing
+  // `tokenizer` (= both the contract checks and the asset parse come before the GPU). If this
+  // turned into an `acquireGpu` failure in an environment without a GPU, this check would turn red.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: COMPONENTS }),
@@ -207,9 +223,10 @@ test("fromAssets: manifest 契約を全て満たして初めて資産へ触る�
   );
 });
 
-test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ちる（受け口の診断）", async () => {
-  // 容器が揃っていない Record では**部品の不在**で落ちる（manifest の文言では落ちない）=
-  // 上の門が資産の不在に巻き添えられていないことの対偶。
+test("fromAssets: without a component's container it fails with the spellings of both forms (the opener's diagnostic)", async () => {
+  // A Record without all the containers fails on **the missing component** (not with the manifest's
+  // wording) = the contrapositive showing that the check above is not dragged along by missing
+  // assets.
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () => Pipeline.fromAssets({ manifest, assets: emptyAssets }),
@@ -218,29 +235,32 @@ test("fromAssets: 部品の容器が無ければ 2 形の綴りつきで落ち�
   );
 });
 
-test("fromAssets: 中断済み signal は資産へ触る前に reason そのままで reject する", async () => {
-  // UI の中止ボタンは DL 完了後の組み立て（資産解析 → acquireGpu）にも効かなければならない。
-  // 入口の検査が資産解析より**先**にあることを、上の門と同じ manifest + 空資産で見る:
-  // signal 無しなら「資産 'tokenizer' が無い」で落ちる形が、中断済みなら reason で落ちる。
+test("fromAssets: an already-aborted signal rejects with the reason itself before touching the assets", async () => {
+  // The UI's cancel button must also act on the assembly after the download finished (asset parse →
+  // acquireGpu). That the entry check comes **before** the asset parse is checked with the same
+  // manifest + empty assets as the check above: a call that would fail with "asset 'tokenizer' is
+  // missing" without a signal fails with the reason when already aborted.
   const manifest = parseManifest(manifestText());
   const controller = new AbortController();
-  const reason = new Error("中止ボタン");
+  const reason = new Error("cancel button");
   controller.abort(reason);
   const error = await assertRejects(() =>
     Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
   );
-  // 包まない（消費側が `error === controller.signal.reason` で自分の中断を識別できる）。
+  // Not wrapped (the consumer can identify its own abort with `error ===
+  // controller.signal.reason`).
   assertStrictEquals(error, reason);
 });
 
-test("fromAssets: 実行開始後に届いた中断も最初の段境界で効く", async () => {
-  // 上の門は「呼ぶ前に中断済み」だけを見る。中止ボタンは**組み立てが走っている最中**に
-  // 押されるので、段境界の検査はイベントループへ譲ってからでなければ死文になる
-  // （abort() の届き方はタスク配送 — 同期解析中は 1 度も観測されない）。
-  // 仕掛けてから呼ぶと、資産エラー（「資産 'tokenizer' が無い」）ではなく reason で落ちる。
+test("fromAssets: an abort that arrives after execution has started also takes effect at the first stage boundary", async () => {
+  // The check above sees only "already aborted before the call". The cancel button is pressed
+  // **while the assembly is running**, so the stage-boundary check is a dead letter unless it
+  // yields to the event loop first (abort() is delivered as a task — during a synchronous parse it
+  // is never observed). Scheduling it and then calling fails with the reason, not with the asset
+  // error ("asset 'tokenizer' is missing").
   const manifest = parseManifest(manifestText());
   const controller = new AbortController();
-  const reason = new Error("中止ボタン（実行中）");
+  const reason = new Error("cancel button (while running)");
   setTimeout(() => controller.abort(reason), 0);
   const error = await assertRejects(() =>
     Pipeline.fromAssets({ manifest, assets: COMPONENTS }, { signal: controller.signal }),
@@ -248,9 +268,13 @@ test("fromAssets: 実行開始後に届いた中断も最初の段境界で効�
   assertStrictEquals(error, reason);
 });
 
-// ---- 実行ノブの明示指定（明示 > quant 宣言 > runtime 既定 — ADR 0058 追記 2026-09-26）----------
+// ---- Explicit execution knobs (explicit > quant declaration > runtime default) ------------------
+// ADR 0058 addendum 2026-09-26.
 
-/** quant の `session` だけを差し替えた manifest（他の欄は {@link manifestText} の骨格）。 */
+/**
+ * A manifest with only the quant's `session` replaced (the other fields are the skeleton of {@link
+ * manifestText}).
+ */
 const manifestWithSession = (session: Record<string, unknown>) =>
   parseManifest(
     manifestText({
@@ -263,16 +287,17 @@ const manifestWithSession = (session: Record<string, unknown>) =>
     }),
   );
 
-/** 型の外から来る呼び手（JS の消費者）の構築オプションを再現する。 */
+/** Reproduces the construction options of a caller from outside the types (a JS consumer). */
 const optionsWith = (key: string, value: unknown): PipelineOptions => {
   const options: PipelineOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
   return options;
 };
 
-test("fromAssets: 明示と quant 宣言の合成が runtime の受けない組合せなら資産に触る前に ModelInputError", async () => {
-  // 宣言は s16 だけ（単独なら通る）。明示の c16 と組んで初めて runtime が受けない形になるので、
-  // 打つ手は「指定を直す」= 入力起因。資産は空 — admission 席で落ちていなければ部品の不在で落ちる。
+test("fromAssets: when combining the explicit choice and the quant declaration gives a combination the runtime does not accept, a ModelInputError before touching the assets", async () => {
+  // The declaration is s16 only (it passes on its own). Only together with the explicit c16 does it
+  // become a shape the runtime does not accept, so the remedy is "fix the choice" = input-caused.
+  // The assets are empty — had it not failed at admission, it would fail on the missing component.
   await assertRejects(
     () =>
       Pipeline.fromAssets(
@@ -284,16 +309,17 @@ test("fromAssets: 明示と quant 宣言の合成が runtime の受けない組�
   );
 });
 
-test("fromAssets: 不正な明示値と Anima が受けないノブは資産に触る前に ModelInputError", async () => {
+test("fromAssets: an invalid explicit value and a knob Anima does not accept give a ModelInputError before touching the assets", async () => {
   const manifest = parseManifest(manifestText());
-  // null は quant 宣言へも runtime 既定へも戻さない。
+  // null falls back neither to the quant declaration nor to the runtime default.
   await assertRejects(
     () =>
       Pipeline.fromAssets({ manifest, assets: emptyAssets }, optionsWith("linearCompute", null)),
     ModelInputError,
     "linearCompute is invalid",
   );
-  // 並列 GEMV は Anima の受理表の外 — 黙って捨てると「指定したのに効かない」になる。
+  // Parallel GEMV is outside Anima's acceptance table — silently dropping it would mean "I chose it
+  // but it has no effect".
   await assertRejects(
     () =>
       Pipeline.fromAssets(
@@ -305,7 +331,7 @@ test("fromAssets: 不正な明示値と Anima が受けないノブは資産に�
   );
 });
 
-test("fromAssets: 受理される明示は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
+test("fromAssets: an accepted explicit choice passes admission and gets to the asset stage (the counterpart showing the check is not vacuous)", async () => {
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () =>
@@ -321,9 +347,10 @@ test("fromAssets: 受理される明示は admission を通って資産の段ま
   );
 });
 
-test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ資産に触る前に名指しで落ちる", async () => {
-  // quant 宣言は shader-f16 を要求しない。要求は実効設定から導く（黙って f32 へ落とさず、
-  // 重みを上げた後の Session 構築まで遅らせもしない）。
+test("fromAssets: when the shared GPU lacks the explicit f16 compute, it fails by name before touching the assets", async () => {
+  // The quant declaration does not require shader-f16. The requirement is derived from the
+  // effective settings (no silent fallback to f32, and no deferring it to Session construction
+  // after the weights are uploaded).
   const manifest = parseManifest(manifestText());
   await assertRejects(
     () =>
@@ -339,11 +366,12 @@ test("fromAssets: 明示の f16 計算を共有 GPU が持たなければ資産�
   );
 });
 
-// ---- DiT 常駐の構築オプション（ADR 0112）---------------------------------------------------
+// ---- The DiT residency construction option (ADR 0112) ------------------------------------------
 
-test("fromAssets: residency の未知の綴りは資産に触る前に ModelInputError", async () => {
-  // 綴り違いが黙って段ごと運転になると、opt-in が効いていないことに速度でしか気付けない。
-  // 資産は空 — admission 席で落ちていなければ部品の不在で落ちる。
+test("fromAssets: an unknown residency spelling gives a ModelInputError before touching the assets", async () => {
+  // If a misspelling silently became per-stage operation, one would notice that the opt-in has no
+  // effect only through speed. The assets are empty — had it not failed at admission, it would fail
+  // on the missing component.
   const manifest = parseManifest(manifestText());
   for (const value of ["transformers", null]) {
     await assertRejects(
@@ -354,9 +382,9 @@ test("fromAssets: residency の未知の綴りは資産に触る前に ModelInpu
   }
 });
 
-test("fromAssets: 受理される residency は admission を通って資産の段まで進む（門が恒真でないことの対）", async () => {
-  // 構築は Session を 1 本も張らない（常駐 DiT は最初の generate で作る）ので、transformer でも
-  // 構築段の順序は変わらない。
+test("fromAssets: an accepted residency passes admission and gets to the asset stage (the counterpart showing the check is not vacuous)", async () => {
+  // Construction opens no Session (the resident DiT is built at the first generate), so even with
+  // transformer the order of the construction stages does not change.
   const manifest = parseManifest(manifestText());
   for (const residency of ["per-stage", "transformer"] as const) {
     await assertRejects(
@@ -368,13 +396,15 @@ test("fromAssets: 受理される residency は admission を通って資産の�
 });
 
 /**
- * GPU の手前まで組める資産一式。構築は Session を 1 本も張らないので、偽の GPU でも組み上がる —
- * 要るのは解析される資産（tokenizer 2 本の最小 JSON と、`transformer` の容器の rope 素表）だけ。
+ * A set of assets that builds up to just before the GPU. Construction opens no Session, so it
+ * builds even with a fake GPU — all it needs is the assets that get parsed (the minimal JSON of the
+ * two tokenizers and the rope base tables in the `transformer` container).
  */
 const buildableAssets = async (): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
   const encode = (value: unknown): Uint8Array<ArrayBuffer> =>
     new TextEncoder().encode(JSON.stringify(value));
-  // `anima_tokenizer_test.ts` の createTokenizers の門と同じ最小形（"aba" が両方で 2 トークン以上）。
+  // The same minimal shape as the createTokenizers check in `anima_tokenizer_test.ts` ("aba" is two
+  // or more tokens in both).
   const tokenizer = encode({
     vocabText: "a\nb\nab",
     vocabCount: 3,
@@ -422,17 +452,21 @@ const buildableAssets = async (): Promise<Record<string, Uint8Array<ArrayBuffer>
   };
 };
 
-/** TS の型を通らない値を 1 欄だけ差した request（JS の呼び手の綴り違いの再現）。 */
+/**
+ * A request with one field set to a value that does not pass the TS types (reproduces a JS caller's
+ * misspelling).
+ */
 const requestWith = (key: string, value: unknown): GenerateRequest => {
   const request: GenerateRequest = { prompt: "aba" };
   Object.defineProperty(request, key, { value, enumerable: true });
   return request;
 };
 
-test("generate: request の residency の未知の綴りは GPU に触る前に ModelInputError（入口の結線）", async () => {
-  // 綴り違いの "transformers" が入口を素通りすると、段ごと運転として走り（常駐の席の判断は
-  // "transformer" との一致しか見ない）、通知も出ない = 黙って遅い経路。偽の GPU は Session を
-  // 組めないので、入口を抜ければ最初の段の構築で別の例外に化ける（下の対のテスト）。
+test("generate: an unknown residency spelling in the request gives a ModelInputError before touching the GPU (the entry wiring)", async () => {
+  // If the misspelling "transformers" slipped past the entry, it would run as per-stage operation
+  // (the residency decision only looks for a match with "transformer") with no notice = a silently
+  // slow path. The fake GPU cannot build a Session, so once past the entry it would turn into
+  // another exception at the first stage's construction (the counterpart test below).
   const manifest = parseManifest(manifestText());
   await using pipeline = await Pipeline.fromAssets(
     { manifest, assets: await buildableAssets() },
@@ -445,10 +479,10 @@ test("generate: request の residency の未知の綴りは GPU に触る前に 
     ModelInputError,
     "residency: expected 'per-stage' / 'transformer' (actual 'transformers')",
   );
-  assertEquals(events, [], "入口の検査より先に段へ入っている");
+  assertEquals(events, [], "a stage was entered before the entry check");
 });
 
-test("generate: 受理される residency は入口を通って最初の段（GPU）まで進む（門が恒真でないことの対）", async () => {
+test("generate: an accepted residency passes the entry and gets to the first stage (GPU) (the counterpart showing the check is not vacuous)", async () => {
   const manifest = parseManifest(manifestText());
   await using pipeline = await Pipeline.fromAssets(
     { manifest, assets: await buildableAssets() },
@@ -465,13 +499,14 @@ test("generate: 受理される residency は入口を通って最初の段（GP
         },
       }),
     );
-    assert(!(error instanceof ModelInputError), `${residency}: 入口で落ちている（${error}）`);
-    assertEquals(events, ["text_encoder:start"], `${residency}: 最初の段に入っていない`);
+    assert(!(error instanceof ModelInputError), `${residency}: rejected at the entry (${error})`);
+    assertEquals(events, ["text_encoder:start"], `${residency}: the first stage was not entered`);
   }
 });
 
-test("generate: f32 で有限に収まらない guidanceScale は GPU に触る前に ModelInputError", async () => {
-  // CFG は倍率を f32 で掛ける。f64 で有限でも f32 で Infinity になる値は、合成を ±Inf / NaN にする。
+test("generate: a guidanceScale that does not stay finite in f32 gives a ModelInputError before touching the GPU", async () => {
+  // CFG multiplies by the factor in f32. A value finite in f64 but Infinity in f32 makes the
+  // combination ±Inf / NaN.
   const manifest = parseManifest(manifestText());
   await using pipeline = await Pipeline.fromAssets(
     { manifest, assets: await buildableAssets() },
@@ -490,51 +525,56 @@ test("generate: f32 で有限に収まらない guidanceScale は GPU に触る�
       ModelInputError,
       `guidanceScale ${guidanceScale} is not a finite number that fits in f32`,
     );
-    assertEquals(events, [], `${guidanceScale}: 入口の検査より先に段へ入っている`);
+    assertEquals(events, [], `${guidanceScale}: a stage was entered before the entry check`);
   }
 });
 
-test("resolveNegativePrompt: guidanceScale 1 で negativePrompt を渡したら落とす", () => {
-  // 効かないノブを黙って受けると、ユーザーは指定したつもりで実際は 1 文字も使われない
-  // （guidance=1 は uncond 分岐を丸ごと計算しない — `generation/dpm-solver-multistep.ts` の
-  // `needsUncond`）。
+test("resolveNegativePrompt: rejects a negativePrompt passed with guidanceScale 1", () => {
+  // Silently accepting a knob with no effect means the user thinks they set it while not a single
+  // character is used (guidance=1 skips the whole uncond branch — `needsUncond` in
+  // `generation/dpm-solver-multistep.ts`).
   assertThrows(
     () => resolveNegativePrompt("worst quality", undefined, 1),
     ModelInputError,
     "negativePrompt has no effect",
   );
-  // 落とすのは **request での明示指定**だけ。manifest の既定が埋まっているだけの状態は
-  // 「効かないノブを渡した」ことにならないので、guidance=1 でも通る。これは配布形
-  // `anima-turbo` の**既定経路そのもの**（defaults.guidanceScale = 1 + defaults.negativePrompt）
-  // で、ここを締めるリファクタが入ると turbo の既定生成が丸ごと throw する。
-  assertEquals(resolveNegativePrompt(undefined, "既定のネガ", 1), "既定のネガ");
-  // fallback があっても requested があれば落ちる = 落とす / 落とさないの分岐は
-  // **requested の有無だけ**で決まり、fallback の有無では変わらない。
+  // Only **an explicit choice in the request** is rejected. A state where only the manifest's
+  // default is filled in is not "passing a knob with no effect", so it passes even at guidance=1.
+  // This is **the very default path** of the `anima-turbo` distribution (defaults.guidanceScale = 1
+  // + defaults.negativePrompt), and a refactor that tightened this would make turbo's default
+  // generation throw outright.
+  assertEquals(resolveNegativePrompt(undefined, "default negative", 1), "default negative");
+  // Even with a fallback, a requested value fails = the branch between rejecting and not rejecting
+  // is decided **only by whether requested is present**, not by whether a fallback is.
   assertThrows(
-    () => resolveNegativePrompt("worst quality", "既定のネガ", 1),
+    () => resolveNegativePrompt("worst quality", "default negative", 1),
     ModelInputError,
     "negativePrompt has no effect",
   );
   assertEquals(resolveNegativePrompt(undefined, undefined, 1), undefined);
 });
 
-test("resolveNegativePrompt: uncond を計算する設定で negativePrompt が無ければ落とす", () => {
-  // request にも manifest の defaults にも無い形。ここで落とさないと uncond 側の綴りが
-  // 空のまま GPU 経路へ入る。
+test("resolveNegativePrompt: rejects a missing negativePrompt under settings that compute uncond", () => {
+  // The shape where it is in neither the request nor the manifest's defaults. Without rejecting it
+  // here, the uncond side's text would enter the GPU path empty.
   assertThrows(
     () => resolveNegativePrompt(undefined, undefined, 7),
     ModelInputError,
     "negativePrompt is required",
   );
-  // 供給元は request > defaults の順。どちらかがあれば通る。
-  assertEquals(resolveNegativePrompt(undefined, "既定のネガ", 7), "既定のネガ");
-  assertEquals(resolveNegativePrompt("要求のネガ", "既定のネガ", 7), "要求のネガ");
+  // The source order is request > defaults. Either one is enough to pass.
+  assertEquals(resolveNegativePrompt(undefined, "default negative", 7), "default negative");
+  assertEquals(
+    resolveNegativePrompt("requested negative", "default negative", 7),
+    "requested negative",
+  );
 });
 
-test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合を通る", () => {
-  // `generate` の入口はこの検査を呼ぶ（`Randn` を作るのは text encoder / conditioner を回して
-  // DiT の重みを上げ切った後なので、生成器側だけに検査があると GB 級のロードの末に落ちる）。
-  // 受理集合を 2 か所に書かないことを、同じ入力・同じ文言で確かめる。
+test("assertAcceptableSeed: the generation entry and Randn go through the same accepted set", () => {
+  // `generate`'s entry calls this check (the `Randn` is created after running the text encoder /
+  // conditioner and uploading all the DiT weights, so a check only on the generator side would fail
+  // at the end of a GB-scale load). That the accepted set is not written in two places is confirmed
+  // with the same input and the same wording.
   for (const seed of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
     const direct = assertThrows(
       () => assertAcceptableSeed(seed),
@@ -546,21 +586,25 @@ test("assertAcceptableSeed: 生成の入口と Randn が同じ受理集合を通
       ModelInputError,
       "non-negative safe integer",
     );
-    assertEquals(direct.message, viaRandn.message, `seed ${seed} の診断`);
+    assertEquals(direct.message, viaRandn.message, `diagnostic for seed ${seed}`);
   }
   for (const seed of [0, 42, Number.MAX_SAFE_INTEGER]) assertAcceptableSeed(seed);
 });
 
-test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で euler と dpmpp-2m が割れる）", () => {
-  // 梯子と入力は手で置いた 1 要素・4 step。`index 2` は **2 次項が実際に効く唯一の位置** —
-  // 両端（0 / 3）は 1 次に落ち、`index 1` は λ_s1 = −inf（先頭 σ が厳密に 1）で 2 次項が
-  // ちょうど 0 に落ちる（更新則の doc の ∓inf 節）。
+test("denoiseStep: scheduler.type selects the update rule (euler and dpmpp-2m diverge on the same input)", () => {
+  // The ladder and the input are a hand-placed single element over 4 steps. `index 2` is **the only
+  // position where the 2nd-order term actually takes effect** — both ends (0 / 3) fall to 1st
+  // order, and at `index 1` λ_s1 = −inf (the leading σ is exactly 1), so the 2nd-order term becomes
+  // exactly 0 (the ∓inf section of the update rule's doc).
   //
-  // 期待値は diffusers の式を f64 で解いた手計算（σ=[1,.5,.25,.125,0] / x=1 / v=2 / 直前 x0=0）:
+  // The expected values are a hand calculation solving diffusers' formulas in f64
+  // (σ=[1,.5,.25,.125,0] / x=1 / v=2 / previous x0=0):
   //   x0 = x − σ_s0·v = 0.5
-  //   1 次項: x + (σ_t − σ_s0)·v = 0.75 —— flow matching では DPM++ の 1 次が Euler と恒等
-  //   2 次項: h = log(7/3)・r0 = (λ_s0 − λ_s1)/h → 0.75 + 0.0964055 = 0.8464055
-  // 2 つの経路の差は**2 次項ちょうど**なので、選択が逆さまでも 2 次項が落ちても値が動く。
+  //   1st-order term: x + (σ_t − σ_s0)·v = 0.75 — in flow matching DPM++'s 1st order is
+  //                   identical to Euler
+  //   2nd-order term: h = log(7/3), r0 = (λ_s0 − λ_s1)/h → 0.75 + 0.0964055 = 0.8464055
+  // The difference between the two paths is **exactly the 2nd-order term**, so the value moves if
+  // the choice is reversed or if the 2nd-order term is dropped.
   const input = {
     sample: Float32Array.from([1]),
     cond: Float32Array.from([2]),
@@ -571,23 +615,25 @@ test("denoiseStep: scheduler.type が更新則を選ぶ（同じ入力で euler 
     previousX0: Float32Array.from([0]),
   };
 
-  // euler は履歴を渡されても読まない（配布済み manifest の既定経路がここで動かない）。
+  // euler does not read the history even when given one (the default path of distributed manifests
+  // does not move here).
   const euler = denoiseStep("euler", input);
   assertEquals([...euler.sample], [0.75]);
-  assertEquals(euler.previousX0, undefined, "Euler は次 step へ渡す履歴を持たない");
+  assertEquals(euler.previousX0, undefined, "Euler keeps no history to pass to the next step");
 
   const dpm = denoiseStep("dpmpp-2m", input);
   assertAlmostEquals(dpm.sample[0], 0.8464055, 1e-6);
-  // 次 step へ渡すのはこの step の x0 予測そのもの。ここが切れると DPM++ 2M は黙って 1 次
-  // （= Euler と同じ値）へ落ちる。
+  // What is passed to the next step is this step's x0 prediction itself. If this were cut, DPM++ 2M
+  // would silently fall to 1st order (= the same value as Euler).
   const carried = dpm.previousX0;
-  assert(carried !== undefined, "DPM++ 2M は x0 を次 step へ持ち回る");
+  assert(carried !== undefined, "DPM++ 2M carries x0 over to the next step");
   assertEquals([...carried], [0.5]);
 });
 
-test("denoiseStep: 更新後の latent が非有限なら step を名指しして落ち、次の step へ渡さない（どちらの更新則も）", () => {
-  // f32 で有限な倍率 1e38 でも、差分 10 との積が f32 で溢れて合成が +Inf になり、更新後が -Inf になる。
-  // 入口の f32 の検査だけでは防げない形（倍率と DiT の出力の組で溢れる）。
+test("denoiseStep: a non-finite latent after the update fails naming the step and is not passed to the next step (with either update rule)", () => {
+  // Even with a factor of 1e38, finite in f32, the product with the difference 10 overflows f32,
+  // the combination becomes +Inf and the updated value -Inf. A shape the entry's f32 check alone
+  // cannot prevent (the overflow comes from the pair of the factor and the DiT output).
   const input = {
     sample: Float32Array.from([0, 0.5]),
     cond: Float32Array.from([0.25, 10]),
@@ -605,19 +651,20 @@ test("denoiseStep: 更新後の latent が非有限なら step を名指しし�
       type,
     );
   }
-  // 対照: 同じ入力で倍率だけ普通の値なら通る（門が恒真でない）。
+  // Control: with the same input and only an ordinary factor, it passes (the check is not vacuous).
   for (const type of ["euler", "dpmpp-2m"] as const) {
     const update = denoiseStep(type, { ...input, guidance: 4 });
     assert(update.sample.every(Number.isFinite), type);
   }
 });
 
-test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出所を文言に出す", () => {
-  // manifest 側（`where = "pipelineConfig.scheduler.type"`）は `anima_config_test.ts` が見て
-  // いるが、request 側の呼び（`pipeline.ts` の `where = "sampler"`）は `generate()` の内側に
-  // あり、実 GPU + 実資産が無いと踏めない。受理集合そのものは純関数として直接縛る
-  // （`resolveNegativePrompt` と同じ流儀）。配線は実 GPU 門（`e2e_anima_test.ts` の
-  // `sampler: "dpmpp-2m"` ケース）が引き続き担う。
+test("assertAnimaSamplerType: the request-side spelling also accepts exactly two words, and the message names the origin", () => {
+  // The manifest side (`where = "pipelineConfig.scheduler.type"`) is checked by
+  // `anima_config_test.ts`, but the request-side call (`where = "sampler"` in `pipeline.ts`) is
+  // inside `generate()` and cannot be reached without a real GPU + real assets. The accepted set
+  // itself is pinned directly as a pure function (the same approach as `resolveNegativePrompt`).
+  // The wiring stays with the real-GPU check (the `sampler: "dpmpp-2m"` case of
+  // `e2e_anima_test.ts`).
   assertEquals(assertAnimaSamplerType("euler", "sampler"), "euler");
   assertEquals(assertAnimaSamplerType("dpmpp-2m", "sampler"), "dpmpp-2m");
 
@@ -627,7 +674,8 @@ test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出
     "sampler: expected 'euler' / 'dpmpp-2m'",
   );
   assertStringIncludes(misspelled.message, "actual 'dpm++'");
-  // 非文字列でも「実際」に何が来たかを出す（型の縁で診断が消えない）。
+  // Even for a non-string it shows what "actually" arrived (the diagnostic does not vanish at the
+  // type's edge).
   for (const [value, expected] of [
     [2, "actual 2"],
     [undefined, "actual undefined"],
@@ -637,38 +685,42 @@ test("assertAnimaSamplerType: request 側の綴りも 2 語だけを受け、出
   }
 });
 
-test("SAMPLER_TYPES: 公開した並びは受理集合そのもので、消費側からは書き換えられない", () => {
-  // CLI / UI はこの並びで引数を検査し選択肢を並べる。並びと検査が別の表を持つと「選べるのに
-  // 落ちる語」ができるので、並びの全語が検査を通ることを公開面（`./anima`）から縛る。
+test("SAMPLER_TYPES: the published list is the accepted set itself and consumers cannot rewrite it", () => {
+  // A CLI / UI checks arguments and lists the choices with this list. If the list and the check had
+  // separate tables, there would be "words you can choose that fail", so the public surface
+  // (`./anima`) pins that every word of the list passes the check.
   assertEquals([...SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
   for (const name of SAMPLER_TYPES) {
     assertEquals(assertAnimaSamplerType(name, "sampler"), name);
   }
-  // 型を通らない JS の消費者が共有の並びへ語を足す・差し替える形。凍結が外れると以後の全
-  // pipeline の受理集合が黙って広がる（未知の綴りが GPU の手前で落ちなくなる）。
+  // The shape where a JS consumer that bypasses the types adds or replaces a word in the shared
+  // list. If the freeze came off, the accepted set of every later pipeline would widen silently
+  // (unknown spellings would no longer fail before the GPU).
   assertThrows(() => Reflect.apply(Array.prototype.push, SAMPLER_TYPES, ["dpm++"]), TypeError);
   assertEquals(Reflect.set(SAMPLER_TYPES, 0, "dpm++"), false);
   assertEquals([...SAMPLER_TYPES], ["euler", "dpmpp-2m"]);
   assertThrows(() => assertAnimaSamplerType("dpm++", "sampler"), Error, "actual 'dpm++'");
 });
 
-test("latentSnapshot: 束縛した時点の latent を写す（step を進めても写しは変わらない）", () => {
+test("latentSnapshot: copies the latent at the time it was bound (the copy does not change as steps advance)", () => {
   const shape = [1, 2, 1, 1];
-  // denoise ループの再現: `cfgEulerStep` は純関数なので `current` は step ごとに**新しい
-  // 配列**へ差し替わる。イベントの口は step ごとに作って渡す。
+  // Reproduces the denoise loop: `cfgEulerStep` is a pure function, so `current` is replaced by **a
+  // new array** at each step. The event hook is created and passed per step.
   const step1 = Float32Array.from([1, 2]);
   const first = latentSnapshot(step1, shape);
   const step2 = Float32Array.from([3, 4]);
   const second = latentSnapshot(step2, shape);
 
-  // 生成が全部終わってから呼んでも「作った時点」の値が返る。ループ変数を閉じ込める実装だと
-  // ここが両方 [3, 4] になる（購読側からは検出できない取り違え）。
+  // Even when called after the whole generation is over, it returns the value "at the time it was
+  // made". An implementation that captured the loop variable would give [3, 4] for both (a mix-up
+  // subscribers cannot detect).
   assertEquals(Array.from(first().data), [1, 2]);
   assertEquals(Array.from(second().data), [3, 4]);
   assertEquals(first().shape, shape);
 
-  // 返すのは毎回**別の写し**。購読側が受け取った配列を書き換えても、次の写しにも
-  // パイプライン側の配列にも波及しない（参照を握られる事故の構造的な排除）。
+  // Each call returns **a separate copy**. Even if a subscriber rewrites the array it received,
+  // neither the next copy nor the pipeline's array is affected (structurally ruling out the
+  // accident of a held reference).
   const copy = first();
   assertNotStrictEquals(copy.data, step1);
   copy.data[0] = 99;
@@ -676,9 +728,10 @@ test("latentSnapshot: 束縛した時点の latent を写す（step を進めて
   assertEquals(Array.from(step1), [1, 2]);
   assertNotStrictEquals(copy.data, first().data);
 
-  // shape も同じ扱い。実引数は `plan.latentShape` の**素の可変配列**なので、参照のまま返すと
-  // 購読側の書き換えが次 step の patchify / rope の対応を崩す（要素数は変わらないので末尾の
-  // 「出た画像の寸法 == 要求解像度」検査も通り、黙って別物が出る）。
+  // The same goes for shape. The actual argument is **the plain mutable array** `plan.latentShape`,
+  // so returning it by reference would let a subscriber's rewrite break the patchify / rope
+  // correspondence of the next step (the element count does not change, so the final "output image
+  // dimensions == requested resolution" check also passes, and something else comes out silently).
   assertNotStrictEquals(copy.shape, shape);
   shape[2] = 99;
   assertEquals(copy.shape, [1, 2, 1, 1]);

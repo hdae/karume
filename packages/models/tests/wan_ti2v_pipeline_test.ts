@@ -1,19 +1,26 @@
-// Wan2.2 TI2V 5B の class（`Ti2vPipeline` — `src/wan/ti2v-pipeline.ts`）の GPU 不要の部分。family.ts が
-// class ごとの値（`WanFamilySpec` の owner・pipeline・generation）を本当に通していることを、公開の入口から縛る:
+// The GPU-free part of the Wan2.2 TI2V 5B class (`Ti2vPipeline` — `src/wan/ti2v-pipeline.ts`). Pins, from the
+// public entry points, that family.ts really passes the per-class values (`WanFamilySpec`'s owner, pipeline and
+// generation):
 //
-// - manifest の門（pipeline 名 / major・quant・`pipelineConfig`）— 2.1 と 2.2 の class が互いの manifest を拒む
-// - 家族 admission の 48 ch の経路（tensorless の容器で `fromAssets` を構築の完了まで進める）— VAE を 2.1 の
-//   16 ch に差し替える・DiT を 2.1 の 5 入力に差し替えると世代の照合で落ちる（admission が 2.1 の形へ戻る
-//   退行の縛り）
-// - 取得面（`fromPretrained`）も 2.2 の family を渡す（手元の取得元で `wan/1` を拒み `wan-ti2v/1` を受ける）
-// - 計画の門が 2.2 の受理集合で効く・模擬 Session の生成で patch 2 の記述子が VAE の段の末尾（unpatchify）まで届く
-// - 文言の接頭辞が `wan.Ti2vPipeline:`（2.1 の文言で取り違えない）
-// - I2V（ADR 0121 決定 11）: encoder の部品の admission・段の順と解放（encoder → 畳む → 解放待ち → text → DiT）・
-//   encoder の段の中断と構築途中の失敗の後片付け・encoder の受け渡し（常駐と bindings）・条件の潜在の非有限の門・
-//   DiT の条件づけ（先頭 P トークンのマスク・条件側の時刻 0・モデル入力だけの置き換え・UniPC へは置き換えない潜在・
-//   最後の 1 回の置き換え）・要求の門（fit / 寸法 / RGB8）・公式の置き換えの形との最終の一致（UniPC は要素ごと）
+// - the manifest checks (pipeline name / major, quant, `pipelineConfig`) — the 2.1 and 2.2 classes reject each
+//   other's manifests
+// - the 48-ch path of the family admission (`fromAssets` runs to the end of construction on tensorless
+//   containers) — replacing the VAE with 2.1's 16 ch or the DiT with 2.1's 5 inputs fails the generation
+//   comparison (pins against a regression where admission falls back to 2.1's shapes)
+// - the fetch side (`fromPretrained`) passes the 2.2 family too (a local source rejects `wan/1` and accepts
+//   `wan-ti2v/1`)
+// - the plan check applies 2.2's accepted set, and in generation on a mock Session the patch-2 descriptor reaches
+//   the end of the VAE stage (unpatchify)
+// - the message prefix is `wan.Ti2vPipeline:` (not mixed up with 2.1's messages)
+// - I2V (ADR 0121 decision 11): admission of the encoder components; stage order and release (encoder → fold →
+//   wait for release → text → DiT); abort of the encoder stage and cleanup after a failure partway through
+//   construction; the encoder hand-off (residents and bindings); the non-finite check on the condition latent;
+//   DiT conditioning (mask of the first P tokens, time 0 on the condition side, replacement of the model input
+//   only, the latent UniPC receives is not replaced, the final replacement); the request checks (fit / size /
+//   RGB8); final agreement with the official replacement form (UniPC element-wise)
 //
-// 実 GPU の通しは e2e（系列から組む helper — ADR 0121 段 6 のコミット 6）。
+// The full run on a real GPU is the e2e (the helper that assembles from the series — ADR 0121 stage 6,
+// commit 6).
 
 import { readFile } from "@karume/test-support/fs";
 import {
@@ -76,13 +83,13 @@ import { stubModel } from "./helpers/stub-model.ts";
 import type { ModelInput } from "../../runtime/tests/helpers/container-write.ts";
 import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu.ts";
 
-/** 2.2 の class の文言の接頭辞（F3 — 2.1 の `wan.Pipeline:` で取り違えない）。 */
+/** The message prefix of the 2.2 class (F3 — not mixed up with 2.1's `wan.Pipeline:`). */
 const OWNER = "wan.Ti2vPipeline:";
 
-/** 系列の `pipelineConfig` の形（既定の shift は上流の scheduler の `flow_shift` 5.0）。 */
+/** The shape of the series' `pipelineConfig` (the default shift is the upstream scheduler's `flow_shift` 5.0). */
 const CONFIG: WanPipelineConfig = { scheduler: { shift: 5 }, defaults: { steps: 50, guidance: 5 } };
 
-/** 埋め込み資産の 1 行。 */
+/** One row of the embeddings asset. */
 type Row = {
   readonly name: string;
   readonly role: "positive" | "negative";
@@ -97,8 +104,8 @@ const ROWS: readonly Row[] = [
 ];
 
 /**
- * 埋め込み資産のバイト列（recipe `wan/text_embeds.py` と同じ形 — メタはキー 1 つに JSON・行は
- * `[tokens, width]` の f32）。
+ * The bytes of the embeddings asset (the same form as the recipe `wan/text_embeds.py` — the metadata is JSON
+ * under one key, and each row is `[tokens, width]` f32).
  */
 const embedsAsset = (width: number): Uint8Array<ArrayBuffer> => {
   const header: Record<string, unknown> = {
@@ -126,10 +133,13 @@ const embedsAsset = (width: number): Uint8Array<ArrayBuffer> => {
 };
 
 // ---------------------------------------------------------------------------------------------
-// 構築の入口（tensorless の容器 — 宣言だけを持ち、重みは 1 本も無い）
+// Construction entry points (tensorless containers — they hold only declarations and not a single weight)
 // ---------------------------------------------------------------------------------------------
 
-/** RoPE の素表（`transformer` の容器の資産 `rope_base` — 幅 22 / 21 / 21 で head_dim 128）。 */
+/**
+ * The RoPE base table (the asset `rope_base` of the `transformer` container — widths 22 / 21 / 21 for
+ * head_dim 128).
+ */
 const ROPE_BASE = await readFile(
   new URL("./fixtures/wan-dit/rope_base.safetensors", import.meta.url),
 );
@@ -140,7 +150,7 @@ type DitInput = {
   readonly dtype?: "f32" | "bool";
 };
 
-/** recipe `wan/ti2v_export_dit.py` と同じ 7 本の宣言（潜在 48 ch → `tokens` の幅 192）。 */
+/** The same 7 declarations as the recipe `wan/ti2v_export_dit.py` (latent 48 ch → `tokens` width 192). */
 const TI2V_DIT_INPUTS: readonly DitInput[] = [
   { name: "tokens", shape: [1, "S", 192] },
   { name: "timesteps_proj", shape: [1, 256] },
@@ -151,7 +161,7 @@ const TI2V_DIT_INPUTS: readonly DitInput[] = [
   { name: "condition_mask", shape: [1, "S", 1], dtype: "bool" },
 ];
 
-/** DiT の容器の中身（宣言だけ・RoPE の素表の資産つき）。 */
+/** The content of the DiT container (declarations only, with the RoPE base table asset). */
 const ditInput = (inputs: readonly DitInput[]): ModelInput => ({
   graphs: {
     transformer: parseIrDeclarationValue({
@@ -173,10 +183,10 @@ const ditInput = (inputs: readonly DitInput[]): ModelInput => ({
   provenance: { license: "test" },
 });
 
-/** DiT の容器の書き出し設定（素表〈12,704 バイト〉が 1 block に収まる大きさ）。 */
+/** Write settings of the DiT container (sized so that the base table, 12,704 bytes, fits in one block). */
 const DIT_WRITE = { partBytes: 1 << 16, blockBytes: 1 << 14 };
 
-/** DiT の容器（`fromAssets` の part 列）。 */
+/** The DiT container (the part sequence for `fromAssets`). */
 const ditAssets = async (inputs: readonly DitInput[]) =>
   partAssets("transformer", await writeContainer(ditInput(inputs), DIT_WRITE));
 
@@ -186,7 +196,8 @@ type VaeChannels = { readonly latent: number; readonly sample: number };
 const VAE_22_CHANNELS: VaeChannels = { latent: 48, sample: 12 };
 
 /**
- * VAE の chunk グラフ 1 本の容器の中身（潜在タイル 16・縮尺 8・cache 1 本 — 2.2 の系列と同じ幾何）。`tile` 32 is
+ * The content of one VAE chunk graph's container (latent tile 16, scale 8, one cache — the same geometry as the
+ * 2.2 series). `tile` 32 is
  * the 32-latent pair's geometry (ADR 0134 — every spatial dimension doubled; like the tile-16 fixture it
  * declares no initializer, so its "every initializer borrowed" holds vacuously).
  */
@@ -220,11 +231,11 @@ const vaeInput = (name: string, frames: number, channels: VaeChannels, tile = 16
   provenance: { license: "test" },
 });
 
-/** VAE の chunk グラフ 1 本の容器（`fromAssets` の part 列）。 */
+/** One VAE chunk graph's container (the part sequence for `fromAssets`). */
 const vaeAssets = async (name: string, frames: number, channels: VaeChannels, tile = 16) =>
   partAssets(name, await writeContainer(vaeInput(name, frames, channels, tile)));
 
-/** I2V の VAE encoder のグラフ 1 本の宣言（入力 1 本 → 出力 1 本・記号長）。 */
+/** The declaration of one I2V VAE encoder graph (one input → one output, symbolic lengths). */
 type EncoderGraph = {
   readonly symbols: readonly string[];
   readonly input: { readonly name: string; readonly shape: readonly (number | string)[] };
@@ -232,8 +243,8 @@ type EncoderGraph = {
 };
 
 /**
- * recipe `wan/export_vae_encoder.py` と同じ入出力・記号の 3 グラフ（潜在 48・mid block 640・patchify 済みの画像
- * `[12, 1, 8h, 8w]`）。
+ * Three graphs with the same inputs, outputs and symbols as the recipe `wan/export_vae_encoder.py` (latent 48,
+ * mid block 640, patchified image `[12, 1, 8h, 8w]`).
  */
 const ENCODER_GRAPHS: Readonly<Record<string, EncoderGraph>> = {
   vae_encoder_pre: {
@@ -253,7 +264,7 @@ const ENCODER_GRAPHS: Readonly<Record<string, EncoderGraph>> = {
   },
 };
 
-/** encoder のグラフ 1 本の容器の中身（宣言だけ）。 */
+/** The content of one encoder graph's container (declarations only). */
 const encoderInput = (name: string, graph: EncoderGraph): ModelInput => ({
   graphs: {
     [name]: parseIrDeclarationValue({
@@ -275,7 +286,10 @@ const encoderInput = (name: string, graph: EncoderGraph): ModelInput => ({
   provenance: { license: "test" },
 });
 
-/** encoder の 3 本の容器（`fromAssets` の part 列 — `replaced` の部品だけ宣言を差し替える）。 */
+/**
+ * The three encoder containers (the part sequence for `fromAssets` — only the components in `replaced` get
+ * replaced declarations).
+ */
 const encoderAssets = async (
   replaced: Readonly<Record<string, EncoderGraph>> = {},
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
@@ -288,7 +302,7 @@ const encoderAssets = async (
   return parts.reduce((all, part) => ({ ...all, ...part }), {});
 };
 
-/** 2.2 の配布形の部品（DiT・VAE decoder 2 本・I2V の VAE encoder 3 本）。 */
+/** The components of the 2.2 distribution (DiT, two VAE decoders, three I2V VAE encoders). */
 const COMPONENTS = [
   "transformer",
   "vae_decoder_first",
@@ -296,7 +310,10 @@ const COMPONENTS = [
   ...Object.keys(ENCODER_GRAPHS),
 ];
 
-/** 構築の入口のテストが使う manifest（系列から組む helper と同じ骨格 — 宣言だけ）。 */
+/**
+ * The manifest the construction entry-point tests use (the same skeleton as the helper that assembles from the
+ * series — declarations only).
+ */
 const ti2vManifest = (
   overrides: {
     readonly pipeline?: string;
@@ -334,7 +351,10 @@ const ti2vManifest = (
   );
 };
 
-/** 2.2 の宣言の資産一式（48 ch・出口 12 ch の VAE・7 入力の DiT・encoder 3 本・埋め込み幅 4096）。 */
+/**
+ * The full set of 2.2 declaration assets (VAE with 48 ch and 12 output ch, DiT with 7 inputs, three encoders,
+ * embedding width 4096).
+ */
 const VALID_ASSETS: Assets["assets"] = {
   ...(await ditAssets(TI2V_DIT_INPUTS)),
   ...(await vaeAssets("vae_decoder_first", 1, { latent: 48, sample: 12 })),
@@ -343,7 +363,10 @@ const VALID_ASSETS: Assets["assets"] = {
   text_embeds: embedsAsset(4096),
 };
 
-/** 資産の一部を差し替えて `Ti2vPipeline.fromAssets` へ渡す（共有の模擬 GPU — アダプタに触らない）。 */
+/**
+ * Replaces part of the assets and passes them to `Ti2vPipeline.fromAssets` (a shared mock GPU — no adapter is
+ * touched).
+ */
 const buildTi2v = (
   manifest: Manifest,
   replaced: Assets["assets"] = {},
@@ -354,15 +377,18 @@ const buildTi2v = (
     { textEncoder: "precomputed", gpu: fakeGpuContext(fakeDevice()), ...options },
   );
 
-/** TS の型を通らない値を 1 欄だけ差した構築オプション（JS の呼び手の綴り違いの再現）。 */
+/**
+ * Construction options with one field set to a value TS's types would not allow (reproduces a JS caller's
+ * misspelling).
+ */
 const optionsWith = (key: string, value: unknown): PipelineOptions => {
   const options: PipelineOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
   return options;
 };
 
-describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quant・pipelineConfig）", () => {
-  it("対照: wan-ti2v/1 の manifest と 2.2 の宣言の資産は構築を終え、prompts を資産の並びで返す", async () => {
+describe("Ti2vPipeline.fromAssets: manifest checks (pipeline name / major, quant, pipelineConfig)", () => {
+  it("control: a wan-ti2v/1 manifest with 2.2 declaration assets finishes construction and returns prompts in asset order", async () => {
     const pipeline = await buildTi2v(ti2vManifest());
     assert(pipeline instanceof Ti2vPipeline);
     assertEquals(
@@ -372,17 +398,20 @@ describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quan
     await pipeline.dispose();
   });
 
-  it("wan/1（Wan2.1）の manifest を拒み、文言は wan.Ti2vPipeline: で始まる", async () => {
+  it("rejects a wan/1 (Wan2.1) manifest with a message that starts with wan.Ti2vPipeline:", async () => {
     const error = await assertRejects(
       () => buildTi2v(ti2vManifest({ pipeline: "wan/1" })),
       Error,
       "the manifest's pipeline is 'wan/1' ('wan-ti2v/1' is required)",
     );
     assert(error.message.startsWith(OWNER), error.message);
-    assert(!(error instanceof ModelInputError), "資産の齟齬を入力起因にしない");
+    assert(
+      !(error instanceof ModelInputError),
+      "an asset mismatch must not be classified as an input error",
+    );
   });
 
-  it("逆向き: Pipeline は wan-ti2v/1 の manifest を wan.Pipeline: の文言で拒む", async () => {
+  it("the reverse: Pipeline rejects a wan-ti2v/1 manifest with a wan.Pipeline: message", async () => {
     const error = await assertRejects(
       () =>
         Pipeline.fromAssets(
@@ -395,7 +424,7 @@ describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quan
     assert(!error.message.startsWith(OWNER), error.message);
   });
 
-  it("major 2 は「この実装が読めるのは wan-ti2v/1」と言って拒む", async () => {
+  it("rejects major 2, saying that this implementation reads wan-ti2v/1", async () => {
     const error = await assertRejects(
       () => buildTi2v(ti2vManifest({ pipeline: "wan-ti2v/2" })),
       Error,
@@ -404,7 +433,7 @@ describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quan
     assert(error.message.startsWith(OWNER), error.message);
   });
 
-  it("manifest に無い quant は利用可能な一覧つきで拒む", async () => {
+  it("rejects a quant missing from the manifest, listing the available ones", async () => {
     const error = await assertRejects(
       () => buildTi2v(ti2vManifest(), {}, { quant: "f16+dit8" }),
       Error,
@@ -413,7 +442,7 @@ describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quan
     assert(error.message.startsWith(OWNER), error.message);
   });
 
-  it("pipelineConfig の未知キーは 2.1 と同じスキーマの門で拒む", async () => {
+  it("rejects unknown pipelineConfig keys with the same schema check as 2.1", async () => {
     await assertRejects(
       () =>
         buildTi2v(
@@ -424,7 +453,7 @@ describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quan
     );
   });
 
-  it("textEncoder の未知の綴りは資産に触る前に wan.Ti2vPipeline: の素の Error", async () => {
+  it("throws a plain wan.Ti2vPipeline: Error for an unknown textEncoder spelling before touching the assets", async () => {
     const error = await assertRejects(
       () =>
         Ti2vPipeline.fromAssets(
@@ -438,8 +467,8 @@ describe("Ti2vPipeline.fromAssets: manifest の門（pipeline 名 / major・quan
   });
 });
 
-describe("Ti2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照合する（48 ch・7 入力）", () => {
-  it("VAE を 2.1 の宣言（潜在 16・出口 3）に差し替えると、統計 48 本との照合で落ちる", async () => {
+describe("Ti2vPipeline.fromAssets: the family admission compares against the 2.2 generation (48 ch, 7 inputs)", () => {
+  it("fails the comparison with the 48 statistics when the VAE is replaced with 2.1's declaration (latent 16, output 3)", async () => {
     const vae = {
       ...(await vaeAssets("vae_decoder_first", 1, { latent: 16, sample: 3 })),
       ...(await vaeAssets("vae_decoder_next", 4, { latent: 16, sample: 3 })),
@@ -451,7 +480,7 @@ describe("Ti2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照合�
     );
   });
 
-  it("潜在 48 でも出口が RGB の 3 ch（unpatchify の無い宣言）なら、unpatchify 2 との照合で落ちる", async () => {
+  it("fails the comparison with unpatchify 2 when the output is RGB's 3 ch (a declaration without unpatchify), even with latent 48", async () => {
     const vae = {
       ...(await vaeAssets("vae_decoder_first", 1, { latent: 48, sample: 3 })),
       ...(await vaeAssets("vae_decoder_next", 4, { latent: 48, sample: 3 })),
@@ -463,7 +492,7 @@ describe("Ti2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照合�
     );
   });
 
-  it("DiT を 2.1 の 5 入力に差し替えると、ti2v の入力の集合の文言で落ちる", async () => {
+  it("fails with the ti2v input-set message when the DiT is replaced with 2.1's 5 inputs", async () => {
     const t2v = "tokens, timesteps_proj, encoder_hidden_states, rope_cos, rope_sin";
     const dit = await ditAssets(TI2V_DIT_INPUTS.slice(0, 5));
     await assertRejects(
@@ -476,8 +505,8 @@ describe("Ti2vPipeline.fromAssets: 家族 admission は 2.2 の世代で照合�
 });
 
 /**
- * 2.2 の宣言の容器を置いたメモリ上のディレクトリ（手元の配布形の席 — `localDirectory`）。`pipeline` だけを
- * 変えて、取得面の門が class の pipeline 名で効くかを見る。
+ * An in-memory directory holding the 2.2 declaration containers (a local distribution — `localDirectory`). Only
+ * `pipeline` changes, to see whether the fetch side's check applies the class's pipeline name.
  */
 const ti2vDirectory = async (
   pipeline: string,
@@ -551,8 +580,8 @@ const ti2vDirectory = async (
     {
       readFile: (path) => {
         const bytes = files.get(path);
-        if (bytes === undefined) return Promise.reject(new Error(`ti2v: ${path} が無い`));
-        // MUST: buffer 全体を占める view を返す（`DirectoryAdapter.readFile` の契約）。
+        if (bytes === undefined) return Promise.reject(new Error(`ti2v: ${path} is missing`));
+        // MUST: return a view that covers the whole buffer (the contract of `DirectoryAdapter.readFile`).
         return Promise.resolve(bytes.slice());
       },
     },
@@ -560,14 +589,14 @@ const ti2vDirectory = async (
   );
 };
 
-describe("Ti2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す（手元の取得元）", () => {
+describe("Ti2vPipeline.fromPretrained: the fetch side passes the 2.2 family too (a local source)", () => {
   const fromPretrained = (source: DistributionSource) =>
     Ti2vPipeline.fromPretrained(source, {
       textEncoder: "precomputed",
       gpu: fakeGpuContext(fakeDevice()),
     });
 
-  it("対照: wan-ti2v/1 の配布形は構築を終え、prompts を資産の並びで返す", async () => {
+  it("control: a wan-ti2v/1 distribution finishes construction and returns prompts in asset order", async () => {
     const pipeline = await fromPretrained(await ti2vDirectory("wan-ti2v/1"));
     assert(pipeline instanceof Ti2vPipeline);
     assertEquals(
@@ -577,7 +606,7 @@ describe("Ti2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す（�
     await pipeline.dispose();
   });
 
-  it("wan/1（Wan2.1）の配布形を wan.Ti2vPipeline: の文言で拒む", async () => {
+  it("rejects a wan/1 (Wan2.1) distribution with a wan.Ti2vPipeline: message", async () => {
     const error = await assertRejects(
       async () => fromPretrained(await ti2vDirectory("wan/1")),
       Error,
@@ -588,7 +617,8 @@ describe("Ti2vPipeline.fromPretrained: 取得面も 2.2 の family を渡す（�
 });
 
 /**
- * 2.2 の VAE の chunk グラフ 2 本の宣言（潜在 48・タイル 16・縮尺 8・出口 12 = RGB 3 × 2²）。`tile` 32 is the
+ * The declarations of 2.2's two VAE chunk graphs (latent 48, tile 16, scale 8, output 12 = RGB 3 × 2²). `tile`
+ * 32 is the
  * 32-latent pair's geometry (ADR 0134 — every spatial dimension doubled).
  */
 const vaeChunkGraphs = (tile = 16) => {
@@ -604,9 +634,10 @@ const vaeChunkGraphs = (tile = 16) => {
   return { first: graph(1), next: graph(4) };
 };
 
-// NOTE: ここは `WAN22_TI2V_FAMILY` の定数の中身を計画の門で縛る（テストが generation と owner を直接
-// 渡す）。family の生成が spec.generation を渡す経路は、模擬 Session の 832×480 のテストが縛る。
-describe("WAN22_TI2V_FAMILY の世代の値（計画の門）", () => {
+// NOTE: this pins the content of the `WAN22_TI2V_FAMILY` constant through the plan check (the test passes
+// generation and owner directly). The path by which the family's generation passes spec.generation is pinned
+// by the 832×480 test on a mock Session.
+describe("WAN22_TI2V_FAMILY's generation values (the plan check)", () => {
   const embeds: WanTextEmbeds = parseWanTextEmbeds(embedsAsset(3).buffer);
   const graphs = vaeChunkGraphs();
   const layout = wanVaeChunkLayout(graphs.first, graphs.next);
@@ -620,18 +651,18 @@ describe("WAN22_TI2V_FAMILY の世代の値（計画の門）", () => {
       WAN22_TI2V_FAMILY.owner,
     );
 
-  it("1280×704 / 704×1280 × 33 フレームは通り、潜在は [48, 9, H/16, W/16]", () => {
+  it("1280×704 / 704×1280 × 33 frames pass, and the latent is [48, 9, H/16, W/16]", () => {
     assertEquals(plan({ frames: 33 }).latentShape, [48, 9, 44, 80]);
     assertEquals(plan({ frames: 33, width: 704, height: 1280 }).latentShape, [48, 9, 80, 44]);
   });
 
-  it("省いた寸法とフレーム数は記述子の既定 1280×704・33 フレーム、省いた shift は pipelineConfig の値", () => {
+  it("an omitted size and frame count take the descriptor's defaults 1280×704 and 33 frames, and an omitted shift takes pipelineConfig's value", () => {
     const planned = plan({});
     assertEquals([planned.width, planned.height, planned.frames], [1280, 704, 33]);
     assertEquals(planned.shift, 5);
   });
 
-  it("既定の 33 を超えて上限 121 までの 4n+1（37 / 41 / 45 / 49 / 53 / 121）は通り、潜在のフレーム数は 10 / 11 / 12 / 13 / 14 / 31", () => {
+  it("4n+1 values above the default 33 up to the limit 121 (37 / 41 / 45 / 49 / 53 / 121) pass, with latent frame counts 10 / 11 / 12 / 13 / 14 / 31", () => {
     for (const [frames, latentFrames] of [
       [37, 10],
       [41, 11],
@@ -644,7 +675,7 @@ describe("WAN22_TI2V_FAMILY の世代の値（計画の門）", () => {
     }
   });
 
-  it("832×480（Wan2.1 の既定）は 2.2 の受理集合の文言で、125 フレームは上限 121 の文言で ModelInputError", () => {
+  it("throws ModelInputError for 832×480 (Wan2.1's default) with 2.2's accepted-set message, and for 125 frames with the limit-121 message", () => {
     assertThrows(
       () => plan({ width: 832, height: 480 }),
       ModelInputError,
@@ -659,29 +690,30 @@ describe("WAN22_TI2V_FAMILY の世代の値（計画の門）", () => {
 });
 
 // ---------------------------------------------------------------------------------------------
-// 模擬 Session の生成（`wan_pipeline_test.ts` の mockPipeline と同じ形 — 2.2 の幾何・資産の経路だけ）
+// Generation on mock Sessions (the same form as mockPipeline in `wan_pipeline_test.ts` — only 2.2's geometry and
+// asset path)
 // ---------------------------------------------------------------------------------------------
 
-/** VAE の出口（patchify 空間）のチャネル `s` が返す値 — チャネルごとに違い、2 進で割り切れる。 */
+/** The value channel `s` of the VAE output (patchify space) returns — different per channel and exact in binary. */
 const patchValue = (channel: number): number => channel / 16;
 
-/** encoder の 3 Session の enqueue 1 回（模擬が記録する引数）。 */
+/** One enqueue on the three encoder Sessions (the arguments the mock records). */
 type EncoderEnqueue = {
   readonly part: string;
   readonly inputs: RunInputs;
   readonly options: EnqueueOptions;
 };
 
-/** encoder の enqueue に注入する失敗（{@link mockTi2v} の `failEnqueue`）。 */
-const ENQUEUE_FAILURE = new Error("模擬: encoder の enqueue の失敗");
+/** The failure injected into an encoder enqueue (`failEnqueue` of {@link mockTi2v}). */
+const ENQUEUE_FAILURE = new Error("mock: encoder enqueue failed");
 
-/** encoder の Session の構築に注入する失敗（{@link mockTi2v} の `failCreate`）。 */
-const CREATE_FAILURE = new Error("模擬: encoder の Session の構築の失敗");
+/** The failure injected into the construction of an encoder Session (`failCreate` of {@link mockTi2v}). */
+const CREATE_FAILURE = new Error("mock: encoder Session construction failed");
 
-/** encoder の mu の読み戻しに注入する失敗（{@link mockTi2v} の `failRead`）。 */
-const READ_FAILURE = new Error("模擬: encoder の mu の読み戻しの失敗");
+/** The failure injected into the read-back of the encoder's mu (`failRead` of {@link mockTi2v}). */
+const READ_FAILURE = new Error("mock: read-back of the encoder's mu failed");
 
-/** encoder のグラフ 1 本の宣言だけを持つ {@link GraphOwner}（出口の名前は `out`）。 */
+/** A {@link GraphOwner} holding only one encoder graph's declaration (the output is named `out`). */
 const encoderStub = (graph: EncoderGraph): GraphOwner =>
   stubModel({
     symbols: graph.symbols,
@@ -690,7 +722,7 @@ const encoderStub = (graph: EncoderGraph): GraphOwner =>
     values: { out: graph.output },
   });
 
-/** encoder の 3 グラフ（{@link ENCODER_GRAPHS} — `replaced` の部品だけ宣言を差し替える）。 */
+/** The three encoder graphs ({@link ENCODER_GRAPHS} — only the components in `replaced` get replaced declarations). */
 const encoderGraphs = (replaced: Readonly<Record<string, EncoderGraph>> = {}) => {
   const graphs = { ...ENCODER_GRAPHS, ...replaced };
   return {
@@ -701,30 +733,36 @@ const encoderGraphs = (replaced: Readonly<Record<string, EncoderGraph>> = {}) =>
 };
 
 /**
- * 模擬 Session で回す `Ti2vPipeline`。DiT は定数を返し、VAE は 1 タイル = 1 batch の手順を偽の
- * GpuContext で回して、読み戻すフレームを**チャネルごとの値**（{@link patchValue}）で埋める — unpatchify の
- * 並べ方が出力の画素の値に出る。I2V の encoder の段は 3 Session の enqueue を記録し、mu（読み戻しのキー `mu`）を
- * `options.mu` で埋める。偽の GpuContext の解放待ち（空の submit → `onSubmittedWorkDone`）も `log` に積む。
+ * A `Ti2vPipeline` run on mock Sessions. The DiT returns a constant, and the VAE runs its one-tile = one-batch
+ * procedure on a fake GpuContext and fills the frames it reads back with **per-channel values**
+ * ({@link patchValue}) — so the unpatchify ordering shows in the output pixel values. The I2V encoder stage
+ * records the enqueues of the three Sessions and fills mu (read-back key `mu`) from `options.mu`. The fake
+ * GpuContext's wait for release (an empty submit → `onSubmittedWorkDone`) is also pushed to `log`.
  *
- * NOTE: コンストラクタは TS の `private` なので `Reflect.construct` で内部状態（family.ts の `WanState`）を
- * 直接渡す（private の迂回はテストだけ — `wan_pipeline_test.ts` の mockPipeline と同じ理由）。
+ * NOTE: the constructor is TS `private`, so `Reflect.construct` passes the internal state (family.ts's
+ * `WanState`) directly (bypassing private only in tests — for the same reason as mockPipeline in
+ * `wan_pipeline_test.ts`).
  */
 const mockTi2v = (
   options: {
     /**
-     * `"gpu"` なら text 段を模擬の umT5 で回す（プロンプト層はフィクスチャの表 — {@link wanParityEncoder}・出力は
-     * 幅 3 の定数）。DiT の文脈は配布形と同じ 512 行（公式の negative は 126 トークン）。
+     * With `"gpu"`, runs the text stage on a mock umT5 (the prompt layer is the fixture's table —
+     * {@link wanParityEncoder}; the output is a constant of width 3). The DiT context has 512 rows, as in the
+     * distribution (the official negative is 126 tokens).
      */
     readonly textEncoder?: "gpu";
-    /** encoder の mu の値（添字 → 値 — 省けば 0.25）。 */
+    /** The encoder's mu values (index → value — 0.25 when omitted). */
     readonly mu?: (index: number) => number;
-    /** この部品（`vae_encoder_*`）の enqueue で {@link ENQUEUE_FAILURE} を投げる。 */
+    /** Throws {@link ENQUEUE_FAILURE} on the enqueue of this component (`vae_encoder_*`). */
     readonly failEnqueue?: string;
-    /** encoder の `createSession` の中で部品名を渡して呼ぶ（中断の注入口 — 構築の途中で `abort` する）。 */
+    /**
+     * Called with the component name inside the encoder's `createSession` (the abort injection point — `abort`
+     * partway through construction).
+     */
     readonly onEncoderCreate?: (part: string) => void;
-    /** この部品（`vae_encoder_*`）の `createSession` を {@link CREATE_FAILURE} で reject する。 */
+    /** Rejects the `createSession` of this component (`vae_encoder_*`) with {@link CREATE_FAILURE}. */
     readonly failCreate?: string;
-    /** encoder の mu の読み戻し（`finishAndRead`）を {@link READ_FAILURE} で reject する。 */
+    /** Rejects the read-back of the encoder's mu (`finishAndRead`) with {@link READ_FAILURE}. */
     readonly failRead?: boolean;
     /**
      * Builds the 32-latent decoder pair (ADR 0134): the 16-latent pair's Sessions become lenders
@@ -740,13 +778,13 @@ const mockTi2v = (
 ) => {
   const log: string[] = [];
   const ditRuns: Record<string, Tensor>[] = [];
-  /** encoder の 3 Session の enqueue（発行順）。 */
+  /** The enqueues of the three encoder Sessions (in issue order). */
   const encoderEnqueues: EncoderEnqueue[] = [];
-  /** VAE の chunk の enqueue の `latent`（発行順 — 1 タイル目は first → next）。 */
+  /** The `latent` of each VAE chunk enqueue (in issue order — the first tile goes first → next). */
   const vaeLatents: Tensor[] = [];
-  /** `onRunDiagnostics` が受けたコンポーネント名（発行順）。 */
+  /** The component names `onRunDiagnostics` received (in issue order). */
   const diagnosed: string[] = [];
-  /** `denoise-step` の `copyLatents()`（step 順）。 */
+  /** `copyLatents()` of each `denoise-step` (in step order). */
   const snapshots: Float32Array[] = [];
   const { first, next } = vaeChunkGraphs();
   const resident = (byteLength: number, label: string) => ({
@@ -842,7 +880,7 @@ const mockTi2v = (
           first: borrowerSession("vae_decoder_first_32"),
           next: borrowerSession("vae_decoder_next_32"),
         };
-  // 行数 64 は潜在 [48, 2, 44, 80] の格子（2 × 22 × 40）を覆う。値は門と無関係。
+  // 64 rows cover the grid of the latent [48, 2, 44, 80] (2 × 22 × 40). The values are irrelevant to the checks.
   const ropeBase: WanRopeBase = {
     rows: 64,
     widths: [1, 1, 1],
@@ -850,8 +888,9 @@ const mockTi2v = (
     sin: [new Float32Array(64), new Float32Array(64), new Float32Array(64)],
   };
   const gpuText = options.textEncoder === "gpu";
-  // DiT の取り決めは家族 admission と同じ関数・同じ値（patch は VAE の宣言のチャネル数・入力の形と
-  // owner は spec）で組む — spec の入力の形が 2.1 へ戻ると、7 入力の宣言はここで落ちる。
+  // The DiT contract is built with the same function and values as the family admission (the patch from the
+  // VAE declaration's channel count, the input form and owner from the spec) — if the spec's input form falls
+  // back to 2.1, the 7-input declaration fails here.
   const dit = ditContract(
     stubModel({
       symbols: ["S"],
@@ -872,7 +911,8 @@ const mockTi2v = (
     WAN22_TI2V_FAMILY.generation.ditInputForm,
     WAN22_TI2V_FAMILY.owner,
   );
-  // encoder の取り決めも家族 admission と同じ関数・同じ値（decoder の幾何・2.2 の記述子）で組む。
+  // The encoder contract is also built with the same function and values as the family admission (the
+  // decoder's geometry, the 2.2 descriptor).
   const vaeEncoderContract = wanVaeEncoderContract(
     encoderGraphs(),
     layout,
@@ -921,8 +961,8 @@ const mockTi2v = (
             log.push("batch:finish");
             return Promise.resolve();
           },
-          // encoder の mu は `options.mu` で、VAE のフレームの常駐 `[12, T, 128, 128]`（チャネル優先）はチャネル s の
-          // 平面を patchValue(s) で埋める。
+          // The encoder's mu is filled from `options.mu`; the VAE frame resident `[12, T, 128, 128]` (channel-major)
+          // fills channel s's plane with patchValue(s).
           finishAndRead: (outputs: Record<string, { readonly byteLength: number }>) => {
             log.push("batch:read");
             if (options.failRead === true && Object.hasOwn(outputs, "mu")) {
@@ -949,7 +989,7 @@ const mockTi2v = (
           },
         });
       },
-      // 解放待ち（`settleReleasedMemory`）が触る面。
+      // The surface the wait for release (`settleReleasedMemory`) touches.
       device: {
         queue: {
           submit: () => {
@@ -1009,8 +1049,9 @@ const mockTi2v = (
   };
   const pipeline: Ti2vPipeline = Reflect.construct(Ti2vPipeline, [state]);
   /**
-   * 5 フレーム・2 step（DiT 4 回）の要求で回し、観測したイベントを `log` に・途中の潜在を `snapshots` に積む。
-   * プロンプトは資産の経路が `cats`、GPU 経路がフィクスチャの固定プロンプト `boxing-cats`。
+   * Runs a request of 5 frames and 2 steps (4 DiT runs), pushing the observed events to `log` and the
+   * intermediate latents to `snapshots`. The prompt is `cats` on the asset path and the fixture's fixed prompt
+   * `boxing-cats` on the GPU path.
    */
   const generate = (request: Partial<Ti2vGenerateRequest> = {}) =>
     pipeline.generate({
@@ -1042,13 +1083,13 @@ const mockTi2v = (
   };
 };
 
-describe("Ti2vPipeline.generate（模擬 Session — 2.2 の世代の値が VAE の段の末尾まで届く）", () => {
-  it("出力は [3, F, H, W] で unpatchify 済み（RGB の画素 (y, x) は patch 空間のチャネル c·4 + (x%2)·2 + (y%2)）", async () => {
+describe("Ti2vPipeline.generate (mock Sessions — 2.2's generation values reach the end of the VAE stage)", () => {
+  it("the output is [3, F, H, W] and unpatchified (RGB pixel (y, x) is patch-space channel c·4 + (x%2)·2 + (y%2))", async () => {
     const { log, generate } = mockTi2v();
     const video = await generate();
     assertEquals([video.frames, video.width, video.height, video.fps], [5, 1280, 704, 24]);
     assertEquals(video.data.length, 3 * 5 * 704 * 1280);
-    // 1280×704 の潜在 44×80 をタイル 16 で覆うと 28 枚（段 5 の凍結表と同じ本数）。
+    // Covering 1280×704's latent 44×80 with tile 16 takes 28 tiles (the same count as stage 5's frozen table).
     assertEquals(log.filter((entry) => entry.startsWith("tile:")).length, 28);
     let worst = 0;
     let worstAt = -1;
@@ -1064,14 +1105,15 @@ describe("Ti2vPipeline.generate（模擬 Session — 2.2 の世代の値が VAE 
         }
       }
     }
-    // タイルの重なりのブレンドは同じ値どうしの重み付き和なので、f32 の丸め以内で元の値に戻る。
+    // Blending the tile overlaps is a weighted sum of equal values, so it returns the original value within f32
+    // rounding.
     assert(
       worst <= 1e-6,
-      `unpatchify の並べ方と違う画素がある（最大差 ${worst}・添字 ${worstAt}）`,
+      `some pixels differ from the unpatchify ordering (largest difference ${worst}, index ${worstAt})`,
     );
   });
 
-  it("DiT の run は ti2v の 7 本で、tokens の幅は 192（潜在 48 ch の patch）・T2V の条件入力は全て偽のマスクと生成側と同じ時刻", async () => {
+  it("the DiT runs take ti2v's 7 inputs, tokens are 192 wide (the patch of latent 48 ch), and T2V's condition inputs are an all-false mask and the same time as the generation side", async () => {
     const { ditRuns, generate } = mockTi2v();
     await generate();
     assertEquals(ditRuns.length, 4);
@@ -1092,16 +1134,20 @@ describe("Ti2vPipeline.generate（模擬 Session — 2.2 の世代の値が VAE 
       assertEquals(mask.data.length, tokens);
       assert(
         mask.data.every((value) => value === 0),
-        "T2V の条件マスクに真の要素がある",
+        "T2V's condition mask has a true element",
       );
-      // 条件側の時刻は生成側と同じ配列（dit-loop の T2V の取り決め — 写しではない）。
+      // The condition side's time is the same array as the generation side's (dit-loop's T2V contract — not a
+      // copy).
       const condition = inputs.timesteps_proj_condition;
       assertEquals([condition.dtype, condition.shape], ["f32", inputs.timesteps_proj.shape]);
-      assert(condition.data === inputs.timesteps_proj.data, "条件側の時刻が生成側と別の配列");
+      assert(
+        condition.data === inputs.timesteps_proj.data,
+        "the condition side's time is a different array from the generation side's",
+      );
     }
   });
 
-  it("832×480 の要求は Session を 1 本も張らずに 2.2 の受理集合の文言で ModelInputError", async () => {
+  it("throws ModelInputError for an 832×480 request with 2.2's accepted-set message without creating a single Session", async () => {
     const { log, generate } = mockTi2v();
     await assertRejects(
       () => generate({ width: 832, height: 480 }),
@@ -1114,13 +1160,13 @@ describe("Ti2vPipeline.generate（模擬 Session — 2.2 の世代の値が VAE 
     );
   });
 
-  it("集合の外のプロンプトの文言は wan.Ti2vPipeline.prompts を案内する", async () => {
+  it("the message for a prompt outside the set points to wan.Ti2vPipeline.prompts", async () => {
     const { generate } = mockTi2v();
     const error = await assertRejects(() => generate({ prompt: "A ferret." }), ModelInputError);
     assertStringIncludes(error.message, "wan.Ti2vPipeline.prompts lists them");
   });
 
-  it("dispose 済みの生成は wan.Ti2vPipeline: の文言で拒む", async () => {
+  it("rejects generation after dispose with a wan.Ti2vPipeline: message", async () => {
     const { pipeline, generate } = mockTi2v();
     await pipeline.dispose();
     await assertRejects(() => generate(), Error, `${OWNER} cannot generate after dispose`);
@@ -1128,46 +1174,52 @@ describe("Ti2vPipeline.generate（模擬 Session — 2.2 の世代の値が VAE 
 });
 
 // ---------------------------------------------------------------------------------------------
-// I2V（ADR 0121 決定 11 — 条件画像 → encoder の段 → 先頭の潜在フレームで条件づけた DiT の段）
+// I2V (ADR 0121 decision 11 — condition image → encoder stage → DiT stage conditioned on the first latent frame)
 // ---------------------------------------------------------------------------------------------
 
-/** 画素ごとに値の違う RGB8（I2V の条件画像の模擬）。 */
+/** An RGB8 image with a different value per pixel (a mock I2V condition image). */
 const rgb8 = (width: number, height: number): Rgb8Image => {
   const data = new Uint8Array(width * height * 3);
   for (let index = 0; index < data.length; index += 1) data[index] = (index * 37) % 256;
   return { data, width, height };
 };
 
-/** 横長（16:9 — 1280×704 を選ぶ）と縦長（9:16 — 704×1280 を選ぶ）の条件画像。 */
+/** Landscape (16:9 — selects 1280×704) and portrait (9:16 — selects 704×1280) condition images. */
 const LANDSCAPE = rgb8(64, 36);
 const PORTRAIT = rgb8(36, 64);
 
-/** 1280×704・5 フレームの潜在の形（`[48, 2, 44, 80]`）と、先頭フレームのトークン数（`(704/32)·(1280/32)`）。 */
+/**
+ * The latent shape of 1280×704 with 5 frames (`[48, 2, 44, 80]`) and the first frame's token count
+ * (`(704/32)·(1280/32)`).
+ */
 const I2V_SHAPE = [48, 2, 44, 80] as const;
 const I2V_PLANE = 44 * 80;
 const FIRST_FRAME_TOKENS = 880;
 
-/** TS の型を通らない値を 1 欄だけ差した生成の要求（JS の呼び手の綴り違い・型のすり抜けの再現）。 */
+/**
+ * A generation request with one field set to a value TS's types would not allow (reproduces a JS caller's
+ * misspelling or a value slipping past the types).
+ */
 const requestWith = (key: string, value: unknown): Partial<Ti2vGenerateRequest> => {
   const request: Partial<Ti2vGenerateRequest> = {};
   Object.defineProperty(request, key, { value, enumerable: true });
   return request;
 };
 
-/** 2 つの数値列がビット単位で同じか（`-0` と `+0`・NaN の払い出しも区別する）。 */
+/** Whether two number sequences are bitwise identical (also tells `-0` from `+0` and NaN payloads apart). */
 const sameBits = (actual: ArrayLike<number> & ArrayBufferView, expected: Float32Array): boolean =>
   actual.byteLength === expected.byteLength &&
   new Uint8Array(actual.buffer, actual.byteOffset, actual.byteLength).every(
     (byte, at) => byte === new Uint8Array(expected.buffer, expected.byteOffset)[at],
   );
 
-/** 常駐でなくホストのテンソルであること（pre の入口は前処理の出力をそのまま受ける）。 */
+/** Asserts a host tensor rather than a resident (pre's entry takes the preprocessing output as is). */
 const hostTensor = (input: RunInput | undefined): Tensor => {
-  if (input === undefined || !("data" in input)) throw new Error("ホストのテンソルでない");
+  if (input === undefined || !("data" in input)) throw new Error("not a host tensor");
   return input;
 };
 
-/** mu が定数 0.25 のときの条件の潜在（encoder の段の出口 — `[48, 1, 44, 80]` の正規化）。 */
+/** The condition latent when mu is the constant 0.25 (the encoder stage's output — `[48, 1, 44, 80]` normalized). */
 const conditionOf = (mu: number): Float32Array<ArrayBuffer> =>
   normalizeWanLatents(
     new Float32Array(48 * I2V_PLANE).fill(mu),
@@ -1175,8 +1227,9 @@ const conditionOf = (mu: number): Float32Array<ArrayBuffer> =>
   );
 
 /**
- * 先頭の潜在フレームを条件の潜在で**写して**置き換えたモデル入力（置き換えの式とは独立に組む — 先頭フレーム以外の
- * 潜在と条件が ±0 でなければ式と同じ値）。
+ * The model input with the first latent frame replaced by **copying** the condition latent (built independently
+ * of the replacement formula — the same values as the formula unless the latents outside the first frame or the
+ * condition are ±0).
  */
 const copyFirstFrame = (
   latents: Float32Array,
@@ -1224,8 +1277,8 @@ describe("Ti2vPipeline.generate: ownership of the caller's latents", () => {
   });
 });
 
-describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）", () => {
-  it("encoder の 3 Session（実行オプション {}）→ 常駐 3 本 → 1 本の batch で pre → attn → post → Session → 常駐の順に畳む → 解放を待つ → encoder の end → DiT", async () => {
+describe("Ti2vPipeline.generate I2V: stage order and release (mock Sessions)", () => {
+  it("the three encoder Sessions (run options {}) → three residents → pre → attn → post in one batch → folds Sessions, then residents → waits for release → the encoder's end → DiT", async () => {
     const { log, diagnosed, generate } = mockTi2v();
     await generate({ image: LANDSCAPE });
     assertEquals(log.slice(0, log.indexOf("create:transformer") + 1), [
@@ -1253,7 +1306,7 @@ describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）"
       "transformer:start",
       "create:transformer",
     ]);
-    // 診断は Session 1 本 = 1 名（encoder は 1 回ずつ・段の順）。
+    // Diagnostics are one name per Session (each encoder once, in stage order).
     assertEquals(diagnosed.slice(0, 4), [
       "vae_encoder_pre",
       "vae_encoder_attn",
@@ -1263,7 +1316,7 @@ describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）"
     assertEquals(log.at(-1), "vae_decoder:end");
   });
 
-  it("gpu の経路: encoder の段を畳んで解放を待ってから umT5 を張る（encoder → text → DiT → VAE）", async () => {
+  it("the gpu path: folds the encoder stage and waits for release before creating umT5 (encoder → text → DiT → VAE)", async () => {
     const { log, generate } = mockTi2v({ textEncoder: "gpu" });
     await generate({ image: LANDSCAPE });
     assertEquals(
@@ -1281,11 +1334,11 @@ describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）"
     );
     assert(
       log.indexOf("settle:done") < log.indexOf("create:text_encoder"),
-      `解放を待つ前に umT5 を張った: ${log.slice(0, 30)}`,
+      `umT5 was created before waiting for release: ${log.slice(0, 30)}`,
     );
   });
 
-  it("画像の無い要求は encoder の段を持たない（Session・常駐・batch・解放待ちのどれも無い — T2V と同じ経路）", async () => {
+  it("a request without an image has no encoder stage (no Session, resident, batch or wait for release — the same path as T2V)", async () => {
     const { log, encoderEnqueues, diagnosed, generate } = mockTi2v();
     await generate();
     assertEquals(
@@ -1300,12 +1353,13 @@ describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）"
     assertEquals(diagnosed[0], "transformer");
   });
 
-  it("encoder の batch の enqueue が落ちたら区間を閉じ、3 Session と常駐を畳んで解放を待ち、本体の失敗をそのまま投げる（DiT へ進まない）", async () => {
+  it("when an enqueue in the encoder batch fails, closes the batch, folds the three Sessions and the residents, waits for release, and rethrows the original failure as is (does not go on to the DiT)", async () => {
     const { log, generate } = mockTi2v({ failEnqueue: "vae_encoder_attn" });
     const error = await assertRejects(() => generate({ image: LANDSCAPE }));
     assertStrictEquals(error, ENQUEUE_FAILURE);
     const after = log.slice(log.indexOf("enqueue:vae_encoder_attn"));
-    // 失敗した段も解放を待つ（同じ pipeline の次の生成の DiT の段に encoder の確保を残さない）。
+    // A failed stage waits for release too (no encoder allocation is left behind for the DiT stage of the same
+    // pipeline's next generation).
     assertEquals(after, [
       "enqueue:vae_encoder_attn",
       "batch:finish",
@@ -1321,7 +1375,10 @@ describe("Ti2vPipeline.generate の I2V: 段の順と解放（模擬 Session）"
   });
 });
 
-/** encoder の段の後片付けの列（3 Session → 常駐 3 本 → 解放待ち — 畳む順と解放待ちの MUST）。 */
+/**
+ * The encoder stage's teardown sequence (three Sessions → three residents → wait for release — the fold order
+ * and the wait for release are MUST).
+ */
 const ENCODER_TEARDOWN = [
   "dispose:vae_encoder_pre",
   "dispose:vae_encoder_attn",
@@ -1333,11 +1390,11 @@ const ENCODER_TEARDOWN = [
   "settle:done",
 ];
 
-describe("Ti2vPipeline.generate の I2V: encoder の段の中断と構築途中の失敗（模擬 Session）", () => {
-  it("中断済みの signal は encoder の Session を 1 本も張らずに reason を投げる（入口 → encoder の境目）", async () => {
+describe("Ti2vPipeline.generate I2V: abort of the encoder stage and failures partway through construction (mock Sessions)", () => {
+  it("an already-aborted signal throws the reason without creating a single encoder Session (the entry → encoder boundary)", async () => {
     const { log, generate } = mockTi2v();
     const controller = new AbortController();
-    const reason = new Error("中止ボタン（入口）");
+    const reason = new Error("abort button (entry)");
     controller.abort(reason);
     const error = await assertRejects(() =>
       generate({ image: LANDSCAPE, signal: controller.signal }),
@@ -1353,9 +1410,9 @@ describe("Ti2vPipeline.generate の I2V: encoder の段の中断と構築途中�
     );
   });
 
-  it("構築の途中の中断は batch の前で効き、張った 3 Session と常駐を畳んで解放を待ち、reason をそのまま投げる・次の generate は回る", async () => {
+  it("an abort partway through construction takes effect before the batch, folds the three Sessions and residents created, waits for release, and throws the reason as is; the next generate runs", async () => {
     const controller = new AbortController();
-    const reason = new Error("中止ボタン（encoder の段）");
+    const reason = new Error("abort button (encoder stage)");
     const { log, encoderEnqueues, generate } = mockTi2v({
       onEncoderCreate: (part) => {
         if (part === "vae_encoder_pre") controller.abort(reason);
@@ -1365,17 +1422,22 @@ describe("Ti2vPipeline.generate の I2V: encoder の段の中断と構築途中�
       generate({ image: LANDSCAPE, signal: controller.signal }),
     );
     assertStrictEquals(error, reason);
-    // 3 グラフの batch は不可分 — 中断は区間を開く前に効き、enqueue を 1 本も出さない。
+    // The three-graph batch is indivisible — the abort takes effect before the batch opens, and not a single
+    // enqueue is issued.
     assertEquals(encoderEnqueues, []);
-    assert(!log.includes("batch:begin"), `中断の後に batch を開いた: ${log}`);
+    assert(!log.includes("batch:begin"), `a batch was opened after the abort: ${log}`);
     assertEquals(log.slice(log.indexOf("resident:wan vae_encoder_post") + 1), ENCODER_TEARDOWN);
-    assert(!log.includes("vae_encoder:end"), `中断した段が end を出した: ${log}`);
+    assert(!log.includes("vae_encoder:end"), `the aborted stage emitted end: ${log}`);
     log.length = 0;
     await generate({ image: LANDSCAPE });
-    assertEquals(log.at(-1), "vae_decoder:end", "中断の後の generate が最後まで回らない");
+    assertEquals(
+      log.at(-1),
+      "vae_decoder:end",
+      "the generate after the abort does not run to the end",
+    );
   });
 
-  it("attn の Session の構築が落ちたら、張った pre だけを畳んで解放を待ち、本体の失敗をそのまま投げる（常駐は張らない）", async () => {
+  it("when the attn Session's construction fails, folds only the pre already created, waits for release, and rethrows the original failure as is (no residents are created)", async () => {
     const { log, generate } = mockTi2v({ failCreate: "vae_encoder_attn" });
     const error = await assertRejects(() => generate({ image: LANDSCAPE }));
     assertStrictEquals(error, CREATE_FAILURE);
@@ -1389,17 +1451,20 @@ describe("Ti2vPipeline.generate の I2V: encoder の段の中断と構築途中�
     ]);
   });
 
-  it("mu の読み戻しが落ちたら、3 Session → 常駐の順に畳んで解放を待ち、本体の失敗をそのまま投げる（区間は読み戻しが閉じる）", async () => {
+  it("when the read-back of mu fails, folds the three Sessions, then the residents, waits for release, and rethrows the original failure as is (the read-back closes the batch)", async () => {
     const { log, generate } = mockTi2v({ failRead: true });
     const error = await assertRejects(() => generate({ image: LANDSCAPE }));
     assertStrictEquals(error, READ_FAILURE);
     assertEquals(log.slice(log.indexOf("batch:read") + 1), ENCODER_TEARDOWN);
-    assert(!log.includes("batch:finish"), `読み戻しの失敗の後に区間を閉じ直した: ${log}`);
+    assert(
+      !log.includes("batch:finish"),
+      `the batch was closed again after the read-back failure: ${log}`,
+    );
   });
 });
 
-describe("Ti2vPipeline.generate の I2V: encoder の受け渡し（模擬 Session）", () => {
-  it("pre は前処理の出力 [12, 1, 352, 640] をそのまま受け、attn は S = 3520・post は h 44 / w 80 を bindings で受け、前段の copyOutputs の常駐が次段の入力（同じ batch）", async () => {
+describe("Ti2vPipeline.generate I2V: the encoder hand-off (mock Sessions)", () => {
+  it("pre takes the preprocessing output [12, 1, 352, 640] as is, attn takes S = 3520 and post h 44 / w 80 through bindings, and each stage's copyOutputs resident is the next stage's input (same batch)", async () => {
     const { encoderEnqueues, generate } = mockTi2v();
     await generate({ image: LANDSCAPE });
     assertEquals(
@@ -1410,7 +1475,10 @@ describe("Ti2vPipeline.generate の I2V: encoder の受け渡し（模擬 Sessio
     const image = hostTensor(pre.inputs.image);
     const expected = preprocessWanI2vImage(LANDSCAPE, {}, WAN22_TI2V_FAMILY.generation);
     assertEquals([...image.shape], [12, 1, 352, 640]);
-    assert(sameBits(image.data, expected.pixels), "pre の入口が前処理の出力と違う");
+    assert(
+      sameBits(image.data, expected.pixels),
+      "pre's input differs from the preprocessing output",
+    );
     assertEquals(pre.options.bindings, undefined);
     const preOut = pre.options.copyOutputs?.out;
     const attnOut = attn.options.copyOutputs?.out;
@@ -1420,7 +1488,7 @@ describe("Ti2vPipeline.generate の I2V: encoder の受け渡し（模擬 Sessio
     assertEquals(attn.options.bindings, { S: 3520 });
     assertStrictEquals(post.inputs.hidden, attnOut);
     assertEquals(post.options.bindings, { h: 44, w: 80 });
-    // 大きさは宣言 shape ぶん（mid 640 × S・mu 48 × S — f32）。
+    // The sizes follow the declared shapes (mid 640 × S, mu 48 × S — f32).
     assertEquals(
       [preOut.byteLength, attnOut.byteLength, mu.byteLength],
       [640 * 3520 * 4, 640 * 3520 * 4, 48 * 3520 * 4],
@@ -1428,7 +1496,7 @@ describe("Ti2vPipeline.generate の I2V: encoder の受け渡し（模擬 Sessio
     assert(pre.options.batch === attn.options.batch && attn.options.batch === post.options.batch);
   });
 
-  it("縦長の画像は 704×1280 で回す（pre の入口 [12, 1, 640, 352]・post の h 80 / w 44）", async () => {
+  it("runs a portrait image at 704×1280 (pre's input [12, 1, 640, 352], post's h 80 / w 44)", async () => {
     const { encoderEnqueues, generate } = mockTi2v();
     const video = await generate({ image: PORTRAIT });
     assertEquals([video.width, video.height], [704, 1280]);
@@ -1449,25 +1517,25 @@ describe("Ti2vPipeline.generate の I2V: encoder の受け渡し（模擬 Sessio
       "channel 1, position (x=1, y=1) is non-finite (Infinity)",
     ],
   ] as const) {
-    it(`条件の潜在（mu の正規化の後）が ${label} なら encoder の段で落ち、DiT の段を張らない（encoder は畳む）`, async () => {
+    it(`fails in the encoder stage when the condition latent (after normalizing mu) is ${label}, and does not create the DiT stage (the encoders are folded)`, async () => {
       const { log, generate } = mockTi2v({ mu });
       await assertRejects(
         () => generate({ image: LANDSCAPE }),
         Error,
         `${OWNER} condition image latent (after normalizing the VAE encoder's mu) ${message}`,
       );
-      assert(!log.includes("create:transformer"), `DiT の Session を張った: ${log}`);
-      assert(!log.includes("vae_encoder:end"), "途中で落ちた段の end を出した");
+      assert(!log.includes("create:transformer"), `the DiT Session was created: ${log}`);
+      assert(!log.includes("vae_encoder:end"), "the stage that failed partway emitted end");
       for (const part of ["vae_encoder_pre", "vae_encoder_attn", "vae_encoder_post"]) {
-        assert(log.includes(`dispose:${part}`), `${part} を畳んでいない`);
-        assert(log.includes(`release:wan ${part}`), `${part} の常駐を返していない`);
+        assert(log.includes(`dispose:${part}`), `${part} was not folded`);
+        assert(log.includes(`release:wan ${part}`), `${part}'s resident was not returned`);
       }
     });
   }
 });
 
-describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session — diffusers の expand_timesteps の形）", () => {
-  it("条件マスクは先頭の潜在フレームの 880 トークン（1280×704 — (H/32)·(W/32)）だけが真で、ループの前に 1 回だけ作る", async () => {
+describe("Ti2vPipeline.generate I2V: DiT conditioning (mock Sessions — the form of diffusers' expand_timesteps)", () => {
+  it("the condition mask is true only for the first latent frame's 880 tokens (1280×704 — (H/32)·(W/32)) and is built once before the loop", async () => {
     const { ditRuns, generate } = mockTi2v();
     await generate({ image: LANDSCAPE });
     assertEquals(ditRuns.length, 4);
@@ -1479,18 +1547,18 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
       const tail = mask.data.subarray(FIRST_FRAME_TOKENS);
       assert(
         head.every((value) => value === 1),
-        "先頭フレームのトークンに偽がある",
+        "a token of the first frame is false",
       );
       assert(
         tail.every((value) => value === 0),
-        "先頭フレームの外に真がある",
+        "a token outside the first frame is true",
       );
       masks.add(mask.data);
     }
-    assertEquals(masks.size, 1, "条件マスクを run ごとに作り直した");
+    assertEquals(masks.size, 1, "the condition mask was rebuilt for each run");
   });
 
-  it("条件側の時刻は t = 0 の proj（生成側とは別の配列・全 run で同じ 1 本）", async () => {
+  it("the condition side's time is the proj of t = 0 (a different array from the generation side's, the same one for every run)", async () => {
     const { ditRuns, generate } = mockTi2v();
     await generate({ image: LANDSCAPE });
     const zero = timestepsProj(0, 256);
@@ -1498,22 +1566,26 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
     for (const inputs of ditRuns) {
       const condition = inputs.timesteps_proj_condition;
       assertEquals([condition.dtype, [...condition.shape]], ["f32", [1, 256]]);
-      assert(sameBits(condition.data, zero), "条件側の時刻が t = 0 の proj でない");
-      assert(condition.data !== inputs.timesteps_proj.data, "条件側の時刻が生成側と同じ配列");
-      assert(!sameBits(inputs.timesteps_proj.data, zero), "生成側の時刻まで 0 になっている");
+      assert(sameBits(condition.data, zero), "the condition side's time is not the proj of t = 0");
+      assert(
+        condition.data !== inputs.timesteps_proj.data,
+        "the condition side's time is the same array as the generation side's",
+      );
+      assert(!sameBits(inputs.timesteps_proj.data, zero), "the generation side's time is 0 too");
       projs.add(condition.data);
     }
-    assertEquals(projs.size, 1, "条件側の時刻を run ごとに作り直した");
+    assertEquals(projs.size, 1, "the condition side's time was rebuilt for each run");
   });
 
-  it("モデル入力は先頭の潜在フレームだけ条件の潜在・UniPC は置き換えない潜在で進み、copyLatents はその状態（先頭フレームは置き換わらない）", async () => {
+  it("the model input has the condition latent in the first latent frame only, UniPC advances on the unreplaced latent, and copyLatents is that state (the first frame is not replaced)", async () => {
     const { ditRuns, snapshots, generate } = mockTi2v();
     const count = I2V_SHAPE.reduce((product, dim) => product * dim, 1);
-    // 先頭フレームも条件と違う値（UniPC が置き換えた潜在で進むと step 1 の先頭フレームが変わる）。
+    // The first frame differs from the condition too (if UniPC advanced on the replaced latent, step 1's first
+    // frame would change).
     const initial = new Float32Array(count).map((_, index) => Math.fround(Math.sin(index + 1) / 2));
     await generate({ image: LANDSCAPE, latents: initial, guidance: 1 });
     const condition = conditionOf(0.25);
-    // 模擬の DiT は 0.1 を返し、guidance 1 は CFG を回さないので、速度は全要素 0.1。
+    // The mock DiT returns 0.1 and guidance 1 skips CFG, so the velocity is 0.1 in every element.
     const sampler = new WanUniPcSampler(
       wanUniPcSchedule(2, CONFIG.scheduler.shift, WAN_UNIPC_CONFIG.numTrainTimesteps),
       WAN_UNIPC_CONFIG,
@@ -1532,27 +1604,22 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
           ditRuns[step].tokens.data,
           patchifyLatents(copyFirstFrame(latents, condition), I2V_SHAPE, patch),
         ),
-        `step ${step + 1} のモデル入力が「先頭フレームだけ条件」でない`,
+        `step ${step + 1}'s model input is not "condition in the first frame only"`,
       );
     }
     assertEquals(snapshots.length, 2);
-    assert(
-      sameBits(snapshots[0], first),
-      "step 1 の copyLatents が置き換えない UniPC の潜在でない",
-    );
-    assert(
-      sameBits(snapshots[1], second),
-      "step 2 の copyLatents が置き換えない UniPC の潜在でない",
-    );
+    assert(sameBits(snapshots[0], first), "step 1's copyLatents is not UniPC's unreplaced latent");
+    assert(sameBits(snapshots[1], second), "step 2's copyLatents is not UniPC's unreplaced latent");
   });
 
-  it("CFG の 2 パス（guidance 5）は uncond と cond の両方が「先頭フレームだけ条件」のモデル入力を受ける", async () => {
+  it("in CFG's two passes (guidance 5), both uncond and cond receive a model input with the condition in the first frame only", async () => {
     const { ditRuns, generate } = mockTi2v();
     const count = I2V_SHAPE.reduce((product, dim) => product * dim, 1);
     const initial = new Float32Array(count).map((_, index) => Math.fround(Math.sin(index + 1) / 2));
     await generate({ image: LANDSCAPE, latents: initial, guidance: 5 });
     const condition = conditionOf(0.25);
-    // 模擬の DiT は両パスとも 0.1 を返すので、CFG の合成も全要素 0.1（合成は製品の関数で作る）。
+    // The mock DiT returns 0.1 in both passes, so the CFG combination is 0.1 in every element too (the
+    // combination is made with the production function).
     const noise = new Float32Array(count).fill(0.1);
     const velocity = wanClassifierFreeGuidance(noise, noise, 5);
     const sampler = new WanUniPcSampler(
@@ -1561,7 +1628,7 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
     );
     const first = sampler.step(velocity, initial);
     const patch = wanDitPatch(48);
-    // run の並びは step ごとに uncond → cond（B = 1 の逐次 2 回）。
+    // The runs go uncond → cond per step (two sequential runs with B = 1).
     assertEquals(ditRuns.length, 4);
     ditRuns.forEach((inputs, run) => {
       const step = Math.floor(run / 2);
@@ -1571,14 +1638,14 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
           inputs.tokens.data,
           patchifyLatents(copyFirstFrame(latents, condition), I2V_SHAPE, patch),
         ),
-        `step ${step + 1} の ${
+        `step ${step + 1}'s ${
           run % 2 === 0 ? "uncond" : "cond"
-        } のモデル入力が「先頭フレームだけ条件」でない`,
+        } model input is not "condition in the first frame only"`,
       );
     });
   });
 
-  it("ループの後に 1 回置き換えてから VAE へ渡す（1 タイル目の chunk 0 = 条件の潜在・chunk 1 = 最後の UniPC の潜在 — どちらも逆正規化）", async () => {
+  it("replaces once after the loop before passing to the VAE (the first tile's chunk 0 = the condition latent, chunk 1 = the last UniPC latent — both denormalized)", async () => {
     const { snapshots, vaeLatents, generate } = mockTi2v();
     const count = I2V_SHAPE.reduce((product, dim) => product * dim, 1);
     const initial = new Float32Array(count).map((_, index) => Math.fround(Math.sin(index + 1) / 2));
@@ -1589,7 +1656,8 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
       copyFirstFrame(last, conditionOf(0.25)),
       WAN22_TI2V_FAMILY.generation.latents,
     );
-    // 1 タイル目（潜在の左上 16×16）の chunk 0（first）と chunk 1（next）の `latent [48, 1, 16, 16]`。
+    // `latent [48, 1, 16, 16]` of chunk 0 (first) and chunk 1 (next) of the first tile (the top-left 16×16 of the
+    // latent).
     const tile = (frame: number): Float32Array => {
       const out = new Float32Array(48 * 16 * 16);
       for (let channel = 0; channel < 48; channel += 1) {
@@ -1600,14 +1668,17 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
       }
       return out;
     };
-    assert(sameBits(vaeLatents[0].data, tile(0)), "VAE へ渡した先頭フレームが条件の潜在でない");
+    assert(
+      sameBits(vaeLatents[0].data, tile(0)),
+      "the first frame passed to the VAE is not the condition latent",
+    );
     assert(
       sameBits(vaeLatents[1].data, tile(1)),
-      "VAE へ渡した 2 フレーム目が最後の UniPC の潜在でない",
+      "the second frame passed to the VAE is not the last UniPC latent",
     );
   });
 
-  it("公式の形（初期と各 step の後に置き換え）と diffusers の形（モデル入力だけ・最後に 1 回）の最終の潜在はビット一致する（UniPC は要素ごとの更新）", () => {
+  it("the final latents of the official form (replace initially and after each step) and the diffusers form (model input only, once at the end) are bit-identical (UniPC updates element-wise)", () => {
     const shape = [3, 3, 4, 4] as const;
     const plane = shape[2] * shape[3];
     const count = shape.reduce((product, dim) => product * dim, 1);
@@ -1615,7 +1686,8 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
     const condition = new Float32Array(shape[0] * plane).map((_, index) =>
       Math.fround(Math.sin(index * 1.3) * 0.8 + 0.05),
     );
-    // 要素をまたぐ擬似 DiT（全要素の平均と離れた要素を混ぜる — 置き換えた要素が他の要素の速度に効く）。
+    // A pseudo DiT that mixes across elements (mixes the mean of all elements and a distant element — a replaced
+    // element affects the velocity of other elements).
     const model = (input: Float32Array): Float32Array<ArrayBuffer> => {
       const mean = input.reduce((total, value) => total + value, 0) / input.length;
       return input.map((value, index) =>
@@ -1637,12 +1709,12 @@ describe("Ti2vPipeline.generate の I2V: DiT の条件づけ（模擬 Session �
       for (let step = 0; step < steps; step += 1) {
         replaced = replace(official.step(model(replaced), replaced));
       }
-      assert(sameBits(replaced, diffusersFinal), `${steps} step で最終の潜在が割れた`);
+      assert(sameBits(replaced, diffusersFinal), `the final latents diverged at ${steps} steps`);
     }
   });
 });
 
-describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Session を 1 本も張らずに落ちる）", () => {
+describe("Ti2vPipeline.generate I2V: request checks (mock Sessions — they fail without creating a single Session)", () => {
   const rejects = async (
     request: Partial<Ti2vGenerateRequest>,
     errorClass: new (message: string) => Error,
@@ -1657,7 +1729,7 @@ describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Sessi
     return error;
   };
 
-  it("image 無しの fit は ModelInputError", async () => {
+  it("throws ModelInputError for fit without image", async () => {
     await rejects(
       { fit: "stretch" },
       ModelInputError,
@@ -1665,7 +1737,7 @@ describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Sessi
     );
   });
 
-  it("fit の綴り違いは素の Error（ModelInputError ではない — 名前の綴り違いの扱い）", async () => {
+  it("a misspelled fit is a plain Error (not ModelInputError — the handling of a misspelled name)", async () => {
     const error = await rejects(
       { ...requestWith("fit", "cover"), image: LANDSCAPE },
       Error,
@@ -1674,7 +1746,7 @@ describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Sessi
     assert(!(error instanceof ModelInputError));
   });
 
-  it("fit の綴り違いは image の有無より先に見る（image 無しの 'cover' も素の Error）", async () => {
+  it("checks a misspelled fit before whether image is present (a 'cover' without image is a plain Error too)", async () => {
     const error = await rejects(
       requestWith("fit", "cover"),
       Error,
@@ -1685,15 +1757,15 @@ describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Sessi
 
   for (const [label, value, actual] of [
     ["null", null, "null"],
-    ["数", 42, "number"],
-    ["data の無い object", { width: 4, height: 4 }, "no data"],
+    ["a number", 42, "number"],
+    ["an object without data", { width: 4, height: 4 }, "no data"],
     [
-      "data が Float32Array",
+      "data is a Float32Array",
       { width: 4, height: 4, data: new Float32Array(48) },
       "data is Float32Array",
     ],
   ] as const) {
-    it(`RGB8 の形でない image（${label}）は ModelInputError（JS の呼び手の型のすり抜け — 長さの検査を通る別の型の配列も）`, async () => {
+    it(`throws ModelInputError for an image that is not RGB8-shaped (${label}) (a JS caller slipping past the types — including an array of another type that passes the length check)`, async () => {
       await rejects(
         requestWith("image", value),
         ModelInputError,
@@ -1702,7 +1774,7 @@ describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Sessi
     });
   }
 
-  it("明示の寸法が受理集合の外なら ModelInputError（片方だけでも・両方でも）", async () => {
+  it("throws ModelInputError when an explicit size is outside the accepted set (one side alone or both)", async () => {
     await rejects(
       { image: LANDSCAPE, width: 832 },
       ModelInputError,
@@ -1715,7 +1787,7 @@ describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Sessi
     );
   });
 
-  it("RGB8 の長さが寸法と合わない画像は ModelInputError", async () => {
+  it("throws ModelInputError for an image whose RGB8 length does not match its size", async () => {
     await rejects(
       { image: { data: new Uint8Array(10), width: 4, height: 4 } },
       ModelInputError,
@@ -1724,7 +1796,7 @@ describe("Ti2vPipeline.generate の I2V: 要求の門（模擬 Session — Sessi
   });
 });
 
-describe("WAN22_TI2V_FAMILY の I2V の計画（計画の門）", () => {
+describe("WAN22_TI2V_FAMILY's I2V plan (the plan check)", () => {
   const embeds: WanTextEmbeds = parseWanTextEmbeds(embedsAsset(3).buffer);
   const graphs = vaeChunkGraphs();
   const layout = wanVaeChunkLayout(graphs.first, graphs.next);
@@ -1738,7 +1810,7 @@ describe("WAN22_TI2V_FAMILY の I2V の計画（計画の門）", () => {
       WAN22_TI2V_FAMILY.owner,
     );
 
-  it("寸法を省けば画像の縦横比で選ぶ（横長 → 1280×704・縦長 → 704×1280）・潜在の形もその寸法", () => {
+  it("an omitted size is chosen by the image's aspect ratio (landscape → 1280×704, portrait → 704×1280), and the latent shape follows that size", () => {
     const landscape = plan({ image: LANDSCAPE });
     assertEquals([landscape.width, landscape.height], [1280, 704]);
     assertEquals(landscape.latentShape, [48, 9, 44, 80]);
@@ -1747,7 +1819,7 @@ describe("WAN22_TI2V_FAMILY の I2V の計画（計画の門）", () => {
     assertEquals(portrait.latentShape, [48, 9, 80, 44]);
   });
 
-  it("明示の寸法は画像の縦横比より優先する（横長の画像に 704×1280・縦長の画像に width 1280）", () => {
+  it("an explicit size takes precedence over the image's aspect ratio (704×1280 for a landscape image, width 1280 for a portrait one)", () => {
     const explicit = plan({ image: LANDSCAPE, width: 704, height: 1280 });
     assertEquals([explicit.width, explicit.height], [704, 1280]);
     assertEquals(explicit.conditionImage?.shape, [12, 1, 640, 352]);
@@ -1755,7 +1827,7 @@ describe("WAN22_TI2V_FAMILY の I2V の計画（計画の門）", () => {
     assertEquals([widthOnly.width, widthOnly.height], [1280, 704]);
   });
 
-  it("fit を省けば crop（公式）・stretch は直接の伸縮（前処理の結果がそれぞれと一致）", () => {
+  it("an omitted fit means crop (official), and stretch resizes directly (the preprocessing result matches each)", () => {
     const generation = WAN22_TI2V_FAMILY.generation;
     for (const fit of [undefined, "crop", "stretch"] as const) {
       const planned = plan({ image: LANDSCAPE, ...(fit === undefined ? {} : { fit }) });
@@ -1763,18 +1835,19 @@ describe("WAN22_TI2V_FAMILY の I2V の計画（計画の門）", () => {
       assert(planned.conditionImage !== undefined);
       assert(sameBits(planned.conditionImage.pixels, expected.pixels), `fit ${fit}`);
     }
-    // crop と stretch は 64×36（16:9）→ 1280×704（20:11）で別の画素になる（同じ値なら上の比較が空振りする）。
+    // crop and stretch give different pixels for 64×36 (16:9) → 1280×704 (20:11) (with equal values the
+    // comparison above would be vacuous).
     const crop = preprocessWanI2vImage(LANDSCAPE, { fit: "crop" }, generation);
     const stretch = preprocessWanI2vImage(LANDSCAPE, { fit: "stretch" }, generation);
     assert(!sameBits(crop.pixels, stretch.pixels));
   });
 
-  it("画像の無い要求は条件画像を持たない（T2V の計画は画像の欄が無いときと同じ）", () => {
+  it("a request without an image has no condition image (the T2V plan is the same as without the image field)", () => {
     assertEquals(plan({}).conditionImage, undefined);
   });
 });
 
-describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の門）", () => {
+describe("wanVaeEncoderContract (the family admission check of the three encoder graphs)", () => {
   const graphs = vaeChunkGraphs();
   const layout = wanVaeChunkLayout(graphs.first, graphs.next);
   const contract = (replaced: Readonly<Record<string, EncoderGraph>> = {}) =>
@@ -1785,7 +1858,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
       WAN22_TI2V_FAMILY.owner,
     );
 
-  it("対照: 系列の宣言は通り、記号の名前・チャネル数・入口の倍率をグラフから読む", () => {
+  it("control: the series' declarations pass, and the symbol names, channel counts and input scale are read from the graphs", () => {
     const admitted = contract();
     assertEquals(
       [admitted.hiddenChannels, admitted.latentChannels, admitted.patchChannels],
@@ -1796,7 +1869,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     assertEquals([admitted.post.height, admitted.post.width], ["h", "w"]);
   });
 
-  it("pre の入口の倍率が decoder の空間の圧縮（16 ÷ patchify 2 = 8）と違えば落ちる", () => {
+  it("fails when pre's input scale differs from the decoder's spatial compression (16 ÷ patchify 2 = 8)", () => {
     assertThrows(
       () =>
         contract({
@@ -1810,7 +1883,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("post の出口のチャネルが decoder の潜在 48 と違えば落ちる", () => {
+  it("fails when post's output channels differ from the decoder's latent 48", () => {
     assertThrows(
       () =>
         contract({
@@ -1821,7 +1894,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("attn が系列長の記号のほかに記号を持てば落ちる（束縛の源はホストが渡す S だけ）", () => {
+  it("fails when attn has symbols other than the sequence-length symbol (the only binding source is the S the host passes)", () => {
     assertThrows(
       () =>
         contract({
@@ -1832,7 +1905,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("post の入口の空間の軸が記号そのものでなければ落ちる（h, w を bindings で渡せない）", () => {
+  it("fails when a spatial axis of post's input is not a bare symbol (h, w could not be passed through bindings)", () => {
     assertThrows(
       () =>
         contract({
@@ -1847,8 +1920,8 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
   });
 
   /**
-   * `EncoderGraph` で書けない宣言（入力 2 本・出口の dtype）を差し込む形。`replaced` の部品だけ {@link GraphOwner} を
-   * 差し替え、残りは系列の宣言のまま。
+   * Injects declarations `EncoderGraph` cannot express (two inputs, the output dtype). Only the components in
+   * `replaced` get a replaced {@link GraphOwner}; the rest keep the series' declarations.
    */
   const contractWith = (replaced: Partial<Record<"pre" | "attn" | "post", GraphOwner>>) =>
     wanVaeEncoderContract(
@@ -1858,7 +1931,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
       WAN22_TI2V_FAMILY.owner,
     );
 
-  it("入出力が 1 本 → 1 本でなければ落ちる（ホストはそれだけを組んで読む）", () => {
+  it("fails unless inputs → outputs are 1 → 1 (that is all the host builds and reads)", () => {
     const pre = ENCODER_GRAPHS.vae_encoder_pre;
     assertThrows(
       () =>
@@ -1875,7 +1948,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("出力が 2 本でも落ちる（入力の本数だけを比べる退行を止める — 先頭の 1 本の形は正しい）", () => {
+  it("fails with two outputs too (stops a regression that compares only the input count — the first output's shape is correct)", () => {
     const post = ENCODER_GRAPHS.vae_encoder_post;
     assertThrows(
       () =>
@@ -1892,7 +1965,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("入力の dtype が f32 でなければ落ちる", () => {
+  it("fails when the input dtype is not f32", () => {
     const attn = ENCODER_GRAPHS.vae_encoder_attn;
     assertThrows(
       () =>
@@ -1909,7 +1982,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("出力の dtype が f32 でなければ落ちる", () => {
+  it("fails when the output dtype is not f32", () => {
     const { graph } = encoderGraphs().post;
     assertThrows(
       () =>
@@ -1923,7 +1996,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("pre の出口のチャネルが静的でなければ落ちる（C は 3 グラフで同じ静的な値として読む）", () => {
+  it("fails when pre's output channels are not static (C is read as the same static value across the three graphs)", () => {
     assertThrows(
       () =>
         contract({
@@ -1938,7 +2011,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("pre が空間の記号 h, w のほかに記号を持てば落ちる（束縛の源はホストが渡す h, w だけ）", () => {
+  it("fails when pre has symbols other than the spatial symbols h, w (the only binding sources are the h, w the host passes)", () => {
     assertThrows(
       () =>
         contract({
@@ -1949,7 +2022,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("attn の入口の C が pre の出口の 640 と違えば落ちる（3 グラフの受け渡しはバイト列の読み替え）", () => {
+  it("fails when attn's input C differs from pre's output 640 (the hand-off between the three graphs reinterprets the bytes)", () => {
     assertThrows(
       () =>
         contract({
@@ -1963,7 +2036,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("attn の出口の C が pre の出口の 640 と違えば落ちる", () => {
+  it("fails when attn's output C differs from pre's output 640", () => {
     assertThrows(
       () =>
         contract({
@@ -1974,7 +2047,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("post の入口の C が pre の出口の 640 と違えば落ちる", () => {
+  it("fails when post's input C differs from pre's output 640", () => {
     assertThrows(
       () =>
         contract({
@@ -1988,7 +2061,7 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
     );
   });
 
-  it("受理寸法の 1 つが空間の圧縮 16 で割り切れなければ落ちる（受理寸法ごとの束縛の被覆）", () => {
+  it("fails when one of the accepted sizes is not divisible by the spatial compression 16 (the bindings must cover every accepted size)", () => {
     const generation = {
       ...WAN22_TI2V_FAMILY.generation,
       acceptedSizes: [...WAN22_TI2V_FAMILY.generation.acceptedSizes, { width: 1288, height: 704 }],
@@ -2001,8 +2074,8 @@ describe("wanVaeEncoderContract（encoder の 3 グラフの家族 admission の
   });
 });
 
-describe("Ti2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 admission）", () => {
-  it("encoder の部品が無い 2.2 の資産は、部品 'vae_encoder_pre' の容器が無い旨で落ちる（画像を渡さない使い方でも取る）", async () => {
+describe("Ti2vPipeline.fromAssets: the I2V VAE encoder components (family admission)", () => {
+  it("2.2 assets without the encoder components fail saying that component 'vae_encoder_pre' has no container (they are required even when no image is passed)", async () => {
     const assets = Object.fromEntries(
       Object.entries(VALID_ASSETS).filter(([key]) => !key.startsWith("vae_encoder_")),
     );
@@ -2017,7 +2090,7 @@ describe("Ti2vPipeline.fromAssets: I2V の VAE encoder の部品（家族 admiss
     );
   });
 
-  it("encoder の宣言の食い違い（pre の入口の倍率 4）は構築で落ちる（admission が encoder の門を通す）", async () => {
+  it("a mismatched encoder declaration (pre's input scale 4) fails at construction (admission goes through the encoder check)", async () => {
     const encoder = await encoderAssets({
       vae_encoder_pre: {
         ...ENCODER_GRAPHS.vae_encoder_pre,

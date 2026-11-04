@@ -1,11 +1,14 @@
-// Wan2.1 のプロンプト層（`WanPromptEncoder`）を、パリティ用フィクスチャ `wan-text/parity.json`（recipe
-// `tools/export-recipes/wan/umt5_tokenizer.py` が transformers 5.14.1 と ftfy 6.3.1 から焼く）から組む読み口。
+// Builds the Wan2.1 prompt layer (`WanPromptEncoder`) from the parity fixture
+// `wan-text/parity.json` (written by the recipe `tools/export-recipes/wan/umt5_tokenizer.py` from
+// transformers 5.14.1 and ftfy 6.3.1).
 //
-// フィクスチャの語彙は**部分集合**（全ケースの断片の部分文字列）なので、引けるのはフィクスチャのケースの
-// 文字列だけ — 固定 4 本（recipe `wan/prompts.py` の `FIXED_PROMPTS` そのもの）と境界・乱択のケース。
-// パイプラインのホストテストが、資産 8 MB を読まずに GPU 経路の入口と text 段を回すための器。
+// The fixture's vocabulary is a **subset** (substrings of the fragments of every case), so only the
+// strings of the fixture's cases can be looked up — the 4 fixed prompts (exactly `FIXED_PROMPTS` of
+// the recipe `wan/prompts.py`) and the boundary and random cases. The vehicle for the pipeline's
+// host tests to run the entry of the GPU path and the text stage without reading the 8 MB asset.
 //
-// 表の組み方は `wan_text_tokenizer_test.ts` と同じ（あちらがパリティの正本で、ここは読み口だけ）。
+// The tables are built the same way as in `wan_text_tokenizer_test.ts` (that file is the source of
+// truth for parity; this is only a reader).
 
 import { readTextFile } from "@karume/test-support/fs";
 import { parseCodeRanges } from "../../src/text/code-ranges.ts";
@@ -13,7 +16,10 @@ import type { T5Tables, T5VocabEntry } from "../../src/text/t5-tokenizer.ts";
 import { parsePromptCleanTables } from "../../src/wan/text/prompt-clean.ts";
 import { WanPromptEncoder } from "../../src/wan/text/tokenizer.ts";
 
-/** フィクスチャのケース 1 本（受理なら上流の前処理の出力と id 列、拒否なら理由）。 */
+/**
+ * One case of the fixture (when accepted, the upstream preprocessing output and the id sequence;
+ * when rejected, the reason).
+ */
 export type WanParityCase = {
   readonly id: string;
   readonly why: string;
@@ -42,17 +48,23 @@ const fixture = JSON.parse(
   await readTextFile(new URL("../fixtures/wan-text/parity.json", import.meta.url)),
 ) as WanParityFixture;
 
-/** フィクスチャの全ケース（生成の順）。 */
+/** Every case of the fixture (in generation order). */
 export const wanParityCases: readonly WanParityCase[] = fixture.cases;
 
-/** フィクスチャのケースを id で引く（無ければ fail loudly — 再生成でケースが消えたことを黙って通さない）。 */
+/**
+ * Looks up a fixture case by id (fails loudly when missing — a case removed by regeneration does
+ * not pass silently).
+ */
 export const wanParityCase = (id: string): WanParityCase => {
   const found = fixture.cases.find((entry) => entry.id === id);
-  if (found === undefined) throw new Error(`wan-text/parity.json にケース '${id}' が無い`);
+  if (found === undefined) throw new Error(`wan-text/parity.json has no case '${id}'`);
   return found;
 };
 
-/** フィクスチャの表で組んだプロンプト層（`maxLength` はフィクスチャの値 = 上流の 512）。 */
+/**
+ * The prompt layer built from the fixture's tables (`maxLength` is the fixture's value = upstream's
+ * 512).
+ */
 export const wanParityEncoder = (): WanPromptEncoder => {
   const t5: T5Tables = {
     vocab: new Map<string, T5VocabEntry>(

@@ -1,9 +1,9 @@
-// 静的配線（`src/generation/program.ts`）の setup 検証テスト。GPU も実資産も要らない。
+// Setup validation tests of the static wiring (`src/generation/program.ts`). Needs neither a GPU nor real assets.
 //
-// ここで縛るのは ADR 0083 決定 1 の「program は setup 時に**全結線**を検証する不変オブジェクト」
-// という契約そのもの。名前の取り違えも形の食い違いも、実行時には**例外を出さない**か真因から
-// 遠い場所で出る（形の合う別の出力を掴めば、もっともらしい token 列が黙って返る）ので、
-// 検証が抜けた欄はそのまま沈黙劣化の入口になる。
+// What is pinned here is the contract of ADR 0083 decision 1 itself, "a program is an immutable object that
+// validates **all of its wiring** at setup". A mixed-up name or a mismatched shape **raises no exception** at run
+// time, or raises one far from the real cause (grabbing another output of a matching shape silently returns a
+// plausible token sequence), so a field that escapes validation becomes an entry point for silent degradation.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -26,10 +26,10 @@ const DERIVED = "per_layer_inputs";
 type GraphInput = GenerationGraph["inputs"][number];
 
 /**
- * 製品グラフ（gemma4 の実形を縮めたもの）— 派生入力の有無だけ選べる。
+ * The product graph (a shrunk version of gemma4's real shape) — only the presence of derived inputs is selectable.
  *
- * 行選択は `[R]`（記号）で、出口 2 本の 2 次元目は**同じ R** である（R=1 が通常の
- * prefill / decode・R>1 が投機の verify）。
+ * Row selection is `[R]` (a symbol), and the second dimension of the 2 outputs is **the same R** (R=1 is ordinary
+ * prefill / decode; R>1 is the speculative verify).
  */
 const graphOf = (options: { readonly derived?: boolean } = {}): GenerationGraph => ({
   symbols: ["C", "M", "R"],
@@ -47,7 +47,7 @@ const graphOf = (options: { readonly derived?: boolean } = {}): GenerationGraph 
   },
 });
 
-/** `graphOf()` の `values` を 1 本だけ差し替えたグラフ（形の退行を作るための小道具）。 */
+/** A graph with exactly one of `graphOf()`'s `values` replaced (a prop for creating shape regressions). */
 const graphWithValue = (
   name: string,
   info: { readonly dtype: string; readonly shape: readonly (number | string)[] },
@@ -72,47 +72,47 @@ const specOf = (override: Partial<GenerationProgramSpec> = {}): GenerationProgra
   ...override,
 });
 
-test("createGenerationProgram: 製品形の配線をそのまま通し、graph を持ち越さない", () => {
+test("createGenerationProgram: passes the product shape's wiring as is and does not keep the graph", () => {
   const program = createGenerationProgram(specOf());
   assertEquals(program.inputIds, IDS);
   assertEquals(program.logits, LOGITS);
   assertEquals(program.hidden, HIDDEN);
-  // H はグラフからの導出値（宣言を受けない = 二重持ちにしない）。
+  // H is derived from the graph (not accepted as a declaration = not held twice).
   assertEquals(program.hiddenSize, HIDDEN_SIZE);
   assertEquals(program.chunkLength, 4);
   assertEquals(program.capacity, 64);
   assertEquals(program.stopTokens, [7]);
-  // 検証に使ったグラフは program に残さない（不変の配線だけを持つ — ADR 0083 決定 1）。
+  // The graph used for validation is not kept in the program (it holds only the immutable wiring — ADR 0083 decision 1).
   assertEquals(Object.hasOwn(program, "graph"), false);
 });
 
-test("createGenerationProgram: stopTokens は複製する（呼び手の配列と縁を切る）", () => {
+test("createGenerationProgram: stopTokens is copied (detached from the caller's array)", () => {
   const stopTokens = [1, 7];
   const program = createGenerationProgram(specOf({ stopTokens }));
   stopTokens.push(9);
   assertEquals(program.stopTokens, [1, 7]);
 });
 
-test("createGenerationProgram: chunkBuckets は複製し、省略は空配列へ畳む", () => {
+test("createGenerationProgram: chunkBuckets is copied, and omission folds to an empty array", () => {
   const chunkBuckets = [2, 3];
   const program = createGenerationProgram(specOf({ chunkBuckets }));
   assertEquals(program.chunkBuckets, [2, 3]);
-  // 呼び手の配列と縁を切る（後から足された段は「context が許さない物理行数」になる）。
+  // Detached from the caller's array (a bucket added later would be "a physical row count the context does not allow").
   chunkBuckets.push(3);
   assertEquals(program.chunkBuckets, [2, 3]);
-  // 省略 = 追加なし。`undefined` のまま持ち回すと、選ぶ側が `?? []` を書き忘れても赤くならない。
+  // Omitted = nothing added. Carrying `undefined` around would not turn red when a selecting side forgets `?? []`.
   assertEquals(createGenerationProgram(specOf()).chunkBuckets, []);
 });
 
-test("createGenerationProgram: chunkBuckets の受理集合は runtime の門をそのまま通す", () => {
-  // 規則（2 以上 chunkLength 未満・狭義昇順）は models 側に写していないので、ここで縛るのは
-  // 「context を作る前に落ちる」こと自体である（写した規則が育つと context と食い違う）。
+test("createGenerationProgram: the accepted set of chunkBuckets passes through the runtime's check as is", () => {
+  // The rules (2 or more and below chunkLength, strictly ascending) are not copied to the models side, so what is
+  // pinned here is "it fails before the context is created" itself (copied rules would drift from the context as they grow).
   const cases: readonly (readonly [readonly number[], string])[] = [
-    // 1 は decode 形そのもの / chunkLength 以上は queryLength ≤ chunkLength 契約の外。
+    // 1 is the decode shape itself / chunkLength or more is outside the queryLength ≤ chunkLength contract.
     [[1], "chunkBuckets[0] 1 is not an integer in 2..3"],
     [[4], "chunkBuckets[0] 4 is not an integer in 2..3"],
     [[2.5], "chunkBuckets[0] 2.5 is not an integer in 2..3"],
-    // 重複と降順は「queryLength 以上の最小バケット」を線形走査で選べなくする。
+    // Duplicates and descending order make it impossible to pick "the smallest bucket ≥ queryLength" by a linear scan.
     [[2, 2], "chunkBuckets[1] 2 is not greater than the previous 2"],
     [[3, 2], "chunkBuckets[1] 2 is not greater than the previous 3"],
   ];
@@ -149,21 +149,21 @@ test("createGenerationProgram: an invalid suppressed set fails loudly", () => {
   }
 });
 
-test("createGenerationProgram: 派生入力の無いグラフは derivedInputs 省略で通る", () => {
+test("createGenerationProgram: a graph without derived inputs passes with derivedInputs omitted", () => {
   const program = createGenerationProgram(
     specOf({ graph: graphOf({ derived: false }), derivedInputs: undefined }),
   );
   assertEquals(program.derivedInputs, undefined);
 });
 
-test("createGenerationProgram: 数値の受理集合", () => {
+test("createGenerationProgram: the accepted set of numbers", () => {
   const cases: readonly (readonly [Partial<GenerationProgramSpec>, string])[] = [
     [{ chunkLength: 0 }, "chunkLength 0"],
     [{ chunkLength: 2.5 }, "chunkLength 2.5"],
     [{ maxPosition: 0 }, "maxPosition 0"],
     [{ capacity: -1 }, "capacity -1"],
     [{ vocabSize: 0 }, "vocabSize 0"],
-    // 停止 token が語彙の外だと「絶対に成立しない停止条件」が黙って積まれる。
+    // A stop token outside the vocabulary silently adds "a stop condition that can never hold".
     [{ stopTokens: [VOCAB] }, `stopTokens[0] ${VOCAB} is outside the vocabulary 0..${VOCAB - 1}`],
     [{ stopTokens: [-1] }, "stopTokens[0] -1"],
     [{ stopTokens: [0, 1.5] }, "stopTokens[1] 1.5"],
@@ -173,12 +173,12 @@ test("createGenerationProgram: 数値の受理集合", () => {
   }
 });
 
-test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly", () => {
+test("createGenerationProgram: a wrong input name / dtype / shape fails loudly", () => {
   const cases: readonly (readonly [string, Partial<GenerationProgramSpec>, string])[] = [
-    ["token id 入力が無い", { inputIds: "tokens" }, "token id input 'tokens' is not a graph input"],
-    ["last_row が無い", { lastRow: "row" }, "last_row input 'row' is not a graph input"],
+    ["no token id input", { inputIds: "tokens" }, "token id input 'tokens' is not a graph input"],
+    ["no last_row", { lastRow: "row" }, "last_row input 'row' is not a graph input"],
     [
-      "token id 入力が f32",
+      "token id input is f32",
       {
         graph: {
           ...graphOf(),
@@ -190,8 +190,8 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
       "token id input 'input_ids' has dtype f32",
     ],
     [
-      // 固定数の M は prefill 形（M=chunkLength）と decode 形（M=1）を同じグラフで回せない。
-      "M が固定数",
+      // A fixed M cannot run the prefill shape (M=chunkLength) and the decode shape (M=1) in the same graph.
+      "M is a fixed number",
       {
         graph: {
           ...graphOf(),
@@ -203,7 +203,7 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
       "has shape [1,4], not [1,<symbol>]",
     ],
     [
-      "last_row が 1 次元でない",
+      "last_row is not 1-dimensional",
       {
         graph: {
           ...graphOf(),
@@ -215,8 +215,8 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
       "last_row input 'last_row' has shape [1,1], not [<symbol>]",
     ],
     [
-      // 旧配布形（行選択が固定 1 行）— verify の R 行を同じグラフで回せない。
-      "last_row が固定数 [1]",
+      // An old distribution (row selection fixed at 1 row) — the R rows of verify cannot run in the same graph.
+      "last_row is the fixed [1]",
       {
         graph: {
           ...graphOf(),
@@ -233,10 +233,10 @@ test("createGenerationProgram: 入力名 / dtype / 形が違えば fail loudly",
   }
 });
 
-test("createGenerationProgram: 入力長と選択行数に同じ記号を使う誤配線は構築時に落ちる", () => {
-  // `input_ids:[1,M]`・`last_row:[M]` は個別の形検査をどちらも通るが、prefill（物理行 4・
-  // 選択行 1）の最初の run で M が 4 と 1 に二重束縛されて runtime に拒否される。decode（行数 1）
-  // は偶然通るので、検出が GPU 構築後の最初の prefill まで遅れる。
+test("createGenerationProgram: a miswiring that uses the same symbol for the input length and the selected row count fails at build time", () => {
+  // `input_ids:[1,M]` and `last_row:[M]` both pass their individual shape checks, but the first run of prefill (4
+  // physical rows, 1 selected row) binds M to both 4 and 1 and the runtime rejects it. Decode (1 row) passes by
+  // chance, so detection is delayed until the first prefill after the GPU build.
   const graph: GenerationGraph = {
     symbols: ["C", "M"],
     inputs: [
@@ -253,20 +253,20 @@ test("createGenerationProgram: 入力長と選択行数に同じ記号を使う�
   assertThrows(() => createGenerationProgram(specOf({ graph })), Error, "same symbol M");
 });
 
-test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る", () => {
+test("createGenerationProgram: checks the logits output's existence / shape / vocabulary size", () => {
   assertThrows(
     () => createGenerationProgram(specOf({ logits: "scores" })),
     Error,
     "logits output 'scores' is not a graph output",
   );
-  // ノード出力として存在するだけの名前は run から返ってこない（グラフ出力に載っているかを見る）。
+  // A name that only exists as a node output is not returned from run (checks that it is a graph output).
   assertThrows(
     () => createGenerationProgram(specOf({ graph: { ...graphOf(), outputs: [HIDDEN] } })),
     Error,
     "logits output 'logits' is not a graph output",
   );
-  // 全行 logits（`[1,M,V]`）への退行 = 行選択の出口でない。M は行選択とは別の記号なので、
-  // 「選んだ行数」と「返る行数」が別々に決まる形になる。
+  // A regression to all-row logits (`[1,M,V]`) = not a row-selection output. M is a different symbol from the row
+  // selection, so "the selected row count" and "the returned row count" would be decided separately.
   assertThrows(
     () =>
       createGenerationProgram(
@@ -275,7 +275,7 @@ test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る
     Error,
     "not [1,R,64]",
   );
-  // 旧配布形（最終行 1 本固定）— R=1 の run では値が同じでも、verify の R 行が焼かれていない。
+  // An old distribution (fixed to the single last row) — with R=1 runs the values are the same, but the R rows of verify are not exported.
   assertThrows(
     () =>
       createGenerationProgram(
@@ -284,7 +284,7 @@ test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る
     Error,
     "not [1,R,64]",
   );
-  // 語彙数の食い違い（別世代の資産と program の組み合わせ）。
+  // A vocabulary size mismatch (assets of a different generation combined with the program).
   assertThrows(
     () => createGenerationProgram(specOf({ vocabSize: 32, stopTokens: [7] })),
     Error,
@@ -300,8 +300,8 @@ test("createGenerationProgram: logits 出口の実在 / 形 / 語彙数を見る
   );
 });
 
-test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () => {
-  // 出口 1 本の旧配布形は「hidden がグラフ出力に無い」として落ちる（互換分岐は無い）。
+test("createGenerationProgram: checks the hidden output's existence / shape / H", () => {
+  // An old distribution with a single output fails as "hidden is not a graph output" (there is no compatibility branch).
   assertThrows(
     () => createGenerationProgram(specOf({ graph: { ...graphOf(), outputs: [LOGITS] } })),
     Error,
@@ -320,7 +320,7 @@ test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () =
     Error,
     "hidden output 'hidden' has dtype i32",
   );
-  // 行が logits と別記号 = 2 本の出口が違う行集合を返す形。
+  // Rows with a different symbol from logits = the 2 outputs return different row sets.
   assertThrows(
     () =>
       createGenerationProgram(
@@ -329,7 +329,7 @@ test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () =
     Error,
     "not [1,R,<H>]",
   );
-  // H が記号のままだと run ごとに幅が変わる（drafter の重みと繋がらない）。
+  // If H stayed a symbol, the width would change per run (it would not connect to the drafter's weights).
   assertThrows(
     () =>
       createGenerationProgram(
@@ -346,7 +346,7 @@ test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () =
     Error,
     "hidden output 'hidden' H 0 is not a positive integer",
   );
-  // 同じ名前を 2 本の出口に結線した形（V = H のときだけ両方の形検査を通ってしまう）。
+  // The same name wired to both outputs (passes both shape checks only when V = H).
   assertThrows(
     () => createGenerationProgram(specOf({ hidden: LOGITS })),
     Error,
@@ -354,14 +354,14 @@ test("createGenerationProgram: hidden 出口の実在 / 形 / H を見る", () =
   );
 });
 
-test("createGenerationProgram: グラフ入力の被覆を両方向で見る", () => {
-  // 欠け: per_layer_inputs をホスト側で供給しないまま program を組む。
+test("createGenerationProgram: checks the coverage of the graph inputs in both directions", () => {
+  // Missing: building the program without supplying per_layer_inputs from the host side.
   assertThrows(
     () => createGenerationProgram(specOf({ derivedInputs: undefined })),
     Error,
     `Graph inputs ${DERIVED} are not wired`,
   );
-  // 余り: 宣言した名前がグラフに無い（毎 run 無視される入力になる）。
+  // Extra: a declared name is not in the graph (an input ignored on every run).
   assertThrows(
     () =>
       createGenerationProgram(
@@ -373,7 +373,7 @@ test("createGenerationProgram: グラフ入力の被覆を両方向で見る", (
     Error,
     "The wired ple are not graph inputs",
   );
-  // 重複: 同じ名前を 2 度結線した形（片方が黙って上書きされる）。
+  // Duplicate: the same name wired twice (one is silently overwritten).
   assertThrows(
     () =>
       createGenerationProgram(
@@ -387,14 +387,14 @@ test("createGenerationProgram: グラフ入力の被覆を両方向で見る", (
   );
 });
 
-test("createGenerationProgram: 常駐入力の席も被覆に数える（作り手が Session 側の入力）", () => {
-  // 値を作るのは Session の包みなので derivedInputs には載らない（PLE の GPU 常駐席）。
+test("createGenerationProgram: resident inputs also count toward coverage (inputs whose producer is the Session side)", () => {
+  // The value is produced by the Session wrapper, so it is not in derivedInputs (the PLE GPU-resident option).
   const wiring = createGenerationProgram(
     specOf({ derivedInputs: undefined, residentInputs: [DERIVED] }),
   );
   assertEquals(wiring.residentInputs, [DERIVED]);
   assertEquals(wiring.derivedInputs, undefined);
-  // 同じ入力を 2 つの作り手が名乗る形は重複として落とす。
+  // The same input claimed by 2 producers fails as a duplicate.
   assertThrows(
     () =>
       createGenerationProgram(
@@ -408,52 +408,52 @@ test("createGenerationProgram: 常駐入力の席も被覆に数える（作り�
   );
 });
 
-test("createGenerationProgram: 記号は入力 shape か容量記号のどちらかで決まること", () => {
-  // C（state スロットの容量記号）は入力 shape に現れない = 容量記号が唯一の源。
+test("createGenerationProgram: every symbol is determined by either an input shape or the capacity symbol", () => {
+  // C (the capacity symbol of the state slots) does not appear in the input shapes = the capacity symbol is its only source.
   assertThrows(
     () => createGenerationProgram(specOf({ capacitySymbol: "K" })),
     Error,
     "Capacity symbol K is not in the graph's symbols [C, M, R]",
   );
-  // 入力 shape から決まる記号を容量記号に選ぶと、run の束縛と context の束縛が分裂する。
+  // Choosing a symbol determined by an input shape as the capacity symbol splits the run's binding from the context's.
   assertThrows(
     () => createGenerationProgram(specOf({ capacitySymbol: "M" })),
     Error,
     "Capacity symbol M is a symbol determined by an input shape",
   );
-  // R も同じ（行数は last_row 入力の要素数から決まる = context の束縛を要らない）。
+  // The same for R (the row count is determined by the element count of the last_row input = no context binding needed).
   assertThrows(
     () => createGenerationProgram(specOf({ capacitySymbol: "R" })),
     Error,
     "Capacity symbol R is a symbol determined by an input shape",
   );
-  // 容量記号が 1 本足りない形（states の記号が 2 本ある資産）。
+  // A shape with one capacity symbol too few (assets whose states have 2 symbols).
   assertThrows(
     () =>
       createGenerationProgram(specOf({ graph: { ...graphOf(), symbols: ["C", "D", "M", "R"] } })),
     Error,
     "Symbols D are determined neither by an input shape nor by the capacity symbol",
   );
-  // M / R は入力 shape から決まるので容量記号に要らない（C だけで通る）。
+  // M / R are determined by the input shapes, so they need no capacity symbol (C alone passes).
   assertEquals(createGenerationProgram(specOf()).capacitySymbol, "C");
 });
 
-test("GenerationGraph: 実 IrGraph がこの面を満たす（綴りのドリフト検出）", () => {
-  // 型検査だけの門（実行時は何もしない）。`GenerationGraph` は `PreparedModel["graph"]` を
-  // **写して**いるので、IR の inputs / outputs / values / symbols の綴りが runtime 側で
-  // 変わるとこの 1 行がコンパイルエラーになる。
+test("GenerationGraph: a real IrGraph satisfies this surface (detects spelling drift)", () => {
+  // A type-check-only check (does nothing at run time). `GenerationGraph` **mirrors** `PreparedModel["graph"]`, so if
+  // the spelling of the IR's inputs / outputs / values / symbols changes on the runtime side, this one line becomes a
+  // compile error.
   const asGenerationGraph = (graph: PreparedModel["graph"]): GenerationGraph => graph;
   assertEquals(typeof asGenerationGraph, "function");
 });
 
-// ---- 公開の読み口（`generationProgramFace`）----------------------------------
+// ---- The public view (`generationProgramFace`) ----------------------------------
 //
-// `GenerationProgram` は `gemma.Pipeline.program` としてパッケージの公開面に出る値なので、
-// 守る先は消費者側である。これを叩く門は実資産 + 実 GPU の e2e 1 箇所にしか無く、
-// `Object.freeze` を外す / `[...wiring.stopTokens]` を `wiring.stopTokens` に戻す変更が、
-// 資産の無い環境（CI・多くの開発機）では全部緑のまま通っていた。
+// `GenerationProgram` is a value exposed on the package's public surface as `gemma.Pipeline.program`, so what is
+// protected is the consumer side. The only check exercising it was one e2e with real assets + a real GPU, so a change
+// that removed `Object.freeze` / turned `[...wiring.stopTokens]` back into `wiring.stopTokens` stayed all green in
+// environments without assets (CI and most development machines).
 
-test("generationProgramFace: 出る欄は数 6 つだけ（内部配線を出さない）", () => {
+test("generationProgramFace: exposes only 6 numeric fields (no internal wiring)", () => {
   const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7], chunkBuckets: [2] }));
   const face = generationProgramFace(wiring);
   assertEquals(Object.keys(face).sort(), [
@@ -474,28 +474,28 @@ test("generationProgramFace: 出る欄は数 6 つだけ（内部配線を出さ
   });
 });
 
-test("generationProgramFace: 凍結コピーを返す（消費者の書き換えが停止集合へ届かない）", () => {
+test("generationProgramFace: returns a frozen copy (consumer writes do not reach the stop set)", () => {
   const wiring = createGenerationProgram(specOf({ stopTokens: [1, 7], chunkBuckets: [2, 3] }));
   const face = generationProgramFace(wiring);
-  assertEquals(Object.isFrozen(face), true, "face が凍結されていない");
-  assertEquals(Object.isFrozen(face.stopTokens), true, "stopTokens が凍結されていない");
-  // バケットも同じ扱い（並べ替えられると物理行数の選び方そのものが変わる）。
-  assertEquals(Object.isFrozen(face.chunkBuckets), true, "chunkBuckets が凍結されていない");
+  assertEquals(Object.isFrozen(face), true, "face is not frozen");
+  assertEquals(Object.isFrozen(face.stopTokens), true, "stopTokens is not frozen");
+  // The buckets are treated the same (reordering them would change how the physical row count is chosen).
+  assertEquals(Object.isFrozen(face.chunkBuckets), true, "chunkBuckets is not frozen");
   assertThrows(() => {
     (face.chunkBuckets as number[]).reverse();
   }, TypeError);
-  assert(face.chunkBuckets !== wiring.chunkBuckets, "配線の配列をそのまま出している");
-  // ESM は常に strict mode なので、凍結配列への書き込みは黙って捨てられず TypeError になる。
+  assert(face.chunkBuckets !== wiring.chunkBuckets, "exposes the wiring's array as is");
+  // ESM is always strict mode, so a write to a frozen array is not silently dropped but raises a TypeError.
   assertThrows(() => {
     (face.stopTokens as number[]).length = 0;
   }, TypeError);
   assertThrows(() => {
     (face.stopTokens as number[]).sort((a, b) => a - b);
   }, TypeError);
-  // 別実体であること（凍結だけ残してコピーを落とすと、wiring 側の配列まで凍る副作用が出る）。
-  assert(face.stopTokens !== wiring.stopTokens, "配線の配列をそのまま出している");
-  assertEquals(Object.isFrozen(wiring.stopTokens), false, "配線側まで凍らせている");
-  assertEquals([...wiring.stopTokens], [1, 7], "配線側の停止集合は無傷");
+  // They are separate objects (keeping only the freeze and dropping the copy would freeze the wiring's array too, as a side effect).
+  assert(face.stopTokens !== wiring.stopTokens, "exposes the wiring's array as is");
+  assertEquals(Object.isFrozen(wiring.stopTokens), false, "freezes the wiring side too");
+  assertEquals([...wiring.stopTokens], [1, 7], "the wiring side's stop set is intact");
 });
 
 test("createGenerationProgram: derivedInputs.positionsOnly is a declaration, so only a boolean passes", () => {

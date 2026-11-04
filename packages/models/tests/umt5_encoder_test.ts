@@ -1,18 +1,21 @@
 /**
- * `Encoder`（`@karume/models/umt5`）の**構築の門**と umT5 のグラフ宣言の取り決め（`umt5GraphContract`）。
- * GPU も実資産も要らない範囲だけを見る（実 GPU の符号化は `e2e_wan_umt5_test.ts`）。
+ * **Construction checks** of `Encoder` (`@karume/models/umt5`) and the contract of umT5's graph declarations
+ * (`umt5GraphContract`). Only what needs neither a GPU nor real assets (real-GPU encoding is in
+ * `e2e_wan_umt5_test.ts`).
  *
- * 押さえるのは 3 点:
+ * Three points are pinned:
  *
- * ① **家族 admission**（pipeline 名 / major・`pipelineConfig`・quant・トークナイザ資産の宣言・quant の
- *    `session`・グラフ宣言）は **GPU に触る前**に落ちる。全量面（`fromAssets`）では容器を揃えたまま、その違反の
- *    文言で落ちることを見る（容器が無い形は受け口の診断で落ちる — 対照）。
- * ② 取得面（`fromPretrained` — 疑似 HF）では、admission の違反は **重みの part を 1 本も取らずに**落ちる
- *    （取ったのは manifest と part 0〈descriptor〉だけ）。正の経路は「トークナイザ資産の解析」で止まる — admission と
- *    重みの part の取得・資産の取得を通り終えた（`wan_components_test.ts` と同じ「次の段の文言で通過を見る」形）。
- *    GPU は共有の模擬 GPU を渡し、アダプタにも触らない。
- * ③ 取得元に既定は無い（`SOURCES` は呼び手が渡すオプトインの対応表で、既定ではない — ADR 0073。ref 欠落時の
- *    案内の文言は `repo_ref_test.ts`）。
+ * ① **Family admission** (pipeline name / major, `pipelineConfig`, quant, the tokenizer asset declaration, the
+ *    quant's `session`, the graph declarations) fails **before touching a GPU**. On the full-assets surface
+ *    (`fromAssets`), with the containers present, it fails with that violation's message (without containers it
+ *    fails with the entry diagnostic — the control).
+ * ② On the fetch surface (`fromPretrained` — a fake HF), an admission violation fails **without fetching a single
+ *    weight part** (only the manifest and part 0 (the descriptor) were fetched). The positive path stops at
+ *    "parsing the tokenizer asset" — having passed admission, the weight-part fetch and the asset fetch (the same
+ *    "observe passing through by the next stage's message" form as `wan_components_test.ts`). A shared fake GPU is
+ *    passed, and no adapter is touched either.
+ * ③ There is no default source (`SOURCES` is an opt-in table the caller passes, not a default — ADR 0073. The hint
+ *    message for a missing ref is in `repo_ref_test.ts`).
  */
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -41,14 +44,17 @@ import {
 } from "./helpers/container-loading-fixture.ts";
 import { MemoryCacheStorage } from "./helpers/memory-cache.ts";
 
-/** umT5 の語彙埋め込みの形（語彙 2 行 × 幅 32 — 幅は宣言から読まれる）。 */
+/** The shape of umT5's vocabulary embedding (2 vocabulary rows × width 32 — the width is read from the declaration). */
 const EMBED_ROWS = 2;
 const HIDDEN = 32;
 
 const f32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Float32Array.from(values).buffer);
 
-/** 語彙埋め込みの格納（i8 = per-channel・i4 = 32 要素ごとの group — 格納の門の対照）。 */
+/**
+ * Storage of the vocabulary embedding (i8 = per-channel, i4 = a group per 32 elements — the control for the storage
+ * check).
+ */
 const embedWeight = (storage: "i8" | "i4"): TensorInput => {
   const elements = EMBED_ROWS * HIDDEN;
   if (storage === "i8") {
@@ -80,7 +86,8 @@ const embedWeight = (storage: "i8" | "i4"): TensorInput => {
 };
 
 /**
- * umT5 の宣言（取り決めの正常形 — 入力 2 本の i32・記号 L・出力 `[1, L, 32]`・i8 の重み）。実行はしない。
+ * umT5's declarations (the contract's normal form — two i32 inputs, symbol L, output `[1, L, 32]`, i8 weights).
+ * Never executed.
  */
 const umt5Input = (storage: "i8" | "i4" = "i8"): ModelInput => ({
   graphs: {
@@ -116,7 +123,7 @@ const umt5Input = (storage: "i8" | "i4" = "i8"): ModelInput => ({
   provenance: { license: "test" },
 });
 
-/** 最小のトークナイザ資産（形式 `karume-umt5-tokenizer/1` — 語彙 6 行・上限 512）。 */
+/** A minimal tokenizer asset (format `karume-umt5-tokenizer/1` — 6 vocabulary rows, limit 512). */
 const tokenizerJson = (patch: Record<string, unknown> = {}): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(
     JSON.stringify({
@@ -140,12 +147,15 @@ const tokenizerJson = (patch: Record<string, unknown> = {}): Uint8Array<ArrayBuf
     }),
   );
 
-/** トークナイザ資産の宣言（`fromAssets` の門は中身を読まないので 3 点セットは綴りだけ合わせる）。 */
+/**
+ * The tokenizer asset declaration (the `fromAssets` checks do not read the contents, so the three fields only match in
+ * spelling).
+ */
 const TOKENIZER_REF = { path: "xxl/tokenizer/tokenizer.json", size: 8, sha256: "f".repeat(64) };
 
 /**
- * 配布形 `karume-umt5-xxl` の骨格（`models/karume-umt5-xxl/karume.json` と同じ欄 — 検査に要る分だけ）。`patch` は
- * `models["xxl"]` の中身を上書きする。
+ * Skeleton of the distribution `karume-umt5-xxl` (the same fields as `models/karume-umt5-xxl/karume.json` — only
+ * what the checks need). `patch` overrides the contents of `models["xxl"]`.
  */
 const manifestOf = (textEncoder: Record<string, unknown>, patch: Record<string, unknown> = {}) =>
   parseManifest(
@@ -169,7 +179,10 @@ const manifestOf = (textEncoder: Record<string, unknown>, patch: Record<string, 
 
 const written = await writeContainer(umt5Input());
 const writtenI4 = await writeContainer(umt5Input("i4"));
-/** manifest の宣言（全量面の門は part の実体を読まないので、descriptor と part の 3 点セットだけ）。 */
+/**
+ * The manifest declaration (the full-assets checks do not read the parts' contents, so only the descriptor and the
+ * parts' three fields).
+ */
 const DECLARED = {
   container: {
     descriptor: written.descriptor,
@@ -180,21 +193,24 @@ const DECLARED = {
 };
 const COMPONENTS = partAssets("text_encoder", written);
 
-/** 共有の模擬 GPU（アダプタの limits を読みに行かない・Session は張れない — GPU に触ったら別の文言で落ちる）。 */
+/**
+ * A shared fake GPU (never reads adapter limits, cannot set up a Session — touching the GPU would fail with a different
+ * message).
+ */
 const fakeGpu = () => fakeGpuContext(fakeDevice());
 
-describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器は揃えたまま）", () => {
+describe("fromAssets: family admission fails before touching a GPU (with the containers present)", () => {
   const rejected: readonly [string, Record<string, unknown>, string][] = [
-    ["pipeline の名前違い", { pipeline: "wan/1" }, "the manifest's pipeline is 'wan/1'"],
-    ["未知の major", { pipeline: "umt5-encoder/2" }, "unsupported major"],
-    ["pipelineConfig の欄", { pipelineConfig: { maxLength: 512 } }, "unknown key 'maxLength'"],
+    ["wrong pipeline name", { pipeline: "wan/1" }, "the manifest's pipeline is 'wan/1'"],
+    ["unknown major", { pipeline: "umt5-encoder/2" }, "unsupported major"],
+    ["a pipelineConfig field", { pipelineConfig: { maxLength: 512 } }, "unknown key 'maxLength'"],
     [
-      "トークナイザ資産の宣言が無い（取り込み由来のミラーの形）",
+      "no tokenizer asset declaration (the shape of a mirror made by import)",
       { assets: {} },
       "have no tokenizer asset 'tokenizer'",
     ],
     [
-      "quant の session に実行ノブ",
+      "an execution knob in the quant's session",
       { quants: { i8: { weights: { text_encoder: "i8" }, session: { linearCompute: "a8" } } } },
       "session.linearCompute is not supported",
     ],
@@ -213,11 +229,14 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
         Error,
         message,
       );
-      assert(!(error instanceof ModelInputError), `資産の齟齬を入力起因にしない: ${label}`);
+      assert(
+        !(error instanceof ModelInputError),
+        `an asset inconsistency is not an input error: ${label}`,
+      );
     });
   }
 
-  it("model / quant の綴り違いは利用可能な一覧つきで落ちる", async () => {
+  it("a misspelt model / quant fails with the list of available ones", async () => {
     const input = { manifest: manifestOf(DECLARED), assets: COMPONENTS };
     await assertRejects(
       () => Encoder.fromAssets(input, { model: "base", gpu: fakeGpu() }),
@@ -231,7 +250,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
     );
   });
 
-  it("グラフ宣言の格納が i8 / f32 でない容器（i4）は落ちる", async () => {
+  it("rejects a container whose graph declaration storage is not i8 / f32 (i4)", async () => {
     await assertRejects(
       () =>
         Encoder.fromAssets(
@@ -246,7 +265,7 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
     );
   });
 
-  it("対照: 容器が無ければ manifest の門ではなく受け口の診断で落ちる", async () => {
+  it("control: without containers it fails with the entry diagnostic, not a manifest check", async () => {
     await assertRejects(
       () => Encoder.fromAssets({ manifest: manifestOf(DECLARED), assets: {} }),
       Error,
@@ -255,14 +274,14 @@ describe("fromAssets: 家族 admission は GPU に触る前に落ちる（容器
   });
 });
 
-describe("fromAssets: トークナイザ資産の中身は GPU に触る前に見る", () => {
+describe("fromAssets: the tokenizer asset's contents are checked before touching a GPU", () => {
   const build = (tokenizer: Uint8Array<ArrayBuffer>) =>
     Encoder.fromAssets(
       { manifest: manifestOf(DECLARED), assets: { ...COMPONENTS, tokenizer } },
       { gpu: fakeGpu() },
     );
 
-  it("宣言はあるが資産のバイト列が無ければ、揃っているキーを添えて落ちる", async () => {
+  it("fails, listing the keys that are present, when the asset is declared but its bytes are missing", async () => {
     await assertRejects(
       () =>
         Encoder.fromAssets(
@@ -274,7 +293,7 @@ describe("fromAssets: トークナイザ資産の中身は GPU に触る前に�
     );
   });
 
-  it("Wan のトークナイザ資産（前処理の表つきの別形式）は読まない", async () => {
+  it("does not read Wan's tokenizer asset (a different format with preprocessing tables)", async () => {
     await assertRejects(
       () => build(tokenizerJson({ format: "karume-wan-umt5-tokenizer/1" })),
       Error,
@@ -282,7 +301,7 @@ describe("fromAssets: トークナイザ資産の中身は GPU に触る前に�
     );
   });
 
-  it("最大長がグラフの有効長の上限 512 と違う資産は落ちる", async () => {
+  it("rejects an asset whose maximum length differs from the graph's valid-length upper limit 512", async () => {
     await assertRejects(
       () => build(tokenizerJson({ maxLength: 256 })),
       Error,
@@ -291,13 +310,13 @@ describe("fromAssets: トークナイザ資産の中身は GPU に触る前に�
   });
 });
 
-// ---- 取得面（疑似 HF）---------------------------------------------------------
+// ---- The fetch surface (fake HF) ---------------------------------------------
 
-/** 実体を持つ part（長さ 0 の part は取得の対象外 — hub も取らない）。 */
+/** Parts with contents (a part of length 0 is not fetched — hub does not fetch it either). */
 const nonEmpty = (parts: readonly FileRef[]): readonly FileRef[] =>
   parts.filter((part) => part.size > 0);
 
-/** 疑似 HF に載せた umT5 の配布形（`patch` は `models["test"]` の欄を差し替える）。 */
+/** The umT5 distribution served on a fake HF (`patch` replaces fields of `models["test"]`). */
 const serveUmt5 = async (patch: Record<string, unknown>, tokenizer: Uint8Array<ArrayBuffer>) => {
   const served = await serveContainer("xxl/text_encoder/model.i8", umt5Input(), {
     partBytes: 1024,
@@ -334,35 +353,36 @@ const serveUmt5 = async (patch: Record<string, unknown>, tokenizer: Uint8Array<A
   return { load, paths: mock.paths, parts: served.parts, tokenizerRef };
 };
 
-describe("fromPretrained: admission の違反は重みの part を 1 本も取らずに落ちる", () => {
+describe("fromPretrained: an admission violation fails without fetching a single weight part", () => {
   const rejected: readonly [string, Record<string, unknown>, string][] = [
-    ["トークナイザ資産の宣言が無い", { assets: {} }, "have no tokenizer asset 'tokenizer'"],
-    ["pipeline の名前違い", { pipeline: "siglip2/1" }, "the manifest's pipeline is 'siglip2/1'"],
-    ["未知の major", { pipeline: "umt5-encoder/2" }, "unsupported major"],
+    ["no tokenizer asset declaration", { assets: {} }, "have no tokenizer asset 'tokenizer'"],
+    ["wrong pipeline name", { pipeline: "siglip2/1" }, "the manifest's pipeline is 'siglip2/1'"],
+    ["unknown major", { pipeline: "umt5-encoder/2" }, "unsupported major"],
   ];
   for (const [label, patch, message] of rejected) {
     it(label, async () => {
       const rig = await serveUmt5(patch, tokenizerJson());
       await assertRejects(() => rig.load(), Error, message);
-      // 取ったのは manifest と part 0（descriptor）だけ — 重みの part とトークナイザ資産は取っていない。
+      // Only the manifest and part 0 (the descriptor) were fetched — not the weight parts nor the tokenizer asset.
       assertEquals(rig.paths, [MANIFEST_PATH, rig.parts[0].path]);
     });
   }
 
-  it("正の経路: admission を通り、重みの part とトークナイザ資産を取り終えてから資産の解析で止まる", async () => {
-    // 観測の仕掛け: トークナイザ資産を形式欄の無い JSON にする。構築は admission → 重みの part の取得 → 資産の
-    // 取得 → 資産の解析の順なので、この文言で落ちれば手前の段は全部通っている（GPU には触らない）。
+  it("positive path: passes admission, fetches the weight parts and the tokenizer asset, then stops at parsing the asset", async () => {
+    // The observation set-up: the tokenizer asset is JSON without a format field. Construction runs admission →
+    // weight-part fetch → asset fetch → asset parsing, so failing with this message means every earlier stage passed
+    // (no GPU is touched).
     const rig = await serveUmt5({}, new TextEncoder().encode("{}"));
     await assertRejects(() => rig.load(), Error, "tokenizer.format: not a string");
     for (const part of nonEmpty(rig.parts)) {
-      assert(rig.paths.includes(part.path), `重みの part ${part.path} を取っていない`);
+      assert(rig.paths.includes(part.path), `weight part ${part.path} was not fetched`);
     }
-    assert(rig.paths.includes(rig.tokenizerRef.path), "トークナイザ資産を取っていない");
+    assert(rig.paths.includes(rig.tokenizerRef.path), "the tokenizer asset was not fetched");
   });
 });
 
-describe("fromPretrained: 取得元に既定は無い", () => {
-  it("ref を省くと（型検査の外の JS の呼び出し）、repo が必須であることを言って落ちる", async () => {
+describe("fromPretrained: there is no default source", () => {
+  it("omitting ref (a JS call outside the type check) fails, saying that repo is required", async () => {
     await assertRejects(
       // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply supplies Encoder as `this`
       () => Reflect.apply(Encoder.fromPretrained, Encoder, []),
@@ -372,9 +392,9 @@ describe("fromPretrained: 取得元に既定は無い", () => {
   });
 });
 
-// ---- グラフ宣言の取り決め（門を直接叩く）-------------------------------------
+// ---- The graph declaration contract (calling the check directly) -----------
 
-/** 宣言だけの `GraphOwner`（出力の形だけを差し替える — 重みは i8 の 1 本）。 */
+/** A declaration-only `GraphOwner` (only the output shape varies — a single i8 weight). */
 const ownerOf = (outputShape: readonly (number | string)[]): GraphOwner => ({
   graph: {
     format: "karume-ir",
@@ -393,15 +413,15 @@ const ownerOf = (outputShape: readonly (number | string)[]): GraphOwner => ({
   },
 });
 
-describe("umt5GraphContract: 出力の幅", () => {
-  it("幅を渡さなければ宣言の静的な幅を読む（単体の encoder）", () => {
+describe("umt5GraphContract: the output width", () => {
+  it("reads the declaration's static width when no width is passed (the standalone encoder)", () => {
     assertEquals(umt5GraphContract(ownerOf([1, "L", 4096]), "umt5.Encoder"), {
       output: "out",
       hiddenSize: 4096,
     });
   });
 
-  it("宣言の幅が記号次元なら読めないと言って落ちる（ホストは幅を宣言から読む）", () => {
+  it("fails, saying it cannot be read, when the declared width is symbolic (the host reads the width from the declaration)", () => {
     assertThrows(
       () => umt5GraphContract(ownerOf([1, "L", "W"]), "umt5.Encoder"),
       Error,
@@ -409,7 +429,7 @@ describe("umt5GraphContract: 出力の幅", () => {
     );
   });
 
-  it("幅を渡せば宣言の幅をその値と照合する（Wan は DiT の文脈の幅を渡す）", () => {
+  it("checks the declared width against a width that is passed (Wan passes the DiT's context width)", () => {
     assertEquals(umt5GraphContract(ownerOf([1, "L", 4096]), "wan.Pipeline", 4096).hiddenSize, 4096);
     assertThrows(
       () => umt5GraphContract(ownerOf([1, "L", 2048]), "wan.Pipeline", 4096),

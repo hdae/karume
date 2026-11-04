@@ -1,7 +1,8 @@
-// Irodori の codec ホスト層（タイル幾何 + 末尾トリム）の挙動テスト。GPU は要らない。
+// Behaviour tests of Irodori's codec host layer (tile geometry + tail trim). No GPU needed.
 //
-// タイル幾何は「採用区間が隙間なく S を覆い、halo ぶんの文脈が両側にある（または真の境界）」
-// という**構造**の検査で、値のビット一致は実 GPU の門（`e2e_irodori_codec_test.ts`）が見る。
+// The tile geometry is checked **structurally** ("the taken ranges cover S without gaps, with halo
+// context on both sides (or a true boundary)"); bit equality of the values is checked by the
+// real-GPU check (`e2e_irodori_codec_test.ts`).
 // The tail trim is compared with the 3 golden cases
 // (`outputs/test-assets/goldens/dacvae-32dim/host/trim.safetensors`, which records what upstream
 // `find_flattening_point` returned). An environment without the golden SKIPs explicitly; a golden
@@ -21,33 +22,34 @@ import {
 import { findFlatteningPoint, trimmedSampleCount } from "../src/irodori/host/trim.ts";
 import { readFileIfPresent, readTextIfPresent } from "./helpers/read-if-present.ts";
 
-// ---- タイル幾何 -----------------------------------------------------------
+// ---- Tile geometry -----------------------------------------------------------
 
-/** 実重み v4-small の運用値（`pipelineConfig.codecHaloFrames`）。 */
+/** The value used with the real v4-small weights (`pipelineConfig.codecHaloFrames`). */
 const HALO = 8;
 
 /**
- * 幾何の不変条件を外側からもう一度確かめる（`planCodecTiles` 内の表明とは別の書き方で）。
- * 返すのは採用区間の合計フレーム数。
+ * Re-checks the geometry's invariants from the outside (written differently from the assertions
+ * inside `planCodecTiles`). Returns the total frames of the taken ranges.
  */
 const auditTiles = (tiles: readonly CodecTile[], frames: number, halo: number): number => {
   let covered = 0;
   for (const tile of tiles) {
     const takeStart = tile.start + tile.offset;
-    assertEquals(takeStart, covered, "採用区間が連続していない");
+    assertEquals(takeStart, covered, "the taken ranges are not contiguous");
     const takeEnd = takeStart + tile.take;
     const leftContext = takeStart - tile.start;
     const rightContext = tile.start + tile.length - takeEnd;
-    if (tile.start > 0) assertEquals(leftContext >= halo, true, "左の文脈が halo 未満");
+    if (tile.start > 0)
+      assertEquals(leftContext >= halo, true, "the left context is less than halo");
     if (tile.start + tile.length < frames) {
-      assertEquals(rightContext >= halo, true, "右の文脈が halo 未満");
+      assertEquals(rightContext >= halo, true, "the right context is less than halo");
     }
     covered = takeEnd;
   }
   return covered;
 };
 
-test("planCodecTiles: S がタイル長以下なら 1 枚に縮退する（= 単発 decode）", () => {
+test("planCodecTiles: S at most the tile length degenerates to 1 tile (= a single decode)", () => {
   for (const frames of [1, 2, 161, DEFAULT_CODEC_TILE_FRAMES]) {
     const tiles = planCodecTiles(frames, {
       tileFrames: DEFAULT_CODEC_TILE_FRAMES,
@@ -57,7 +59,7 @@ test("planCodecTiles: S がタイル長以下なら 1 枚に縮退する（= 単
   }
 });
 
-test("planCodecTiles: 採用区間が隙間なく S を覆い、両側に halo ぶんの文脈がある", () => {
+test("planCodecTiles: the taken ranges cover S without gaps, with halo context on both sides", () => {
   for (const frames of [17, 33, 64, 161, 183, 300, 749, 750]) {
     for (const tileFrames of [17, 24, 64, 100, DEFAULT_CODEC_TILE_FRAMES]) {
       const tiles = planCodecTiles(frames, { tileFrames, haloFrames: HALO });
@@ -66,17 +68,21 @@ test("planCodecTiles: 採用区間が隙間なく S を覆い、両側に halo �
   }
 });
 
-test("planCodecTiles: 複数枚なら decode 長は全タイル同一（prepared plan が効き続ける）", () => {
+test("planCodecTiles: with several tiles, every tile has the same decode length (the prepared plan keeps working)", () => {
   const tiles = planCodecTiles(750, { tileFrames: 64, haloFrames: HALO });
   assertEquals(new Set(tiles.map((tile) => tile.length)), new Set([64]));
-  // 採用は step = 64 − 2×8 = 48 フレームずつ（末尾だけ端数）。
+  // Taken in steps of 64 − 2×8 = 48 frames (only the last has a remainder).
   assertEquals(tiles.length, Math.ceil(750 / 48));
-  assertEquals(tiles[0].offset, 0, "先頭タイルは左 halo を持たない（真の境界）");
+  assertEquals(tiles[0].offset, 0, "the first tile has no left halo (a true boundary)");
   const last = tiles[tiles.length - 1];
-  assertEquals(last.start + last.length, 750, "末尾タイルの右端は真の境界へスナップする");
+  assertEquals(
+    last.start + last.length,
+    750,
+    "the last tile's right edge snaps to the true boundary",
+  );
 });
 
-test("planCodecTiles: halo 2 枚ぶん以下のタイル長は落とす（採用が 1 枚も残らない）", () => {
+test("planCodecTiles: rejects a tile length of at most 2 halos (no taken range would remain)", () => {
   assertThrows(
     () => planCodecTiles(300, { tileFrames: 16, haloFrames: HALO }),
     ModelInputError,
@@ -84,7 +90,7 @@ test("planCodecTiles: halo 2 枚ぶん以下のタイル長は落とす（採用
   );
 });
 
-test("planCodecTiles: S が正の整数でなければ落とす", () => {
+test("planCodecTiles: rejects an S that is not a positive integer", () => {
   assertThrows(() => planCodecTiles(0, { tileFrames: 64, haloFrames: HALO }), Error, "frames 0");
   assertThrows(
     () => planCodecTiles(1.5, { tileFrames: 64, haloFrames: HALO }),
@@ -93,17 +99,20 @@ test("planCodecTiles: S が正の整数でなければ落とす", () => {
   );
 });
 
-// ---- 貼り合わせ（decodeTiles）---------------------------------------------
+// ---- Stitching (decodeTiles) ---------------------------------------------
 //
-// `decodeTiles` は `run` を注入で受ける（本体の貼り合わせそのものを外から測れるようにするため
-// — `codec.ts` のモジュール doc）。実 GPU の門（`e2e_irodori_codec_test.ts`）は decoder 資産と
-// golden が要るので、資産の無い機ではここが唯一の門になる。anima 側の同型 `decodeTiled` は
-// 同じ手で GPU 無しに縛られている（`anima_tiling_test.ts`）。
+// `decodeTiles` takes `run` by injection (so the stitching itself can be measured from the outside
+// — the module doc of `codec.ts`). The real-GPU check (`e2e_irodori_codec_test.ts`) needs the
+// decoder asset and goldens, so on a machine without the assets this is the only check. anima's
+// counterpart `decodeTiled` is pinned the same way without a GPU (`anima_tiling_test.ts`).
 
 const TILE_LATENT_DIM = 2;
 const TILE_HOP = 4;
 
-/** latent `[frames, latentDim]`（先頭列がフレーム番号 = 位置が値で読める ramp）。 */
+/**
+ * A latent `[frames, latentDim]` (the first column is the frame number = a ramp whose positions can
+ * be read from the values).
+ */
 const rampLatent = (frames: number): Float32Array<ArrayBuffer> => {
   const latent = new Float32Array(frames * TILE_LATENT_DIM) as Float32Array<ArrayBuffer>;
   for (let frame = 0; frame < frames; frame += 1) latent[frame * TILE_LATENT_DIM] = frame;
@@ -111,9 +120,10 @@ const rampLatent = (frames: number): Float32Array<ArrayBuffer> => {
 };
 
 /**
- * 平行移動同変な偽 decoder — 出力サンプルが**入力フレームの値だけ**から決まる
- * （`out[i*hop + s] = slice[i*latentDim]*hop + s`）。ramp を食わせると全長 decode の結果が
- * 恒等列になるので、貼り合わせが 1 サンプルでもずれれば値で露見する。
+ * A translation-equivariant fake decoder — an output sample is determined **only by the input
+ * frame's value** (`out[i*hop + s] = slice[i*latentDim]*hop + s`). Fed the ramp, a full-length
+ * decode gives the identity sequence, so stitching that is off by even one sample shows in the
+ * values.
  */
 const equivariantDecoder = (slice: Float32Array<ArrayBuffer>, frames: number) => {
   const out = new Float32Array(frames * TILE_HOP);
@@ -125,10 +135,14 @@ const equivariantDecoder = (slice: Float32Array<ArrayBuffer>, frames: number) =>
   return Promise.resolve(out);
 };
 
-test("decodeTiles: 採用区間を全長の正しい位置へ貼る（複数枚が単発 decode と一致）", async () => {
+test("decodeTiles: places the taken ranges at the right positions of the full length (several tiles match a single decode)", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
-  assertEquals(tiles.length > 1, true, "1 枚に縮退すると貼り合わせの添字算術を踏まない");
+  assertEquals(
+    tiles.length > 1,
+    true,
+    "degenerating to 1 tile would skip the stitching's index arithmetic",
+  );
 
   const waveform = await decodeTiles(
     rampLatent(frames),
@@ -137,17 +151,18 @@ test("decodeTiles: 採用区間を全長の正しい位置へ貼る（複数枚�
   );
 
   assertEquals(waveform.length, frames * TILE_HOP);
-  // offset / take / start のどれかの掛け算が違えば、この恒等列が崩れる。
+  // If any of the multiplications of offset / take / start is wrong, this identity sequence breaks.
   assertEquals(
     [...waveform],
     Array.from({ length: frames * TILE_HOP }, (_, index) => index),
   );
 });
 
-test("decodeTiles: 位置を無視する decoder では一致が破れる（門が恒真でない証拠）", async () => {
+test("decodeTiles: a decoder that ignores positions breaks the match (evidence that the check is not vacuous)", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
-  // 入力フレームの値ではなく**タイル内の添字**から作る（= 平行移動同変でない）decoder。
+  // A decoder built from **the index within the tile** rather than the input frame's value (= not
+  // translation-equivariant).
   const waveform = await decodeTiles(
     rampLatent(frames),
     { latentDim: TILE_LATENT_DIM, hopLength: TILE_HOP, tiles },
@@ -157,11 +172,11 @@ test("decodeTiles: 位置を無視する decoder では一致が破れる（門�
   assertEquals(
     [...waveform].some((value, index) => value !== index),
     true,
-    "位置を無視した decoder でも一致してしまい、この門は何も縛れていない",
+    "it matches even with a decoder that ignores positions, so this check pins nothing",
   );
 });
 
-test("decodeTiles: run へ渡すのはタイル 1 枚ぶんの写し（view でない）", async () => {
+test("decodeTiles: what is passed to run is a copy of one tile (not a view)", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
   let call = 0;
@@ -171,19 +186,23 @@ test("decodeTiles: run へ渡すのはタイル 1 枚ぶんの写し（view で�
     (slice, tileFrames) => {
       const tile = tiles[call];
       call += 1;
-      assertEquals(tileFrames, tile.length, "frames 引数がタイルの decode 長と違う");
+      assertEquals(
+        tileFrames,
+        tile.length,
+        "the frames argument differs from the tile's decode length",
+      );
       assertEquals(slice.length, tile.length * TILE_LATENT_DIM);
-      // 写しならバッファ全体をちょうど占める（view のまま渡すと、バッファ全体を占めることを
-      // 前提にした受け渡しの契約から外れる）。
+      // A copy spans its whole buffer exactly (passing a view would break the hand-off contract
+      // that assumes the whole buffer is spanned).
       assertEquals(slice.buffer.byteLength, slice.length * 4);
-      assertEquals(slice[0], tile.start, "slice の先頭がタイルの開始フレームでない");
+      assertEquals(slice[0], tile.start, "the slice does not start at the tile's start frame");
       return equivariantDecoder(slice, tileFrames);
     },
   );
   assertEquals(call, tiles.length);
 });
 
-test("decodeTiles: latent の要素数が latentDim で割れなければ落とす", async () => {
+test("decodeTiles: rejects a latent whose element count is not divisible by latentDim", async () => {
   const tiles = planCodecTiles(12, { tileFrames: 8, haloFrames: 2 });
   await assertRejects(
     () =>
@@ -197,7 +216,7 @@ test("decodeTiles: latent の要素数が latentDim で割れなければ落と�
   );
 });
 
-test("decodeTiles: decoder の出力長が合わなければ落とす（期待サンプル数つき）", async () => {
+test("decodeTiles: rejects a decoder output of the wrong length (with the expected sample count)", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: 8, haloFrames: 2 });
   const error = await assertRejects(
@@ -213,7 +232,7 @@ test("decodeTiles: decoder の出力長が合わなければ落とす（期待�
   assertStringIncludes(error.message, `= ${tiles[0].length * TILE_HOP})`);
 });
 
-test("decodeTiles: 1 枚に縮退した計画では単発 decode の写しそのもの", async () => {
+test("decodeTiles: with a plan degenerated to 1 tile, it is exactly a copy of the single decode", async () => {
   const frames = 12;
   const tiles = planCodecTiles(frames, { tileFrames: DEFAULT_CODEC_TILE_FRAMES, haloFrames: HALO });
   assertEquals(tiles.length, 1);
@@ -224,14 +243,15 @@ test("decodeTiles: 1 枚に縮退した計画では単発 decode の写しその
     equivariantDecoder,
   );
   const single = await equivariantDecoder(latent, frames);
-  // ビット一致（f32 のビット列で比べる — 値の等価では NaN / -0 の取り違えが素通りする）。
+  // Bit equality (compared as f32 bit patterns — value equality lets mixed-up NaN / -0 slip
+  // through).
   assertEquals(new Uint32Array(waveform.buffer), new Uint32Array(single.buffer));
 });
 
-// ---- 末尾トリム -----------------------------------------------------------
+// ---- Tail trim -----------------------------------------------------------
 
 const LATENT_DIM = 32;
-/** 上流 `hop_length`（`pipelineConfig.hopLength`）。 */
+/** Upstream's `hop_length` (`pipelineConfig.hopLength`). */
 const HOP = 1920;
 
 const GOLDEN_DIR = new URL("host/", goldenDir("dacvae-32dim"));
@@ -239,7 +259,10 @@ const FETCH_HINT =
   "fetch: node tools/test-assets/fetch.ts — the assets gate accepts only a complete fetch; " +
   "--include 'goldens/dacvae-32dim/host/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
 
-/** golden `meta.json` の trim 節（正本は `tools/export-recipes/irodori/dacvae/host.py` — ここは読み口）。 */
+/**
+ * The trim section of the golden `meta.json` (the source of truth is
+ * `tools/export-recipes/irodori/dacvae/host.py` — this is a reader).
+ */
 type TrimMeta = {
   readonly trim: Readonly<Record<string, { readonly frames: number; readonly point: number }>>;
 };
@@ -263,7 +286,7 @@ if (!GOLDEN_AVAILABLE) {
 }
 
 test.skipIf(!GOLDEN_AVAILABLE)(
-  "findFlatteningPoint: golden 3 ケースが上流 find_flattening_point と同じ位置を返す",
+  "findFlatteningPoint: the 3 golden cases return the same position as upstream's find_flattening_point",
   () => {
     if (trimBytes === undefined || trimMetaText === undefined) {
       throw new Error(
@@ -276,47 +299,50 @@ test.skipIf(!GOLDEN_AVAILABLE)(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     );
     const meta = JSON.parse(trimMetaText) as TrimMeta;
-    // 実 z 2 本は「切らない」側、合成 1 本は「ちょうど 121 を返す」側（恒真化の遮断）。
+    // The 2 real z are on the "do not cut" side, the 1 synthetic one on the "returns exactly 121"
+    // side (guarding against a vacuous check).
     assertEquals(Object.keys(meta.trim).sort(), ["z-full", "z-no-ref", "z-silent-tail"]);
     for (const [name, expected] of Object.entries(meta.trim)) {
       const spec = file.tensors.get(name);
-      if (spec === undefined) throw new Error(`golden trim に '${name}' が無い`);
+      if (spec === undefined) throw new Error(`golden trim has no '${name}'`);
       const latent = new Float32Array(
         file.buffer.slice(spec.byteOffset, spec.byteOffset + spec.byteLength),
       );
-      assertEquals(spec.shape, [1, expected.frames, LATENT_DIM], `${name} の形`);
+      assertEquals(spec.shape, [1, expected.frames, LATENT_DIM], `shape of ${name}`);
       assertEquals(
         findFlatteningPoint(latent, expected.frames, LATENT_DIM),
         expected.point,
-        `${name}: 上流と違う位置を返した`,
+        `${name}: returned a position different from upstream`,
       );
     }
   },
 );
 
-test("findFlatteningPoint: 全部 0 の latent は先頭で平坦（窓が全部 pad と同じ）", () => {
+test("findFlatteningPoint: an all-zero latent is flat from the start (every window equals the pad)", () => {
   assertEquals(findFlatteningPoint(new Float32Array(10 * LATENT_DIM), 10, LATENT_DIM), 0);
 });
 
-test("findFlatteningPoint: 値が一定でも 0 近傍でなければ平坦としない（窓は pad ごと見る）", () => {
-  // 全要素 1.0。末尾の窓は 0 pad で平均が薄まる（i=9 で mean 0.05 < 0.1）が、実在行と pad の
-  // 差が std 0.218 を作るので通らない — 見つからず `frames` が返る。
+test("findFlatteningPoint: a constant value that is not near 0 is not flat (the window includes the pad)", () => {
+  // Every element 1.0. The tail window's mean is diluted by the zero pad (mean 0.05 < 0.1 at i=9),
+  // but the difference between real rows and the pad gives std 0.218, so it does not pass — nothing
+  // is found and `frames` is returned.
   const flat = new Float32Array(10 * LATENT_DIM).fill(1);
   assertEquals(findFlatteningPoint(flat, 10, LATENT_DIM), 10);
 });
 
-test("findFlatteningPoint: 末尾を 0 にした位置をそのまま返す（golden 合成ケースの縮小版）", () => {
+test("findFlatteningPoint: returns the position from which the tail was zeroed (a reduced version of the golden synthetic case)", () => {
   const frames = 40;
   const silentFrom = 25;
   const latent = new Float32Array(frames * LATENT_DIM);
-  // 平均 0・分散 1 の交互符号（mean のしきい値では落ちず std だけで落ちる形）。
+  // Alternating signs with mean 0 and variance 1 (a shape that the mean threshold does not catch,
+  // only std).
   for (let index = 0; index < silentFrom * LATENT_DIM; index += 1) {
     latent[index] = index % 2 === 0 ? 1 : -1;
   }
   assertEquals(findFlatteningPoint(latent, frames, LATENT_DIM), silentFrom);
 });
 
-test("findFlatteningPoint: 要素数が frames × latentDim と違えば落とす", () => {
+test("findFlatteningPoint: rejects an element count different from frames × latentDim", () => {
   assertThrows(
     () => findFlatteningPoint(new Float32Array(31), 1, LATENT_DIM),
     Error,
@@ -324,13 +350,13 @@ test("findFlatteningPoint: 要素数が frames × latentDim と違えば落と�
   );
 });
 
-test("trimmedSampleCount: 短いほうを採る（上流 max_samples）", () => {
-  assertEquals(trimmedSampleCount(161 * HOP, 121, HOP), 121 * HOP, "トリムが効く");
-  assertEquals(trimmedSampleCount(161 * HOP, 161, HOP), 161 * HOP, "切らない");
-  // 秒指定でフレーム全長より短い切り出しが要求されているときは、そちらが勝つ。
+test("trimmedSampleCount: takes the shorter one (upstream's max_samples)", () => {
+  assertEquals(trimmedSampleCount(161 * HOP, 121, HOP), 121 * HOP, "the trim applies");
+  assertEquals(trimmedSampleCount(161 * HOP, 161, HOP), 161 * HOP, "not cut");
+  // When a seconds setting requests a cut shorter than the full frame length, that wins.
   assertEquals(trimmedSampleCount(48_192, 26, HOP), 48_192);
 });
 
-test("trimmedSampleCount: 先頭から平坦（0）のときだけ切らない（0 サンプルを返さない）", () => {
+test("trimmedSampleCount: does not cut only when it is flat (0) from the start (never returns 0 samples)", () => {
   assertEquals(trimmedSampleCount(161 * HOP, 0, HOP), 161 * HOP);
 });

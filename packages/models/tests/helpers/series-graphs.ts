@@ -1,22 +1,27 @@
 /**
- * 系列出力（`outputs/series/`）の容器が名乗るグラフ名の表 — **この 1 本が正本**。
+ * The table of graph names the containers of the series output (`outputs/series/`) carry — **this
+ * one file is the source of truth**.
  *
- * MUST: 系列を読むテスト・tools・examples はグラフ名を綴らず、ここから引く。門番
- * （`e2e_assets_gate_test.ts`）と各 e2e が別々に表を持つと、片方だけ書き換えても誰も落ちない
- * 状態になる（門番は「期待どおり」と言い、e2e は別のグラフを読む）。
+ * MUST: tests, tools and examples that read series do not spell graph names; they look them up
+ * here. If the assets gate (`e2e_assets_gate_test.ts`) and each e2e kept their own tables, changing
+ * only one of them would fail nothing (the gate says "as expected" while the e2e reads another
+ * graph).
  *
- * グラフ名は**配布 manifest の weights キー**であって、置き場のディレクトリ名ではない
- * （container-v1 §2.1）。両者は綴りが一致しない — `caption-proj` のグラフは `caption_proj`・
- * `deberta/full-24layer` のグラフは `text_encoder`・`dacvae` の `decoder` / `encoder` は
- * `codec_decoder` / `codec_encoder`。ディレクトリ名からグラフ名を導く規則を書くと、家族
- * ごとの例外が読み手の数だけ生えるので、表を引く形に固定する。
+ * A graph name is the **weights key of the distribution manifest**, not the name of the directory
+ * it lives in (container-v1 §2.1). The two are spelled differently — the graph of `caption-proj`
+ * is `caption_proj`, the graph of `deberta/full-24layer` is `text_encoder`, and `decoder` /
+ * `encoder` of `dacvae` are `codec_decoder` / `codec_encoder`. A rule that derives graph names from
+ * directory names would grow per-family exceptions for every reader, so the shape is fixed to a
+ * table lookup.
  */
 
 /**
- * 系列ディレクトリ名 → 部品ディレクトリ名（重みが系列の根直下なら空文字）→ グラフ名。
+ * Series directory name → component directory name (empty string when the weights sit directly
+ * in the series root) → graph name.
  *
- * NOTE: 載るのは**実重み e2e が実際に開く系列**。`outputs/series/` にはこれ以外の系列
- * （退役した実験・研究記録の `-probe`）も置かれうるが、読み手がいないものは表に要らない。
+ * NOTE: the table lists **the series the real-weight e2e actually open**. `outputs/series/` may
+ * hold other series too (retired experiments, the `-probe` of research records), but those without
+ * a reader do not need to be in the table.
  */
 export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
   "birefnet-hr-1024-f16": { "": "matte" },
@@ -92,34 +97,36 @@ export const SERIES_GRAPHS: Readonly<Record<string, Readonly<Record<string, stri
 };
 
 /**
- * その系列の「部品ディレクトリ → グラフ名」（表に無い系列は fail loudly）。
+ * The series' "component directory → graph name" (fails loudly for a series not in the table).
  *
- * ターゲットの列挙と表の突合（`Object.keys(...)` の等値検査）を持つ e2e のための口。
+ * The entry point for e2e that enumerate targets and check them against the table (an equality
+ * check on `Object.keys(...)`).
  */
 export const seriesComponents = (series: string): Readonly<Record<string, string>> => {
   if (!Object.hasOwn(SERIES_GRAPHS, series)) {
     throw new Error(
-      `系列 ${series} がグラフ名の表に無い（helpers/series-graphs.ts）。` +
-        `在るのは ${Object.keys(SERIES_GRAPHS).join(" / ")}。`,
+      `series ${series} is not in the graph-name table (helpers/series-graphs.ts). ` +
+        `Known series: ${Object.keys(SERIES_GRAPHS).join(" / ")}.`,
     );
   }
   return SERIES_GRAPHS[series];
 };
 
 /**
- * 系列 + 部品ディレクトリ（重みが根直下なら省略）の容器が名乗るグラフ名。
+ * The graph name the container of a series + component directory carries (the component is
+ * omitted when the weights sit directly in the root).
  *
- * MUST: 表に無い組み合わせは fail loudly。`undefined` を `prepareContainer` へ渡すと型検査で
- * 止まるが、綴り違いを**別のグラフ名として黙って**渡す形（`?? "model"` のような既定値）は
- * 数値が通ってしまうので作らない。
+ * MUST: a combination not in the table fails loudly. Passing `undefined` to `prepareContainer` is
+ * stopped by the type checker, but a form that **silently** passes a misspelling **as another
+ * graph name** (a default such as `?? "model"`) lets the numbers pass, so it is not written.
  */
 export const seriesGraph = (series: string, component = ""): string => {
   const components = seriesComponents(series);
   if (!Object.hasOwn(components, component)) {
     const known = Object.keys(components).map((name) => (name === "" ? "<根直下>" : name));
     throw new Error(
-      `系列 ${series} の部品 ${component === "" ? "<根直下>" : component} がグラフ名の表に無い` +
-        `（helpers/series-graphs.ts）。在るのは ${known.join(" / ")}。`,
+      `series ${series} has no component ${component === "" ? "<根直下>" : component} in the graph-name table` +
+        ` (helpers/series-graphs.ts). Known components: ${known.join(" / ")}.`,
     );
   }
   return components[component];

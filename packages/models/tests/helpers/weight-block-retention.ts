@@ -1,17 +1,20 @@
 /**
- * 容器のバイト列の常駐量の実測（`container_loading_test.ts` が別プロセスで起動する台本）。
+ * Measures how many container bytes stay resident (a script `container_loading_test.ts` launches in
+ * a separate process).
  *
- * MUST: 別プロセスなのは `--v8-flags=--expose-gc` が要るため — `deno test` 側にその旗を
- * 立てる口が無く、旗が無いと「到達不能になったバイト列がまだ回収されていないだけ」と
- * 「握られたまま」を区別できない（測る前に必ず gc を 1 回踏む）。
+ * MUST: it is a separate process because it needs `--v8-flags=--expose-gc` — `deno test` has no way
+ * to set that flag, and without it "bytes that became unreachable but are not collected yet" cannot
+ * be told apart from "bytes still held" (gc always runs once before measuring).
  *
- * 測るのは `process.memoryUsage().external`（ArrayBuffer の実体の合計）。**キャッシュの中身を
- * 明示的に捨ててから**測ることで、残る外部メモリ = models 側が握っているバイト列だけになる。
- * `open(key)` は保持したまま測る（部品の供給口が生きている限り常駐する、という元の姿を
- * 再現するため）。コンテナ経路では供給口が握るのは**区間読みの口**だけで、重みの block は
- * Session を組むその瞬間にしか読まれない — だから重み 1 本ぶんが丸ごと残ったら回帰である。
+ * What is measured is `process.memoryUsage().external` (the total of ArrayBuffer backing stores).
+ * Measuring **after explicitly dropping the cache's contents** leaves the remaining external memory
+ * = only the bytes models holds. `open(key)` is kept while measuring (to reproduce the original
+ * situation: the bytes stay resident as long as a component's supply entry is alive). On the
+ * container path the supply entry holds only **a range reader**, and the weight blocks are read
+ * only at the moment the Session is built — so one whole weight staying resident is a regression.
  *
- * 失敗時は理由を stderr へ出して非ゼロ終了する（呼び手はその出力をそのまま見せる）。
+ * On failure it writes the reason to stderr and exits non-zero (the caller shows that output as
+ * is).
  */
 
 import { loadContainerComponents } from "../../src/hub/components.ts";
@@ -25,13 +28,16 @@ const HUB_URL = "https://hub.test";
 const REPO = "karume-test/retention";
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-/** 重み 1 本の大きさ（2048² f32 = 16MiB）。 */
+/** The size of one weight (2048² f32 = 16MiB). */
 const WIDTH = 2048;
 const WEIGHT_BYTES = WIDTH * WIDTH * 4;
-/** 合格線: gc 後に残ってよい外部メモリ。握っていれば 16MiB が丸ごと残る。 */
+/**
+ * The pass line: the external memory allowed to remain after gc. Holding the weight leaves the
+ * whole 16MiB.
+ */
 const ALLOWED_RESIDENT_BYTES = 4 * 1024 * 1024;
 
-/** `linear` 1 段。`w`（16MiB）が重みの block に載る。 */
+/** One `linear` stage. `w` (16MiB) goes in a weight block. */
 const component = (): ModelInput => ({
   graphs: {
     dit: parseIrDeclarationValue({
@@ -72,11 +78,11 @@ const component = (): ModelInput => ({
 
 const mib = (bytes: number): string => `${(bytes / 1024 / 1024).toFixed(1)}MiB`;
 
-/** 到達不能になった ArrayBuffer を確実に回収させてから外部メモリを読む。 */
+/** Reads external memory after making sure unreachable ArrayBuffers are collected. */
 const externalAfterGc = (): number => {
   const collect = (globalThis as { gc?: () => void }).gc;
   if (collect === undefined) {
-    console.error("weight-block-retention: --v8-flags=--expose-gc 付きで起動していない");
+    console.error("weight-block-retention: not launched with --v8-flags=--expose-gc");
     process.exit(2);
   }
   collect();
@@ -85,9 +91,10 @@ const externalAfterGc = (): number => {
 };
 
 /**
- * 配る現物の表を作る。**フィクスチャのバイト列を `main` の枠に置かない**ための独立関数 —
- * 実行中の関数のローカルは（内側から参照されていなくても）その枠が生きている限り回収されず、
- * 16MiB のフィクスチャがそのまま測定値へ乗ってしまう。
+ * Builds the table of served files. A separate function so that **the fixture's bytes are not
+ * placed in `main`'s frame** — a running function's locals are not collected while its frame is
+ * alive (even when nothing inside refers to them), and the 16MiB fixture would land in the
+ * measurement as is.
  */
 const buildServed = async (): Promise<RepoSpec> => {
   const container = await serveContainer("dit/model.f32", component(), {
@@ -114,7 +121,8 @@ const main = async (): Promise<void> => {
   // Node keeps the imported module sources as external strings (about 10 MiB for hub + models), so
   // the retained bytes are measured as the growth over this baseline, not as an absolute amount.
   const baseline = externalAfterGc();
-  // MUST: `RepoSpec` を `main` の枠へ束縛しない（フィクスチャのバイト列が測定値へ乗る）。
+  // MUST: do not bind `RepoSpec` in `main`'s frame (the fixture's bytes would land in the
+  // measurement).
   const mock = serveRepos([await buildServed()]);
   const { fetch } = mock;
 
@@ -126,33 +134,35 @@ const main = async (): Promise<void> => {
     loaded,
     resolveSelection(loaded.manifest),
     ["dit"],
-    // 家族 admission の席（この台本が測るのは常駐量なので、門は 1 つも置かない）。
+    // The family admission slot (this script measures residency, so it places no check).
     () => undefined,
     hubOptions,
   );
 
-  // 供給口は保持したまま、models の外にあるバイト列（フィクスチャ・キャッシュ）を捨てる —
-  // 残る外部メモリ = models 側が握っているぶん、という等式を成立させるため（疑似 HF の表は
-  // `fetch` の閉包が握るので、取得面が生きている限り勝手には消えない）。
+  // Drop the bytes outside models (the fixture, the cache) while keeping the supply entry — so that
+  // the equation "remaining external memory = what models holds" holds (the fake HF table is held
+  // by the `fetch` closure, so it does not vanish on its own while the fetch surface is alive).
   mock.clear();
   for (const cache of caches.namespaces.values()) cache.entries.clear();
 
   const resident = externalAfterGc() - baseline;
-  // `open` を gc の後まで生かす（ここで初めて到達可能性が切れる）。
+  // Keep `open` alive until after gc (reachability is cut only here).
   if (open("dit").graph.outputs[0] !== "y") {
-    console.error("weight-block-retention: グラフ宣言が読めない（フィクスチャの誤り）");
+    console.error("weight-block-retention: cannot read the graph declaration (fixture error)");
     process.exit(2);
   }
 
   if (resident > ALLOWED_RESIDENT_BYTES) {
     console.error(
-      `weight-block-retention: 容器のバイト列が常駐している` +
-        `（external の増分=${mib(resident)} > 許容 ${mib(ALLOWED_RESIDENT_BYTES)}` +
-        ` / 重み 1 本 ${mib(WEIGHT_BYTES)}）`,
+      `weight-block-retention: container bytes stay resident` +
+        ` (external growth=${mib(resident)} > allowed ${mib(ALLOWED_RESIDENT_BYTES)}` +
+        ` / one weight ${mib(WEIGHT_BYTES)})`,
     );
     process.exit(1);
   }
-  console.log(`weight-block-retention: external の増分=${mib(resident)}（基準 ${mib(baseline)}）`);
+  console.log(
+    `weight-block-retention: external growth=${mib(resident)} (baseline ${mib(baseline)})`,
+  );
 };
 
 await main();

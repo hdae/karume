@@ -5,27 +5,31 @@
  * `e2e_gemma4_reference_test.ts` / `e2e_gemma4_qat_reference_test.ts` /
  * `e2e_gemma4_qat_mobile_reference_test.ts`).
  *
- * ## 何を固定するのか
+ * ## What is pinned
  *
- * 固定プロンプト 1 本（{@link REFERENCE_PROMPT}）を greedy で {@link REFERENCE_MAX_NEW_TOKENS}
- * token まで回した **token id 列**。LLM の出口は離散の id 列なので、PNG / WAV の sha 門と同じく
- * 出口の成果物そのものを固定する（ADR 0106）。主張は「同じ機・同じ席で 1 token も動いていない」
- * だけで、クロスデバイスの同一性も品質も言わない。
+ * The **token id sequence** of one fixed prompt ({@link REFERENCE_PROMPT}) run greedily up to
+ * {@link REFERENCE_MAX_NEW_TOKENS} tokens. An LLM's output is a discrete id sequence, so, like the
+ * sha checks of PNG / WAV, the output artifact itself is pinned (ADR 0106). The claim is only "not
+ * a single token moved on the same machine with the same preset"; it says nothing about
+ * cross-device identity or quality.
  *
- * ## 行のクラス（参照行 / 実用行）
+ * ## Row classes (reference rows / practical rows)
  *
- * 行のクラスは**席の `session` から導かれる**（ADR 0110 決定 7）: `session` が空の席は参照行
- * （参照層の凍結 — 変わったら退行）、非空の席は実用行（退行 + 決定性の検出器 — 実用層を変えた
- * コミットでは同じコミットで `KARUME_REFERENCE=rewrite` する）。呼び手は席を固定表で持たず、
- * {@link mirrorSeats} でミラーの manifest から**全 quant 席**を列挙する — 行のクラスもそこで
- * 導くので、導出そのものが正本になる（配布形に席が増えれば行も増え、席の `session` が変われば
- * クラスも追従する。固定表だと、配布済みの席に行が無い穴が黙って残る）。
+ * A row's class is **derived from the preset's `session`** (ADR 0110 decision 7): a preset with an
+ * empty `session` is a reference row (a freeze of the reference layer — a change is a regression),
+ * a non-empty one is a practical row (a regression + determinism detector — a commit that changes
+ * the practical layer runs `KARUME_REFERENCE=rewrite` in the same commit). Callers do not keep the
+ * presets in a fixed table; {@link mirrorSeats} enumerates **every quant preset** from the mirror's
+ * manifest — the row class is derived there too, so the derivation itself is the source of truth
+ * (a preset added to the distribution adds a row, and a change in a preset's `session` changes its
+ * class with it. A fixed table would silently leave a hole where a distributed preset has no row).
  *
- * ## 実物
+ * ## The artifact
  *
- * `{ "ids": [...] }` の JSON テキスト（2 スペース・末尾改行 — {@link seatArtifactBytes}）。sha は
- * このバイト列に対して採る。復号後の本文と停止理由は `results.json` の `note` にだけ載せる —
- * 本文は id 列から導かれる（同じ変化を 2 度数えない）ので、実物には入れない。
+ * A JSON text `{ "ids": [...] }` (2-space indent, trailing newline — {@link seatArtifactBytes}).
+ * The sha is taken over these bytes. The decoded text and the stop reason go only into the `note`
+ * of `results.json` — the text is derived from the id sequence (the same change is not counted
+ * twice), so it is not put in the artifact.
  */
 
 import { readTextFileSync } from "@karume/test-support/fs";
@@ -44,12 +48,15 @@ import { type Results, runRecordedCase } from "../../../runtime/tests/helpers/re
 import { mirrorAvailable } from "./gemma-mirror.ts";
 
 /**
- * 固定プロンプト（英文 1 本）。{@link REFERENCE_MAX_NEW_TOKENS} を超える応答が出る依頼にしてある —
- * 早く EOS で閉じるプロンプトだと、固定される id 列が短くなって門が弱くなる。
+ * The fixed prompt (one English text). It asks for a response longer than
+ * {@link REFERENCE_MAX_NEW_TOKENS} — with a prompt that closes early with EOS, the pinned id
+ * sequence would be shorter and the check weaker.
  */
 export const REFERENCE_PROMPT = "Explain in about five sentences why the sky is blue.";
 
-/** 抽選する token 数の上限（停止 token もこの数に含まれる — `ChatOptions.maxNewTokens`）。 */
+/**
+ * The upper bound on sampled tokens (the stop token counts toward it — `ChatOptions.maxNewTokens`).
+ */
 export const REFERENCE_MAX_NEW_TOKENS = 64;
 
 /** The pipeline surface a run needs (common to `gemma.Pipeline` and `gemma4QatMobile.Pipeline`). */
@@ -58,30 +65,35 @@ export type ChatPipeline = {
   dispose(): Promise<void>;
 };
 
-/** 行のクラス（モジュール doc の「行のクラス」）。 */
+/** A row's class ("Row classes" in the module doc). */
 export type SeatRow = "reference" | "practical";
 
-/** quant 席 1 つ（model × quant）と、その行のクラス（席の `session` から導いたもの）。 */
+/** One quant preset (model × quant) and its row class (derived from the preset's `session`). */
 export type Seat<Model extends string = string> = {
   readonly model: Model;
   readonly quant: string;
   readonly row: SeatRow;
 };
 
-/** 参照値のケース ID（`<model>/<quant>`）。 */
+/** The case ID of a reference value (`<model>/<quant>`). */
 export const seatCaseId = (seat: Pick<Seat, "model" | "quant">): string =>
   `${seat.model}/${seat.quant}`;
 
-/** 実物のファイル名（結果の席からの相対 — `/` を含められないので `-` で繋ぐ）。 */
+/**
+ * The artifact's file name (relative to the results directory — `/` cannot appear, so the parts are
+ * joined with `-`).
+ */
 export const seatArtifactName = (seat: Pick<Seat, "model" | "quant">): string =>
   `${seat.model}-${seat.quant}.json`;
 
 /**
- * ミラーの manifest から**全 model × 全 quant 席**を列挙し、行のクラスを席の `session` の空非空
- * から導く（モジュール doc「行のクラス」）。テストの登録時に呼ぶので同期で読む。
+ * Enumerates **every model × every quant preset** from the mirror's manifest and derives each row's
+ * class from whether the preset's `session` is empty ("Row classes" in the module doc). Called when
+ * tests are registered, so it reads synchronously.
  *
- * ミラーが無い・この版が読めない配布形（`mirrorAvailable` が偽）なら空集合 — 呼び手は理由を
- * 名乗って SKIP する。並びは manifest の宣言順（model → quant）。
+ * An empty set when the mirror is missing or its distribution cannot be read by this version
+ * (`mirrorAvailable` is false) — callers SKIP and give the reason. The order is the manifest's
+ * declaration order (model → quant).
  */
 export const mirrorSeats = (mirror: URL): readonly Seat[] => {
   if (!mirrorAvailable(mirror)) return [];
@@ -95,21 +107,22 @@ export const mirrorSeats = (mirror: URL): readonly Seat[] => {
   );
 };
 
-/** 1 席ぶんの走行の結果。 */
+/** The result of running one preset. */
 export type SeatRun = {
-  /** 生成 token の id 列（停止 token は含まない — `onToken` が受けた順）。 */
+  /** The generated token ids (without the stop token — in the order `onToken` received them). */
   readonly ids: readonly number[];
   readonly stop: ChatStop;
-  /** 復号後の本文（`note` に載せるだけ — 実物には入れない）。 */
+  /** The decoded text (only put in the `note` — not in the artifact). */
   readonly text: string;
 };
 
 /**
- * 1 席ぶんを走らせる: 開く → 固定プロンプト 1 本を greedy で回す → 解放する。
+ * Runs one preset: open → run the fixed prompt once, greedily → release.
  *
- * `speculative: false` は行を**席の数値だけ**にするため（drafter が居ると投機の verify 形を
- * 通る token が混ざる。drafter との同一性は `e2e_gemma4_speculative_test.ts` が別に門にしている）。
- * drafter を持たない pipeline でも `false` は通る（明示の取り消しは drafter を要求しない）。
+ * `speculative: false` keeps the row to **the preset's own numerics** (with a drafter, tokens that
+ * went through the speculative verify form would be mixed in. Identity with the drafter is checked
+ * separately by `e2e_gemma4_speculative_test.ts`). `false` also passes on a pipeline without a
+ * drafter (an explicit opt-out does not require a drafter).
  */
 export const runSeat = async <Model extends string>(
   open: (choice: { readonly model: Model; readonly quant: string }) => Promise<ChatPipeline>,
@@ -132,23 +145,28 @@ export const runSeat = async <Model extends string>(
   }
 };
 
-/** 実物のバイト列（`{ "ids": [...] }`・2 スペース・末尾改行 — sha はこのバイト列に対して採る）。 */
+/**
+ * The artifact's bytes (`{ "ids": [...] }`, 2-space indent, trailing newline — the sha is taken
+ * over these bytes).
+ */
 export const seatArtifactBytes = (ids: readonly number[]): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(`${JSON.stringify({ ids }, undefined, 2)}\n`);
 
-/** `results.json` の `note`（停止理由・token 数・本文）。 */
+/** The `note` of `results.json` (stop reason, token count, text). */
 const seatNote = (run: SeatRun): string =>
   `stop ${run.stop.reason} / ${run.stop.tokens} tokens / text ${JSON.stringify(run.text)}`;
 
 /**
- * 1 席の sha 門の本体: アダプタの同一性 → 走行 → 門の強さの前提（上限まで生成した）→ 実物を
- * 書いて突き合わせる → 決着を積む → **積んだ後に**落とす（先に投げると実測 sha が結果に残らない）。
+ * The body of one preset's sha check: adapter identity → run → the precondition of the check's
+ * strength (it generated up to the limit) → write the artifact and compare → record the settlement
+ * → fail **after recording** (throwing first would leave the measured sha out of the results).
  *
- * 全体を `runRecordedCase` で包む — どこで投げても `fail` の決着が席に残る（決着の無いまま
- * 抜けると、同じ日の前回の走行の決着が居座る）。
+ * The whole is wrapped in `runRecordedCase` — wherever it throws, a `fail` settlement stays in the
+ * results (leaving without a settlement would leave the settlement of an earlier run of the same
+ * day in place).
  *
- * 呼び手はこのケースを `ignore: !RUNNABLE || references.lacksReference(id)` で登録する
- * （比較モードで行が無いケースはここまで来ない — `References.check` が投げる）。
+ * Callers register this case with `ignore: !RUNNABLE || references.lacksReference(id)` (in compare
+ * mode a case without a row never gets here — `References.check` throws).
  */
 export const settleSeatReference = async <Model extends string>(context: {
   readonly references: References;
@@ -161,7 +179,7 @@ export const settleSeatReference = async <Model extends string>(context: {
 }): Promise<void> => {
   const { references, results, seat, open } = context;
   const id = seatCaseId(seat);
-  /** sha の決着（記録の後で不一致を落とすために外へ持ち出す）。 */
+  /** The sha settlement (taken outside so that a mismatch fails after recording). */
   let settlement: ReferenceSettlement | undefined;
   await runRecordedCase(
     results,
@@ -170,17 +188,19 @@ export const settleSeatReference = async <Model extends string>(context: {
       failureNote: (cause) => (cause instanceof Error ? cause.message : String(cause)),
     },
     async () => {
-      // 参照値を書きうる経路なので、キーを採ったアダプタと実行アダプタの同一性を先に見る
-      // （pipeline は内部で acquireGpu するので、自分では GpuContext を持たない）。
+      // This path can write reference values, so the identity of the adapter the key was taken on
+      // and the running adapter is checked first (the pipeline calls acquireGpu internally, so we
+      // do not hold a GpuContext ourselves).
       await assertRunningAdapter();
       const run = await runSeat(open, seat);
-      // 門の強さの前提（上限まで生成した = 固定した id 列が {@link REFERENCE_MAX_NEW_TOKENS} 本ある）。
-      // settle より前に見る — 早く EOS で閉じた走行から行を作らない。本文は診断文に載る（失敗の
-      // note になる）。
+      // The precondition of the check's strength (it generated up to the limit = the pinned id
+      // sequence has {@link REFERENCE_MAX_NEW_TOKENS} ids). Checked before settling — no row is
+      // made from a run that closed early with EOS. The text goes into the diagnostic (it becomes
+      // the failure's note).
       assert(
         run.stop.reason === "max-tokens",
-        `${id}: 応答が ${run.ids.length} token で閉じた（${seatNote(run)}）— ` +
-          `固定プロンプトは ${REFERENCE_MAX_NEW_TOKENS} token を超える応答を出す前提`,
+        `${id}: the response closed after ${run.ids.length} tokens (${seatNote(run)}) — ` +
+          `the fixed prompt is expected to produce a response longer than ${REFERENCE_MAX_NEW_TOKENS} tokens`,
       );
       const artifact = seatArtifactName(seat);
       settlement = await settleReference(references, results, {

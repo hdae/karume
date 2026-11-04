@@ -1,12 +1,13 @@
 /**
- * Wan の動画 VAE の chunk 列の e2e（2.1 の `e2e_wan_vae_tiles_test.ts`・2.2 の
- * `e2e_wan_ti2v_vae_tiles_test.ts`）が共有するもの: フィクスチャの読み口・故障注入の口を持つ chunk
- * ループ・VRAM の内訳・ビット一致。
+ * What the e2e of the Wan video VAE's chunk sequence (2.1's `e2e_wan_vae_tiles_test.ts`, 2.2's
+ * `e2e_wan_ti2v_vae_tiles_test.ts`) share: the fixture reader, a chunk loop with a fault-injection
+ * entry, the VRAM breakdown and bit equality.
  *
- * 製品の経路は `src/wan/vae-chunks.ts` の `decodeWanVaeTile`。ここのループはそれと同じ部品で組み、
- * 故障なしなら製品の経路と Uint32 で一致することを各 e2e が門にする（注入の結果が製品の経路を
- * 代表している担保）。2 つの世代で同じループを使うのは、注入の形を世代ごとに育てて片方だけ
- * 黙ってずれる形を作らないため。
+ * The product path is `decodeWanVaeTile` of `src/wan/vae-chunks.ts`. The loop here is built from
+ * the same parts, and each e2e checks that without a fault it matches the product path bit for bit
+ * as Uint32 (the guarantee that the injected results represent the product path). Both generations
+ * use the same loop so that the injection's shape is not grown per generation with one side
+ * silently drifting.
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -27,8 +28,8 @@ import {
 } from "../../src/wan/vae-chunks.ts";
 
 /**
- * chunk 列のフィクスチャ（逆正規化済みの潜在 `[z,F,t,t]` と上流のクランプ前の出力・ファイルのメタ —
- * 書き手は `tools/export-recipes/wan/export_vae.py`）。
+ * The chunk-sequence fixture (the denormalized latent `[z,F,t,t]`, upstream's output before the
+ * clamp, and the file's metadata — the writer is `tools/export-recipes/wan/export_vae.py`).
  */
 export type Fixture = {
   readonly latents: Float32Array<ArrayBuffer>;
@@ -45,16 +46,13 @@ export const readFixture = async (url: URL): Promise<Fixture> => {
   );
   const view = (key: string): Float32Array<ArrayBuffer> => {
     const tensor = file.tensors.get(key);
-    assert(
-      tensor !== undefined && tensor.dtype === "F32",
-      `${url.pathname}: '${key}' が F32 で無い`,
-    );
+    assert(tensor !== undefined && tensor.dtype === "F32", `${url.pathname}: '${key}' is not F32`);
     return new Float32Array(file.buffer, tensor.byteOffset, tensor.byteLength / 4);
   };
   const frames = file.tensors.get("frames");
-  assert(frames !== undefined, `${url.pathname}: 'frames' が無い`);
+  assert(frames !== undefined, `${url.pathname}: 'frames' is missing`);
   const latents = file.tensors.get("latents");
-  assert(latents !== undefined, `${url.pathname}: 'latents' が無い`);
+  assert(latents !== undefined, `${url.pathname}: 'latents' is missing`);
   return {
     latents: view("latents"),
     frames: view("frames"),
@@ -64,7 +62,7 @@ export const readFixture = async (url: URL): Promise<Fixture> => {
   };
 };
 
-/** 故障注入の種類（無し = 製品の経路と同じ）。 */
+/** The kind of injected fault (none = the same as the product path). */
 export type Fault =
   | { readonly kind: "none" }
   | { readonly kind: "skip-zero" }
@@ -73,10 +71,12 @@ export type Fault =
   | { readonly kind: "swap-cache-frames" };
 
 /**
- * 製品の経路（`decodeWanVaeTile`）と同じ部品で組んだ chunk ループ（故障注入の口）。
+ * A chunk loop built from the same parts as the product path (`decodeWanVaeTile`) (the
+ * fault-injection entry).
  *
- * `swap-cache-frames` だけは first の後で区間を閉じ、cache の 2 フレームをホストで入れ替えてから
- * 残りを別の区間で回す（区間の切れ目は値を変えない — 故障なしの一致の門は 1 区間の形で見る）。
+ * Only `swap-cache-frames` closes the batch after the first chunk, swaps the cache's 2 frames on
+ * the host, then runs the rest in another batch (a batch boundary does not change values — the
+ * no-fault equality check looks at the single-batch form).
  */
 export const decodeWithFault = async (
   gpu: GpuContext,
@@ -123,7 +123,7 @@ export const decodeWithFault = async (
     await runRange(0, 1);
     for (const [name, resident] of Object.entries(caches.inputs(layout.next))) {
       const shape = layout.cacheShapes.get(name);
-      assert(shape !== undefined, `cache '${name}' の形が layout に無い`);
+      assert(shape !== undefined, `cache '${name}' has no shape in the layout`);
       await swapCacheFrames(resident, shape[2] * shape[3]);
     }
     await runRange(1, chunks);
@@ -137,8 +137,8 @@ export const decodeWithFault = async (
 };
 
 /**
- * cache `[C,2,h,w]` の 2 フレームの順をホストで入れ替える（故障注入）。行優先なのでチャネル c の
- * 2 フレームは連続した `2·plane`（plane = h·w）。
+ * Swaps the order of the 2 frames of a cache `[C,2,h,w]` on the host (fault injection). It is
+ * row-major, so channel c's 2 frames are a contiguous `2·plane` (plane = h·w).
  */
 const swapCacheFrames = async (resident: ResidentTensor, plane: number): Promise<void> => {
   const values = new Float32Array(await resident.read());
@@ -150,7 +150,7 @@ const swapCacheFrames = async (resident: ResidentTensor, plane: number): Promise
   resident.write(swapped);
 };
 
-/** VRAM の内訳（診断から — 生きている確保の和）。 */
+/** The VRAM breakdown (from the diagnostics — the sum of the live allocations). */
 export const vramBreakdown = (
   first: SessionDiagnostics,
   next: SessionDiagnostics,
@@ -167,7 +167,7 @@ export const vramBreakdown = (
     nextBacking: next.planBacking.residentBytes + next.planBacking.inputBytes,
     caches: caches.cacheBytes,
     frames: caches.frameBytes,
-    // finishAndRead の staging（フレームの合計 — 決着の間だけ生きる）。
+    // finishAndRead's staging (the total of the frames — alive only while it settles).
     readbackStaging: caches.frameBytes,
   };
   return {

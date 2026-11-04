@@ -10,10 +10,10 @@ import { pleFixture } from "./helpers/ple-fixture.ts";
 type Graph = Parameters<typeof admitGemma4Qat>[0];
 
 /**
- * 構造門を 1 分岐ずつ踏むための改変（1 つの fault で 1 つの throw だけを起こす）。
+ * Modifications that exercise the structural checks one branch at a time (one fault triggers exactly one throw).
  *
- * `undefined` は正常系。`head-without-srq` だけは**通る**改変で、共有 head の前後に SRQ が
- * 無い形（公式 checkpoint の lm_head は SRQ scale が 0 = 未較正）を表す。
+ * `undefined` is the normal case. Only `head-without-srq` is a modification that **passes**: it represents the shape
+ * without SRQ around the shared head (the official checkpoint's lm_head has SRQ scales of 0 = uncalibrated).
  */
 type Fault =
   | "no-per-layer-inputs"
@@ -34,7 +34,7 @@ type Fault =
   | "extra-consumer"
   | "head-without-srq";
 
-/** f32 linear が 1 本だけ引く重み（門はこの initializer 名で projection を名指す）。 */
+/** The weight the single f32 linear reads (the check names the projection by this initializer name). */
 const PROJECTION = "model.model.per_layer_model_projection.weight";
 
 const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
@@ -51,8 +51,8 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
     { op: "linear", ins: ["input2", "head"], outs: ["linear2"] },
     { op: "static_quantize", ins: ["linear2"], outs: ["logits"] },
   ];
-  // 合流後の initializer は**名前が実体の鍵**（docs/ir-v2.md）。門が f32 projection を
-  // 名指すのもこの名前なので、宣言名は FQN そのものにする。
+  // After the merge, an initializer's **name is the key to its data** (docs/ir-v2.md). The check also names the f32
+  // projection by this name, so the declared name is the FQN itself.
   const initializers: Record<string, Graph["initializers"][string]> = {
     head: { storage: { codec: "int2-off" } },
     [PROJECTION]: { storage: { codec: "f32" } },
@@ -87,7 +87,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
       initializers.head = { storage: { codec: "int8-sym" } };
       break;
     case "no-head":
-      // head の linear が token embedding と別の重みを引く（共有 head が 0 本になる）。
+      // The head's linear reads a weight other than the token embedding (no shared head remains).
       raw = raw.map((node, i) => (i === 7 ? { ...node, ins: ["input2", "w4"] } : node));
       break;
     case "no-projection":
@@ -118,7 +118,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
       raw = [...raw, { op: "reshape", ins: ["linear4"], outs: ["spare"] }];
       break;
     case "head-without-srq":
-      // 共有 head の前後から SRQ を外す（前は reshape・後ろは直接グラフ出口）。
+      // Removes the SRQ around the shared head (a reshape before it; the graph output directly after it).
       raw = [
         ...raw.slice(0, 7),
         { op: "reshape", ins: ["input2"], outs: ["normed"] },
@@ -147,7 +147,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
   };
 };
 
-/** 索引 1 本（block 1 本の合成 — 寸法だけが門の対象なので桁は小さくてよい）。 */
+/** A single index (a synthetic one with one block — only the dimensions are checked, so the sizes can be small). */
 const pleIndexOf = (model: "e2b" | "e4b"): Gemma4PleQuantizedIndex =>
   pleFixture({
     tokens: 64,
@@ -157,9 +157,9 @@ const pleIndexOf = (model: "e2b" | "e4b"): Gemma4PleQuantizedIndex =>
     storage: model === "e2b" ? "i4" : "i2",
   }).index;
 
-describe("固定 QAT の family admission", () => {
+describe("family admission of fixed QAT", () => {
   for (const model of ["e2b", "e4b"] as const) {
-    it(`${model} の固定混成と共有 head を受ける`, () => {
+    it(`accepts ${model}'s fixed mix and shared head`, () => {
       const graph = graphOf(model);
       assertEquals(admitGemma4Qat(graph, model), model);
       assertEquals(admitGemma4Qat(graph), model);
@@ -169,15 +169,15 @@ describe("固定 QAT の family admission", () => {
         "configuration differ",
       );
     });
-    it(`${model} の共有 head は前後の SRQ が無くても受ける`, () => {
-      // 公式 checkpoint の lm_head は SRQ の scale が入出力とも 0（未較正 = 恒等）なので、
-      // recipe は恒等 SRQ を IR に挟まない。SRQ 有りの形（上の step）も受ける。
+    it(`accepts ${model}'s shared head without SRQ around it`, () => {
+      // The official checkpoint's lm_head has SRQ scales of 0 for both input and output (uncalibrated = identity),
+      // so the recipe does not insert an identity SRQ into the IR. The shape with SRQ (the step above) is accepted too.
       assertEquals(admitGemma4Qat(graphOf(model, "head-without-srq"), model), model);
     });
   }
 
-  // 拒否の 1 分岐 = 1 fault。文言まで縛るのは、条件を 1 つ書き換えたときに「別の理由で
-  // たまたま落ちる」形を緑にしないため（門の 3 条件同居を解いたのがこの表の前提）。
+  // One rejection branch = one fault. The messages are pinned too so that rewriting one condition does not turn green
+  // a case that "happens to fail for another reason" (splitting the check's three co-located conditions is this table's premise).
   const rejections: readonly [Fault, string][] = [
     ["no-per-layer-inputs", "per_layer_inputs is missing"],
     ["layers", "is not E2B 35 / E4B 42"],
@@ -197,19 +197,19 @@ describe("固定 QAT の family admission", () => {
     ["extra-consumer", "fixed SRQ before and after"],
   ];
   for (const [fault, message] of rejections) {
-    it(`改変 ${fault} を拒否する`, () => {
+    it(`rejects modification ${fault}`, () => {
       assertThrows(() => admitGemma4Qat(graphOf("e2b", fault)), Error, message);
     });
   }
 
-  it("未対応の model 名を拒否する", () => {
+  it("rejects an unsupported model name", () => {
     assertThrows(() => assertGemma4QatModel("12b"), Error, "unsupported model '12b'");
     assertEquals(assertGemma4QatModel("e2b"), "e2b");
     assertEquals(assertGemma4QatModel("e4b"), "e4b");
     assertThrows(() => admitGemma4Qat(graphOf("e2b"), "12b"), Error, "unsupported model '12b'");
   });
 
-  it("PLE の格納・層数・次元をグラフへ突合する", () => {
+  it("compares PLE storage, layer count and dimension with the graph", () => {
     for (const model of ["e2b", "e4b"] as const) {
       assertGemma4QatPle(model, graphOf(model), pleIndexOf(model));
     }
@@ -237,9 +237,10 @@ describe("固定 QAT の family admission", () => {
   });
 });
 
-describe("固定 QAT は MTP 指定を資産取得より前に拒否する", () => {
-  // 型側は `speculative?: never` で塞いであるが、JS の呼び手・`as` 経由・動的に組んだ option には
-  // 効かない。実行時の拒否が**資産を 1 byte も取る前**に出ることを、存在しない取得元で確かめる。
+describe("fixed QAT rejects an MTP setting before fetching assets", () => {
+  // The type side is blocked with `speculative?: never`, but that does not apply to JS callers, `as` casts or
+  // dynamically built options. A source that does not exist confirms the runtime rejection comes **before a single
+  // byte of assets is fetched**.
   it("fromPretrained", async () => {
     await assertRejects(
       () =>
@@ -257,12 +258,12 @@ describe("固定 QAT は MTP 指定を資産取得より前に拒否する", () 
   });
 });
 
-describe("QAT のホスト RoPE", () => {
+describe("host RoPE of QAT", () => {
   const spec = {
     sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
     full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
   } satisfies RopeSpec;
-  it("pad と回転しない次元を厳密に保存し、入力4本を返す", () => {
+  it("preserves pad and the non-rotated dimensions exactly, and returns 4 inputs", () => {
     const input = gemma4QatMobile.ropeInputs(spec, [0, 17, 127]);
     assertEquals(Object.keys(input).length, 4);
     for (const [key, tensor] of Object.entries(input)) {
@@ -287,19 +288,19 @@ describe("QAT のホスト RoPE", () => {
       }
     }
   });
-  it("角度の f32 丸めを保ち、通常 Gemma の f64 契約へ戻らない", () => {
-    // Torch f32: sin(tensor(127) * (1 / tensor(10))) = 0x3e086dee。
-    // theta=10000、次元32/256は逆周波数1/10。べき乗そのものは厳密なので角度の丸めだけを検査する。
+  it("keeps the f32 rounding of the angle and does not fall back to regular Gemma's f64 contract", () => {
+    // Torch f32: sin(tensor(127) * (1 / tensor(10))) = 0x3e086dee.
+    // theta=10000; dimension 32/256 gives an inverse frequency of 1/10. The power itself is exact, so only the rounding of the angle is checked.
     const key = "rope_sliding_attention_sin";
     assertEquals(gemma4QatMobile.ropeInputs(spec, [127])[key].data[32], 0.13323184847831726);
     assertEquals(ropeInputs(spec, [127])[key].data[32], 0.13323204219341278);
   });
-  it("両層種別 × 位置 5 点の cos / sin を golden とビット単位で突合する", async () => {
-    // 1 要素だけの検査では、逆周波数が厳密に表せる次元を選んだときに「べき乗段の丸めが
-    // 抜けても緑」になる。golden は表全体を u32 で凍結してその抜けを捕まえる。
-    // MUST: これは **karume 自身の出力の凍結**で、上流 Torch とのビット一致ではない
-    // （ADR 0097 追記 5 が全ビット一致を保証していない）。丸め契約を意図して変える
-    // ときだけ焼き直す。
+  it("compares cos / sin for both layer types × 5 positions bit for bit with the golden", async () => {
+    // A single-element check stays green "even if the rounding of the power step is missing" when a dimension whose
+    // inverse frequency is exactly representable is chosen. The golden freezes the whole table as u32 to catch that.
+    // MUST: this is **a freeze of karume's own output**, not bit agreement with upstream Torch (ADR 0097 addendum 5
+    // does not guarantee agreement in every bit). Regenerate it only when the rounding contract is changed on
+    // purpose.
     const golden = JSON.parse(
       await readTextFile(new URL("./fixtures/gemma4-qat-rope-golden.json", import.meta.url)),
     ) as {
@@ -315,18 +316,18 @@ describe("QAT のホスト RoPE", () => {
       const expected = new Uint32Array(bytes.buffer as ArrayBuffer);
       const data = inputs[name].data as Float32Array<ArrayBuffer>;
       const actual = new Uint32Array(data.buffer, data.byteOffset, data.length);
-      assertEquals(actual.length, expected.length, `${name}: 要素数`);
+      assertEquals(actual.length, expected.length, `${name}: element count`);
       for (let i = 0; i < expected.length; i++) {
         if (actual[i] === expected[i]) continue;
         throw new Error(
-          `${name}[${i}]: 0x${actual[i].toString(16)} が golden 0x${expected[i].toString(
+          `${name}[${i}]: 0x${actual[i].toString(16)} differs from golden 0x${expected[i].toString(
             16,
-          )} と違う`,
+          )}`,
         );
       }
     }
   });
-  it("不正な位置と f32 で表せない逆周波数を拒否する", () => {
+  it("rejects an invalid position and an inverse frequency not representable in f32", () => {
     assertThrows(() => gemma4QatMobile.ropeInputs(spec, [-1]), Error, "non-negative integer");
     assertThrows(
       () =>

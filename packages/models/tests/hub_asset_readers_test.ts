@@ -1,14 +1,17 @@
-// 取得済み資産バイト列の読み口（`src/hub/asset-readers.ts`）。7 family が同じ 1 本を通るので、
-// ここが受理集合を広げると全 family の資産門が一斉に緩む。
+// The reader of fetched asset bytes (`src/hub/asset-readers.ts`). 7 families go through this one
+// path, so widening its accepted set here loosens the asset checks of every family at once.
 //
-// 見るのは 5 点（最後の 1 点は容器の内側の資産 — `readWholeAsset`）:
+// What is checked, 5 points (the last one is for assets inside the container — `readWholeAsset`):
 //
-// ① **写さない**こと。返るのは view の `buffer` そのもの（GB 級の重みで RAM ピークが倍に
-//    ならない条件）で、同一性で縛れる。
-// ② buffer 全体を占めない view は落とす。通すと `openContainer` は隣のバイト列をヘッダとして読む。
-// ③ 文言のラベル（family 名と manifest の表）は呼び手が渡したものが逐語で出る — 各 family の
-//    テストが文言を逐語 assert しているので、ここが落とすと 5 本が一斉に赤になる。
-// ④ decode 段（不正 UTF-8）と parse 段（JSON 構文違反）を別の文言で落とす。
+// ① It **does not copy**. What comes back is the view's `buffer` itself (the condition for GB-scale
+//    weights not to double the RAM peak), which can be pinned by identity.
+// ② A view that does not span its whole buffer is rejected. Letting it through would make
+//    `openContainer` read the neighbouring bytes as a header.
+// ③ The message labels (family name and manifest table) come out verbatim as the caller passed
+//    them — each family's tests assert the message verbatim, so dropping them here would turn 5
+//    files red at once.
+// ④ The decode stage (invalid UTF-8) and the parse stage (JSON syntax error) fail with different
+//    messages.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
@@ -16,10 +19,10 @@ import { openContainer } from "@karume/runtime";
 import { readAssetBuffer, readAssetJson, readWholeAsset } from "../src/hub/asset-readers.ts";
 import { tensorlessContainer } from "./helpers/container-fixture.ts";
 
-/** buffer 全体を占める view（hub が返す契約どおりの形）。 */
+/** A view spanning its whole buffer (the shape the hub's contract returns). */
 const wholeView = (bytes: readonly number[]): Uint8Array<ArrayBuffer> => Uint8Array.from(bytes);
 
-test("readAssetBuffer: 返るのは view の buffer そのもの（1 バイトも写さない）", () => {
+test("readAssetBuffer: returns the view's buffer itself (not a single byte is copied)", () => {
   const bytes = wholeView([1, 2, 3, 4]);
   assertStrictEquals(
     readAssetBuffer("sbv2", "weights / assets", { model: bytes }, "model"),
@@ -27,7 +30,7 @@ test("readAssetBuffer: 返るのは view の buffer そのもの（1 バイト�
   );
 });
 
-test("readAssetBuffer: 資産が無ければ落とし、文言に family・表・揃っているキーが入る", () => {
+test("readAssetBuffer: fails when the asset is missing, with the family, the table and the keys present in the message", () => {
   assertThrows(
     () => readAssetBuffer("sbv2", "weights / assets", { front: wholeView([0]) }, "voice"),
     Error,
@@ -36,7 +39,7 @@ test("readAssetBuffer: 資産が無ければ落とし、文言に family・表�
   );
 });
 
-test("readAssetBuffer: manifest の表は呼び手のラベルがそのまま出る（family ごとに違う）", () => {
+test("readAssetBuffer: the manifest table is the caller's label as is (it differs per family)", () => {
   assertThrows(
     () => readAssetBuffer("birefnet", "weights", {}, "matte"),
     Error,
@@ -44,9 +47,9 @@ test("readAssetBuffer: manifest の表は呼び手のラベルがそのまま出
   );
 });
 
-test("readAssetBuffer: 資産の有無は Object.hasOwn で見る（prototype の値を拾わない）", () => {
-  // `assets["toString"]` は Object.prototype 由来の関数を返す。`in` で見ていると、そこから
-  // `byteOffset` を読もうとして「資産が無い」とは別の場所で落ちる。
+test("readAssetBuffer: asset presence is checked with Object.hasOwn (prototype values are not picked up)", () => {
+  // `assets["toString"]` returns a function from Object.prototype. Checking with `in` would try to
+  // read `byteOffset` from it and fail somewhere other than "the asset is missing".
   assertThrows(
     () => readAssetBuffer("anima", "weights / assets", {}, "toString"),
     Error,
@@ -54,8 +57,9 @@ test("readAssetBuffer: 資産の有無は Object.hasOwn で見る（prototype �
   );
 });
 
-test("readAssetBuffer: buffer 全体を占めない view は取得層の不変条件破れとして落ちる", () => {
-  // 先頭を 1 バイト飛ばした view。返してしまうと `openContainer` は隣のバイト列をヘッダに読む。
+test("readAssetBuffer: a view not spanning its whole buffer fails as a broken fetch-layer invariant", () => {
+  // A view that skips the first byte. Returning it would make `openContainer` read the neighbouring
+  // bytes as a header.
   const backing = wholeView([1, 2, 3, 4]);
   const shifted = new Uint8Array(backing.buffer, 1, 2);
   assertThrows(
@@ -66,7 +70,9 @@ test("readAssetBuffer: buffer 全体を占めない view は取得層の不変�
   );
 });
 
-/** JSON としては閉じているが、文字列値に不正 UTF-8（0xff）を 1 バイト混ぜた資産。 */
+/**
+ * An asset that is closed as JSON but has one invalid UTF-8 byte (0xff) mixed into a string value.
+ */
 const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
   Uint8Array.from([
     ...new TextEncoder().encode('{"unkId":'),
@@ -76,14 +82,14 @@ const brokenUtf8Asset = (): Uint8Array<ArrayBuffer> =>
     ...new TextEncoder().encode("}"),
   ]);
 
-test("readAssetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる（JSON 段まで進まない）", () => {
+test("readAssetJson: an invalid UTF-8 asset fails with the decode-stage message (it does not reach the JSON stage)", () => {
   const broken = brokenUtf8Asset();
-  // 前提の固定: 既定の TextDecoder は 0xff を U+FFFD へ置換するので、置換して読むと
-  // **内容の違う valid JSON** が黙って通ってしまう。塞いだのはこの経路。
+  // Pinning the premise: the default TextDecoder replaces 0xff with U+FFFD, so reading with
+  // replacement silently lets **valid JSON with different contents** through. That path is closed.
   assertEquals(
     JSON.parse(new TextDecoder().decode(broken)),
     { unkId: "�" },
-    "置換 decode が valid JSON にならない前提が崩れた（このテストの主題が消える）",
+    "the premise that the replacing decode does not give valid JSON broke (this test's subject is gone)",
   );
   assertThrows(
     () => readAssetJson("sbv2", "weights / assets", { tokenizer: broken }, "tokenizer"),
@@ -92,14 +98,14 @@ test("readAssetJson: 不正 UTF-8 の資産は decode 段の文言で落ちる�
   );
 });
 
-test("readAssetJson: JSON 構文違反は decode とは別の文言で落ちる（正常域は不変）", () => {
+test("readAssetJson: a JSON syntax error fails with a message different from decode (the valid domain is unchanged)", () => {
   const truncated = new TextEncoder().encode('{"unkId":');
   assertThrows(
     () => readAssetJson("irodori", "weights / assets", { tokenizer: truncated }, "tokenizer"),
     Error,
     "irodori: asset 'tokenizer' cannot be read as JSON",
   );
-  // 正しい UTF-8 は多バイト文字を含んでもそのまま通る。
+  // Correct UTF-8 passes as is, even with multi-byte characters.
   const valid = new TextEncoder().encode('{"unkId":0,"space":"あ"}');
   assertEquals(readAssetJson("irodori", "weights / assets", { tokenizer: valid }, "tokenizer"), {
     unkId: 0,
@@ -107,7 +113,7 @@ test("readAssetJson: JSON 構文違反は decode とは別の文言で落ちる�
   });
 });
 
-test("readAssetJson: 資産そのものが無い場合は buffer 段の文言で落ちる", () => {
+test("readAssetJson: when the asset itself is missing, it fails with the buffer-stage message", () => {
   assertThrows(
     () => readAssetJson("sbv2", "weights / assets", {}, "symbols"),
     Error,
@@ -115,14 +121,16 @@ test("readAssetJson: 資産そのものが無い場合は buffer 段の文言で
   );
 });
 
-// ---- 容器の資産（`readWholeAsset`）------------------------------------------
+// ---- Container assets (`readWholeAsset`) ------------------------------------------
 //
-// 容器の内側の資産（`rope_base` / PLE の索引）は manifest の表に載らないので、読み口は
-// `AssetReader` 1 本。見るのは 2 点: **論理長ぶんだけ**返ること（block の詰め物を渡さない）と、
-// 返る ArrayBuffer が payload だけを占めること（`parseSafetensors` がそのまま読める形）。
+// Assets inside the container (`rope_base` / the PLE index) are not in the manifest's table, so the
+// reader is a single `AssetReader`. Two points are checked: it returns **exactly the logical
+// length** (no block padding is handed out), and the returned ArrayBuffer spans only the payload (a
+// form `parseSafetensors` can read as is).
 
-test("readWholeAsset: 論理長ぶんだけ読み、詰め物を含まない buffer を返す", async () => {
-  // 長さ 6 の資産（block 長は 4 の倍数へ切り上がるので 8 バイト = 詰め物 2 バイト）。
+test("readWholeAsset: reads exactly the logical length and returns a buffer without padding", async () => {
+  // An asset of length 6 (the block length rounds up to a multiple of 4, so 8 bytes = 2 bytes of
+  // padding).
   const payload = Uint8Array.from([1, 2, 3, 4, 5, 6]) as Uint8Array<ArrayBuffer>;
   const written = await tensorlessContainer(
     "unit",
@@ -135,6 +143,6 @@ test("readWholeAsset: 論理長ぶんだけ読み、詰め物を含まない buf
   assertEquals(reader.length, payload.byteLength);
 
   const buffer = await readWholeAsset(reader);
-  assertEquals(buffer.byteLength, payload.byteLength, "詰め物まで返している");
+  assertEquals(buffer.byteLength, payload.byteLength, "padding was returned too");
   assertEquals([...new Uint8Array(buffer)], [...payload]);
 });

@@ -13,8 +13,9 @@ import {
   STRICT_OUTPUTS,
 } from "./helpers/collapse-ceilings.ts";
 
-describe("崩壊上限の判定（output.2 以降 — GPU も資産も要らない）", () => {
-  // 固定の合成データ: 1 チャネルだけ桁の大きい外れ値チャネルを持つ golden（実物の channel 686 の形）。
+describe("the collapse-ceiling judgement (output.2 onwards — needs neither a GPU nor assets)", () => {
+  // Fixed synthetic data: a golden with a single outlier channel an order of magnitude larger (the
+  // shape of the real channel 686).
   const SIZE = 1024;
   const OUTLIER = 686;
   const golden = Float32Array.from({ length: SIZE }, (_, index) =>
@@ -22,7 +23,10 @@ describe("崩壊上限の判定（output.2 以降 — GPU も資産も要らな�
   );
   const normOf = (values: ArrayLike<number>): number =>
     Math.sqrt(Array.from(values, (value) => value * value).reduce((sum, value) => sum + value, 0));
-  /** golden に、相対 RMS 誤差がちょうど `target` になる揺れ（golden と別周期）を足した別標本。 */
+  /**
+   * A different sample: the golden plus a perturbation (with a period other than the golden's)
+   * whose relative RMS error is exactly `target`.
+   */
   const sampleAt = (target: number): Float32Array => {
     const noise = Array.from({ length: SIZE }, (_, index) => Math.cos(index * 1.13 + 0.7));
     const scale = (target * normOf(golden)) / normOf(noise);
@@ -35,22 +39,24 @@ describe("崩壊上限の判定（output.2 以降 — GPU も資産も要らな�
     copy[index] = value;
     return copy;
   };
-  /** 表の全出力（output.2〜24）と、その上限。 */
+  /** Every output in the table (output.2–24) and its ceiling. */
   const ceilings = Object.entries(COLLAPSE_CEILINGS);
   /**
-   * 各出力の上限の半分の相対 RMS を持つ別標本。上限は導出に使った最悪の × 2 以上なので、
-   * これは導出に使った正当な最悪以上の揺れを持つ（正当な標本の代表）。
+   * A different sample with a relative RMS of half each output's ceiling. A ceiling is at least × 2
+   * the worst case used to derive it, so this sample perturbs at least as much as the legitimate
+   * worst case used in the derivation (a representative of the legitimate samples).
    */
   const legitimateFor = (ceiling: number): Float32Array => sampleAt(ceiling / 2);
   const deepest = collapseCeilingOf("output.24");
   /**
-   * 上限が output.24 の正当な揺れ（上限の半分 ≈ 0.165 — 導出の最悪 0.1620 程度）より狭い最後の
-   * 出力（ADR 0026 追記 2026-10-07 の表: output.14 の上限 0.15 < 0.165 ≤ output.15 の 0.17）。
+   * The last output whose ceiling is narrower than output.24's legitimate perturbation (half its
+   * ceiling ≈ 0.165 — about the derivation's worst case 0.1620) (the table of the ADR 0026 addendum
+   * 2026-10-07: output.14's ceiling 0.15 < 0.165 ≤ output.15's 0.17).
    */
   const LAST_TIGHTER_THAN_DEEPEST = 14;
   const indexOf = (output: string): number => Number(output.slice("output.".length));
 
-  it("上限の表は output.2〜24 をちょうど覆い、表に無い出力は投げる", () => {
+  it("the ceiling table covers exactly output.2–24 and throws for an output not in the table", () => {
     assertEquals(
       ceilings.map(([output]) => output),
       Array.from(
@@ -63,56 +69,56 @@ describe("崩壊上限の判定（output.2 以降 — GPU も資産も要らな�
     }
   });
 
-  it("上限は出力の順に非減少（活性量子化の誤差は層を下るほど積もる — 導出の最悪も単調）", () => {
+  it("the ceilings are non-decreasing in output order (activation-quantisation error accumulates down the layers — the derivation's worst cases are monotonic too)", () => {
     ceilings.slice(1).forEach(([output, ceiling], position) => {
       const [previousOutput, previous] = ceilings[position];
-      assert(previous <= ceiling, `${previousOutput} の ${previous} > ${output} の ${ceiling}`);
+      assert(previous <= ceiling, `${previousOutput} at ${previous} > ${output} at ${ceiling}`);
     });
   });
 
-  it("output.24 の正当な揺れの大きさの別標本は、output.2〜14 では赤・output.15〜24 では通す（上限は出力ごと）", () => {
+  it("a different sample with output.24's legitimate perturbation size is red on output.2–14 and passes on output.15–24 (the ceiling is per output)", () => {
     const deepLegitimate = legitimateFor(deepest);
     for (const [output, ceiling] of ceilings) {
       const report = judgeCollapse(deepLegitimate, golden, ceiling);
       assertEquals(
         report.pass,
         indexOf(output) > LAST_TIGHTER_THAN_DEEPEST,
-        `${output}: relRms=${report.relRms} 上限 ${ceiling}`,
+        `${output}: relRms=${report.relRms} ceiling ${ceiling}`,
       );
     }
   });
 
-  it("各出力で、上限の半分（導出の最悪以上）の別標本は通し、上限を 1% 超えた別標本は赤にする", () => {
+  it("on each output, a different sample at half the ceiling (at least the derivation's worst case) passes and one 1% over the ceiling is red", () => {
     for (const [output, ceiling] of ceilings) {
       const inside = judgeCollapse(legitimateFor(ceiling), golden, ceiling);
-      assert(inside.pass, `${output}: relRms=${inside.relRms} 上限 ${ceiling}`);
+      assert(inside.pass, `${output}: relRms=${inside.relRms} ceiling ${ceiling}`);
       const outside = judgeCollapse(sampleAt(ceiling * 1.01), golden, ceiling);
-      assertEquals(outside.pass, false, `${output}: relRms=${outside.relRms} 上限 ${ceiling}`);
+      assertEquals(outside.pass, false, `${output}: relRms=${outside.relRms} ceiling ${ceiling}`);
     }
   });
 
-  it("外れ値チャネルの 1 要素が 7 動いても（maxAbs では落ちた形）全体が近ければ output.19 の上限で通す", () => {
+  it("even when one element of the outlier channel moves by 7 (a shape that failed under maxAbs), it passes output.19's ceiling if the whole is close", () => {
     const ceiling = collapseCeilingOf("output.19");
     const report = judgeCollapse(withElement(golden, OUTLIER, 28.8 - 7.17), golden, ceiling);
-    assert(report.pass, `relRms=${report.relRms} 上限 ${ceiling}`);
+    assert(report.pass, `relRms=${report.relRms} ceiling ${ceiling}`);
     assert(report.maxAbs > 7, `maxAbs=${report.maxAbs}`);
   });
 
-  it("全要素 0 を全出力で赤にする（相対 RMS 1.0）", () => {
+  it("all-zero elements are red on every output (relative RMS 1.0)", () => {
     for (const [output, ceiling] of ceilings) {
       const report = judgeCollapse(new Float32Array(SIZE), golden, ceiling);
       assertEquals([report.pass, report.relRms], [false, 1], output);
     }
   });
 
-  it("符号反転を全出力で赤にする", () => {
+  it("a sign flip is red on every output", () => {
     for (const [output, ceiling] of ceilings) {
       const flipped = map(legitimateFor(ceiling), (value) => -value);
       assertEquals(judgeCollapse(flipped, golden, ceiling).pass, false, output);
     }
   });
 
-  it("全要素 × 2 と × 1.5 の拡大を全出力で赤にする（相対 RMS 1.0 / 0.5）", () => {
+  it("scaling every element × 2 and × 1.5 is red on every output (relative RMS 1.0 / 0.5)", () => {
     for (const factor of [2, 1.5]) {
       const scaled = map(golden, (value) => value * factor);
       for (const [output, ceiling] of ceilings) {
@@ -120,23 +126,23 @@ describe("崩壊上限の判定（output.2 以降 — GPU も資産も要らな�
         assertEquals(
           report.pass,
           false,
-          `× ${factor} ${output}: relRms=${report.relRms} 上限 ${ceiling}`,
+          `× ${factor} ${output}: relRms=${report.relRms} ceiling ${ceiling}`,
         );
       }
     }
   });
 
-  it("1 要素だけの NaN / +Inf / -Inf を、実行側でも期待値側でも赤にする", () => {
+  it("a single NaN / +Inf / -Inf element is red on both the actual side and the expected side", () => {
     const legitimate = legitimateFor(deepest);
     for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       const onActual = judgeCollapse(withElement(legitimate, 3, bad), golden, deepest);
-      assertEquals([onActual.pass, onActual.nonFiniteCount], [false, 1], `actual に ${bad}`);
+      assertEquals([onActual.pass, onActual.nonFiniteCount], [false, 1], `${bad} in actual`);
       const onExpected = judgeCollapse(legitimate, withElement(golden, 3, bad), deepest);
-      assertEquals([onExpected.pass, onExpected.nonFiniteCount], [false, 1], `expected に ${bad}`);
+      assertEquals([onExpected.pass, onExpected.nonFiniteCount], [false, 1], `${bad} in expected`);
     }
   });
 
-  it("長さが違えば判定せずに投げる（取り違え — 誤差の問題ではない）", () => {
+  it("throws without judging when the lengths differ (a mix-up — not a matter of error)", () => {
     assertThrows(() => judgeCollapse(golden.subarray(1), golden, deepest), AllcloseError);
   });
 });

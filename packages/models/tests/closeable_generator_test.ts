@@ -2,7 +2,7 @@ import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
 import { closeableGenerator } from "../src/concurrency/closeable-generator.ts";
 
-test("未開始の終了は本体を実行せず、一度だけ通知する", async () => {
+test("closing before start does not run the body and notifies once", async () => {
   for (const method of ["return", "throw"] as const) {
     let entered = 0;
     let finalized = 0;
@@ -27,7 +27,7 @@ test("未開始の終了は本体を実行せず、一度だけ通知する", as
   }
 });
 
-test("開始直後の return は実行中の next を追い越さず本体の finally を通す", async () => {
+test("return right after start does not overtake the running next and goes through the body's finally", async () => {
   const ready = Promise.withResolvers<void>();
   let finalized = 0;
   let unstarted = 0;
@@ -52,7 +52,7 @@ test("開始直後の return は実行中の next を追い越さず本体の fi
   assertEquals({ finalized, unstarted }, { finalized: 1, unstarted: 0 });
 });
 
-test("未開始 return の終了値が拒否されても所有者を解放し、次の終了は成功する", async () => {
+test("even when the completion value of a return before start is rejected, the owner is released and the next close succeeds", async () => {
   const value = Promise.withResolvers<void>();
   const cleanup = Promise.withResolvers<void>();
   const error = new Error("return value failed");

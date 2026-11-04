@@ -1,9 +1,11 @@
-// SBV2 のホストグルー（`src/sbv2/host/` の純関数）と、その成果物の梱包の挙動テスト。
+// Behaviour tests of the SBV2 host glue (the pure functions of `src/sbv2/host/`) and the packaging
+// of its outputs.
 //
-// front と voice の間に挟まる「データ依存 shape」の計算（継続長 → フレーム展開 → z_p）と、
-// 成果物の梱包（WAV は `src/audio/` のファミリ非依存層・dump は example 側）。ここは golden
-// E2E の外側 — グラフを 1 つも実行しないので、誤りは「音の長さが変わる」「無音になる」形で
-// しか出ず、数値突合では捕まらない。
+// The "data-dependent shape" computation between front and voice (durations → frame expansion →
+// z_p), and the packaging of the outputs (WAV is the family-independent layer in `src/audio/`; the
+// dump is on the example side). This lies outside the golden E2E — no graph is executed, so a
+// mistake shows up only as "the audio length changes" or "it goes silent" and is not caught by a
+// numeric comparison.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -14,24 +16,30 @@ import { durationsToFrames } from "../src/sbv2/host/duration.ts";
 import { buildZp } from "../src/sbv2/host/latent.ts";
 import { Randn } from "../src/sbv2/host/random.ts";
 import { encodeWav } from "../src/audio/wav.ts";
-// dump の書き出しは**開発用の契約**（torch 参照へ渡す運搬形式）なのでテスト側ヘルパに置いて
-// ある。パッケージの公開面には出ないが、梱包が閉じていること自体はここで固定する。
+// Writing the dump is a **development contract** (the transport format handed to the torch
+// reference), so it lives in a test-side helper. It is not on the package's public surface, but the
+// packaging round trip itself is pinned here.
 import { writeSafetensors } from "./helpers/safetensors-write.ts";
 
 /**
- * `logw = log(w)` の逆算（テストが期待フレーム数を式ではなく値で書けるようにする）。
+ * Inverts `logw = log(w)` (so that tests can write the expected frame counts as values rather than
+ * formulas).
  *
- * MUST: `w` に整数を渡さない。`exp(fround(log(n)))` は n の直上・直下どちらにも落ちうるので
- * `ceil` が n か n+1 かで揺れる（ceil 境界の性質そのものであって実装の欠陥ではない）。
+ * MUST: do not pass integers as `w`. `exp(fround(log(n)))` can land just above or just below n, so
+ * `ceil` wobbles between n and n+1 (a property of the ceil boundary itself, not a defect of the
+ * implementation).
  */
 const logwFor = (frames: readonly number[]): Float32Array<ArrayBuffer> =>
   Float32Array.from(frames, Math.log);
 
-/** 上限を主題にしないテストで渡す上限（実配布形の `maxFrames` と同じ 4096）。 */
+/**
+ * The maximum passed by tests whose subject is not the maximum (4096, as `maxFrames` of the real
+ * distribution).
+ */
 const AMPLE_FRAMES = 4096;
 
-test("durationsToFrames: exp → ceil でフレーム数になり、展開列は単調非減少", () => {
-  // sdp と dp を同じにして混合を無視できる形にし、ceil の挙動だけを見る。
+test("durationsToFrames: exp → ceil gives the frame counts, and the expansion index is non-decreasing", () => {
+  // sdp and dp are made equal so the mixing can be ignored and only the ceil behaviour is observed.
   const logw = logwFor([1.2, 1.8, 0.3]);
   const plan = durationsToFrames(logw, logw, new Float32Array([1, 1, 1]), 0.5, 1, AMPLE_FRAMES);
   assertEquals([...plan.wCeil], [2, 2, 1]);
@@ -39,67 +47,72 @@ test("durationsToFrames: exp → ceil でフレーム数になり、展開列は
   assertEquals([...plan.expandIdx], [0, 0, 1, 1, 2]);
 });
 
-test("durationsToFrames: x_mask が 0 の音素は 0 フレームになる", () => {
+test("durationsToFrames: a phoneme whose x_mask is 0 gets 0 frames", () => {
   const logw = logwFor([1.2, 5.4]);
   const plan = durationsToFrames(logw, logw, new Float32Array([1, 0]), 0, 1, AMPLE_FRAMES);
   assertEquals([...plan.wCeil], [2, 0]);
   assertEquals([...plan.expandIdx], [0, 0]);
 });
 
-test("durationsToFrames: length_scale はフレーム数に比例して効く", () => {
+test("durationsToFrames: length_scale scales the frame counts proportionally", () => {
   const logw = logwFor([1.2, 1.2]);
   const mask = new Float32Array([1, 1]);
   assertEquals([...durationsToFrames(logw, logw, mask, 0, 1, AMPLE_FRAMES).wCeil], [2, 2], "w=1.2");
   assertEquals([...durationsToFrames(logw, logw, mask, 0, 2, AMPLE_FRAMES).wCeil], [3, 3], "w=2.4");
 });
 
-test("durationsToFrames: 故障注入 — sdp_ratio の混合が効いている", () => {
-  // sdp と dp に違う値を渡し、比を変えると結果が変わることを見る。片方だけ使う実装
-  // （混合を書き忘れ）は ratio を変えても同じ答えになる。
+test("durationsToFrames: fault injection — the sdp_ratio mixing takes effect", () => {
+  // Pass different values for sdp and dp and check that changing the ratio changes the result. An
+  // implementation that uses only one of them (the mixing forgotten) gives the same answer for any
+  // ratio.
   const sdp = logwFor([9.5, 9.5]);
   const dp = logwFor([1.5, 1.5]);
   const mask = new Float32Array([1, 1]);
   assertEquals(
     [...durationsToFrames(sdp, dp, mask, 0, 1, AMPLE_FRAMES).wCeil],
     [2, 2],
-    "r=0 は dp だけ",
+    "r=0 is dp only",
   );
   assertEquals(
     [...durationsToFrames(sdp, dp, mask, 1, 1, AMPLE_FRAMES).wCeil],
     [10, 10],
-    "r=1 は sdp だけ",
+    "r=1 is sdp only",
   );
-  // 混合は logw（対数）側で行うので中間比は幾何平均 √(9.5·1.5) ≈ 3.775 になる。
+  // The mixing happens on the logw (log) side, so a middle ratio gives the geometric mean
+  // √(9.5·1.5) ≈ 3.775.
   const mixed = durationsToFrames(sdp, dp, mask, 0.5, 1, AMPLE_FRAMES).wCeil;
   assertEquals([...mixed], [4, 4]);
 });
 
-test("durationsToFrames: 長さ不一致・全 0 フレームは落とす", () => {
+test("durationsToFrames: rejects a length mismatch and all-zero frames", () => {
   const logw = logwFor([1, 1]);
-  // どちらも front 出力が壊れている＝内部異常なので、素の `Error`（500 相当）のまま。
-  // 呼び手が text や lengthScale を直しても直らない = 入力起因の分岐へ流してはならない。
+  // Both mean the front output is broken = an internal fault, so they stay plain `Error`
+  // (500-like). The caller cannot fix them by changing text or lengthScale = they must not go to
+  // the input-error branch.
   const mismatch = assertThrows(
     () => durationsToFrames(logw, logwFor([1]), new Float32Array([1, 1]), 0, 1, AMPLE_FRAMES),
     Error,
     "Length mismatch",
   );
-  assert(!(mismatch instanceof InputError), "長さ不一致は入力起因ではない");
+  assert(!(mismatch instanceof InputError), "a length mismatch is not an input error");
   const empty = assertThrows(
     () => durationsToFrames(logw, logw, new Float32Array([0, 0]), 0, 1, AMPLE_FRAMES),
     Error,
     "total frame count is 0",
   );
-  assert(!(empty instanceof InputError), "総フレーム数 0 は入力起因ではない");
+  assert(!(empty instanceof InputError), "a total frame count of 0 is not an input error");
 });
 
-test("durationsToFrames: 総フレーム数が配布形の上限を超えたら展開列を確保する前に落とす", () => {
-  // 同じ text でも lengthScale を上げれば総フレーム数はいくらでも伸びる（5 → 8）。上限を
-  // 超えた要求は、長さ Ty の展開列も下流の T×T 表（8·T² bytes 級）も確保せずにここで止まる。
+test("durationsToFrames: a total frame count above the distribution's maximum fails before the expansion index is allocated", () => {
+  // For the same text, raising lengthScale grows the total frame count without bound (5 → 8). A
+  // request above the maximum stops here, allocating neither the length-Ty expansion index nor the
+  // downstream T×T table (on the order of 8·T² bytes).
   const logw = logwFor([1.2, 1.8, 0.3]);
   const mask = new Float32Array([1, 1, 1]);
   assertEquals(durationsToFrames(logw, logw, mask, 0.5, 1, 7).totalFrames, 5);
-  // 型は `InputError`（400 相当）— text を短く分けるか lengthScale を下げれば通る要求で、
-  // 内部不変条件の破れ（素の `Error` = 500）とは呼び手の分岐先が違う（`errors.ts` の分類軸）。
+  // The type is `InputError` (400-like) — the request goes through if the text is split shorter or
+  // lengthScale is lowered, so the caller branches differently than for a broken internal invariant
+  // (plain `Error` = 500) (the classification axis of `errors.ts`).
   assertThrows(
     () => durationsToFrames(logw, logw, mask, 0.5, 2, 7),
     InputError,
@@ -107,15 +120,15 @@ test("durationsToFrames: 総フレーム数が配布形の上限を超えたら�
   );
 });
 
-test("durationsToFrames: ちょうど上限は通る（境界を 1 つ内側に取っていない）", () => {
+test("durationsToFrames: exactly the maximum passes (the boundary is not one too far inside)", () => {
   const logw = logwFor([1.2, 1.8, 0.3]);
   const plan = durationsToFrames(logw, logw, new Float32Array([1, 1, 1]), 0.5, 2, 8);
   assertEquals(plan.totalFrames, 8);
-  assertEquals(plan.expandIdx.length, 8, "上限ちょうどの展開列が確保されている");
+  assertEquals(plan.expandIdx.length, 8, "an expansion index of exactly the maximum is allocated");
 });
 
-test("buildZp: m_p を展開して noise·exp(logs_p)·scale を足す", () => {
-  // C=2 / P=2 / Ty=3。logs_p = 0 なので exp は 1 になり、期待値を手で書ける。
+test("buildZp: expands m_p and adds noise·exp(logs_p)·scale", () => {
+  // C=2 / P=2 / Ty=3. logs_p = 0, so exp is 1 and the expected values can be written by hand.
   const mP = new Float32Array([1, 2, 10, 20]);
   const logsP = new Float32Array([0, 0, 0, 0]);
   const expandIdx = Int32Array.from([0, 1, 1]);
@@ -124,21 +137,22 @@ test("buildZp: m_p を展開して noise·exp(logs_p)·scale を足す", () => {
   assertEquals([...zP], [1 + 0.5, 2, 2 - 0.5, 10 + 1, 20, 20 - 1]);
 });
 
-test("buildZp: 故障注入 — 展開インデックスがずれると値も変わる", () => {
-  // 「gather を無視して先頭 Ty 列を切り出す」実装は expandIdx を変えても同じ答えを返す。
+test("buildZp: fault injection — a shifted expansion index changes the values", () => {
+  // An implementation that ignores the gather and slices the first Ty columns returns the same
+  // answer for any expandIdx.
   const mP = new Float32Array([1, 2, 3]);
   const logsP = new Float32Array([0, 0, 0]);
   const noise = new Float32Array(3);
   const a = buildZp(mP, logsP, Int32Array.from([0, 1, 2]), 1, noise, 1);
   const b = buildZp(mP, logsP, Int32Array.from([0, 0, 2]), 1, noise, 1);
-  assertEquals(a.length, b.length, "長さは同じ（= 長さでは検出できない形）");
+  assertEquals(a.length, b.length, "the lengths are equal (= a fault the length cannot detect)");
   assert(
     [...a].some((value, index) => value !== b[index]),
-    "展開を変えても同じ値",
+    "the values are the same even with a different expansion",
   );
 });
 
-test("buildZp: 形状の食い違いは落とす", () => {
+test("buildZp: rejects mismatched shapes", () => {
   const mP = new Float32Array([1, 2, 3, 4]);
   const logsP = new Float32Array([0, 0, 0, 0]);
   const idx = Int32Array.from([0, 1]);
@@ -151,24 +165,24 @@ test("buildZp: 形状の食い違いは落とす", () => {
   );
 });
 
-test("Randn: 同じ seed は同じ列・違う seed は違う列", () => {
+test("Randn: the same seed gives the same sequence and a different seed a different one", () => {
   const a = new Randn(7).normals(64);
   const b = new Randn(7).normals(64);
   const c = new Randn(8).normals(64);
   assertEquals([...a], [...b]);
   assert(
     [...a].some((value, index) => value !== c[index]),
-    "seed を変えても同じ列",
+    "the same sequence even with a different seed",
   );
 });
 
-test("Randn: 標準正規らしい統計量を持ち、scale が線形に効く", () => {
+test("Randn: has standard-normal statistics, and scale acts linearly", () => {
   const samples = new Randn(1).normals(20000);
   const mean = samples.reduce((sum, value) => sum + value, 0) / samples.length;
   const variance = samples.reduce((sum, value) => sum + (value - mean) ** 2, 0) / samples.length;
-  assert(Math.abs(mean) < 0.05, `平均 ${mean} が 0 から離れすぎ`);
-  assert(Math.abs(variance - 1) < 0.05, `分散 ${variance} が 1 から離れすぎ`);
-  // scale は同じ列に掛かるだけ（列そのものは seed で決まる）。
+  assert(Math.abs(mean) < 0.05, `mean ${mean} is too far from 0`);
+  assert(Math.abs(variance - 1) < 0.05, `variance ${variance} is too far from 1`);
+  // scale only multiplies the same sequence (the sequence itself is determined by the seed).
   const plain = new Randn(3).normals(16);
   const scaled = new Randn(3).normals(16, 2);
   for (const [index, value] of plain.entries()) {
@@ -176,9 +190,10 @@ test("Randn: 標準正規らしい統計量を持ち、scale が線形に効く"
   }
 });
 
-test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {
-  // 持ち越すと「同じ seed でも呼び出し順で列が変わる」形になり、dump した乱数列との
-  // 対応が読めなくなる。奇数長 → 次の呼び出し、が偶数長 2 回と同じ列になることで固定する。
+test("Randn: does not carry a Box–Muller pair over, even for odd lengths", () => {
+  // Carrying it over would make the sequence depend on the call order even for the same seed, and
+  // the correspondence with the dumped random sequence could no longer be read. Pinned by checking
+  // that an odd length followed by the next call gives the same sequence as two even-length calls.
   const split = new Randn(5);
   const head = split.normals(3);
   const tail = split.normals(2);
@@ -187,7 +202,7 @@ test("Randn: 奇数長でも Box–Muller の対を持ち越さない", () => {
   assertEquals([...tail], [...fresh.normals(2)]);
 });
 
-test("encodeWav: RIFF ヘッダの各欄が仕様どおり", () => {
+test("encodeWav: every RIFF header field follows the spec", () => {
   const wav = encodeWav(new Float32Array([0, 1, -1]), 44100);
   const view = new DataView(wav.buffer);
   const text = (offset: number): string => String.fromCharCode(...wav.subarray(offset, offset + 4));
@@ -198,7 +213,7 @@ test("encodeWav: RIFF ヘッダの各欄が仕様どおり", () => {
   assertEquals(text(12), "fmt ");
   assertEquals(view.getUint32(16, true), 16);
   assertEquals(view.getUint16(20, true), 1, "PCM");
-  assertEquals(view.getUint16(22, true), 1, "モノラル");
+  assertEquals(view.getUint16(22, true), 1, "mono");
   assertEquals(view.getUint32(24, true), 44100);
   assertEquals(view.getUint32(28, true), 44100 * 2, "byte rate");
   assertEquals(view.getUint16(32, true), 2, "block align");
@@ -207,25 +222,25 @@ test("encodeWav: RIFF ヘッダの各欄が仕様どおり", () => {
   assertEquals(view.getUint32(40, true), 6);
 });
 
-test("encodeWav: 値域外はクリップし、丸めは floor(x+0.5) 相当", () => {
-  // ±0.5 は 32767 倍すると丁度 ±16383.5 になる（0.5 は f32 で厳密）。ここが
-  // **半端値の丸め規則を分ける唯一の観測点**で、`Math.round` は常に +∞ 方向へ倒す
-  // （+16384 / −16383）。Python 組み込みの `round`（偶数丸め）だと −16384 になり、
-  // 3 本の wav が 1 LSB 食い違う — 参照側は `floor(x+0.5)` で揃えてある。
+test("encodeWav: clips out-of-range values and rounds like floor(x+0.5)", () => {
+  // ±0.5 times 32767 is exactly ±16383.5 (0.5 is exact in f32). This is **the only observation
+  // point that tells the rounding rules for halves apart**: `Math.round` always rounds towards +∞
+  // (+16384 / −16383). Python's built-in `round` (round half to even) gives −16384, and the three
+  // wavs would differ by 1 LSB — the reference side is aligned with `floor(x+0.5)`.
   const wav = encodeWav(new Float32Array([2, -2, 0.5, -0.5]), 8000);
   const view = new DataView(wav.buffer);
-  assertEquals(view.getInt16(44, true), 32767, "上限クリップ");
-  assertEquals(view.getInt16(46, true), -32767, "下限クリップ");
+  assertEquals(view.getInt16(44, true), 32767, "upper clip");
+  assertEquals(view.getInt16(46, true), -32767, "lower clip");
   assertEquals(view.getInt16(48, true), 16384);
   assertEquals(view.getInt16(50, true), -16383);
 });
 
-test("encodeWav: 不正なサンプリング周波数は落とす", () => {
+test("encodeWav: rejects an invalid sample rate", () => {
   assertThrows(() => encodeWav(new Float32Array(1), 0), ModelInputError);
   assertThrows(() => encodeWav(new Float32Array(1), 44100.5), ModelInputError);
 });
 
-test("writeSafetensors: 書いたものを読み戻せる（dump の運搬が閉じている）", () => {
+test("writeSafetensors: what is written can be read back (the dump transport round-trips)", () => {
   const bytes = writeSafetensors(
     new Map([
       ["ids", { dtype: "I32" as const, shape: [1, 3], data: Int32Array.from([7, 8, 9]) }],
@@ -233,7 +248,8 @@ test("writeSafetensors: 書いたものを読み戻せる（dump の運搬が閉
     ]),
     { demo: '{"text":"あ"}' },
   );
-  // データ節の開始（8 + ヘッダ長）が 8 バイト境界に乗る（参照実装の詰め方）。
+  // The start of the data section (8 + header length) is on an 8-byte boundary (the reference
+  // implementation's padding).
   const headerLength = Number(new DataView(bytes.buffer).getBigUint64(0, true));
   assertEquals((8 + headerLength) % 8, 0);
 
@@ -248,7 +264,7 @@ test("writeSafetensors: 書いたものを読み戻せる（dump の運搬が閉
   assertEquals([...new Float32Array(file.buffer, noise.byteOffset, 4)], [1, 2, 3, 4]);
 });
 
-test("writeSafetensors: shape と data 長の食い違いは落とす", () => {
+test("writeSafetensors: rejects a mismatch between shape and data length", () => {
   assertThrows(
     () =>
       writeSafetensors(
@@ -256,6 +272,6 @@ test("writeSafetensors: shape と data 長の食い違いは落とす", () => {
         {},
       ),
     Error,
-    "要素数",
+    "element count",
   );
 });
