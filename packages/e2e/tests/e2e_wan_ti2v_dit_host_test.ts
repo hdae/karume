@@ -37,7 +37,6 @@ import {
   conditionMask,
   filePresent,
   firstBitMismatch,
-  floatsOf,
   loadTi2vGolden,
   openTi2vTransformer,
   readRopeBase,
@@ -51,6 +50,7 @@ import {
   WAN_TI2V_GOLDEN_DIR as GOLDEN_DIR,
   wanTi2vMirrorPresent,
 } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { floatsOf } from "../../models/tests/helpers/safetensors.ts";
 import {
   WAN_TI2V_ASSEMBLE_COMMAND as ASSEMBLE,
   WAN_TI2V_DIST_ROOT as DIST_ROOT,

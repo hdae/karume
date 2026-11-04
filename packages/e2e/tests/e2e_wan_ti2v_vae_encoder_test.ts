@@ -95,12 +95,8 @@ import { normalizeWanLatents } from "../../models/src/wan/latents.ts";
 import { disposeSteps } from "../../models/src/session/dispose-steps.ts";
 import { acquireTestGpu, GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { settleReleases } from "../../models/tests/helpers/settle-releases.ts";
-import {
-  filePresent,
-  firstBitMismatch,
-  readBuffer,
-  viewOf,
-} from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { filePresent, firstBitMismatch } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { readBuffer, viewOf } from "../../models/tests/helpers/safetensors.ts";
 import {
   WAN_I2V_ENCODER_BAND,
   WAN_I2V_GOLDEN_CASES,

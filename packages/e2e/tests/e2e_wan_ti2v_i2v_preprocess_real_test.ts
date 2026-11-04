@@ -38,10 +38,9 @@ import {
 import {
   filePresent,
   firstBitMismatch,
-  readBuffer,
   TEST_ASSETS_FETCH,
-  viewOf,
 } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { readBuffer, viewOf } from "../../models/tests/helpers/safetensors.ts";
 import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 
 /** 登録時点で必要なので同期で数える（`ignore` の判定に使う）。 */

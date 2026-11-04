@@ -121,7 +121,6 @@ import {
   conditionMask,
   filePresent,
   firstBitMismatch,
-  floatsOf,
   isAccept,
   loadTi2vGolden,
   openTi2vTransformer,
@@ -131,7 +130,6 @@ import {
   type Ti2vForm,
   type Ti2vFullTokens,
   type Ti2vGolden,
-  viewOf,
   WAN22_GEOMETRY,
   WAN_TI2V_CASES,
   WAN_TI2V_COMPONENT,
@@ -139,6 +137,7 @@ import {
   WAN_TI2V_GOLDEN_DIR,
   wanTi2vMirrorPresent,
 } from "../../models/tests/helpers/wan-ti2v-dit.ts";
+import { floatsOf, viewOf } from "../../models/tests/helpers/safetensors.ts";
 import {
   readWanTi2vDistributionManifestText,
   WAN_TI2V_ASSEMBLE_COMMAND,

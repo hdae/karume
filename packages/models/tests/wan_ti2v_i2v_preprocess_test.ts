@@ -45,7 +45,8 @@ import {
 } from "../src/wan/latents.ts";
 import { unpatchifyWanVaeFrames } from "../src/wan/vae-tiles.ts";
 import { WAN_I2V_LANCZOS_FIXTURE } from "./helpers/wan-i2v-image.ts";
-import { firstBitMismatch, readBuffer, viewOf } from "./helpers/wan-ti2v-dit.ts";
+import { firstBitMismatch } from "./helpers/wan-ti2v-dit.ts";
+import { readBuffer, viewOf } from "./helpers/safetensors.ts";
 
 const CHANNELS = 3;
 

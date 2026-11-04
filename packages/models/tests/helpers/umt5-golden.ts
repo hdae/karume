@@ -22,10 +22,11 @@
  * 副作用ゼロ（定数と関数だけ — ファイルは呼ばれたときに読む）。
  */
 
-import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
+import { isNotFound, statSync } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
 import { parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { goldenDir } from "@karume/test-support/test-assets";
+import { floatsOf, readBuffer, viewOf } from "./safetensors.ts";
 
 /**
  * 正規化比 r の帯（ADR 0119 決定 8 ① — 導き方は ADR 0118 決定 8 と同じ）。決定用 6 本（`band-*`）の最悪 r × 5 を
@@ -112,27 +113,6 @@ export const filePresent = (url: URL): boolean => {
     if (isNotFound(cause)) return false;
     throw cause;
   }
-};
-
-export const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
-  const bytes = await readFile(url);
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-};
-
-const viewOf = (file: SafetensorsFile, key: string, where: string) => {
-  const view = file.tensors.get(key);
-  if (view === undefined) throw new Error(`${where}: '${key}' が無い`);
-  return view;
-};
-
-export const floatsOf = (
-  file: SafetensorsFile,
-  key: string,
-  where: string,
-): Float32Array<ArrayBuffer> => {
-  const view = viewOf(file, key, where);
-  if (view.dtype !== "F32") throw new Error(`${where}: '${key}' が ${view.dtype}`);
-  return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
 const intsOf = (file: SafetensorsFile, key: string, where: string): Int32Array<ArrayBuffer> => {

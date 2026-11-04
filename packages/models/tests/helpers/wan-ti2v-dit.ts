@@ -19,13 +19,14 @@
  * 0 / 1）、T2V は全て 0。golden の `input.condition_mask` とのビット一致はホストテストが縛る。
  */
 
-import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
+import { isNotFound, statSync } from "@karume/test-support/fs";
 import { assertEquals } from "@std/assert";
 import { type OpenedContainer, parseSafetensors, type SafetensorsFile } from "@karume/runtime";
 import { goldenDir } from "@karume/test-support/test-assets";
 import type { WanPatchGeometry, WanTokenGrid } from "../../src/wan/dit-tokens.ts";
 import { parseWanRopeBase, type WanRopeBase } from "../../src/wan/dit-rope.ts";
 import { mirrorPresent } from "./mirror.ts";
+import { readBuffer, viewOf } from "./safetensors.ts";
 import { openWanTi2vComponent, WAN_TI2V_DIST_ROOT } from "./wan-ti2v-pipeline.ts";
 
 /** The series the goldens were exported with (their folder under `goldens/` of the test-asset root). */
@@ -126,27 +127,6 @@ export const caseFiles = (name: string): readonly URL[] => [
   new URL(`io.${name}.safetensors`, WAN_TI2V_GOLDEN_DIR),
   new URL(`reference.${name}.safetensors`, WAN_TI2V_GOLDEN_DIR),
 ];
-
-export const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
-  const bytes = await readFile(url);
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-};
-
-export const viewOf = (file: SafetensorsFile, key: string, where: string) => {
-  const view = file.tensors.get(key);
-  if (view === undefined) throw new Error(`${where}: '${key}' が無い`);
-  return view;
-};
-
-export const floatsOf = (
-  file: SafetensorsFile,
-  key: string,
-  where: string,
-): Float32Array<ArrayBuffer> => {
-  const view = viewOf(file, key, where);
-  if (view.dtype !== "F32") throw new Error(`${where}: '${key}' が ${view.dtype}`);
-  return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
-};
 
 export const scalarOf = (file: SafetensorsFile, key: string, where: string): number => {
   const view = viewOf(file, key, where);
