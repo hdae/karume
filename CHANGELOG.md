@@ -15,6 +15,8 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-04
+
 ### Added
 
 - `@karume/models/gemma`: the PLE index schema 4, the form of the q4_0 QAT line of Gemma 4
@@ -86,8 +88,9 @@ measurements in `docs/research/`.
   of many devices (E2B 4.70 GB, E4B 5.64 GB), where `pleResidency: "gpu"` fails loudly. The
   exporter (`karume.ple`) writes schema 5 for `storage="bf16"`; the bytes of schema 3 / 4 indexes
   are unchanged.
-- The q4_0 QAT line of Gemma 4, `karume-gemma4-qat` (read by `@karume/models/gemma`; not yet
-  published): Google's q4_0 quantization-aware-trained E2B / E4B / 12B on their own int4 grid
+- The q4_0 QAT line of Gemma 4, `karume-gemma4-qat` (read by `@karume/models/gemma`; published
+  on Hugging Face as `hdae/karume-gemma4-qat`, pinned as `gemma.SOURCES["gemma4-qat"]`, also in
+  `KARUME_SOURCES`): Google's q4_0 quantization-aware-trained E2B / E4B / 12B on their own int4 grid
   (group 32 — the linears, the tied embedding and, for E2B / E4B, the PLE in index schema 4), each
   with its QAT multi-token-prediction drafter on the same grid, so `speculative: {}` works for all
   three models. Default preset `i4`; E2B / E4B also have `i4-gemvpar` / `i4-fast` (parallel GEMV,
@@ -118,8 +121,8 @@ measurements in `docs/research/`.
 
 - `@karume/models/gemma4-qat` is renamed `@karume/models/gemma4-qat-mobile` (barrel
   namespace `gemma4QatMobile`, diagnostics `gemma4QatMobile.Pipeline: …`), and the mobile QAT
-  distribution becomes `karume-gemma4-qat-mobile`. The subpath exports no `SOURCES` and
-  `KARUME_SOURCES` has no mobile entry until the renamed repository is published; the name
+  distribution becomes `karume-gemma4-qat-mobile`. Its `SOURCES["gemma4-qat-mobile"]` (also in
+  `KARUME_SOURCES`) pins `hdae/karume-gemma4-qat-mobile`; the name
   `karume-gemma4-qat` now means the q4_0 QAT line above (ADR 0097 addendum 10).
 - The regular `karume-gemma4` distribution ships E2B and E4B only (12B moved to the
   q4_0 QAT line), each with one `model` container (`model/model.bf16.krm`) and one preset,
@@ -137,7 +140,7 @@ measurements in `docs/research/`.
   the freed name `hdae/karume-gemma4-qat`. The revision that 0.15.1's `gemma4Qat.SOURCES["gemma4-qat"]`
   pins is then not found under the name 0.15.1 reads, so **0.15.1 is yanked**; use this release.
 
-## [0.15.1] - 2026-11-01
+## [0.15.1] - 2026-11-01 [YANKED]
 
 ### Added
 
@@ -2082,7 +2085,8 @@ Four distribution repositories were re-uploaded for this release.
   `fetch` injection for `fromPretrained`, and `Symbol.dispose` support on `AnimaPipeline`.
 - Model cards are generated from the manifest when a distribution is assembled.
 
-[Unreleased]: https://github.com/hdae/karume/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/hdae/karume/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/hdae/karume/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/hdae/karume/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/hdae/karume/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/hdae/karume/compare/v0.13.0...v0.14.0
