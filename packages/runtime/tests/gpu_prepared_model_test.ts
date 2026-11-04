@@ -1,10 +1,10 @@
-// 2 段境界（ADR 0070 決定 5 / graph-first）の実 GPU 門 — `prepareContainer(opened, graph) →
-// estimate() → createContainerSession(gpu)` が、1 本にまとめた createSessionFromContainer と
-// **同じ Session** を作ること。
+// Real-GPU check of the two-phase boundary (ADR 0070 decision 5 / graph-first) — `prepareContainer(opened, graph) →
+// estimate() → createContainerSession(gpu)` must build **the same Session** as the combined
+// createSessionFromContainer.
 //
-// 検出器は 2 つ: 全重みを通る run の出力ビット同一と storage 診断の一致。fixture は 4 codec 混在
-// （f32 / f16 / int8-sym / int4-sym-g）を使う — どれか 1 codec が 2 段の経路で欠けても沈黙しない
-// ため。
+// Two detectors: bit-identical output of a run that goes through every weight, and matching storage
+// diagnostics. The fixture mixes 4 codecs (f32 / f16 / int8-sym / int4-sym-g) — so that dropping any one
+// codec on the two-phase path does not pass silently.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -33,17 +33,17 @@ const bitsOf = (tensor: Tensor): readonly number[] => [
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "2 段境界は createSessionFromContainer と出力ビット同一・storage 診断一致（実 GPU）",
+  "the two-phase boundary matches createSessionFromContainer in bit-identical output and storage diagnostics (real GPU)",
   async () => {
     const fixture = buildFixture();
     const gpu = await acquireGpu();
     try {
-      // 相 1: 開いた容器の宣言だけで admission（重みの block は 1 つも取っていない）
+      // Phase 1: admission from the declarations of the opened container only (not a single weight block fetched)
       const counted = countingContainer(await openModelBytes(fixture.declaration, fixture.tensors));
       const prepared = prepareContainer(counted.container, GRAPH_NAME);
       const estimate = prepared.estimate();
-      assertEquals(counted.reads(), 0, "admission が重みの block を取っている");
-      // 相 2: block を取って構築
+      assertEquals(counted.reads(), 0, "admission fetched a weight block");
+      // Phase 2: fetch the blocks and build
       const twoPhase = await prepared.createContainerSession(gpu);
       const composed = await createSessionFromContainer(
         gpu,
@@ -53,12 +53,12 @@ test.skipIf(!GPU_AVAILABLE)(
       try {
         const twoPhaseOut = (await twoPhase.run({ x: fixture.x }))["y"];
         const composedOut = (await composed.run({ x: fixture.x }))["y"];
-        assertEquals(bitsOf(twoPhaseOut), bitsOf(composedOut), "出力がビット同一でない");
+        assertEquals(bitsOf(twoPhaseOut), bitsOf(composedOut), "the outputs are not bit-identical");
         assertEquals(twoPhase.diagnostics().storage, composed.diagnostics().storage);
         const storage = twoPhase.diagnostics().storage;
-        assert(storage.residentCompressedBytes > 0, "圧縮常駐が 1 本も無い");
-        // 重みを 1 バイトも取る前に出した数字が、実測の圧縮常駐と厳密一致する
-        // （ADR 0070 決定 5 の対応表 — 2 段境界にした意味がここに出る）
+        assert(storage.residentCompressedBytes > 0, "no compressed resident weight at all");
+        // The number given before a single byte of weights was fetched matches the measured compressed
+        // residency exactly (the mapping table of ADR 0070 decision 5 — this is where the two-phase boundary pays off)
         assertEquals(estimate.resident.weights.compressedBytes, storage.residentCompressedBytes);
       } finally {
         await twoPhase.dispose();
@@ -71,10 +71,10 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "admission は重みの block を 1 つも取る前に落ちる（実 GPU）",
+  "admission fails before a single weight block is fetched (real GPU)",
   async () => {
-    // 対応 op でも実行できない意味論 dtype（matmul の重みが i32 — capability 不足）。
-    // NOTE: 格納 codec の側では作れない — 台帳の全 codec が実行できる（bf16 は ADR 0131 で開いた）。
+    // A semantic dtype that cannot run even on a supported op (matmul weights in i32 — missing capability).
+    // NOTE: it cannot be made on the storage-codec side — every codec of the ledger can run (bf16 was opened by ADR 0131).
     const unsupportedDtype = baseDeclaration();
     unsupportedDtype.values["w"] = { dtype: "i32", shape: [4, 3] };
     const counted = countingContainer(
@@ -95,7 +95,7 @@ test.skipIf(!GPU_AVAILABLE)(
         RuntimeSupportError,
         "i32",
       );
-      assertEquals(counted.reads(), 0, "実行できないモデルなのに重みの block を取っている");
+      assertEquals(counted.reads(), 0, "fetched a weight block for a model that cannot run");
     } finally {
       gpu.destroy();
     }
@@ -103,12 +103,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 重み `w`（`[4,3]` f32）を 2 本の piece で供給し、**2 本目の読みだけ**を落とすメモリ内容器。
+ * An in-memory container that supplies the weight `w` (`[4,3]` f32) as 2 pieces and fails **only the read of
+ * the second one**.
  *
- * MUST: 落とし方は「構築の途中」でなければならない。admission（capability / op 契約）で
- * 落とすと GPU の資源を 1 つも作る前に戻るので、「半端な資源が残らない」という主張が
- * 空振りする（`:70` の門がその相を別に持っている）。piece 1 は実バイト列を返して
- * `queue.writeBuffer` まで進ませ、piece 2 の `read()` で初めて落とす。
+ * MUST: the failure has to happen "in the middle of construction". Failing at admission (capability / op
+ * contract) returns before a single GPU resource is created, so the claim "no half-built resources remain"
+ * would test nothing (the check at `:70` covers that phase separately). Piece 1 returns real bytes and lets
+ * construction go as far as `queue.writeBuffer`; only the `read()` of piece 2 fails.
  */
 const halfUploadedContainer = (): { readonly container: BoundContainer; reads(): number } => {
   let reads = 0;
@@ -132,7 +133,7 @@ const halfUploadedContainer = (): { readonly container: BoundContainer; reads():
                 rows: [2, 4],
                 read: () => {
                   reads += 1;
-                  return Promise.reject(new Error("piece 2 の供給が落ちた"));
+                  return Promise.reject(new Error("the supply of piece 2 failed"));
                 },
               },
             ],
@@ -146,10 +147,10 @@ const halfUploadedContainer = (): { readonly container: BoundContainer; reads():
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "構築の途中で落ちても同じ device で作り直せる（部分 Session が残らない・実 GPU）",
+  "a failure in the middle of construction can be rebuilt on the same device (no partial Session remains; real GPU)",
   async () => {
-    // Session 構築が途中で失敗したとき、GPU 側に半端な資源や壊れた常駐を残さないこと。
-    // 供給元が容器になっても成り立つべき不変条件で、admission の相だけを見る他の 2 本とは別。
+    // When Session construction fails partway, it must leave no half-built resources or broken residency on the GPU.
+    // An invariant that must hold with a container as the source too; separate from the other 2, which look only at the admission phase.
     const broken = halfUploadedContainer();
     const healthy = await openModelBytes();
     const gpu = await acquireGpu();
@@ -157,15 +158,15 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         () => createSessionFromContainer(gpu, broken.container, GRAPH_NAME),
         Error,
-        "piece 2 の供給が落ちた",
+        "the supply of piece 2 failed",
       );
-      // 恒真でないことの確認 — 1 本目は実際に上がっており、落ちたのは転送が始まった後である。
+      // Not vacuous — the first piece was actually uploaded, and the failure came after the transfer had started.
       assertEquals(
         broken.reads(),
         2,
-        "piece の読みが 2 回に達していない（転送が始まる前に落ちている）",
+        "the piece reads did not reach 2 (the failure came before the transfer started)",
       );
-      // 同じ device で正常な容器から作り直し、最後まで走ること（x[1,4]·w[4,3] + b）。
+      // Rebuild from a healthy container on the same device and run to the end (x[1,4]·w[4,3] + b).
       const session = await createSessionFromContainer(gpu, healthy, GRAPH_NAME);
       try {
         const out = (
@@ -173,7 +174,7 @@ test.skipIf(!GPU_AVAILABLE)(
             x: { dtype: "f32", shape: [1, 4], data: Float32Array.from([1, 1, 1, 1]) },
           })
         )["y"];
-        // w は全要素 0.5 なので行和は 2・b は [1,2,3]。
+        // Every element of w is 0.5, so each row sum is 2; b is [1,2,3].
         assertEquals([...out.data], [3, 4, 5]);
       } finally {
         await session.dispose();

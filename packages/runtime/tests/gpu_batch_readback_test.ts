@@ -24,7 +24,7 @@ const session = async (gpu: GpuContext) =>
 const test = (name: string, fn: () => Promise<void>): void =>
   vitestTest.skipIf(!GPU_AVAILABLE)(name, fn);
 
-test("batch read: 未await enqueueと出力snapshotを1map・queue待ち0回で返す", async () => {
+test("batch read: returns unawaited enqueues and output snapshots with 1 map and 0 queue waits", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu),
     sink = await gpu.createResident(12),
@@ -82,7 +82,7 @@ test("batch read: 未await enqueueと出力snapshotを1map・queue待ち0回で�
   }
 });
 
-test("batch read: 空集合は従来の完了フェンスで閉じる", async () => {
+test("batch read: an empty set closes with the usual completion fence", async () => {
   const gpu = await acquireGpu(),
     fences = countFences(gpu);
   try {
@@ -95,7 +95,7 @@ test("batch read: 空集合は従来の完了フェンスで閉じる", async ()
   }
 });
 
-test("batch read: finish先行・settle中を拒否しsettle後は読める", async () => {
+test("batch read: rejects a read after finish and during settle, and reads after settle", async () => {
   const gpu = await acquireGpu(),
     sink = await gpu.createResident(4);
   sink.write(Int32Array.of(91));
@@ -124,7 +124,7 @@ test("batch read: finish先行・settle中を拒否しsettle後は読める", as
   }
 });
 
-test("batch read: 異なるdeviceと不正memberは発行時に拒否し予約を戻す", async () => {
+test("batch read: rejects a different device and an invalid member at issue and returns the reservation", async () => {
   const gpu = await acquireGpu(),
     other = await acquireGpu(),
     sink = await gpu.createResident(4),
@@ -150,7 +150,7 @@ test("batch read: 異なるdeviceと不正memberは発行時に拒否し予約�
   }
 });
 
-test("batch read: 破棄済みと合計上限超過も部分予約を漏らさない", async () => {
+test("batch read: a disposed member and an over-the-total-limit request leak no partial reservation either", async () => {
   const gpu = await acquireGpu(),
     sink = await gpu.createResident(4),
     dead = await gpu.createResident(4);
@@ -183,7 +183,7 @@ test("batch read: 破棄済みと合計上限超過も部分予約を漏らさ�
 });
 
 for (const fault of ["create", "copy", "map", "getMappedRange"] as const) {
-  test(`batch read: ${fault}例外でscopeと予約・stagingを解放する`, async () => {
+  test(`batch read: releases the scope, the reservation and the staging on a ${fault} exception`, async () => {
     const gpu = await acquireGpu(),
       sink = await gpu.createResident(4),
       create = gpu.device.createBuffer.bind(gpu.device),
@@ -240,7 +240,7 @@ for (const fault of ["create", "copy", "map", "getMappedRange"] as const) {
   });
 }
 
-test("batch read: copyのGPU validationをmap例外で隠さない", async () => {
+test("batch read: does not hide the copy's GPU validation behind the map exception", async () => {
   const gpu = await acquireGpu();
   const bad = new ResidentTensor(
     gpu,
@@ -261,7 +261,7 @@ test("batch read: copyのGPU validationをmap例外で隠さない", async () =>
   }
 });
 
-test("batch read: enqueue側の失敗でも成功データを返さない", async () => {
+test("batch read: returns no successful data when the enqueue side fails", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu),
     sink = await gpu.createResident(12);
@@ -279,7 +279,7 @@ test("batch read: enqueue側の失敗でも成功データを返さない", asyn
   }
 });
 
-test("batch read: map未決着のdevice lossでもハングせず予約を戻す", async () => {
+test("batch read: device loss before map settles does not hang and returns the reservation", async () => {
   const gpu = await acquireGpu(),
     sink = await gpu.createResident(4),
     create = gpu.device.createBuffer.bind(gpu.device),
@@ -314,7 +314,7 @@ test("batch read: map未決着のdevice lossでもハングせず予約を戻す
   }
 });
 
-test("batch read: GPU失敗とenqueue失敗が重なってもホスト側の原因を保つ", async () => {
+test("batch read: keeps the host-side cause when a GPU failure and an enqueue failure coincide", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu);
   const create = gpu.device.createBuffer.bind(gpu.device);

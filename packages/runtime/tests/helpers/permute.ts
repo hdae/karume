@@ -1,4 +1,7 @@
-/** 出力の座標を入力座標へ戻す独立oracle。要素順の恒等判定そのものは使わない。 */
+/**
+ * Independent oracle mapping output coordinates back to input coordinates. It does not use an
+ * element-order identity check.
+ */
 export const permutedSourceIndices = (
   shape: readonly number[],
   axes: readonly number[],

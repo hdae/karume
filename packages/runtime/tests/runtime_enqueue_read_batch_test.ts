@@ -1,17 +1,20 @@
-// `Session.enqueue` / `Session.enqueueRead` が受け取る `options.batch` は、**利用者のオブジェクト
-// のプロパティ**なので getter を仕込める。読むたびに別の値を返す getter を通すと、受け口の検査が
-// 見た区間・in-flight リースを取った区間・`#readBatch` に覚えた区間が食い違い、
+// The `options.batch` that `Session.enqueue` / `Session.enqueueRead` receive is **a property of the
+// caller's object**, so a getter can be planted there. Passing a getter that returns a different
+// value on each read makes the scope the entry check saw, the scope the in-flight lease was taken
+// on and the scope remembered in `#readBatch` diverge, so that
 //
-// ① 「未決着 run がある Session には enqueue できない」の検査を素通りして自己デッドロックになる
-// ② getter の throw が戻り Promise の reject ではなく **同期 throw** として漏れる
-// ③ `enqueueRead` の「決着まで後続 enqueue を拒む」門が別の区間に掛かり、読む slot を後続 enqueue に
-//    上書きされる（沈黙誤値）
+// ① the check "a Session with an unsettled run cannot be enqueued to" is bypassed and it
+//    self-deadlocks
+// ② a throw from the getter leaks as a **synchronous throw** instead of a rejection of the returned
+//    Promise
+// ③ `enqueueRead`'s check "reject later enqueues until settled" applies to another scope, and the
+//    slot being read is overwritten by a later enqueue (a silent wrong value)
 //
-// が起きる。ここが固定するのは「`options.batch` は発行の同期区間で 1 度だけ読み、以後はその値だけを
-// 使う」— 上の 3 つはその系。
+// happen. What this pins is "`options.batch` is read once in the synchronous part of issuing, and
+// only that value is used afterwards" — the three above follow from it.
 //
-// 実 GPU は使わない。検査もリース取得も dispatch を 1 本も出さない同期区間の話なので、フェイク
-// device（`helpers/fake-gpu.ts`）で決定論的に固定できる。
+// No real GPU is used. The check and the lease acquisition happen in a synchronous part that issues
+// no dispatch at all, so a fake device (`helpers/fake-gpu.ts`) pins them deterministically.
 
 import { assertEquals, assertInstanceOf, assertNotEquals, assertStringIncludes } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -29,10 +32,13 @@ import { fakeDevice } from "./helpers/fake-gpu.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 
 // ---------------------------------------------------------------------------
-// 材料（空グラフ・フェイク device・決着の観測）
+// Fixtures (empty graph, fake device, observing settlement)
 // ---------------------------------------------------------------------------
 
-/** ノード 0 本のグラフ。受け口の検査は積む中身を 1 バイトも見ないので、これで足りる。 */
+/**
+ * A graph with 0 nodes. The entry check does not look at a single byte of what is enqueued, so this
+ * is enough.
+ */
 const emptyGraph = (): IrGraph =>
   mergeGraph({
     format: "karume-ir",
@@ -46,7 +52,10 @@ const emptyGraph = (): IrGraph =>
     nodes: [],
   });
 
-/** 上限は門に掛からない値でよい（検査したいのは受け口で、確保の寸法ではない）。 */
+/**
+ * Any limits that do not trip a check will do (what is checked is the entry point, not allocation
+ * sizes).
+ */
 const LIMITS: RequiredLimits = {
   maxBufferSize: 1 << 20,
   maxStorageBufferBindingSize: 1 << 20,
@@ -62,8 +71,8 @@ const LIMITS: RequiredLimits = {
 };
 
 /**
- * `helpers/fake-gpu.ts` の最小フェイクに `limits` を足した device。
- * 構築相（`buildSessionState`）が `minStorageBufferOffsetAlignment` を 1 回読むため。
+ * A device that adds `limits` to the minimal fake in `helpers/fake-gpu.ts`, because the build phase
+ * (`buildSessionState`) reads `minStorageBufferOffsetAlignment` once.
  */
 const deviceWithLimits = (): GPUDevice =>
   Object.assign(fakeDevice(), { limits: { minStorageBufferOffsetAlignment: 256 } });
@@ -77,10 +86,11 @@ const emptySession = async (gpu: GpuContext): Promise<Session> => {
 };
 
 /**
- * 決着の観測（`"resolved"` / `"rejected"` / `"pending"`）。
+ * Observes settlement (`"resolved"` / `"rejected"` / `"pending"`).
  *
- * 退行すると対象は**永久に pending** になる（自己デッドロックは例外も診断も出ない）ので、
- * 待ち切らずに打ち切って「pending のままだった」を assert できる形にする。
+ * A regression leaves the target **pending forever** (a self-deadlock raises no exception and no
+ * diagnostic), so this gives up instead of waiting it out, letting a test assert "it stayed
+ * pending".
  */
 const outcomeOf = async (
   awaited: Promise<unknown>,
@@ -108,8 +118,8 @@ const rejectionOf = async (awaited: Promise<unknown>): Promise<unknown> => {
 
 // ---------------------------------------------------------------------------
 
-describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
-  it("getter を仕込まない通常形では 1 度しか読まず、受理も読み戻しも区間の決着も通る", async () => {
+describe("the enqueue entry point reads options.batch only once", () => {
+  it("in the normal form without a getter it reads once, and admission, read-back and scope settlement all pass", async () => {
     const gpu = gpuContext();
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
@@ -127,15 +137,15 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     assertEquals(await outcomeOf(read.admitted), { state: "resolved" });
     assertEquals(await outcomeOf(read.outputs), { state: "resolved" });
     assertEquals(await finished, { state: "resolved" });
-    // 読みが 1 度きりであること自体が、以下 3 本の退行が起きえない根拠になる。
+    // That it is read only once is itself why the three regressions below cannot happen.
     assertEquals(reads, 1);
     await session.dispose();
   });
 
-  it("2 度目以降に別の区間を返す getter でも、後続 enqueue を拒む対象は入った区間のまま", async () => {
+  it("even with a getter that returns another scope from the second read on, the scope rejecting later enqueues stays the one entered", async () => {
     const gpu = gpuContext();
     const session = await emptySession(gpu);
-    // 区間は device 単位で排他なので、すり替え先は別 GpuContext で開く。
+    // Scopes are exclusive per device, so the substitute is opened on another GpuContext.
     const other = gpuContext();
     const entered = await gpu.beginBatch();
     const decoy = await other.beginBatch();
@@ -149,31 +159,32 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
         },
       },
     );
-    // 入った区間が `entered` であることの観測: `decoy` で enter していれば「別の GpuContext で
-    // 開いた batch には enqueue できない」で受理そのものが落ちる。
+    // Observing that the entered scope is `entered`: had it entered `decoy`, admission itself would
+    // fail with "cannot enqueue to a batch opened on another GpuContext".
     assertEquals(await outcomeOf(read.admitted), { state: "resolved" });
-    // `#readBatch` も `entered` のまま = 決着前の後続 enqueue は拒まれる。
+    // `#readBatch` is also still `entered` = later enqueues before settlement are rejected.
     const refused = await rejectionOf(session.enqueue({}, { batch: entered }));
     assertInstanceOf(refused, BatchScopeError);
     assertStringIncludes(refused.message, "A batch holding an enqueueRead");
     assertEquals(await outcomeOf(entered.finish()), { state: "resolved" });
-    // 決着後は同じ区間ではなくなる（門が解除されることの逆側）。
+    // After settlement it is no longer the same scope (the other side of the check being lifted).
     assertEquals(await outcomeOf(decoy.finish()), { state: "resolved" });
     await session.dispose();
   });
 
-  it("2 度目以降で throw する getter でも、enqueueRead は同期 throw しない", async () => {
+  it("even with a getter that throws from the second read on, enqueueRead does not throw synchronously", async () => {
     const gpu = gpuContext();
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
     let reads = 0;
-    // 同期 throw が漏れると、この呼び出し自体がここで落ちる（戻り値を受け取れない）。
+    // If a synchronous throw leaked, this call itself would fail here (the return value could not
+    // be received).
     const read = session.enqueueRead(
       {},
       {
         get batch(): BatchScope {
           reads += 1;
-          if (reads >= 2) throw new Error("2 度目の読み");
+          if (reads >= 2) throw new Error("second read");
           return batch;
         },
       },
@@ -183,7 +194,7 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
     await session.dispose();
   });
 
-  it("最初の読みで throw する getter は、同期 throw ではなく戻り Promise の reject になる", async () => {
+  it("a getter that throws on the first read becomes a rejection of the returned Promise, not a synchronous throw", async () => {
     const gpu = gpuContext();
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
@@ -191,18 +202,19 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
       {},
       {
         get batch(): BatchScope {
-          throw new Error("最初の読み");
+          throw new Error("first read");
         },
       },
     );
     assertInstanceOf(await rejectionOf(read.admitted), Error);
     assertInstanceOf(await rejectionOf(read.outputs), Error);
-    // 受理に落ちた enqueue は区間へ 1 本も入っていない（リースが残らず finish は決着する）。
+    // An enqueue that failed admission put nothing into the scope (no lease remains and finish
+    // settles).
     assertEquals(await outcomeOf(batch.finish()), { state: "resolved" });
     await session.dispose();
   });
 
-  it("getter の中から同じ Session の run を発行しても、受理と区間は決着する", async () => {
+  it("even if the getter issues a run on the same Session, admission and the scope settle", async () => {
     const gpu = gpuContext();
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
@@ -216,33 +228,36 @@ describe("enqueue の受け口は options.batch を 1 度だけ読む", () => {
         },
       },
     );
-    // 未決着 run を持つ Session の enqueue は自己デッドロックなので、受け口が型付き例外へ変換する。
+    // An enqueue on a Session with an unsettled run would self-deadlock, so the entry point turns
+    // it into a typed exception.
     const refused = await rejectionOf(read.admitted);
     assertInstanceOf(refused, BatchScopeError);
     assertStringIncludes(refused.message, "unsettled runs");
-    // リースを取る前に落ちているので区間は決着する。
+    // It failed before taking the lease, so the scope settles.
     assertEquals(await outcomeOf(batch.finish()), { state: "resolved" });
-    // run も区間ロックを取れるところまで進む（本体はフェイク device にコマンド列を作る口が
-    // 無いので落ちる — ここで固定したいのは「ロック待ちのまま永久に pending にならない」こと）。
+    // The run also gets as far as taking the scope lock (the body fails because the fake device has
+    // no way to build a command sequence — what this pins is "it does not stay pending forever
+    // waiting for the lock").
     assertEquals(issued.length, 1);
     assertNotEquals((await outcomeOf(issued[0])).state, "pending");
     await session.dispose();
   });
 });
 
-describe("Session.dispose は enqueueRead を積んだ batch の決着前には受け付けない", () => {
-  it("決着前の dispose は受付終了の前に拒否し、finish 後の dispose は通る", async () => {
+describe("Session.dispose is not accepted before a batch holding an enqueueRead has settled", () => {
+  it("a dispose before settlement is rejected before intake closes, and a dispose after finish passes", async () => {
     const gpu = gpuContext();
     const session = await emptySession(gpu);
     const batch = await gpu.beginBatch();
     const read = session.enqueueRead({}, { batch });
     assertEquals(await outcomeOf(read.admitted), { state: "resolved" });
-    // 決着時の読み戻しの写し元は slot backing の生のバッファ（借用計数なし）— 通すと破棄本体が
-    // finish の copy より先に backing を destroy する。
+    // The read-back at settlement copies from the slot backing's raw buffer (no borrow count) —
+    // letting dispose through would destroy the backing before finish's copy.
     const refused = await rejectionOf(session.dispose());
     assertInstanceOf(refused, ExecutionError);
     assertStringIncludes(refused.message, "enqueueRead readback");
-    // 拒否は受付終了の前 = Session はまだ使える（後続の区間へ積める）。
+    // The rejection comes before intake closes = the Session is still usable (later scopes can be
+    // enqueued to).
     assertEquals(await outcomeOf(batch.finish()), { state: "resolved" });
     assertEquals(await outcomeOf(read.outputs), { state: "resolved" });
     const next = await gpu.beginBatch();
@@ -252,11 +267,14 @@ describe("Session.dispose は enqueueRead を積んだ batch の決着前には�
   });
 });
 
-describe("enqueueRead の読み戻し合計の上限は dispatch の前に検査する", () => {
-  // 上限は 1 本ぶん（12 bytes）は通り、2 本ぶん（24 bytes）は超える値にする。
+describe("the read-back total limit of enqueueRead is checked before dispatch", () => {
+  // The limit lets one read-back (12 bytes) pass and is exceeded by two (24 bytes).
   const READBACK_LIMITS: RequiredLimits = { ...LIMITS, maxBufferSize: 16 };
 
-  /** 入力 `x`（f32 × 3 = 12 bytes）をそのまま出力するグラフ（ノード 0 本でも読み戻しが 12 bytes 載る）。 */
+  /**
+   * A graph that outputs input `x` (f32 × 3 = 12 bytes) as is (with 0 nodes it still carries a
+   * 12-byte read-back).
+   */
   const passThroughGraph = (): IrGraph =>
     mergeGraph({
       format: "karume-ir",
@@ -270,7 +288,7 @@ describe("enqueueRead の読み戻し合計の上限は dispatch の前に検査
       nodes: [],
     });
 
-  /** backing の確保と入力の書き込みを受けるフェイク device（書き込みの発行を数える）。 */
+  /** A fake device that takes backing allocations and input writes (counting the issued writes). */
   const recordingGpu = (): { readonly gpu: GpuContext; readonly writes: () => number } => {
     let writes = 0;
     const device = fakeDevice();
@@ -300,7 +318,7 @@ describe("enqueueRead の読み戻し合計の上限は dispatch の前に検査
 
   const x = () => ({ dtype: "f32" as const, shape: [3], data: Float32Array.of(1, 2, 3) });
 
-  it("登録済み合計 + 今回分が上限を超える enqueueRead は、入力の書き込みも backing の保持もせずに拒否する", async () => {
+  it("an enqueueRead whose registered total plus this one exceeds the limit is rejected without writing inputs or holding a backing", async () => {
     const { gpu, writes } = recordingGpu();
     const first = await passThroughSession(gpu);
     const second = await passThroughSession(gpu);
@@ -313,13 +331,14 @@ describe("enqueueRead の読み戻し合計の上限は dispatch の前に検査
     const refused = await rejectionOf(refusedRead.admitted);
     assertInstanceOf(refused, BatchScopeError);
     assertStringIncludes(refused.message, "maxBufferSize");
-    // 検査が登録（submit の後）でしか走らないと、入力を書き dispatch を submit した後に落ちる
-    // （generation 付きなら state を書いた後 = context の poison）。
+    // If the check ran only at registration (after submit), it would fail after writing the inputs
+    // and submitting the dispatch (with a generation, after writing state = poisoning the context).
     assertEquals(writes() - writesBefore, 0);
-    // dispatch 前の失敗経路は、この enqueue が新規構築した backing を退役させる。
+    // The failure path before dispatch retires the backing this enqueue newly built.
     assertEquals(second.diagnostics().planBacking.retainedCount, 0);
 
-    // 区間の決着は拒否された enqueue の失敗を帰属先として返す（読み戻しはフェイクでは走らない）。
+    // The scope's settlement returns the rejected enqueue's failure as the one it is attributed to
+    // (the read-back does not run on the fake).
     await outcomeOf(batch.finish());
     await outcomeOf(accepted.outputs);
     await outcomeOf(refusedRead.outputs);

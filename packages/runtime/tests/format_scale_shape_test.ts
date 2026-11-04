@@ -1,17 +1,19 @@
-// companion scale の形（`groupScaleShape` — src/format/container/codecs.ts）を消費する 4 経路の突合。
-// GPU を一切使わない。
+// Cross-check of the 4 paths that consume the companion scale shape (`groupScaleShape` —
+// src/format/container/codecs.ts). Uses no GPU at all.
 //
-// scale の形を前提にする経路は 4 つある — 合流層（scale block の長さ）・常駐プランナ（scale の
-// バイト数）・容器から Session 構築へ渡す scale 形（`containerBatches`）・CPU 展開 `decodeI4` の
-// 突合。どれか 1 つが自前の式を持つと、受理した形と展開が読む形が静かに食い違う
-// （group scale が 1 チャネル 1 値として配られる沈黙誤値）。
+// Four paths assume the scale shape — the merge layer (scale block length), the residency planner
+// (scale bytes), the scale shape handed from the container to Session construction
+// (`containerBatches`) and the check in the CPU decode `decodeI4`. If any one of them has its own
+// formula, the accepted shape and the shape the decode reads silently disagree (a silent wrong
+// value where the group scale is handed out as one value per channel).
 //
-// 表の 1 行ごとに見るのは 2 段:
-// ① 共有の関数が手書きの形を返す（式そのものの固定 — 期待値は手で書く。関数から引くと恒真）。
-// ② 4 経路の受理 / 数 / 形が、その関数の値と一致する（式を変えれば 4 経路とも同時に動き、
-//    1 経路だけ別の式に戻すとその経路の行が赤になる）。
-// 行の軸 1（conv_transpose1d の `[Cin,Cout,K]`）と行長 0 の退化形は、局所の式が最も割れやすい
-// 形として必ず表に置く。
+// Each table row is checked in 2 steps:
+// ① The shared function returns the hand-written shape (pins the formula itself — the expected
+//    value is written by hand; deriving it from the function would be a tautology).
+// ② What the 4 paths accept / count / shape matches that function's value (changing the formula
+//    moves all 4 paths together, and reverting one path to a different formula turns its row red).
+// Row axis 1 (`[Cin,Cout,K]` of conv_transpose1d) and the degenerate row length 0 are always in the
+// table, as the shapes on which a local formula most easily breaks.
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -29,7 +31,7 @@ const numel = (shape: readonly number[]): number => shape.reduce((count, dim) =>
 
 const zeros = (length: number): Uint8Array<ArrayBuffer> => new Uint8Array(new ArrayBuffer(length));
 
-/** 重み `w` 1 本を消費する op（経路が重みスロットの消費として扱うもの）。 */
+/** An op consuming the single weight `w` (what the paths treat as consuming a weight slot). */
 type Consumer = "linear" | "conv1d" | "conv_transpose1d";
 
 type Case = {
@@ -39,13 +41,13 @@ type Case = {
   readonly shape: readonly number[];
   readonly rowAxis: 0 | 1;
   readonly groupSize: number;
-  /** 手書きの期待形（共有の関数から引かない）。 */
+  /** The hand-written expected shape (not derived from the shared function). */
   readonly want: readonly [number, number];
 };
 
 const CASES: readonly Case[] = [
   {
-    label: "i4 linear [8,64]・group 16",
+    label: "i4 linear [8,64], group 16",
     consumer: "linear",
     codec: "int4-sym-g",
     shape: [8, 64],
@@ -54,7 +56,7 @@ const CASES: readonly Case[] = [
     want: [8, 4],
   },
   {
-    label: "i4 linear [8,64]・group 64（行長 = group 長）",
+    label: "i4 linear [8,64], group 64 (row length = group length)",
     consumer: "linear",
     codec: "int4-sym-g",
     shape: [8, 64],
@@ -63,7 +65,7 @@ const CASES: readonly Case[] = [
     want: [8, 1],
   },
   {
-    label: "i4 conv1d [4,16,4]・group 16（行長は Cin·K = 64 に平坦化）",
+    label: "i4 conv1d [4,16,4], group 16 (row length flattened to Cin·K = 64)",
     consumer: "conv1d",
     codec: "int4-sym-g",
     shape: [4, 16, 4],
@@ -72,7 +74,7 @@ const CASES: readonly Case[] = [
     want: [4, 4],
   },
   {
-    label: "i4 linear [4,0]・group 16（行長 0 の退化形は group 数 1）",
+    label: "i4 linear [4,0], group 16 (the degenerate row length 0 has group count 1)",
     consumer: "linear",
     codec: "int4-sym-g",
     shape: [4, 0],
@@ -81,7 +83,7 @@ const CASES: readonly Case[] = [
     want: [4, 1],
   },
   {
-    label: "i8 linear [6,16]・per-channel",
+    label: "i8 linear [6,16], per-channel",
     consumer: "linear",
     codec: "int8-sym",
     shape: [6, 16],
@@ -90,7 +92,7 @@ const CASES: readonly Case[] = [
     want: [6, 1],
   },
   {
-    label: "i8 conv_transpose1d [4,6,2]・行の軸 1（行は Cout = 6・行長 8）",
+    label: "i8 conv_transpose1d [4,6,2], row axis 1 (rows are Cout = 6, row length 8)",
     consumer: "conv_transpose1d",
     codec: "int8-sym",
     shape: [4, 6, 2],
@@ -99,9 +101,11 @@ const CASES: readonly Case[] = [
     want: [6, 1],
   },
   {
-    // per-channel の要素数は `numel / groupSize` で行の軸に依らないので、バイト数だけを見る経路
-    // （合流層・常駐プランナ）で軸の取り違えが数に出るのは行長 0 の形だけ（軸 0 と読むと 0 行）。
-    label: "i8 conv_transpose1d [0,6,2]・行の軸 1・行長 0（軸 0 と読むと scale 0 要素）",
+    // The per-channel element count is `numel / groupSize` whatever the row axis, so on the paths
+    // that only look at bytes (merge layer, residency planner) a mixed-up axis shows in the count
+    // only for a row length of 0 (reading it as axis 0 gives 0 rows).
+    label:
+      "i8 conv_transpose1d [0,6,2], row axis 1, row length 0 (read as axis 0: 0 scale elements)",
     consumer: "conv_transpose1d",
     codec: "int8-sym",
     shape: [0, 6, 2],
@@ -111,7 +115,7 @@ const CASES: readonly Case[] = [
   },
 ];
 
-/** `w` を 1 本の op で消費するグラフ（bias `b` は f32）。 */
+/** A graph consuming `w` with one op (bias `b` is f32). */
 const declarationOf = (testCase: Case): DeclarationJson => {
   const { consumer, shape } = testCase;
   const common = {
@@ -177,7 +181,9 @@ const declarationOf = (testCase: Case): DeclarationJson => {
   };
 };
 
-/** `w` の scale を `scaleElements` 要素ぶん持つ供給（中身は見ないので 0 埋め）。 */
+/**
+ * Supplies with `scaleElements` elements of scale for `w` (zero-filled, the contents are not read).
+ */
 const tensorsOf = (testCase: Case, scaleElements: number): readonly TensorInput[] => {
   const { codec, shape, rowAxis, groupSize } = testCase;
   const rows = shape[rowAxis];
@@ -202,7 +208,10 @@ const tensorsOf = (testCase: Case, scaleElements: number): readonly TensorInput[
   ];
 };
 
-/** `containerBatches` が `w` の item に同乗させる scale（GPU を通らない Session 構築の入口）。 */
+/**
+ * The scale that `containerBatches` carries along with the `w` item (the GPU-free entry of Session
+ * construction).
+ */
 const yieldedScale = async (testCase: Case): Promise<ReadyScale | undefined> => {
   const expected = groupScaleShape(testCase.shape, testCase.rowAxis, testCase.groupSize);
   const opened = memoryModel(declarationOf(testCase), tensorsOf(testCase, numel(expected)));
@@ -214,43 +223,44 @@ const yieldedScale = async (testCase: Case): Promise<ReadyScale | undefined> => 
   return undefined;
 };
 
-describe("companion scale の形: 4 経路が groupScaleShape の 1 本に従う", () => {
+describe("companion scale shape: the 4 paths follow the single groupScaleShape", () => {
   for (const testCase of CASES) {
     const { shape, rowAxis, groupSize } = testCase;
     const expected = groupScaleShape(shape, rowAxis, groupSize);
 
     describe(testCase.label, () => {
-      it("共有の関数は手書きの形を返す", () => {
+      it("the shared function returns the hand-written shape", () => {
         assertEquals(expected, testCase.want);
       });
 
-      it("合流層はその形ぶんの scale block を受理し、1 要素多い block を拒否する", () => {
+      it("the merge layer accepts a scale block of that shape and rejects one 1 element longer", () => {
         const bound = memoryModel(declarationOf(testCase), tensorsOf(testCase, numel(expected)))
           .graphs[GRAPH_NAME];
         assertEquals(bound.supplies.get("w")?.scale?.payloadBytes, numel(expected) * 4);
         assertThrows(
           () => memoryModel(declarationOf(testCase), tensorsOf(testCase, numel(expected) + 1)),
           ContainerFormatError,
-          // 型だけでは、scale の長さ検査が死んでも別の規則で落ちれば緑のまま — 規則に固有の
-          // 診断を見る。
+          // The type alone stays green if the scale length check dies but another rule rejects —
+          // look at the diagnostic specific to the rule.
           `initializer 'w' scale: block 'model/w#scale' length ${(numel(expected) + 1) * 4} is not ` +
             `payload ${numel(expected) * 4} bytes`,
         );
       });
 
-      it("常駐プランナの scale バイト数はその形の要素数 × 4", () => {
+      it("the residency planner's scale bytes are that shape's element count × 4", () => {
         const bound = memoryModel(declarationOf(testCase), tensorsOf(testCase, numel(expected)))
           .graphs[GRAPH_NAME];
         const seat = planWeightResidency(mergedGraph(bound, GRAPH_NAME)).get("w");
-        // 行長 0 の i4 も含め、表の重みはどれも圧縮のまま常駐する席に載る（席の判定は
-        // runtime_weight_residency_test の担当 — ここは scale のバイト数だけを見る）。
+        // Every weight in the table, including the i4 one with row length 0, lands in a class
+        // resident in compressed form (the class decision belongs to runtime_weight_residency_test
+        // — here only the scale bytes are checked).
         if (seat?.seat !== "i4" && seat?.seat !== "i8") {
-          throw new Error(`w の席が圧縮常駐でない: ${seat?.seat}`);
+          throw new Error(`w is not in a compressed residency class: ${seat?.seat}`);
         }
         assertEquals(seat.scaleBytes, numel(expected) * 4);
       });
 
-      it("容器から Session 構築へ渡る scale の形がその形", async () => {
+      it("the scale shape handed from the container to Session construction is that shape", async () => {
         const scale = await yieldedScale(testCase);
         assertEquals(scale?.shape, expected);
         assertEquals(scale?.bytes.byteLength, numel(expected) * 4);
@@ -258,7 +268,7 @@ describe("companion scale の形: 4 経路が groupScaleShape の 1 本に従う
 
       if (testCase.codec !== "int4-sym-g") return;
 
-      it("decodeI4 はその形を受理し、group 数が 1 つ違う形を拒否する", () => {
+      it("decodeI4 accepts that shape and rejects one whose group count is off by 1", () => {
         const bytes = zeros(numel(shape) / 2);
         const decoded = decodeI4(
           bytes,

@@ -1,11 +1,13 @@
 /**
- * 空き VRAM の試し確保（`fitsHeadroom` — `src/gpu/headroom.ts`）。
+ * Probe allocation of free VRAM (`fitsHeadroom` — `src/gpu/headroom.ts`).
  *
- * 実 GPU で縛るのは 3 つ: ①入る量は true ②入らない量は false で **device は生きたまま**（続けて小さい
- * 確保が通り、`device.lost` は解決しない）③true の後に同じ量を本当に確保できる（試し確保の解放が
- * 返る前に戻っていない）。②は「createBuffer の OOM は非致命」という WebGPU 仕様の保証そのものを、
- * この機の実装が守ることの確認でもある（wgpu は writeBuffer 側の OOM で device を失う —
- * docs/research/2026-09-27-h35-oom-device-lost.md）。
+ * On a real GPU this pins three things: (1) an amount that fits gives true; (2) an amount that does
+ * not fit gives false **with the device still alive** (a small allocation right after succeeds and
+ * `device.lost` does not resolve); (3) after true, the same amount can really be allocated (the
+ * call does not return before the probe allocation has been released). (2) also confirms that this
+ * machine's implementation keeps the WebGPU spec's guarantee that an OOM in createBuffer is not
+ * fatal (wgpu loses the device on an OOM on the writeBuffer side —
+ * docs/research/2026-09-27-h35-oom-device-lost.md).
  */
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -17,15 +19,15 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const MIB = 1024 ** 2;
 
-describe("probePieces（試し確保の割り方）", () => {
-  it("0 バイトは片を作らない", () => {
+describe("probePieces (how the probe allocation is split)", () => {
+  it("0 bytes makes no pieces", () => {
     assertEquals(probePieces(0, 1024), []);
   });
-  it("maxBufferSize 以下は 1 片で、4 バイトに切り上げる", () => {
+  it("up to maxBufferSize is one piece, rounded up to 4 bytes", () => {
     assertEquals(probePieces(7, 1024), [8]);
     assertEquals(probePieces(1024, 1024), [1024]);
   });
-  it("maxBufferSize を超える量は等分し、どの片も maxBufferSize 以下", () => {
+  it("an amount above maxBufferSize is split evenly and every piece is at most maxBufferSize", () => {
     const pieces = probePieces(5 * 1024 + 1, 1024);
     assertEquals(pieces.length, 6);
     for (const piece of pieces) {
@@ -33,23 +35,24 @@ describe("probePieces（試し確保の割り方）", () => {
     }
     assert(pieces.reduce((sum, piece) => sum + piece, 0) >= 5 * 1024 + 1);
   });
-  it("maxBufferSize が 4 の倍数でなく切り上げが上限を越える形は片を 1 本増やす", () => {
-    // Deno の maxBufferSize は 2^31 - 1 でこの形になる: 1 片 1023 → 4 整列で 1024 > 1023。
+  it("adds one piece when maxBufferSize is not a multiple of 4 and rounding up exceeds the limit", () => {
+    // Deno's maxBufferSize is 2^31 - 1, which has this shape: one piece of 1023 → 1024 after 4-byte
+    // alignment > 1023.
     const pieces = probePieces(1023, 1023);
     assertEquals(pieces, [512, 512]);
     const wide = probePieces(2 ** 31 - 1, 2 ** 31 - 1);
     assertEquals(wide, [2 ** 30, 2 ** 30]);
   });
-  it("負数・非整数は RangeError", () => {
+  it("negative and non-integer sizes are a RangeError", () => {
     assertThrows(() => probePieces(-4, 1024), RangeError);
     assertThrows(() => probePieces(1.5, 1024), RangeError);
     assertThrows(() => probePieces(4, 2), RangeError);
   });
 });
 
-describe("fitsHeadroom（実 GPU）", () => {
+describe("fitsHeadroom (real GPU)", () => {
   it.skipIf(!GPU_AVAILABLE)(
-    "小さい量は入り、天井を越える量は device を生かしたまま false",
+    "a small amount fits, and an amount above the ceiling gives false with the device kept alive",
     async () => {
       const gpu = await acquireGpu();
       try {
@@ -58,9 +61,11 @@ describe("fitsHeadroom（実 GPU）", () => {
           lost = true;
         });
         assertEquals(await fitsHeadroom(gpu, 4), true);
-        // 1 TiB — どの device でも入らない（maxBufferSize ごとの片に割って順に確保し、途中で OOM する）。
+        // 1 TiB — fits on no device (split into maxBufferSize pieces allocated in turn; OOMs part
+        // way).
         assertEquals(await fitsHeadroom(gpu, 2 ** 40), false);
-        // 非致命の確認: 続けて小さい量が入り、本当の確保 + 書き込み + フェンスも通る。
+        // Not fatal: a small amount fits right after, and a real allocation + write + fence also
+        // succeed.
         assertEquals(await fitsHeadroom(gpu, 4), true);
         gpu.device.pushErrorScope("out-of-memory");
         const buffer = gpu.device.createBuffer({
@@ -80,14 +85,15 @@ describe("fitsHeadroom（実 GPU）", () => {
   );
 
   it.skipIf(!GPU_AVAILABLE)(
-    "true の後は同じ量を本当に確保できる（解放を待ってから返る）",
+    "after true the same amount can really be allocated (it returns only after the release)",
     async () => {
       const gpu = await acquireGpu();
       try {
         const bytes = 512 * MIB;
         if (!(await fitsHeadroom(gpu, bytes))) {
-          // 512 MiB も入らない機は前提が崩れている（テストの対象外 — 明示して落とす）。
-          throw new Error("512 MiB の試し確保が通らない device では検証できない");
+          // A machine where even 512 MiB does not fit breaks the premise (out of scope — fail
+          // explicitly).
+          throw new Error("cannot check on a device where a 512 MiB probe allocation fails");
         }
         const pieces = probePieces(bytes, gpu.limits.maxBufferSize);
         gpu.device.pushErrorScope("out-of-memory");

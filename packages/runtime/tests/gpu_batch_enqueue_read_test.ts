@@ -1,11 +1,13 @@
 /**
- * `Session.enqueueRead`（ADR 0054 追記〈グラフ出力の一括読み戻し〉）の門。
+ * Checks of `Session.enqueueRead` (ADR 0054 addendum, batched readback of graph outputs).
  *
- * 見るのは ①出力が run と同じ値で、batch の終端 map 1 回（staging 1 本・queue 待ち 0 回）で
- * 返ること ②`outputs` は決着前に解決しないこと ③常駐の `finishAndRead` と同じ staging に
- * 連結すること ④同じ Session の後続 enqueue をその batch の決着まで拒むこと ⑤受理の失敗と
- * 区間の GPU 失敗が `outputs` にも出て、成功データを返さないこと ⑥出力が常駐入力の別名になる
- * enqueueRead を受理で拒むこと ⑦決着前の Session.dispose を受付終了の前に拒むこと。
+ * What is checked: ① the outputs have the same values as run and come back with a single map at the
+ * end of the batch (1 staging, 0 queue waits); ② `outputs` does not resolve before the batch
+ * settles; ③ it joins the same staging as the resident `finishAndRead`; ④ later enqueues of the
+ * same Session are rejected until that batch settles; ⑤ an admission failure and a GPU failure of
+ * the batch show in `outputs` too, and no success data is returned; ⑥ an enqueueRead whose output
+ * aliases a resident input is rejected at admission; ⑦ Session.dispose before the batch settles is
+ * rejected before admission closes.
  */
 import { test as vitestTest } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
@@ -27,9 +29,9 @@ const session = async (gpu: GpuContext) =>
   );
 const test = (name: string, fn: () => Promise<void>): void =>
   vitestTest.skipIf(!GPU_AVAILABLE)(name, fn);
-/** 次のマクロタスクまで待つ（決着前の `outputs` が解決していないことを見るため）。 */
+/** Waits until the next macrotask (to see that `outputs` has not resolved before settling). */
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
-/** 決着の staging（label `batch-readback`）の確保数と map 数を数える。 */
+/** Counts the allocations and maps of the settling staging (label `batch-readback`). */
 const countStagings = (gpu: GpuContext): { stagings(): number; maps(): number } => {
   const create = gpu.device.createBuffer.bind(gpu.device);
   let stagings = 0,
@@ -49,7 +51,7 @@ const countStagings = (gpu: GpuContext): { stagings(): number; maps(): number } 
   return { stagings: () => stagings, maps: () => maps };
 };
 
-test("batch enqueueRead: グラフ出力を終端の map 1 回で読み戻し run と同じ値を返す", async () => {
+test("batch enqueueRead: reads graph outputs back with a single map at the end and returns the same values as run", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu);
   const fences = countFences(gpu),
@@ -66,12 +68,12 @@ test("batch enqueueRead: グラフ出力を終端の map 1 回で読み戻し ru
     );
     await read.admitted;
     await tick();
-    assertEquals(settled, false, "決着前に outputs が解決した");
+    assertEquals(settled, false, "outputs resolved before the batch settled");
     await batch.finish();
     const outputs = await read.outputs;
     assertEquals(outputs, expected);
     assertEquals(Array.from(outputs.y.data), [-1, -2, -3]);
-    assertEquals(fences.count() - before, 0, "queue 待ちが混ざった");
+    assertEquals(fences.count() - before, 0, "a queue wait slipped in");
     assertEquals([staging.stagings(), staging.maps()], [1, 1]);
   } finally {
     fences.restore();
@@ -80,7 +82,7 @@ test("batch enqueueRead: グラフ出力を終端の map 1 回で読み戻し ru
   }
 });
 
-test("batch enqueueRead: finishAndRead の常駐と同じ 1 本の staging に連結する", async () => {
+test("batch enqueueRead: joins the single staging of the resident finishAndRead", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu),
     sink = await gpu.createResident(12);
@@ -100,7 +102,7 @@ test("batch enqueueRead: finishAndRead の常駐と同じ 1 本の staging に�
   }
 });
 
-test("batch enqueueRead: 同じ Session の後続 enqueue は決着まで拒否し、次の batch では通る", async () => {
+test("batch enqueueRead: later enqueues of the same Session are rejected until settled, and pass in the next batch", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu);
   try {
@@ -121,7 +123,7 @@ test("batch enqueueRead: 同じ Session の後続 enqueue は決着まで拒否�
   }
 });
 
-test("batch enqueueRead: 受理の失敗は admitted と outputs の両方に出て finish にも帰属する", async () => {
+test("batch enqueueRead: an admission failure shows in both admitted and outputs and is attributed to finish too", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu);
   try {
@@ -131,7 +133,8 @@ test("batch enqueueRead: 受理の失敗は admitted と outputs の両方に出
     const failure = await assertRejects(() => read.admitted);
     assertStrictEquals(await assertRejects(() => batch.finish()), failure);
     assertStrictEquals(await assertRejects(() => read.outputs), failure);
-    // outputs を握らないまま落ちる区間も未処理拒否にならない（内部で決着を受け取っている）。
+    // A batch that fails without anyone holding outputs is no unhandled rejection either (the
+    // settlement is received internally).
     const orphaned = await gpu.beginBatch();
     target.enqueueRead({ x0: wrong }, { batch: orphaned });
     await assertRejects(() => orphaned.finish());
@@ -142,7 +145,7 @@ test("batch enqueueRead: 受理の失敗は admitted と outputs の両方に出
   }
 });
 
-test("batch enqueueRead: 区間の GPU 失敗では outputs も拒否し成功データを返さない", async () => {
+test("batch enqueueRead: a GPU failure of the batch rejects outputs too and returns no success data", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu);
   const bad = new ResidentTensor(
@@ -159,7 +162,7 @@ test("batch enqueueRead: 区間の GPU 失敗では outputs も拒否し成功�
     await assertRejects(() => batch.finishAndRead({ bad }), GpuValidationError);
     await assertRejects(() => read.outputs, GpuValidationError);
     assertEquals(bad.useReferences, 0);
-    // 失敗した区間の後も同じ Session で読める（#readBatch が決着で解けている）。
+    // After a failed batch the same Session can read again (#readBatch is released at settlement).
     const next = await gpu.beginBatch();
     const again = target.enqueueRead({ x0: input() }, { batch: next });
     await next.finish();
@@ -171,7 +174,7 @@ test("batch enqueueRead: 区間の GPU 失敗では outputs も拒否し成功�
   }
 });
 
-/** y = reshape(x)（[2,2] → [4]）— グラフ出力が入力の別名になる縮退グラフ。 */
+/** y = reshape(x) ([2,2] → [4]) — a degenerate graph whose output aliases its input. */
 const aliasSession = async (gpu: GpuContext) =>
   await createSessionFromContainer(
     gpu,
@@ -179,15 +182,16 @@ const aliasSession = async (gpu: GpuContext) =>
     "model",
   );
 
-test("batch enqueueRead: 出力が常駐入力の別名なら受理で落ち、区間に何も積まない", async () => {
+test("batch enqueueRead: an output aliasing a resident input fails at admission and queues nothing in the batch", async () => {
   const gpu = await acquireGpu(),
     target = await aliasSession(gpu);
   const resident = await gpu.createResident(16, "r");
   try {
     resident.write(Float32Array.of(1, 2, 3, 4));
     const batch = await gpu.beginBatch();
-    // 写しは決着時に走るので、通すと admitted の後・finish の前の write が読み戻しに混ざる
-    // （積んだ時点と別の値が黙って返る）。
+    // The copy runs at settlement, so letting it through would mix writes made after admitted and
+    // before finish into the readback (a value different from the one at enqueue time comes back
+    // silently).
     const read = target.enqueueRead({ x0: resident }, { batch });
     const failure = await assertRejects(() => read.admitted, ExecutionError, "is an alias of");
     assertEquals(
@@ -205,9 +209,10 @@ test("batch enqueueRead: 出力が常駐入力の別名なら受理で落ち、�
   }
 });
 
-test("batch enqueueRead: ホスト入力の別名出力は通り、入力の値を返す", async () => {
-  // ホスト入力の実体は backing 所有で、決着までの上書きは同じ Session の後続 enqueue だけ
-  // （#readBatch が塞ぐ）なので許す。
+test("batch enqueueRead: an output aliasing a host input passes and returns the input's value", async () => {
+  // The storage of a host input is owned by the backing, and the only thing that can overwrite it
+  // before settlement is a later enqueue of the same Session (blocked by #readBatch), so it is
+  // allowed.
   const gpu = await acquireGpu(),
     target = await aliasSession(gpu);
   try {
@@ -225,7 +230,7 @@ test("batch enqueueRead: ホスト入力の別名出力は通り、入力の値�
   }
 });
 
-test("batch enqueueRead: 決着前の Session.dispose は受付終了の前に拒否し、finish 後は通る", async () => {
+test("batch enqueueRead: Session.dispose before settlement is rejected before admission closes, and passes after finish", async () => {
   const gpu = await acquireGpu(),
     target = await session(gpu);
   try {
@@ -233,7 +238,8 @@ test("batch enqueueRead: 決着前の Session.dispose は受付終了の前に�
     const batch = await gpu.beginBatch();
     const read = target.enqueueRead({ x0: input() }, { batch });
     await read.admitted;
-    // 通すと破棄本体が slot backing を destroy した後に、決着時の copy がその実体を写し元に積む。
+    // Letting it through would have the copy at settlement queue that storage as its source after
+    // the dispose body destroyed the slot backing.
     await assertRejects(() => target.dispose(), ExecutionError, "enqueueRead readback");
     await batch.finish();
     const outputs = await read.outputs;
@@ -244,7 +250,7 @@ test("batch enqueueRead: 決着前の Session.dispose は受付終了の前に�
     assertEquals(u32(outputs.y), u32(expected.y));
     await target.dispose();
   } finally {
-    // dispose は 2 度目以降も同じ完了を返す。
+    // dispose returns the same completion on the second and later calls.
     await target.dispose();
     gpu.destroy();
   }

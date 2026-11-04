@@ -1,36 +1,42 @@
-// f16 **計算**変種（ADR 0028 — `SessionOptions.attentionCompute` / `linearCompute` の `"f16"`）の
-// 数値契約。**重み格納 f16（ADR 0018）とは別の軸**で、こちらは共有タイルを f16 に落とす。
+// The numeric contract of the f16 **compute** variants (ADR 0028 — `"f16"` of
+// `SessionOptions.attentionCompute` / `linearCompute`). **A separate axis from f16 weight storage (ADR
+// 0018)**: this one lowers the shared tiles to f16.
 //
-// ## このファイルが固定する数値契約: atol=0
+// ## The numeric contract this file pins: atol=0
 //
-// カーネルは共有タイルへ書く直前に 1 度だけ f16 へ丸め、内側ループでは f32 へ広げてから
-// （拡幅は厳密）f32 で累積する。したがって
+// The kernel rounds to f16 exactly once, just before writing into the shared tile, and in the inner
+// loop widens to f32 (the widening is exact) and accumulates in f32. Therefore
 //
-//     f16 変種の出力 ≡ 入力を f16 に丸めた f32 変種の出力     … 1 ビットも違わない
+//     f16 variant output ≡ f32 variant output on inputs rounded to f16     … not one bit differs
 //
-// が成立するはずで、tolerance で吸収する余地が構造的に無い（w8a8 の atol=0 と同じ質の契約）。
+// should hold, and there is structurally no room for a tolerance to absorb anything (a contract of
+// the same quality as w8a8's atol=0).
 //
-// ## オラクルの取り方（丸めだけをホストが担い、f32 の縮約は GPU に任せる）
+// ## How the oracle is built (the host does only the rounding; the f32 reduction is left to the GPU)
 //
-// MUST: f32 の縮約を JS で書き直さない。WGSL は `a + b * c` を FFMA へ融合してよく（単一丸め）、
-// `exp` の実装も規定されていないので、CPU で書いた f32 参照は**ドライバの裁量ぶん**だけ
-// 割れうる。それは f16 変種の正しさとは無関係な差なので、契約に持ち込むと atol=0 が壊れる。
-// 代わりに **f32 変種そのものをオラクルにし、ホストは丸め（{@link roundToF16}）だけを担う**:
+// MUST: do not rewrite the f32 reduction in JS. WGSL may fuse `a + b * c` into an FFMA (a single
+// rounding), and the implementation of `exp` is not specified either, so an f32 reference written on
+// the CPU can split by **the driver's latitude**. That difference has nothing to do with the
+// correctness of the f16 variant, so bringing it into the contract would break atol=0. Instead,
+// **the f32 variant itself is the oracle, and the host does only the rounding ({@link roundToF16})**:
 //
-// | 対象      | 実測                                  | オラクル                                                            |
-// | --------- | ------------------------------------- | ------------------------------------------------------------------- |
-// | linear    | `linearCompute:"f16"` × 素の x / w    | 既定 × **f16 に丸めた** x / w                                       |
-// | attention | `attentionCompute:"f16"` × 素の q/k/v | ① bmm(f16(q·s), f16(k·s)ᵀ) → ② softmax(f16(S)) → ③ bmm(f16(P), f16(v)) |
+// | Target    | Measured                               | Oracle                                                              |
+// | --------- | -------------------------------------- | ------------------------------------------------------------------- |
+// | linear    | `linearCompute:"f16"` × plain x / w    | default × x / w **rounded to f16**                                  |
+// | attention | `attentionCompute:"f16"` × plain q/k/v | ① bmm(f16(q·s), f16(k·s)ᵀ) → ② softmax(f16(S)) → ③ bmm(f16(P), f16(v)) |
 //
-// attention の 3 段は融合前の分解経路そのもの（tests/gpu_attention_parity_test.ts が
-// ビット同一を既に固定している経路）で、**丸めが起きる 3 点だけ**をホストが挟む。これは
-// ADR 0023 の「② は softmax のパス①②と逐語一致 / ③ の A 要素は softmax のパス③の出力と同じ式」
-// という不変条件に直接乗っている — 崩れたらここが赤くなる。
+// The 3 stages of attention are exactly the decomposed path before fusion (the path whose bit
+// identity tests/gpu_attention_parity_test.ts already pins), and the host inserts **only the 3 points
+// where rounding happens**. This rests directly on ADR 0023's invariant "② matches softmax passes
+// ①② verbatim / ③'s A element is the same expression as the output of softmax pass ③" — if it
+// breaks, this turns red.
 //
-// MUST: 恒真化しないこと。**f16 変種の出力が f32 変種と違う**ことを毎ケース確かめる
-// （丸めが 1 度も起きていない実装でもオラクル一致は成立してしまうため）。
+// MUST: do not let the check become vacuous. Every case confirms that **the f16 variant's output
+// differs from the f32 variant's** (an implementation in which no rounding ever happens would still
+// match the oracle).
 //
-// 資産不要。`shader-f16` を列挙しないアダプタでは SKIP（既定の f32 経路の検証は無傷）。
+// No assets needed. SKIPs on an adapter that does not list `shader-f16` (the checks of the default
+// f32 path are unaffected).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -68,38 +74,40 @@ import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 // ---------------------------------------------------------------------------
-// 丸めの正本（GPU 非依存）
+// The rounding reference (GPU-independent)
 // ---------------------------------------------------------------------------
 
-test("roundToF16 は独立実装の RTNE 符号化器と f32 入力の全域で一致する（丸めの正本の交差検証）", () => {
-  // MUST: 2 つの実装を突き合わせる。片方だけだと「両方同じ間違い方」を検出できない
-  // （tests/helpers/f16.ts はビット演算の自前実装・src/format/f16.ts は Math.f16round）。
+test("roundToF16 matches an independently implemented RTNE encoder over the whole f32 input range (cross-check of the rounding reference)", () => {
+  // MUST: compare 2 implementations. With only one, "both wrong the same way" cannot be detected
+  // (tests/helpers/f16.ts is a hand-written bit-manipulation implementation; src/format/f16.ts is
+  // Math.f16round).
   //
-  // MUST: 入力は **f32 の値**（`Math.fround` 済み）に揃える。ビット実装は double を一度 f32 へ
-  // 落としてから f16 へ丸めるので、f32 で表せない double を渡すと**二重丸め**の差が出る
-  // （例: 65519.999 は double のままなら 65504・f32 を経由すると同点で偶数側 = Inf）。
-  // カーネルが丸めるのは常に f32 の値なので、契約に関わるのは f32 入力の側だけ。
+  // MUST: the inputs are aligned to **f32 values** (already `Math.fround`ed). The bit implementation
+  // first drops a double to f32 and then rounds to f16, so passing a double not representable in f32
+  // gives a **double rounding** difference (e.g. 65519.999 is 65504 as a double, but through f32 it is
+  // a tie that goes to the even side = Inf). The kernel always rounds f32 values, so only the f32-input
+  // side matters to the contract.
   const viaBits = (value: number): number => f16BitsToF32(f32ToF16Bits(value));
   const cases: readonly number[] = [
     0,
     -0,
     1,
-    // 同点（1 + 2^-11）は偶数側 1.0 へ / 1 + 3·2^-12 は上へ
+    // The tie (1 + 2^-11) goes to the even side 1.0 / 1 + 3·2^-12 goes up
     1 + 2 ** -11,
     1 + 3 * 2 ** -12,
     -(1 + 2 ** -11),
     0.1,
     -0.1,
     1 / 3,
-    65504, // f16 の最大有限値
-    65519, // まだ 65504 へ落ちる
-    65520, // 同点 → 偶数側（仮数 0）= Inf
+    65504, // the largest finite f16 value
+    65519, // still falls to 65504
+    65520, // tie -> even side (mantissa 0) = Inf
     65536,
     -65536,
-    2 ** -14, // 最小 normal
-    2 ** -24, // 最小 subnormal
-    2 ** -25, // 半分 → 偶数丸めで 0
-    3 * 2 ** -25, // subnormal の同点の上側
+    2 ** -14, // smallest normal
+    2 ** -24, // smallest subnormal
+    2 ** -25, // half -> 0 by round-to-even
+    3 * 2 ** -25, // the upper side of a subnormal tie
     1e-9,
     Infinity,
     -Infinity,
@@ -108,26 +116,26 @@ test("roundToF16 は独立実装の RTNE 符号化器と f32 入力の全域で�
     assertEquals(
       Object.is(roundToF16(value), viaBits(value)),
       true,
-      `roundToF16(${value}) = ${roundToF16(value)} / ビット実装 = ${viaBits(value)}`,
+      `roundToF16(${value}) = ${roundToF16(value)} / bit implementation = ${viaBits(value)}`,
     );
   }
-  // 刻みの違う 3 本の走査で全体像も突き合わせる（境界だけ合っている実装を弾く）
+  // Compare the whole picture too with 3 sweeps of different steps (rejects an implementation that is right only at the boundaries)
   for (let i = -20000; i < 20000; i += 7) {
     for (const step of [1e-4, 3.7e-2, 11.3]) {
       const value = Math.fround(i * step);
-      assert(Object.is(roundToF16(value), viaBits(value)), `roundToF16(${value}) が割れた`);
+      assert(Object.is(roundToF16(value), viaBits(value)), `roundToF16(${value}) split`);
     }
   }
   assert(Number.isNaN(roundToF16(Number.NaN)));
 });
 
 // ---------------------------------------------------------------------------
-// 実 GPU（f16 計算変種）
+// Real GPU (f16 compute variants)
 // ---------------------------------------------------------------------------
 
 const F16_GPU = GPU_AVAILABLE && SHADER_F16_AVAILABLE;
 
-/** 決定的なデータ列（乱数は使わない）。MUST: f16 で厳密に表せない刻みにする。 */
+/** Deterministic data sequences (no random numbers). MUST: use steps not exactly representable in f16. */
 const XS = (i: number): number => (((i * 7) % 23) - 11) * 0.1713 + 0.0271;
 const WS = (i: number): number => (((i * 11) % 19) - 9) * 0.2317 - 0.0139;
 const BS = (i: number): number => ((i % 5) - 2) * 0.4271;
@@ -135,25 +143,25 @@ const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.1731;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.2317;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.3119;
 
-/** 半スケール（torch math decomp の `√scale_factor`）— ADR 0023 の契約どおりの値。 */
+/** Half scale (`√scale_factor` of torch's math decomp) — the value ADR 0023's contract prescribes. */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
-/** f32 のビット列（±0 の差も末尾 1 ulp の差も見える形）。 */
+/** The f32 bit pattern (a form in which both a ±0 difference and a last-ulp difference are visible). */
 const bits = (data: Float32Array): Uint32Array =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
 const assertBitEqual = (actual: Float32Array, expected: Float32Array, where: string): void => {
-  assertEquals(actual.length, expected.length, `${where}: 長さ`);
+  assertEquals(actual.length, expected.length, `${where}: length`);
   const a = bits(actual);
   const e = bits(expected);
   const mismatches: string[] = [];
   for (let i = 0; i < a.length && mismatches.length < 4; i += 1) {
     if (a[i] !== e[i]) mismatches.push(`[${i}] ${actual[i]} vs ${expected[i]}`);
   }
-  assertEquals(mismatches, [], `${where}: ビット列が違う（${mismatches.join(" / ")}）`);
+  assertEquals(mismatches, [], `${where}: the bit patterns differ (${mismatches.join(" / ")})`);
 };
 
-/** 2 つの結果が**違う**ことの確認（丸めが実際に効いていることの恒真化対策）。 */
+/** Confirms that 2 results **differ** (guards against vacuity: the rounding actually takes effect). */
 const assertDiffers = (a: Float32Array, b: Float32Array, where: string): void => {
   const x = bits(a);
   const y = bits(b);
@@ -164,8 +172,14 @@ const assertDiffers = (a: Float32Array, b: Float32Array, where: string): void =>
       break;
     }
   }
-  assert(differ, `${where}: f16 変種の出力が f32 変種と 1 ビットも違わない（丸めが効いていない）`);
-  assert(new Set(x).size > 1, `${where}: 出力が定数（比較が恒真になっている）`);
+  assert(
+    differ,
+    `${where}: the f16 variant's output does not differ from the f32 variant's by a single bit (the rounding has no effect)`,
+  );
+  assert(
+    new Set(x).size > 1,
+    `${where}: the output is constant (the comparison has become vacuous)`,
+  );
 };
 
 const roundedCopy = (data: Float32Array): Float32Array<ArrayBuffer> =>
@@ -179,7 +193,7 @@ const roundedTensor = (tensor: FilledTensor): FilledTensor => ({
 
 type RunResult = {
   readonly output: Float32Array<ArrayBuffer>;
-  /** 走ったパイプラインキー（census — 計測に依らない）。 */
+  /** The pipeline keys that ran (census — independent of timing). */
   readonly keys: readonly string[];
 };
 
@@ -214,7 +228,7 @@ const runGraph = async (
 // linear
 // ---------------------------------------------------------------------------
 
-/** `linear(x, w, b)` 1 ノード（重みは**グラフ入力** = 格納 f32 の経路）。 */
+/** A single `linear(x, w, b)` node (the weight is **a graph input** = the f32-storage path). */
 const linearInputGraph = (m: number, n: number, k: number): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -231,7 +245,7 @@ const linearInputGraph = (m: number, n: number, k: number): DeclarationJson => (
   nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
 });
 
-/** `linear(x, w, b)` 1 ノード（重みは f16 格納の initializer = 格納 f16 × 計算 f16 の組）。 */
+/** A single `linear(x, w, b)` node (the weight is an f16-stored initializer = the pair f16 storage x f16 compute). */
 const linearWf16Graph = (m: number, n: number, k: number): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -249,10 +263,11 @@ const linearWf16Graph = (m: number, n: number, k: number): DeclarationJson => ({
 });
 
 /**
- * 形状の選定（既存の GEMM parity テストに倣う）。
+ * The choice of shapes (following the existing GEMM parity tests).
  *
- * MUST: v4 経路とスカラ経路を**両方**持ち、行 / 列とも 64 タイルを跨ぐケースを 1 本入れる。
- * K の偶奇・端数は共有タイルの端で 0 埋めが起きる場所なので、`k % 16 ≠ 0` を必ず含める。
+ * MUST: have **both** the v4 path and the scalar path, and include one case that spans the 64 tiles in
+ * both rows and columns. The parity and remainder of K are where zero fill happens at the edge of the
+ * shared tile, so always include `k % 16 ≠ 0`.
  */
 const LINEAR_SHAPES: readonly {
   readonly name: string;
@@ -260,18 +275,18 @@ const LINEAR_SHAPES: readonly {
   readonly n: number;
   readonly k: number;
 }[] = [
-  // v4（k%4 && n%4）で m / n とも 64 タイルを跨ぐ
+  // v4 (k%4 && n%4), spanning the 64 tiles in both m and n
   { name: "v4 m65 n68 k20", m: 65, n: 68, k: 20 },
-  // スカラ変種（k も n も 4 の倍数でない）+ K タイル端数
-  { name: "スカラ m70 n23 k37", m: 70, n: 23, k: 37 },
-  // K タイルを何枚も跨ぐ v4（丸め誤差が縮約に積まれる形）
+  // The scalar variant (neither k nor n is a multiple of 4) + a K tile remainder
+  { name: "scalar m70 n23 k37", m: 70, n: 23, k: 37 },
+  // v4 spanning many K tiles (rounding error piles up in the reduction)
   { name: "v4 m9 n64 k132", m: 9, n: 64, k: 132 },
-  // k が奇数 1（K 端数 0 埋めが 15 語）
-  { name: "スカラ m5 n7 k1", m: 5, n: 7, k: 1 },
+  // k is the odd number 1 (the K remainder zero fill is 15 words)
+  { name: "scalar m5 n7 k1", m: 5, n: 7, k: 1 },
 ];
 
 test.skipIf(!F16_GPU)(
-  "linear の f16 計算変種は「入力を f16 に丸めた f32 変種」とビット単位で一致する（実 GPU）",
+  "the linear f16 compute variant matches 'the f32 variant with inputs rounded to f16' bit for bit (real GPU)",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     const profile = deviceGeometryProfile(gpu);
@@ -283,31 +298,31 @@ test.skipIf(!F16_GPU)(
         const b = fill([n], BS);
         const graph = linearInputGraph(m, n, k);
 
-        // 実測: 素の入力 × f16 計算
+        // Measured: plain inputs x f16 compute
         const actual = await runGraph(gpu, graph, { x, w, b }, { linearCompute: "f16" });
-        // オラクル: f16 に丸めた入力 × 既定の f32 計算（bias は f32 のまま — 丸めない）
+        // Oracle: inputs rounded to f16 x the default f32 compute (the bias stays f32 — not rounded)
         const oracle = await runGraph(gpu, graph, {
           x: roundedTensor(x),
           w: roundedTensor(w),
           b,
         });
-        // 対照: 素の入力 × 既定の f32 計算（丸めが効いていることの確認用）
+        // Control: plain inputs x the default f32 compute (to confirm that the rounding takes effect)
         const plain = await runGraph(gpu, graph, { x, w, b });
 
         assertBitEqual(actual.output, oracle.output, `linear ${name}`);
         assertDiffers(actual.output, plain.output, `linear ${name}`);
 
         const v4 = k % 4 === 0 && n % 4 === 0;
-        // MUST: 期待キーにも **m** を通す（executor は linearKey(..., m, ...) で行数から
-        // 幾何を解決する — src/runtime/recipe-builder.ts）。省くと既定幾何の綴りになり、
-        // 幾何が違うキーと突き合わせることになる。
+        // MUST: pass **m** to the expected key too (the executor resolves the geometry from the row count
+        // with linearKey(..., m, ...) — src/runtime/recipe-builder.ts). Leaving it out gives the spelling of
+        // the default geometry, and the comparison would be against a key with a different geometry.
         assertEquals(
           actual.keys.filter(
             (key) =>
               key === linearKey("f32", v4, "f16", m, undefined, gemmRowsGeometry(profile, m)),
           ).length,
           1,
-          `linear ${name}: f16 変種のキーが走っていない（${actual.keys.join(", ")}）`,
+          `linear ${name}: the f16 variant's key did not run (${actual.keys.join(", ")})`,
         );
         assertEquals(
           actual.keys.filter(
@@ -315,7 +330,7 @@ test.skipIf(!F16_GPU)(
               key === linearKey("f32", v4, "f32", m, undefined, gemmRowsGeometry(profile, m)),
           ).length,
           0,
-          `linear ${name}: f32 変種のキーが残っている`,
+          `linear ${name}: an f32 variant's key remains`,
         );
       }
     } finally {
@@ -325,7 +340,7 @@ test.skipIf(!F16_GPU)(
 );
 
 test.skipIf(!F16_GPU)(
-  "重み f16 格納 × f16 計算の組は往復恒等（unpack2x16float の値は f16 に厳密に戻る）",
+  "the pair f16 weight storage x f16 compute round-trips identically (unpack2x16float values return exactly to f16)",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     const profile = deviceGeometryProfile(gpu);
@@ -353,7 +368,7 @@ test.skipIf(!F16_GPU)(
         ];
 
         const actual = await runGraph(gpu, graph, { x }, { linearCompute: "f16" }, tensors);
-        // 重みは既に f16 の格子上にあるので、丸めるのは x だけ（往復恒等の主張そのもの）
+        // The weights are already on the f16 grid, so only x is rounded (the round-trip identity claim itself)
         const oracle = await runGraph(gpu, graph, { x: roundedTensor(x) }, {}, tensors);
         const plain = await runGraph(gpu, graph, { x }, {}, tensors);
 
@@ -367,7 +382,7 @@ test.skipIf(!F16_GPU)(
               key === linearKey("f16", v4, "f16", m, undefined, gemmRowsGeometry(profile, m)),
           ).length,
           1,
-          `linear wf16 ${name}: f16 計算のキーが走っていない`,
+          `linear wf16 ${name}: the f16 compute key did not run`,
         );
       }
     } finally {
@@ -377,7 +392,7 @@ test.skipIf(!F16_GPU)(
 );
 
 // ---------------------------------------------------------------------------
-// 融合 attention
+// Fused attention
 // ---------------------------------------------------------------------------
 
 type AttentionShape = {
@@ -389,13 +404,13 @@ type AttentionShape = {
   readonly d: number;
 };
 
-/** MUST: 既存の f32 parity テストと同じ形状群（B と H の畳み込み・端数・v4 の踏み分け）。 */
+/** MUST: the same set of shapes as the existing f32 parity test (folding of B and H, remainders, v4 selection). */
 const ATTENTION_SHAPES: readonly AttentionShape[] = [
-  { name: "全異 B2 H3 M5 N11 D7", b: 2, h: 3, m: 5, n: 11, d: 7 },
-  { name: "端数 B3 H1 M17 N19 D13", b: 3, h: 1, m: 17, n: 19, d: 13 },
+  { name: "all distinct B2 H3 M5 N11 D7", b: 2, h: 3, m: 5, n: 11, d: 7 },
+  { name: "remainders B3 H1 M17 N19 D13", b: 3, h: 1, m: 17, n: 19, d: 13 },
   { name: "v4 B1 H2 M68 N20 D12", b: 1, h: 2, m: 68, n: 20, d: 12 },
-  { name: "混成 B2 H2 M9 N8 D6", b: 2, h: 2, m: 9, n: 8, d: 6 },
-  { name: "DiT 形 B1 H4 M64 N64 D128", b: 1, h: 4, m: 64, n: 64, d: 128 },
+  { name: "mixed B2 H2 M9 N8 D6", b: 2, h: 2, m: 9, n: 8, d: 6 },
+  { name: "DiT shape B1 H4 M64 N64 D128", b: 1, h: 4, m: 64, n: 64, d: 128 },
 ];
 
 const tensorOf = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Tensor => ({
@@ -405,14 +420,15 @@ const tensorOf = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Te
 });
 
 /**
- * 分解経路 3 段のオラクル。丸めが起きる点だけをホストが挟む（ADR 0028 の丸め列 1 / 4）:
+ * The oracle of the 3-stage decomposed path. The host inserts only the points where rounding happens
+ * (rounding sequences 1 / 4 of ADR 0028):
  *
- * 1. `f16(q·scale)` と `f16(k·scale)` — ①QK のタイル充填。**scale の乗算は f32 で済ませてから**
- *    丸める（半スケール契約は ADR 0023）。k は `[n,d]` → `[d,n]` へホストで転置する
- *    （カーネル側の「共有メモリで転置」と同じ配置になる）。
- * 2. `f16(S)` — ①QK の書き出し（S は f16 で受け渡す）。
- * 3. `f16(P)` と `f16(v)` — ③PV のタイル充填。`P = exp(S−m)·inv` は softmax のパス③の出力
- *    そのもの（ADR 0023 の成立根拠 4）。
+ * 1. `f16(q·scale)` and `f16(k·scale)` — the tile fill of ①QK. **The scale multiplication is done in
+ *    f32 first**, then rounded (the half-scale contract is ADR 0023). k is transposed on the host from
+ *    `[n,d]` to `[d,n]` (the same layout as the kernel's "transpose in shared memory").
+ * 2. `f16(S)` — the write-out of ①QK (S is handed over in f16).
+ * 3. `f16(P)` and `f16(v)` — the tile fill of ③PV. `P = exp(S−m)·inv` is exactly the output of softmax
+ *    pass ③ (reason 4 why it holds, ADR 0023).
  */
 const attentionOracle = async (
   gpu: GpuContext,
@@ -425,7 +441,7 @@ const attentionOracle = async (
   const { b, h, m, n, d } = shape;
   const heads = b * h;
 
-  // ① q·scale を f16 へ / k·scale を [heads, d, n] へ転置しつつ f16 へ
+  // ① q·scale to f16 / k·scale transposed to [heads, d, n] and to f16
   const qs = Float32Array.from(q, (value) => roundToF16(Math.fround(value * scale)));
   const kt = new Float32Array(heads * d * n);
   for (let head = 0; head < heads; head += 1) {
@@ -450,14 +466,14 @@ const attentionOracle = async (
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
 
-  // ② S を f16 へ（① の書き出しの丸め）→ 行統計と P は softmax がそのまま作る
+  // ② S to f16 (the rounding of ①'s write-out) -> the row statistics and P are produced by softmax as is
   const probs = await runGraph(
     gpu,
     singleOpDeclaration("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
     { x0: tensorOf([heads, m, n], roundedCopy(scores.output)) },
   );
 
-  // ③ P と v を f16 へ（③ のタイル充填の丸め）
+  // ③ P and v to f16 (the rounding of ③'s tile fill)
   const out = await runGraph(
     gpu,
     singleOpDeclaration(
@@ -477,7 +493,7 @@ const attentionOracle = async (
 };
 
 test.skipIf(!F16_GPU)(
-  "融合 attention の f16 変種は分解経路 + 丸め 3 点とビット単位で一致する（実 GPU）",
+  "the fused attention f16 variant matches the decomposed path + 3 rounding points bit for bit (real GPU)",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     const profile = deviceGeometryProfile(gpu);
@@ -521,24 +537,24 @@ test.skipIf(!F16_GPU)(
         const qkV4 = d % 4 === 0 && n % 4 === 0;
         const pvV4 = n % 4 === 0 && d % 4 === 0;
         const running = new Set(actual.keys);
-        // MUST: ②行統計の期待キーにも regcache を通す（executor は列数から
-        // `attentionStatsRegCache(n)` を導いてキーへ載せる）。省くと `:rc` 無しの綴りに
-        // なり、走ったキーと必ず食い違う。
+        // MUST: pass regcache to the expected key of ② row statistics too (the executor derives
+        // `attentionStatsRegCache(n)` from the column count and puts it into the key). Leaving it out gives
+        // a spelling without `:rc`, which always disagrees with the key that ran.
         const regCache = attentionStatsRegCache(n);
         for (const key of [
           attentionQkKey(qkV4, "f16", "f32", false, false, false, profile.attention.qk),
           attentionStatsKey("f16", "f32", regCache),
           attentionPvKey(pvV4, "f16", "f32", false, false, profile.attention.pv),
         ]) {
-          assert(running.has(key), `attention ${name}: '${key}' が走っていない`);
+          assert(running.has(key), `attention ${name}: '${key}' did not run`);
         }
-        // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
+        // The 3 kernels switch **together** (the condition for the storage form of S to agree between writer and reader)
         for (const key of [
           attentionQkKey(qkV4, "f32", "f32", false, false, false, profile.attention.qk),
           attentionStatsKey("f32", "f32", regCache),
           attentionPvKey(pvV4, "f32", "f32", false, false, profile.attention.pv),
         ]) {
-          assert(!running.has(key), `attention ${name}: f32 変種 '${key}' が残っている`);
+          assert(!running.has(key), `attention ${name}: f32 variant '${key}' remains`);
         }
       }
     } finally {
@@ -548,16 +564,20 @@ test.skipIf(!F16_GPU)(
 );
 
 // ---------------------------------------------------------------------------
-// fail loudly（黙って f32 へ落とさない）
+// fail loudly (do not silently fall to f32)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "f16 計算の要求は shader-f16 無しの device では Session 構築で落ちる（実 GPU）",
+  "a request for f16 compute fails at Session build on a device without shader-f16 (real GPU)",
   async () => {
-    // MUST: **shaderF16 を要求していない** device を作る（既定の acquireGpu）。
+    // MUST: create a device that **does not request shaderF16** (the default acquireGpu).
     const gpu = await acquireGpu();
     try {
-      assertEquals(gpu.shaderF16Enabled, false, "既定の acquireGpu は shader-f16 を要求しない");
+      assertEquals(
+        gpu.shaderF16Enabled,
+        false,
+        "the default acquireGpu does not request shader-f16",
+      );
       const opened = await openModelBytes(linearInputGraph(4, 8, 4), []);
       for (const options of [{ linearCompute: "f16" }, { attentionCompute: "f16" }] as const) {
         const error = await assertRejects(
@@ -566,7 +586,7 @@ test.skipIf(!GPU_AVAILABLE)(
         );
         assert(
           error.message.includes("acquireGpu({ shaderF16: true })"),
-          `案内が足りない: ${error.message}`,
+          `the guidance is insufficient: ${error.message}`,
         );
       }
     } finally {
@@ -576,7 +596,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!F16_GPU)(
-  "i8 常駐の重み × linearCompute 'f16'（w8a16）は fail loudly（実 GPU）",
+  "i8-resident weights x linearCompute 'f16' (w8a16) fail loudly (real GPU)",
   async () => {
     const m = 4;
     const n = 8;
@@ -603,8 +623,8 @@ test.skipIf(!F16_GPU)(
         graph: GRAPH_NAME,
         initializer: "w",
         bytes: weight.bytes,
-        // per-channel（行長 = K が group 長・groups は 1）。`rowAxis` は linear の重みの
-        // チャネル軸 0（src/ops/names.ts の `WEIGHT_CHANNEL_AXES`）。
+        // per-channel (row length = K is the group length, groups is 1). `rowAxis` is the channel axis 0 of
+        // linear's weight (`WEIGHT_CHANNEL_AXES` in src/ops/names.ts).
         encoding: {
           codec: "int8-sym",
           groupSize: k,
@@ -622,14 +642,14 @@ test.skipIf(!F16_GPU)(
     try {
       const opened = await openModelBytes(graph, tensors);
       const x = fill([m, k], XS);
-      // MUST: i8a8 と f32 は通る（落とすのは w8a16 の組だけ）
+      // MUST: i8a8 and f32 pass (only the w8a16 pair is rejected)
       await runModel(gpu, opened, { x }, {});
       await runModel(gpu, opened, { x }, { linearCompute: "a8" });
       const error = await assertRejects(
         () => runModel(gpu, opened, { x }, { linearCompute: "f16" }),
         ExecutionError,
       );
-      assert(error.message.includes("w8a16"), `案内が足りない: ${error.message}`);
+      assert(error.message.includes("w8a16"), `the guidance is insufficient: ${error.message}`);
     } finally {
       gpu.destroy();
     }

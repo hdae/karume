@@ -18,8 +18,8 @@ const input = (m: number, k = 1536) => ({
 const words = (data: ArrayBufferView<ArrayBuffer>) =>
   new Uint32Array(data.buffer, data.byteOffset, data.byteLength / 4);
 
-describe.skipIf(!GPU_AVAILABLE)("linear→SRQのSession融合と寿命（実GPU）", () => {
-  it("INT2/4/8のM1/4/8で非融合と行0が一致し、M9は非融合を保つ", async () => {
+describe.skipIf(!GPU_AVAILABLE)("Session fusion of linear→SRQ and its lifetimes (real GPU)", () => {
+  it("INT2/4/8 at M1/4/8 match the unfused path on row 0, and M9 stays unfused", async () => {
     const gpu = await acquireGpu();
     try {
       for (const storage of ["i2", "i4", "i8"] as const) {
@@ -38,7 +38,7 @@ describe.skipIf(!GPU_AVAILABLE)("linear→SRQのSession融合と寿命（実GPU�
             try {
               const x = input(m),
                 expected = await baseline.run(x);
-              // 2回目は導出済み計画を使う。同じscaleの参照が保たれ、xは後続negまで生きる。
+              // The second run uses the derived plan. The same scale reference is kept, and x lives until the later neg.
               for (let repeat = 0; repeat < 2; repeat++) {
                 const actual = await fused.run(x);
                 assertEquals(words(actual.y.data), words(expected.y.data));
@@ -64,7 +64,7 @@ describe.skipIf(!GPU_AVAILABLE)("linear→SRQのSession融合と寿命（実GPU�
       gpu.destroy();
     }
   });
-  it("借用scaleは貸し手の寿命を保護し、借り手破棄後も貸し手から再利用できる", async () => {
+  it("a borrowed scale protects the lender's lifetime and stays reusable from the lender after the borrower is destroyed", async () => {
     const gpu = await acquireGpu();
     try {
       for (const storage of ["i2", "i4", "i8"] as const) {
@@ -106,7 +106,7 @@ describe.skipIf(!GPU_AVAILABLE)("linear→SRQのSession融合と寿命（実GPU�
       gpu.destroy();
     }
   });
-  it("不正な型と未対応の計算方式を構築時に拒否する", async () => {
+  it("rejects invalid types and unsupported compute modes at construction", async () => {
     const gpu = await acquireGpu();
     try {
       const model = linearStaticQuantizeModel();

@@ -6,7 +6,7 @@ import type { TensorInput } from "./container-write.ts";
 import { type DeclarationJson, f32Bytes, GRAPH_NAME, openModelBytes } from "./model-fixture.ts";
 import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./pipeline-census.ts";
 
-/** 格納の呼び名 → codec 台帳の登録名（i2 は per-channel の `int2-off`）。 */
+/** Storage name → name registered in the codec ledger (i2 is the per-channel `int2-off`). */
 const CODEC: Readonly<Record<"i2" | "i4" | "i8", CodecName>> = {
   i2: "int2-off",
   i4: "int4-sym-g",
@@ -28,7 +28,7 @@ export const checkGemvSubgroupCensus = async (gpu: GpuContext): Promise<void> =>
       { length: (n * k * bits) / 8 },
       (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
     );
-    // per-channel（i2 / i8）は groups = 1、group 量子化（i4）は 行長 / group。
+    // Per-channel (i2 / i8): groups = 1; group quantization (i4): row length / group.
     const groups = group === undefined ? 1 : k / group;
     const tensors: readonly TensorInput[] = [
       {

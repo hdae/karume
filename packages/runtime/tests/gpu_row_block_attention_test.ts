@@ -1,25 +1,28 @@
 /**
- * 分解 attention の**行ブロック実行**（融合ルール `rowBlockAttention` — src/runtime/fusion.ts）の
- * 実 GPU の門。見るのは 3 つで、どれも実機でしか立たない。
+ * Real-GPU checks for the **row-block execution** of decomposed attention (fusion rule
+ * `rowBlockAttention` — src/runtime/fusion.ts). There are three, and each holds only on real
+ * hardware.
  *
- * ① **強制分割 parity**: 同じ入力に対し、
- *    - 掴めない綴り（bmm と reshape の間に 0 dispatch の別名を 1 本挟んだだけ）の**素の 9 ノード列**
- *    - 融合した 1 枚（既定 = 素の 4 dispatch 列と同一）
- *    - 融合した n 枚（`ROW_BLOCK_SPLIT` で 2 / 3 / 端数割を強制）
- *    を回して **f32 のビット列**で突き合わせる。allclose ではなく `Uint32Array` の完全一致で
- *    見るのが要点 — 行ブロック化は「どの workgroup がどの行を担当するか」しか変えないので、
- *    1 ulp でも動いたら K 縮約順か丸め列が動いている。
+ * ① **Forced-split parity**: for the same input, run
+ *    - the **plain 9-node sequence** of a spelling the matcher cannot catch (only one zero-dispatch
+ *      alias inserted between bmm and reshape)
+ *    - the fusion in 1 block (the default = identical to the plain 4-dispatch sequence)
+ *    - the fusion in n blocks (`ROW_BLOCK_SPLIT` forces 2 / 3 / an uneven split)
+ *    and compare them as **f32 bit patterns**. The point is exact `Uint32Array` equality rather
+ *    than allclose — row blocking only changes "which workgroup handles which row", so a 1 ulp
+ *    change means the K reduction order or the rounding sequence moved.
  *
- * ② **ポータビリティ門**: `maxStorageBufferBindingSize` を WebGPU core 既定（128MiB）へ**絞った
- *    device**（`LIMIT_CAPS`）で、S が 128MiB を超える合成グラフが緑になること。**同じグラフを
- *    掴めない綴りにすると同じ device で落ちること**も対で見る（落ちない形を緑にしても、
- *    行ブロックが効いている証拠にならない）。
+ * ② **Portability check**: on a **device with `maxStorageBufferBindingSize` capped** to the WebGPU
+ *    core default (128MiB) (`LIMIT_CAPS`), a synthetic graph whose S exceeds 128MiB passes. As the
+ *    pair, also check that **the same graph in a spelling the matcher cannot catch fails on the
+ *    same device** (passing a shape that never fails is no evidence that row blocking is in
+ *    effect).
  *
- * ③ **予算分割 parity**（ADR 0124）: 予算 `attentionRowBlockMaxBytes` で割った融合が、素の 9 ノード列と
- *    Uint32 で一致すること（枚数とピークも同時に見る）。
+ * ③ **Budget-split parity** (ADR 0124): the fusion split by the budget `attentionRowBlockMaxBytes`
+ *    matches the plain 9-node sequence in Uint32 (the block count and the peak are checked too).
  *
- * MUST: 恒真化しないこと。①は**別々のグラフ / 別々の Session** を回す（同じ経路を 2 回撃つ形は
- * 常に一致する）。出力が定数でないことも毎回確かめる。
+ * MUST: do not let this become a tautology. ① runs **separate graphs / separate Sessions** (running
+ * the same path twice always agrees). Every run also confirms that the output is not constant.
  */
 
 import { test } from "vite-plus/test";
@@ -42,40 +45,42 @@ import {
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { countDispatches, requireCensus } from "./helpers/pipeline-census.ts";
 
-/** WebGPU core 既定のストレージ束縛上限。ポータビリティ門はここを再現する。 */
+/** The WebGPU core default storage binding limit. The portability check reproduces it. */
 const CORE_STORAGE_BINDING_LIMIT = 128 * 1024 * 1024;
 
 type Shape = {
   readonly name: string;
-  /** B·H を畳んだバッチ軸。 */
+  /** The batch axis with B·H folded. */
   readonly heads: number;
-  /** クエリ行数 M。 */
+  /** The query row count M. */
   readonly queries: number;
-  /** キー列数 N。 */
+  /** The key column count N. */
   readonly keys: number;
-  /** head 幅 D。 */
+  /** The head width D. */
   readonly headDim: number;
 };
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data sequences (no random numbers — a failure would not reproduce). */
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.23;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
 
 /**
- * `[1,1,1,N]` の加算 mask（実測形と同じ「列ごと」の broadcast）。
+ * The `[1,1,1,N]` additive mask (the same "per column" broadcast as the observed shape).
  *
- * 4 列に 1 本 −inf を置いて safe_softmax の −inf 経路を通す。MUST: 全列を塞がないこと —
- * 全 −inf の行は safe_softmax が全 0 を書くので、ビット比較が「0 と 0」の恒真になる。
+ * One −inf in every 4 columns exercises safe_softmax's −inf path. MUST: do not block every column —
+ * safe_softmax writes all zeros for an all −inf row, so the bit comparison becomes the tautology
+ * "0 equals 0".
  */
 const columnMask = (keys: number): FilledTensor =>
   fill([1, 1, 1, keys], (i) => (i % 4 === 3 ? Number.NEGATIVE_INFINITY : 0));
 
 /**
- * 分解 attention の実測綴り（irodori DiT の 9 ノード窓そのもの）。
+ * The observed spelling of decomposed attention (exactly the 9-node window of the irodori DiT).
  *
- * `interpose` は bmm と reshape の間に 0 dispatch の別名を 1 本挟むだけ。値も物理 dispatch 数も
- * 変えずに窓の隣接条件だけを外すので、**同じバックエンド上の正本**（融合前の経路）になる。
+ * `interpose` only inserts one zero-dispatch alias between bmm and reshape. It breaks only the
+ * window's adjacency condition without changing the values or the physical dispatch count, so it
+ * becomes **the reference on the same backend** (the path before fusion).
  */
 const attentionGraph = (shape: Shape, interpose = false): DeclarationJson => {
   const { heads, queries, keys, headDim } = shape;
@@ -130,11 +135,17 @@ const attentionInputs = (shape: Shape): Readonly<Record<string, FilledTensor>> =
   v: fill([1, shape.heads, shape.keys, shape.headDim], VALUE),
 });
 
-/** 出力と、その run が実際に確保した中間バッファのピーク（行ブロックの効きの観測点）。 */
+/**
+ * The output and the peak of intermediate buffers that run actually allocated (where the effect of
+ * row blocking is observed).
+ */
 type RunResult = {
   readonly output: Tensor;
   readonly peakTransientBytes: number;
-  /** 行窓の QK（`:rwa`）の dispatch 本数 = 2 枚以上のときの枚数（1 枚では 0 — 計測に依らない census）。 */
+  /**
+   * The dispatch count of the row-window QK (`:rwa`) = the block count when there are 2 or more
+   * (0 with 1 block — a census that does not depend on timing).
+   */
   readonly windowedQkDispatches: number;
 };
 
@@ -156,7 +167,7 @@ const run = async (
       output,
       peakTransientBytes: diagnostics.lastRun?.peakTransientBytes ?? 0,
       windowedQkDispatches: countDispatches(
-        requireCensus(diagnostics.lastRunPipelines, "分解 attention"),
+        requireCensus(diagnostics.lastRunPipelines, "decomposed attention"),
         (key) => key.includes(":rwa"),
       ),
     };
@@ -165,7 +176,9 @@ const run = async (
   }
 };
 
-/** f32 のビット列（`0.0` と `-0.0` の差も、末尾 1 ulp の差も見える形）。 */
+/**
+ * The f32 bit patterns (a form where both `0.0` vs `-0.0` and a last-place 1 ulp difference show).
+ */
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
@@ -180,46 +193,49 @@ const assertSameBits = (actual: Tensor, expected: Tensor, label: string): void =
   assertEquals(
     mismatches,
     [],
-    `${label}: ビット列が違う（最初の食い違い: ${mismatches
+    `${label}: the bit patterns differ (first mismatches: ${mismatches
       .map((i) => `[${i}] ${actual.data[i]} vs ${expected.data[i]}`)
-      .join(" / ")}）`,
+      .join(" / ")})`,
   );
-  // 恒真化の門: 出力が定数なら「一致」は何も検証していない。
-  assert(new Set(a).size > 1, `${label}: 出力が定数（ビット一致が恒真になっている）`);
+  // A check against tautology: if the output is constant, "equal" verifies nothing.
+  assert(new Set(a).size > 1, `${label}: the output is constant (bit equality is a tautology)`);
 };
 
 const SHAPES: readonly Shape[] = [
-  // 全軸が端数（M / N / D とも 4 の倍数でない = 2 本の bmm ともスカラ変種）
-  { name: "端数 H3 M17 N19 D13", heads: 3, queries: 17, keys: 19, headDim: 13 },
-  // v4 経路（D % 4 == 0 && N % 4 == 0）で M が行タイル 2 枚を跨ぐ。分割すると幾何のバケット
-  // （M ≤ 64 / ≤ 512）も跨ぐので、「幾何が変わっても値は動かない」がここで確かめられる。
+  // Every axis uneven (none of M / N / D is a multiple of 4 = both bmm take the scalar variant)
+  { name: "uneven H3 M17 N19 D13", heads: 3, queries: 17, keys: 19, headDim: 13 },
+  // On the v4 path (D % 4 == 0 && N % 4 == 0), M spans two row tiles. Splitting also crosses the
+  // geometry buckets (M ≤ 64 / ≤ 512), so this confirms "the values do not move when the geometry
+  // changes".
   { name: "v4 H2 M68 N20 D12", heads: 2, queries: 68, keys: 20, headDim: 12 },
-  // DiT の self-attention を縮めた形（D = 128・M / N とも 64 の倍数 = 実モデルの経路）
-  { name: "DiT 形 H4 M64 N64 D128", heads: 4, queries: 64, keys: 64, headDim: 128 },
+  // A shrunken DiT self-attention (D = 128, M / N both multiples of 64 = the real model's path)
+  { name: "DiT shape H4 M64 N64 D128", heads: 4, queries: 64, keys: 64, headDim: 128 },
 ];
 
-/** 強制する枚数（1 = 既定と同じ形・2/3 は等分・5 は端数割）。 */
+/** The forced block counts (1 = the same shape as the default, 2/3 split evenly, 5 unevenly). */
 const SPLITS: readonly number[] = [1, 2, 3, 5];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロック実行は枚数を変えても素の 9 ノード列と**ビット単位で一致**する（実 GPU）",
+  "row-block execution is **bit-identical** to the plain 9-node sequence at every block count (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
         const inputs = attentionInputs(shape);
-        // 正本 = 掴めない綴り（融合が 1 度も掛からない素の 9 ノード列）。
+        // The reference = a spelling the matcher cannot catch (the plain 9-node sequence that
+        // never fuses).
         const reference = await run(gpu, attentionGraph(shape, true), inputs);
         let previousPeak = Number.POSITIVE_INFINITY;
         for (const split of SPLITS) {
           const fused = await run(gpu, attentionGraph(shape), inputs, split);
-          const label = `${shape.name} / ${split} 枚`;
+          const label = `${shape.name} / ${split} blocks`;
           assertSameBits(fused.output, reference.output, label);
-          // 枚数を増やすほど中間のピークは下がる（値が同じでも**実体化幅が縮んでいる**ことの
-          // 観測点 — ここが単調でなければ一時の寿命宣言かプール再利用が壊れている）。
+          // More blocks lower the intermediate peak (the observation point that **the materialized
+          // width shrinks** even with identical values — if this is not monotonic, a temporary's
+          // lifetime declaration or the pool reuse is broken).
           assert(
             fused.peakTransientBytes < previousPeak,
-            `${label}: 中間ピーク ${fused.peakTransientBytes}B が ${previousPeak}B から縮んでいない`,
+            `${label}: the intermediate peak ${fused.peakTransientBytes}B did not shrink from ${previousPeak}B`,
           );
           previousPeak = fused.peakTransientBytes;
         }
@@ -231,32 +247,34 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 予算分割 parity（ADR 0124）。`SessionOptions.attentionRowBlockMaxBytes` で束縛上限より細かく割った
- * 融合が、素の 9 ノード列と Uint32 で一致すること。予算は 1 枚 ⌈M/3⌉ 行（各形とも 3 枚 — 17 行は
- * 6 + 6 + 5・68 行は 23 + 23 + 22・64 行は 22 + 21 + 21）にする値。
+ * Budget-split parity (ADR 0124). The fusion split more finely than the binding limit by
+ * `SessionOptions.attentionRowBlockMaxBytes` matches the plain 9-node sequence in Uint32. The
+ * budget is set to ⌈M/3⌉ rows per block (3 blocks for every shape — 17 rows are 6 + 6 + 5, 68 rows
+ * are 23 + 23 + 22, 64 rows are 22 + 21 + 21).
  *
- * MUST: 恒真化しないこと。予算つきの枚数（行窓 QK の dispatch 本数）が独立に数えた 3 枚であることと、
- * ピークが予算なしの融合（1 枚）より厳密に小さいことを同時に見る（予算が融合の文脈に届かないまま
- * 1 枚で回った形を緑にしない）。
+ * MUST: do not let this become a tautology. Check at once that the budgeted block count (the
+ * dispatch count of the row-window QK) is the independently counted 3, and that the peak is
+ * strictly below the unbudgeted fusion (1 block) (a run in 1 block where the budget never reached
+ * the fusion's context must not pass).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "予算 attentionRowBlockMaxBytes で割った行ブロック実行は素の 9 ノード列と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
+  "row-block execution split by the attentionRowBlockMaxBytes budget is **bit-identical** to the plain 9-node sequence, with more blocks and a smaller peak (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of SHAPES) {
         const inputs = attentionInputs(shape);
         const budget = shape.heads * shape.keys * 4 * Math.ceil(shape.queries / 3);
-        const label = `${shape.name} / 予算 ${budget}B`;
+        const label = `${shape.name} / budget ${budget}B`;
         const reference = await run(gpu, attentionGraph(shape, true), inputs);
         const single = await run(gpu, attentionGraph(shape), inputs);
-        assertEquals(single.windowedQkDispatches, 0, `${label}: 予算なしが 1 枚でない`);
+        assertEquals(single.windowedQkDispatches, 0, `${label}: the unbudgeted run is not 1 block`);
         const budgeted = await run(gpu, attentionGraph(shape), inputs, undefined, budget);
         assertSameBits(budgeted.output, reference.output, label);
-        assertEquals(budgeted.windowedQkDispatches, 3, `${label}: 予算つきの枚数`);
+        assertEquals(budgeted.windowedQkDispatches, 3, `${label}: the budgeted block count`);
         assert(
           budgeted.peakTransientBytes < single.peakTransientBytes,
-          `${label}: 中間ピーク ${budgeted.peakTransientBytes}B が予算なしの ${single.peakTransientBytes}B から縮んでいない`,
+          `${label}: the intermediate peak ${budgeted.peakTransientBytes}B did not shrink from the unbudgeted ${single.peakTransientBytes}B`,
         );
       }
     } finally {
@@ -266,12 +284,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * ポータビリティ門の合成グラフ。**実資産を要らない**形で `S = H·M·N·4` を 128MiB 超へ持ち上げる
- * （4 × 2048 × 4200 × 4 = 137,625,600B）。D を 8 に絞ってあるので GEMM の仕事量自体は小さく、
- * 見ているのは「上限を超える中間を実体化せずに済むか」の 1 点だけ。
+ * The synthetic graph of the portability check. It raises `S = H·M·N·4` above 128MiB **without
+ * real assets** (4 × 2048 × 4200 × 4 = 137,625,600B). D is cut down to 8, so the GEMM work itself
+ * is small; the only thing checked is "whether an intermediate above the limit can avoid being
+ * materialized".
  */
 const OVERSIZE: Shape = {
-  name: "上限超 H4 M2048 N4200 D8",
+  name: "over the limit H4 M2048 N4200 D8",
   heads: 4,
   queries: 2048,
   keys: 4200,
@@ -279,25 +298,26 @@ const OVERSIZE: Shape = {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超えるグラフが行ブロックで通る（実 GPU）",
+  "on a device capped to maxStorageBufferBindingSize=128MiB, a graph whose S exceeds the limit passes with row blocks (real GPU)",
   async () => {
     const scoreBytes = OVERSIZE.heads * OVERSIZE.queries * OVERSIZE.keys * 4;
     assert(
       scoreBytes > CORE_STORAGE_BINDING_LIMIT,
-      `合成グラフの S ${scoreBytes}B が core 既定の上限を超えていない（門が空振りする）`,
+      `the synthetic graph's S ${scoreBytes}B does not exceed the core default limit (the check would never fire)`,
     );
-    // 実行が読むのと**同じ純関数**で、この形が 2 枚に割れて 1 枚が上限の内側へ収まることを
-    // 先に固定する（GPU 側が緑になった理由を「たまたま」にしない）。
+    // With **the same pure function** that execution reads, first pin that this shape splits into
+    // 2 blocks and that each block fits within the limit (so the GPU side does not pass "by
+    // chance").
     const blocks = planRowBlocks(
       OVERSIZE.queries,
       OVERSIZE.heads * OVERSIZE.keys * 4,
       CORE_STORAGE_BINDING_LIMIT,
     );
-    assertEquals(blocks.length, 2, "上限に収まる最小枚数");
+    assertEquals(blocks.length, 2, "the smallest block count that fits the limit");
     for (const block of blocks) {
       assert(
         block.rows * OVERSIZE.heads * OVERSIZE.keys * 4 <= CORE_STORAGE_BINDING_LIMIT,
-        `ブロック ${block.offset}+${block.rows} が上限に収まらない`,
+        `block ${block.offset}+${block.rows} does not fit the limit`,
       );
     }
     const gpu = await acquireGpu({
@@ -307,17 +327,21 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         gpu.limits.maxStorageBufferBindingSize,
         CORE_STORAGE_BINDING_LIMIT,
-        "requiredLimits が絞られていない（絞れていなければ門は何も見ていない）",
+        "requiredLimits is not capped (without the cap the check verifies nothing)",
       );
       const inputs = attentionInputs(OVERSIZE);
       const fused = await run(gpu, attentionGraph(OVERSIZE), inputs);
       assertEquals(fused.output.shape, [OVERSIZE.heads, OVERSIZE.queries, OVERSIZE.headDim]);
-      assert(new Set(bits(fused.output)).size > 1, "出力が定数（門が空振りしている）");
+      assert(
+        new Set(bits(fused.output)).size > 1,
+        "the output is constant (the check never fires)",
+      );
 
-      // 門の効力証明: **同じ device・同じ形**でも、窓を崩して素の 9 ノード列に落とすと
-      // S を丸ごと実体化しようとして落ちる。ここが緑のままなら上の緑は行ブロックの
-      // おかげではない。落とすのは計画時の上限 preflight（ADR 0093 決定 5 — GPU の validation
-      // より前に、上限を超える中間をノード名つきで全件列挙する）。
+      // Proof that the check has teeth: on **the same device with the same shape**, breaking the
+      // window down to the plain 9-node sequence tries to materialize all of S and fails. If this
+      // stayed green, the green above would not be thanks to row blocking. What fails it is the
+      // plan-time limit preflight (ADR 0093 decision 5 — before GPU validation, it lists every
+      // intermediate above the limit with its node name).
       await assertRejects(
         () => run(gpu, attentionGraph(OVERSIZE, true), inputs),
         ExecutionError,

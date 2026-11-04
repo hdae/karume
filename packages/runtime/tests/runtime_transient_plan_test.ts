@@ -1,7 +1,8 @@
-// 中間バッファの静的 liveness パッキング（src/runtime/transient-plan.ts — ADR 0093）の門。
-// GPU 不要の純関数。縛るのは「配置の正しさ」（時間区間が重なる slot は同じ領域で空間が重ならない・
-// 同じ dispatch で読み書きが分かれる slot は別領域）と「規則そのもの」（別名・pinned・一時の LIFO・
-// 上限の fail loudly・決定性）。
+// The check of the static liveness packing of intermediate buffers (src/runtime/transient-plan.ts
+// — ADR 0093). A pure function that needs no GPU. What this pins is "the correctness of the
+// placement" (slots whose time intervals overlap do not overlap in space within one region; slots
+// read and written separately by the same dispatch go to different regions) and "the rules
+// themselves" (aliases, pinned, LIFO temporaries, fail loudly on the limits, determinism).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -15,7 +16,7 @@ import {
 } from "../src/runtime/transient-plan.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 
-/** 小さな形を見るための緩い上限（整列 4 = 実寸そのまま）。 */
+/** Loose limits for looking at small shapes (alignment 4 = the actual size as is). */
 const LOOSE: TransientLimits = {
   maxBufferSize: 1 << 30,
   maxStorageBufferBindingSize: 1 << 30,
@@ -25,7 +26,7 @@ const LOOSE: TransientLimits = {
 const value = (name: string): TransientRef => ({ kind: "value", name });
 const temp = (id: number): TransientRef => ({ kind: "temp", id });
 
-/** 1 出力・1 dispatch の素のノード（入力 `ins` を読み、出力 `name` を書く）。 */
+/** A plain node with 1 output and 1 dispatch (reads the inputs `ins`, writes the output `name`). */
 const node = (
   name: string,
   byteLength: number,
@@ -54,15 +55,16 @@ const node = (
 };
 
 /**
- * 配置の不変条件を全ペアで検査する（テストの側の検出器 — 実装がこれを破ると例外なしに
- * 値が壊れるので、ここで必ず落とす）。
+ * Checks the placement invariants over every pair (the test's own detector — if the implementation
+ * breaks them, values are corrupted without an exception, so this must fail here).
  */
 const assertWellFormed = (
   plan: TransientPlan,
   program: TransientProgram,
   limits: TransientLimits,
 ): void => {
-  // 区間を再生し直す（実装と独立に、ステップ境界の粗い区間で見る: 出力はステップ開始〜最終消費ステップ末尾）。
+  // Replay the intervals (independently of the implementation, as coarse intervals on step
+  // boundaries: an output lives from the start of its step to the end of its last consuming step).
   const lastUse = new Map<string, number>();
   program.forEach((step, index) => {
     for (const name of step.releases) lastUse.set(name, index);
@@ -80,7 +82,8 @@ const assertWellFormed = (
       const to = output.pinned ? Infinity : Math.max(index, lastUse.get(output.name) ?? index);
       live.push({ slot, from: index, to });
     });
-    // 一時は dispatch 粒度の区間（同じステップ内で解放済みの一時のバイトは次の一時が使ってよい）。
+    // Temporaries have dispatch-granular intervals (within one step, the bytes of an already
+    // released temporary may be used by the next temporary).
     const n = step.dispatches.length + 1;
     plan.steps[index].temps.forEach((slot, id) => {
       const t = step.temps[id];
@@ -100,7 +103,7 @@ const assertWellFormed = (
         sx.offset < sy.offset + sy.byteLength && sy.offset < sx.offset + sx.byteLength;
       assert(
         !spaceOverlap,
-        `slot ${x.slot} と ${y.slot} が同じ領域 ${sx.region} で時間も空間も重なる`,
+        `slots ${x.slot} and ${y.slot} overlap in both time and space in region ${sx.region}`,
       );
     }
   }
@@ -137,9 +140,9 @@ const assertWellFormed = (
     });
   });
   for (const slot of plan.slots) {
-    assertEquals(slot.offset % limits.offsetAlignment, 0, "offset は整列済み");
-    assert(slot.offset + slot.byteLength <= plan.regions[slot.region], "領域からはみ出さない");
-    assert(slot.byteLength <= limits.maxStorageBufferBindingSize, "束縛上限の内側");
+    assertEquals(slot.offset % limits.offsetAlignment, 0, "the offset is aligned");
+    assert(slot.offset + slot.byteLength <= plan.regions[slot.region], "stays inside its region");
+    assert(slot.byteLength <= limits.maxStorageBufferBindingSize, "within the binding limit");
   }
   for (const [region, size] of plan.regions.entries()) {
     assert(
@@ -151,10 +154,10 @@ const assertWellFormed = (
     plan.totalBytes,
     plan.regions.reduce((t, r) => t + r, 0),
   );
-  assert(plan.totalBytes >= plan.peakLiveBytes, "領域総和は生存ピーク以上");
+  assert(plan.totalBytes >= plan.peakLiveBytes, "the sum of the regions is at least the live peak");
 };
 
-test("鎖 8 → 12 → 4 バイト: 厳密一致プールでは 24 だが、パッキングは生存ピーク 20 に一致する", () => {
+test("chain of 8 → 12 → 4 bytes: an exact-match pool needs 24, but packing equals the live peak of 20", () => {
   const program: TransientProgram = [
     node("a", 8, [], 1),
     node("b", 12, ["a"], 1),
@@ -175,7 +178,7 @@ test("鎖 8 → 12 → 4 バイト: 厳密一致プールでは 24 だが、パ�
   assertEquals(plan.pinned, new Set([c]));
 });
 
-test("同じ dispatch で読まれる入力と書かれる出力は別の領域へ置かれる（usage scope の制約）", () => {
+test("an input read and an output written by the same dispatch go to different regions (the usage scope constraint)", () => {
   // b (8 B) is written while a (8 B) is read. x (24 B, no consumer) is dead before either is born,
   // so both fit into x's bytes (a at 0, b at 8) without growing its region: only the usage-scope
   // rule keeps them apart (read + read_write on one GPUBuffer fails validation). Intervals x [0,1),
@@ -194,11 +197,14 @@ test("同じ dispatch で読まれる入力と書かれる出力は別の領域�
     [b] = plan.steps[2].outputs;
   assert(x !== undefined && a !== undefined && b !== undefined);
   assertEquals(plan.slots[a].region, plan.slots[x].region);
-  assert(plan.slots[a].region !== plan.slots[b].region, "読み側と書き側が同じ領域に居る");
+  assert(
+    plan.slots[a].region !== plan.slots[b].region,
+    "the read side and the write side share a region",
+  );
   assertEquals(plan.regions, [24, 8]);
 });
 
-test("読み同士は同じ領域を共有できる（3 入力の add でも領域は 2 本で足りる）", () => {
+test("reads may share a region with each other (2 regions suffice even for a 3-input add)", () => {
   // a, b and c (8 B each, all read by d) are born after x (24 B) is dead, so they fit into x's bytes
   // at offsets 0 / 8 / 16 without growing its region. d conflicts with a, b and c and opens a second
   // region; y (4 B, written while x is read and read while a / b / c are written) joins d's region
@@ -363,7 +369,7 @@ test("order 2 measures a graph output's lifetime to the final clock, not as infi
   assertEquals(plan.regions, [16, 16, 4, 4]);
 });
 
-test("別名（reshape）は確保を出さず、根の slot の生存を延ばす", () => {
+test("an alias (reshape) allocates nothing and extends the lifetime of the root slot", () => {
   const program: TransientProgram = [
     node("a", 8, [], 1),
     {
@@ -376,7 +382,7 @@ test("別名（reshape）は確保を出さず、根の slot の生存を延ば�
   ];
   const plan = planTransients(program, LOOSE);
   assertWellFormed(plan, program, LOOSE);
-  assertEquals(plan.slots.length, 2, "別名は slot を作らない");
+  assertEquals(plan.slots.length, 2, "an alias creates no slot");
   assertEquals(plan.steps[1].outputs[0], undefined);
   // a lives until b reads it through v, so the two overlap: b is written while a is read, and
   // stacking b on a would grow the region by b's full size anyway — different regions.
@@ -385,7 +391,7 @@ test("別名（reshape）は確保を出さず、根の slot の生存を延ば�
   assert(a !== undefined && b !== undefined && plan.slots[a].region !== plan.slots[b].region);
 });
 
-test("グラフ出力（pinned）は末尾まで生存し、後続の確保に上書きされない", () => {
+test("a graph output (pinned) lives to the end and is not overwritten by later allocations", () => {
   const program: TransientProgram = [
     node("out1", 8, [], 0, { pinned: true }),
     node("x", 8, [], 1),
@@ -397,8 +403,9 @@ test("グラフ出力（pinned）は末尾まで生存し、後続の確保に�
   assertEquals(plan.totalBytes, 24);
 });
 
-test("一時は dispatch 境界で確保・解放され、解放済みの一時のバイトは次の一時が再利用する", () => {
-  // 2 dispatch: 一時 0 は dispatch 0 の間だけ、一時 1 は dispatch 1 の間だけ生きる → 同じバイト。
+test("temporaries are allocated and released on dispatch boundaries, and the next temporary reuses the bytes of a released one", () => {
+  // 2 dispatches: temporary 0 lives only during dispatch 0, temporary 1 only during dispatch 1 →
+  // the same bytes.
   const program: TransientProgram = [
     node("y", 4, [], 0, {
       pinned: true,
@@ -417,7 +424,7 @@ test("一時は dispatch 境界で確保・解放され、解放済みの一時�
   assertEquals(plan.peakLiveBytes, 20);
 });
 
-test("領域は maxBufferSize を超えず、収まらない slot は次の領域へ回る", () => {
+test("a region does not exceed maxBufferSize, and a slot that does not fit goes to the next region", () => {
   const limits: TransientLimits = {
     maxBufferSize: 128,
     maxStorageBufferBindingSize: 128,
@@ -431,10 +438,10 @@ test("領域は maxBufferSize を超えず、収まらない slot は次の領�
   const plan = planTransients(program, limits);
   assertWellFormed(plan, program, limits);
   assert(plan.regions.every((size) => size <= 128));
-  assert(plan.regions.length >= 3, `a / b / c が 3 領域に分かれる（${plan.regions.length}）`);
+  assert(plan.regions.length >= 3, `a / b / c split into 3 regions (${plan.regions.length})`);
 });
 
-test("offset は offsetAlignment に整列する（実寸は整列しない）", () => {
+test("offsets are aligned to offsetAlignment (actual sizes are not)", () => {
   const limits: TransientLimits = { ...LOOSE, offsetAlignment: 256 };
   const program: TransientProgram = [
     node("a", 4, [], 1),
@@ -447,11 +454,11 @@ test("offset は offsetAlignment に整列する（実寸は整列しない）",
   assert(offsets.every((o) => o % 256 === 0));
   assert(
     plan.slots.every((s) => s.byteLength === 4),
-    "束縛 size は実寸のまま",
+    "the binding size stays the actual size",
   );
 });
 
-test("束縛上限を超える中間は配置の前に全件列挙して落ちる", () => {
+test("intermediates over the binding limit fail before placement, listing every one", () => {
   const limits: TransientLimits = {
     maxBufferSize: 1 << 20,
     maxStorageBufferBindingSize: 64,
@@ -468,7 +475,7 @@ test("束縛上限を超える中間は配置の前に全件列挙して落ち�
   );
 });
 
-test("消費計数の誤り（解放過多 / 解放漏れ）は fail loudly", () => {
+test("consumer-count errors (too many releases / a missing release) fail loudly", () => {
   const over: TransientProgram = [
     node("a", 8, [], 0),
     {
@@ -487,7 +494,7 @@ test("消費計数の誤り（解放過多 / 解放漏れ）は fail loudly", ()
   );
 });
 
-test("同じプログラムからは常に同じ計画が出る（決定性）", () => {
+test("the same program always yields the same plan (determinism)", () => {
   const program: TransientProgram = [
     node("a", 8, [], 2),
     node("b", 12, ["a"], 1),
@@ -496,7 +503,7 @@ test("同じプログラムからは常に同じ計画が出る（決定性）",
   assertEquals(planTransients(program, LOOSE), planTransients(program, LOOSE));
 });
 
-test("疑似乱数で組んだ 200 ステップの鎖でも配置の不変条件を破らない（fuzz）", () => {
+test("a pseudo-randomly built chain of 200 steps does not break the placement invariants either (fuzz)", () => {
   let seed = 20260905;
   const rand = (): number => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
@@ -521,7 +528,7 @@ test("疑似乱数で組んだ 200 ステップの鎖でも配置の不変条件
       names.push(name);
       remaining.set(name, uses);
     }
-    // 未消費の残りは末尾で読み切る（解放漏れを作らない）。
+    // Read the unconsumed remainder at the end (so no release is missed).
     const tail = names.filter((n) => (remaining.get(n) ?? 0) > 0);
     const tailReleases = tail.flatMap((n) =>
       Array.from({ length: remaining.get(n) ?? 0 }, () => n),
@@ -541,7 +548,7 @@ test("疑似乱数で組んだ 200 ステップの鎖でも配置の不変条件
     assertWellFormed(plan, program, limits);
     assert(
       plan.totalBytes < 6 * plan.peakLiveBytes,
-      `断片化が異常（${plan.totalBytes} vs 生存ピーク ${plan.peakLiveBytes}）`,
+      `abnormal fragmentation (${plan.totalBytes} vs live peak ${plan.peakLiveBytes})`,
     );
   }
 });

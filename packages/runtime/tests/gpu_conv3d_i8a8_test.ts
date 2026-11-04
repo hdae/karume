@@ -1,18 +1,22 @@
-// conv3d の w8a8 変種（`convCompute: "a8"` — ADR 0133）の実 GPU の門。
+// Real-GPU checks of the w8a8 variant of conv3d (`convCompute: "a8"` — ADR 0133).
 //
-// 1. **TS 鏡像との atol=0**（`referenceConv3dI8a8` — tap ごとの整数内積と fma の flush を同じ順で
-//    行う。クラス E）。形は chunk グラフの縮小形 + タイル端（Cout > 128 で行タイル 2 枚・N % 4 ≠ 0 の
-//    スカラ書き出し・Cin % 16 ≠ 0 の K 端数）+ 3 軸 padding + stride ≠ 1 + dilation ≠ 1 + Kt ≠ Kh ≠ Kw。
-// 2. **dp4a 版とエミュ版が atol=0 で一致**（拡張の有無は速度だけ — linear と同じ主張の conv 側の検出器）。
-// 3. **既定（f32 の implicit GEMM）とは値が割れる**（活性量子化が効いている裏取り — 一致するなら
-//    経路が切り替わっていない）。
-// 4. **適格でない node は f32 経路に落ち、キーがそれを示す**（Cin % 4 ≠ 0）。
-// 5. 鏡像の **tap の並び**は Kt, Kh, Kw の昇順であること（Kh / Kw を入れ替えた鏡像は GPU と割れる —
-//    恒真化の防止）。
+// 1. **atol=0 against the TS mirror** (`referenceConv3dI8a8` — the integer dot product per tap and
+//    the fma flush in the same order. Class E). The shapes are shrunk chunk-graph shapes + tile edges
+//    (Cout > 128 gives 2 row tiles, scalar write-out for N % 4 ≠ 0, a K remainder for Cin % 16 ≠ 0)
+//    + padding on 3 axes + stride ≠ 1 + dilation ≠ 1 + Kt ≠ Kh ≠ Kw.
+// 2. **The dp4a version and the emulated version agree at atol=0** (the extension changes only the
+//    speed — the conv-side detector for the same claim as linear's).
+// 3. **The values split from the default (f32 implicit GEMM)** (evidence that activation quantization
+//    takes effect — if they matched, the path did not switch).
+// 4. **An ineligible node falls to the f32 path, and the key shows it** (Cin % 4 ≠ 0).
+// 5. The mirror's **tap order** is ascending Kt, Kh, Kw (a mirror with Kh / Kw swapped splits from
+//    the GPU — prevents the check from becoming vacuous).
 //
-// MUST: 比較は `assertExact`（`===` の全数比較）。許容誤差を入れた時点でクラス E の主張が消える。
-// MUST: 活性の丸め境界からの余裕（`quantizeRowsTieMargin` — 転置した [画素, Cin] で測る）を門にする
-// （GPU の除算は 2.5 ULP まで許されるので、余裕の無いデータでは ±1 段のずれが出る — linear と同じ）。
+// MUST: compare with `assertExact` (an exhaustive `===` comparison). Admitting a tolerance would erase
+// the class E claim.
+// MUST: check the margin from the activation's rounding boundaries (`quantizeRowsTieMargin` — measured
+// on the transposed [pixel, Cin]) (GPU division is allowed up to 2.5 ULP, so data without a margin
+// shifts by ±1 step — the same as linear).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
@@ -51,9 +55,9 @@ import {
 } from "./helpers/model-fixture.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
-/** 符号付き・画素ごとに大きさの違うデータ（画素ごとの scale が全画素同じにならないように）。 */
+/** Signed data whose magnitude differs per pixel (so that the per-pixel scale is not the same for every pixel). */
 const SIGNED = (i: number): number => ((i % 29) - 14) * 0.3717 + 0.0131;
-/** 行（= 出力チャネル）ごとに大きさの違う重み（全行同じ scale だと軸の取り違えが値に出ない）。 */
+/** Weights whose magnitude differs per row (= output channel) (with the same scale on every row an axis mix-up would not show in the values). */
 const WEIGHT = (i: number, rowLength: number): number =>
   (((i * 7) % 23) - 11) * 0.0625 * (1 + (Math.floor(i / rowLength) % 5) * 0.5);
 const BIAS = (i: number): number => ((i % 11) - 5) * 0.25 + 0.0625;
@@ -64,9 +68,12 @@ const assertExact = (
   expected: ArrayLike<number>,
   where: string,
 ): void => {
-  assertEquals(actual.length, expected.length, `${where}: 長さ`);
+  assertEquals(actual.length, expected.length, `${where}: length`);
   for (let i = 0; i < actual.length; i += 1) {
-    assert(actual[i] === expected[i], `${where}[${i}]: GPU ${actual[i]} / 参照 ${expected[i]}`);
+    assert(
+      actual[i] === expected[i],
+      `${where}[${i}]: GPU ${actual[i]} / reference ${expected[i]}`,
+    );
   }
 };
 
@@ -77,22 +84,23 @@ type Conv3dCase = {
   readonly name: string;
   readonly channelsIn: number;
   readonly channelsOut: number;
-  /** 入力 [T, H, W]。 */
+  /** Input [T, H, W]. */
   readonly input: Triple;
   readonly kernel: Triple;
   readonly stride: Triple;
   readonly padding: Triple;
   readonly dilation: Triple;
-  /** 踏むはずの書き出し変種（判定の取り違えが「両方同じ変種」で紛れないように明示する）。 */
+  /** The write-out variant the case should exercise (stated explicitly so that a predicate mix-up cannot hide behind "both on the same variant"). */
   readonly expectVec4: boolean;
   /**
-   * 入力の生成（既定は SIGNED）。Cin が小さい形は画素ごとの scale が 4〜6 値から決まり、SIGNED では
-   * x/s が丸め境界に寄るので、比が 127 の既知の分数になる生成に差し替える（余裕の門が通る形）。
+   * Input generation (SIGNED by default). For shapes with a small Cin the per-pixel scale is set by
+   * 4–6 values, and with SIGNED x/s drifts toward rounding boundaries, so the generator is replaced by
+   * one whose ratios are known fractions of 127 (a shape that passes the margin check).
    */
   readonly x?: (channel: number, pixel: number) => number;
 };
 
-/** 画素ごとの最大チャネルを回しながら、比が 127·{1, 0.8, −0.6, 0.4, …} に落ちる入力。 */
+/** Input that rotates the per-pixel maximum channel so that the ratios fall on 127·{1, 0.8, −0.6, 0.4, …}. */
 const fractionsOf =
   (fractions: readonly number[]) =>
   (channel: number, pixel: number): number =>
@@ -150,9 +158,9 @@ const dimsOf = (testCase: Conv3dCase): Conv3dDims => ({
 
 const CASES: readonly Conv3dCase[] = [
   {
-    // chunk グラフの conv_in（48→1024 k3・時間 padding 0・空間 same）の縮小形。Cin = 48 は 16 の倍数
-    // （tap の中で K 端数なし）・N = 1·6·8 = 48（v4）
-    name: "chunk conv_in 縮小 48→96 k3 [48,3,6,8]",
+    // A shrunk version of the chunk graph's conv_in (48→1024 k3, temporal padding 0, spatial same).
+    // Cin = 48 is a multiple of 16 (no K remainder within a tap); N = 1·6·8 = 48 (v4)
+    name: "shrunk chunk conv_in 48→96 k3 [48,3,6,8]",
     channelsIn: 48,
     channelsOut: 96,
     input: [3, 6, 8],
@@ -163,9 +171,9 @@ const CASES: readonly Conv3dCase[] = [
     expectVec4: true,
   },
   {
-    // Cout = 130 > タイル辺 128（行タイル 2 枚・2 枚目は 2 行だけ）× 1×1×1（tap 1 本 = flush 1 回）×
-    // N = 2·5·7 = 70（スカラ書き出し）× Cin = 8（パック 2 つ = K タイル 1 枚の 4 パック中 2 パック）
-    name: "行タイル端 130 出力チャネル 1×1×1 [8,2,5,7]",
+    // Cout = 130 > tile edge 128 (2 row tiles, the second with only 2 rows) x 1×1×1 (1 tap = 1 flush) x
+    // N = 2·5·7 = 70 (scalar write-out) x Cin = 8 (2 packs = 2 of the 4 packs of one K tile)
+    name: "row-tile edge 130 output channels 1×1×1 [8,2,5,7]",
     channelsIn: 8,
     channelsOut: 130,
     input: [2, 5, 7],
@@ -176,9 +184,9 @@ const CASES: readonly Conv3dCase[] = [
     expectVec4: false,
   },
   {
-    // stride ≠ 1 を 3 軸とも非対称に・Kt ≠ Kh ≠ Kw・padding 非対称・Cin = 20（16 の倍数でない → tap の
-    // 2 枚目の K タイルは 4 パック中 1 パック）。T: (5+2−2−1)/2+1 = 3 / H: (9+2−1−1)/2+1 = 5 /
-    // W: (10−3−1)/3+1 = 3 → N = 45（スカラ）
+    // stride ≠ 1 on all 3 axes, asymmetric; Kt ≠ Kh ≠ Kw; asymmetric padding; Cin = 20 (not a multiple
+    // of 16 -> the second K tile of a tap holds 1 of 4 packs). T: (5+2−2−1)/2+1 = 3 / H: (9+2−1−1)/2+1
+    // = 5 / W: (10−3−1)/3+1 = 3 -> N = 45 (scalar)
     name: "stride=[2,2,3] Kt≠Kh≠Kw Cin 20 [20,5,9,10] * W[6,20,3,2,4]",
     channelsIn: 20,
     channelsOut: 6,
@@ -190,8 +198,8 @@ const CASES: readonly Conv3dCase[] = [
     expectVec4: false,
   },
   {
-    // dilation ≠ 1 を 3 軸とも・Cin = 4（1 パック = K タイル 1 枚の 4 パック中 1 パック）・N = 5·6·8 = 240
-    // （列タイル 64 で 4 枚・v4）
+    // dilation ≠ 1 on all 3 axes; Cin = 4 (1 pack = 1 of the 4 packs of one K tile); N = 5·6·8 = 240
+    // (4 column tiles of 64, v4)
     name: "dilation=[3,3,2] Cin 4 [4,8,12,10] * W[6,4,2,3,2]",
     channelsIn: 4,
     channelsOut: 6,
@@ -204,9 +212,9 @@ const CASES: readonly Conv3dCase[] = [
     x: fractionsOf([1, 0.8, -0.6, 0.4]),
   },
   {
-    // 全軸 padding 1（範囲外 0 を 3 軸とも踏む — 範囲外の tap が scale 0 で畳まれる検出器）。
-    // N = 4·5·7 = 140（列タイル 3 枚・v4）
-    name: "全軸 padding 1 [12,4,5,7] * W[7,12,3,3,3]",
+    // padding 1 on every axis (exercises the out-of-range 0 on all 3 axes — the detector that
+    // out-of-range taps fold with scale 0). N = 4·5·7 = 140 (3 column tiles, v4)
+    name: "padding 1 on every axis [12,4,5,7] * W[7,12,3,3,3]",
     channelsIn: 12,
     channelsOut: 7,
     input: [4, 5, 7],
@@ -223,7 +231,7 @@ type Prepared = {
   readonly model: Promise<BoundContainer>;
   readonly x: Tensor;
   readonly expected: Float32Array<ArrayBuffer>;
-  /** 鏡像の入力（tap の並びの故障注入に使う）。 */
+  /** The mirror's input (used for the fault injection into the tap order). */
   readonly mirror: {
     readonly x: Float32Array<ArrayBuffer>;
     readonly weight: Float32Array<ArrayBuffer>;
@@ -232,7 +240,7 @@ type Prepared = {
   };
 };
 
-/** `conv3d(x, w, b)` 1 本の宣言と供給（w は i8 + per-channel scale）。 */
+/** Declaration and supply of a single `conv3d(x, w, b)` (w is i8 + per-channel scale). */
 const prepare = (testCase: Conv3dCase): Prepared => {
   const dims = dimsOf(testCase);
   const { channelsIn, channelsOut } = dims;
@@ -251,7 +259,7 @@ const prepare = (testCase: Conv3dCase): Prepared => {
     generate === undefined ? SIGNED : (i) => generate(Math.floor(i / pixels), i % pixels),
   );
   assert(x.dtype === "f32");
-  // 丸め境界からの余裕は転置した [画素, Cin] で測る（カーネルが量子化する並び）
+  // The margin from the rounding boundaries is measured on the transposed [pixel, Cin] (the order the kernel quantizes in)
   const transposed = new Float32Array(pixels * channelsIn);
   for (let ci = 0; ci < channelsIn; ci += 1) {
     for (let pixel = 0; pixel < pixels; pixel += 1) {
@@ -259,15 +267,18 @@ const prepare = (testCase: Conv3dCase): Prepared => {
     }
   }
   const margin = quantizeRowsTieMargin(transposed, pixels, channelsIn);
-  assert(margin > TIE_MARGIN, `${testCase.name}: 丸め境界からの余裕が ${margin} しかない`);
-  // 鏡像は量子化後の整数値を重みに取る（fake-quant 値 ÷ scale — 整数に正確）
+  assert(
+    margin > TIE_MARGIN,
+    `${testCase.name}: the margin from the rounding boundaries is only ${margin}`,
+  );
+  // The mirror takes the quantized integer values as its weights (fake-quant value ÷ scale — exact integers)
   const weightInts = new Float32Array(quantized.values.length);
   for (let i = 0; i < weightInts.length; i += 1) {
     const channel = Math.floor(i / rowLength);
     weightInts[i] = Math.round(quantized.values[i] / quantized.scale[channel]);
   }
   const mirror = { x: x.data, weight: weightInts, weightScale: quantized.scale, bias: bias.data };
-  // 適格でない形（Cin % 4 ≠ 0）は鏡像の外（f32 経路に落ちることだけ見る）
+  // Ineligible shapes (Cin % 4 ≠ 0) are outside the mirror (only that they fall to the f32 path is checked)
   const expected = conv3dI8a8Eligible(dims, "i8")
     ? referenceConv3dI8a8({ ...mirror, dims })
     : new Float32Array(0);
@@ -373,18 +384,18 @@ const ranConv3dGeometry = (gpu: GpuContext, ran: { readonly profile: string }): 
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "convCompute:'a8' の conv3d が TS 鏡像と atol=0 で一致する（chunk の縮小形 / タイル端 / K 端数 / 3 軸 padding / stride / dilation・実 GPU）",
+  "convCompute:'a8' conv3d matches the TS mirror at atol=0 (shrunk chunk shape / tile edges / K remainder / 3-axis padding / stride / dilation, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
         const prepared = prepare(testCase);
         const { dims } = prepared;
-        assert(conv3dI8a8Eligible(dims, "i8"), `${testCase.name}: 適格でない形`);
+        assert(conv3dI8a8Eligible(dims, "i8"), `${testCase.name}: ineligible shape`);
         assertEquals(
           conv3dI8a8UsesVec4(dims.timeOut * dims.heightOut * dims.widthOut),
           testCase.expectVec4,
-          `${testCase.name}: 踏む書き出し変種が想定と違う`,
+          `${testCase.name}: the write-out variant exercised differs from the expected one`,
         );
         const actual = await run(gpu, prepared, { convCompute: "a8" });
         assertEquals(
@@ -393,8 +404,8 @@ test.skipIf(!GPU_AVAILABLE)(
           testCase.name,
         );
         assertExact(actual.y.data, prepared.expected, testCase.name);
-        // 恒真化の門: 出力が定数なら「一致」は何も検証していない
-        assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: 出力が定数`);
+        // The vacuity check: if the output is constant, "a match" verifies nothing
+        assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: the output is constant`);
         assertEquals(
           actual.keys,
           expectedKeys(dims, true, ranConv3dGeometry(gpu, actual)),
@@ -408,7 +419,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "conv3d i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  "conv3d i8a8: the dot4I8Packed version and the emulated version agree at atol=0 (the extension changes only the speed, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -420,7 +431,7 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             actual.keys,
             expectedKeys(prepared.dims, dot === "dp4a", ranConv3dGeometry(gpu, actual)),
-            `${testCase.name}: ${dot} のキー`,
+            `${testCase.name}: the key of ${dot}`,
           );
           results[dot] = actual.y;
         }
@@ -471,7 +482,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "conv3d i8a8 は opt-in のときだけ効き、既定の f32 implicit GEMM とは値が割れる（活性量子化の裏取り・実 GPU）",
+  "conv3d i8a8 takes effect only when opted in, and its values split from the default f32 implicit GEMM (evidence of activation quantization, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -489,12 +500,16 @@ test.skipIf(!GPU_AVAILABLE)(
             conv2dIgemmMTile(dims.channelsOut),
           ),
         ],
-        "既定のキー（f32 の implicit GEMM 1 本）",
+        "the default key (a single f32 implicit GEMM)",
       );
       const a8 = await run(gpu, prepared, { convCompute: "a8" });
-      // MUST: 既定の値は活性 f32 のままなので w8a8 の鏡像とは一致しない（一致するなら活性量子化が
-      // 効いていない）
-      assertNotEquals([...baseline.y.data], [...a8.y.data], "a8 が既定と同じ値");
+      // MUST: the default's activations stay f32, so its values do not match the w8a8 mirror (if they
+      // matched, activation quantization would not be taking effect)
+      assertNotEquals(
+        [...baseline.y.data],
+        [...a8.y.data],
+        "a8 has the same values as the default",
+      );
       assertExact(a8.y.data, prepared.expected, "a8");
     } finally {
       gpu.destroy();
@@ -503,7 +518,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "conv3d i8a8: Cin % 4 ≠ 0 の node は opt-in でも f32 経路に落ち、キーがそれを示す（実 GPU）",
+  "conv3d i8a8: a node with Cin % 4 ≠ 0 falls to the f32 path even when opted in, and the key shows it (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -515,7 +530,7 @@ test.skipIf(!GPU_AVAILABLE)(
       };
       const dims = dimsOf(testCase);
       assert(!conv3dI8a8Eligible(dims, "i8"));
-      // prepare は余裕の門を持つが、適格でない形は鏡像を比較しないので門だけ通す
+      // prepare has the margin check, but ineligible shapes are not compared against the mirror, so only the check is passed
       const prepared = prepare(testCase);
       const actual = await run(gpu, prepared, { convCompute: "a8" });
       const kFlat = dims.channelsIn * dims.kernelT * dims.kernelH * dims.kernelW;
@@ -532,8 +547,8 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test("conv3d i8a8 の鏡像は tap を Kt, Kh, Kw の昇順に畳む（Kh / Kw を入れ替えた鏡像は割れる）", () => {
-  // Kh ≠ Kw の形で、重みの (kh, kw) を入れ替えて渡すと値が変わる（対称な核なら恒真になる）
+test("the conv3d i8a8 mirror folds taps in ascending Kt, Kh, Kw order (a mirror with Kh / Kw swapped splits)", () => {
+  // For a shape with Kh ≠ Kw, passing the weights with (kh, kw) swapped changes the values (a symmetric kernel would make this always hold)
   const testCase = CASES[2];
   const prepared = prepare(testCase);
   const { dims, mirror } = prepared;
@@ -545,7 +560,7 @@ test("conv3d i8a8 の鏡像は tap を Kt, Kh, Kw の昇順に畳む（Kh / Kw �
         for (let kh = 0; kh < kernelH; kh += 1) {
           for (let kw = 0; kw < kernelW; kw += 1) {
             const from = (((co * channelsIn + ci) * kernelT + kt) * kernelH + kh) * kernelW + kw;
-            // (kh, kw) → (kw % Kh, kh % Kw): 核が非正方なので全単射ではないが、値が動くことだけ見る
+            // (kh, kw) -> (kw % Kh, kh % Kw): the kernel is not square, so this is not a bijection; only that the values move is checked
             const to =
               (((co * channelsIn + ci) * kernelT + kt) * kernelH + (kw % kernelH)) * kernelW +
               (kh % kernelW);

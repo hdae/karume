@@ -1,11 +1,14 @@
-// 環境別の参照値 fixture（models 側 e2e は `packages/models/tests/fixtures/references/*.json`、
-// runtime 側 e2e は `packages/runtime/tests/fixtures/references/*.json`）の読み書き。
+// Reading and writing the per-environment reference fixtures (the models-side e2e uses
+// `packages/models/tests/fixtures/references/*.json`, the runtime-side e2e uses
+// `packages/runtime/tests/fixtures/references/*.json`).
 //
-// ここで縛るのは**モードの意味論**そのもの: 未設定は比較だけ、`write` は無い行を足すだけ、
-// `rewrite` は現環境の行だけを上書きする。この 3 つのどれかが緩むと、門が「他の機の参照値と
-// 突き合わせて緑」「割れた値を黙って焼き直して緑」のどちらかに化ける。
+// What this file binds is **the semantics of the modes** themselves: unset only compares, `write`
+// only adds missing rows, and `rewrite` overwrites only the current environment's rows. If any of
+// the three loosens, the check turns into either "green by comparing against another machine's
+// reference" or "green by silently re-recording a broken value".
 //
-// 実 GPU も環境変数も要らない — 環境とモードは引数で注入する。
+// Needs neither a real GPU nor environment variables — the environment and the mode are injected as
+// arguments.
 
 import {
   makeTempDirSync,
@@ -44,7 +47,7 @@ const environment = (key: string): Environment => ({
   os: { platform: "linux", arch: "x86_64" },
 });
 
-/** 1 件だけ他環境の行を持つ fixture を一時ディレクトリに作る。 */
+/** Creates, in a temporary directory, a fixture that holds a single row of another environment. */
 const withFixture = (
   cases: Record<string, Record<string, string>>,
   body: (fixtureUrl: URL) => void,
@@ -65,13 +68,17 @@ const withFixture = (
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
 
-test("参照 fixture: lookup は現環境の行だけを返す", () => {
+test("reference fixture: lookup returns only the current environment's rows", () => {
   withFixture({ "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: undefined,
     });
-    assertEquals(references.lookup("case-1"), undefined, "他環境の行が現環境として見えている");
+    assertEquals(
+      references.lookup("case-1"),
+      undefined,
+      "another environment's row is visible as the current one",
+    );
     assertEquals(referenceGatePasses(references, ["case-1"]), false);
     assertEquals(references.lacksReference("case-1"), true);
     const other = openReferences(fixtureUrl, { environment: environment(OTHER), mode: undefined });
@@ -81,29 +88,29 @@ test("参照 fixture: lookup は現環境の行だけを返す", () => {
   });
 });
 
-test("参照 fixture: write は無い行を足し、既存の行は上書きしない", () => {
+test("reference fixture: write adds missing rows and does not overwrite existing ones", () => {
   withFixture({ "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: "write",
     });
-    // 行が無い ⇒ 実測を足して緑。
+    // No row ⇒ add the measurement and pass.
     assertEquals(references.check("case-1", SHA_B), { status: "written" });
     assertEquals(references.lookup("case-1"), SHA_B);
-    // 行がある ⇒ 通常どおり比較（write でも上書きしない）。
+    // A row exists ⇒ compare as usual (write does not overwrite either).
     assertEquals(references.check("case-1", SHA_B), { status: "pass", expected: SHA_B });
     assertEquals(references.check("case-1", SHA_A), { status: "fail", expected: SHA_B });
-    assertEquals(references.lookup("case-1"), SHA_B, "write モードが既存の行を書き換えた");
-    // 書き戻した内容は次の読みでも同じ（他環境の行は生きたまま）。
+    assertEquals(references.lookup("case-1"), SHA_B, "write mode rewrote an existing row");
+    // What was written back is the same on the next read (another environment's rows stay alive).
     const reopened = openReferences(fixtureUrl, {
       environment: environment(OTHER),
       mode: undefined,
     });
-    assertEquals(reopened.lookup("case-1"), SHA_A, "他環境の行が write で動いた");
+    assertEquals(reopened.lookup("case-1"), SHA_A, "write moved another environment's row");
   });
 });
 
-test("参照 fixture: rewrite は現環境の行だけを上書きする", () => {
+test("reference fixture: rewrite overwrites only the current environment's rows", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A, [OTHER]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -112,13 +119,14 @@ test("参照 fixture: rewrite は現環境の行だけを上書きする", () =>
     assertEquals(references.check("case-1", SHA_B), { status: "rewritten", previous: SHA_A });
     assertEquals(references.lookup("case-1"), SHA_B);
     const other = openReferences(fixtureUrl, { environment: environment(OTHER), mode: undefined });
-    assertEquals(other.lookup("case-1"), SHA_A, "rewrite が他環境の行を巻き込んだ");
+    assertEquals(other.lookup("case-1"), SHA_A, "rewrite dragged in another environment's row");
   });
 });
 
-test("参照 fixture: 先に 2 ハンドルを開いて順に書いても双方の環境の行が残る", () => {
+test("reference fixture: opening two handles first and writing in turn keeps both environments' rows", () => {
   withFixture({}, (fixtureUrl) => {
-    // 両方を**書く前に**開く（開いた時点の写しをそのまま書き戻すと、後から書いた側が先の行を消す）。
+    // Open both **before writing** (writing back the copy taken at open time would make the later
+    // writer erase the earlier rows).
     const current = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: "write",
@@ -132,19 +140,21 @@ test("参照 fixture: 先に 2 ハンドルを開いて順に書いても双方�
     assertEquals(
       document.cases["case-1"],
       { [CURRENT]: SHA_A, [OTHER]: SHA_B },
-      "後から書いた環境が、先に書かれた他環境の行を巻き込んだ",
+      "the environment written later dragged in the row another environment wrote earlier",
     );
   });
 });
 
-test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発の write は先発の行を上書きしない", () => {
+test("reference fixture: even with two handles of the same environment key, the later write does not overwrite the earlier row", () => {
   withFixture({}, (fixtureUrl) => {
-    // 両方を**書く前に**開く。開いた時点の写しで判定すると、後発は「行が無い」と見なして
-    // 先発の行を上書きする（`write` の意味論が rewrite に化ける）。
+    // Open both **before writing**. Deciding from the copy taken at open time, the later one would
+    // see "no row" and overwrite the earlier row (the semantics of `write` would turn into
+    // rewrite).
     const first = openReferences(fixtureUrl, { environment: environment(CURRENT), mode: "write" });
     const second = openReferences(fixtureUrl, { environment: environment(CURRENT), mode: "write" });
     assertEquals(first.check("case-1", SHA_A), { status: "written" });
-    // 後発は最新のディスク行と比較する側へ落ちる（違う実測なら赤）。
+    // The later one falls to comparing against the latest row on disk (red for a different
+    // measurement).
     assertEquals(second.check("case-1", SHA_B), { status: "fail", expected: SHA_A });
     const document = JSON.parse(readTextFileSync(fixtureUrl)) as {
       cases: Record<string, Record<string, string>>;
@@ -152,20 +162,22 @@ test("参照 fixture: 同じ環境キーの 2 ハンドルでも、後発の wri
     assertEquals(
       document.cases["case-1"],
       { [CURRENT]: SHA_A },
-      "後発の write が先発の行を上書きした",
+      "the later write overwrote the earlier row",
     );
-    // 逆側: 同じ実測なら緑（「常に赤」で通しているのではないことを固定する）。
+    // The other side: the same measurement passes (pins that this is not passing by "always red").
     assertEquals(second.check("case-1", SHA_A), { status: "pass", expected: SHA_A });
   });
 });
 
-// --- 参照門の緑条件（登録したケース集合で数える）---------------------------------
+// --- When the reference check passes (counted over the registered set of cases) ----------
 //
-// 門が守るのは「この環境の参照値が無いケースの sha 門が SKIP された」を無音の緑にしないこと。
-// fixture 全体を横断して数えると、改名・削除で残った孤児行がその状態を隠す。
+// What the check guards against is a silent pass for "the sha check of a case with no reference for
+// this environment was skipped". Counting across the whole fixture lets orphan rows left by renames
+// and removals hide that state.
 
-test("参照門: 孤児行だけが現環境の行を持つ状態は緑にしない", () => {
-  // `retired` は登録されていないケース（改名・削除の跡）。現役 2 件は行を持たない。
+test("reference check: does not pass when only orphan rows hold the current environment's rows", () => {
+  // `retired` is an unregistered case (left over from a rename or removal). The two live cases have
+  // no rows.
   withFixture({ retired: { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -174,12 +186,12 @@ test("参照門: 孤児行だけが現環境の行を持つ状態は緑にしな
     assertEquals(
       referenceGatePasses(references, ["case-1", "case-2"]),
       false,
-      "孤児行が現役ケースの全 SKIP を緑で隠した",
+      "orphan rows hid that every live case was skipped",
     );
   });
 });
 
-test("参照門: 現役ケースの行が 1 件も無ければ緑にしない（作るモードは別）", () => {
+test("reference check: does not pass when no live case has a row (the recording mode is separate)", () => {
   withFixture({ "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     const cases = ["case-1", "case-2"];
     const references = openReferences(fixtureUrl, {
@@ -187,7 +199,7 @@ test("参照門: 現役ケースの行が 1 件も無ければ緑にしない（
       mode: undefined,
     });
     assertEquals(referenceGatePasses(references, cases), false);
-    // 参照値を作る走行は行が無くて当然なので緑（ADR 0106）。
+    // A run that records references naturally has no rows, so it passes (ADR 0106).
     const writing = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: "write",
@@ -196,22 +208,23 @@ test("参照門: 現役ケースの行が 1 件も無ければ緑にしない（
   });
 });
 
-// 「どれか 1 本に行があれば緑」だと、新しく足したケースの行の書き忘れが警告付き SKIP のまま
-// 緑で通る。門は登録ケースの全部に行があるか、無いケースが明示の held 行であることを求める。
+// With "pass if any one case has a row", a forgotten row of a newly added case would pass as a
+// skip with a warning. The check requires a row for every registered case, or an explicit held row
+// for a case without one.
 
-test("参照門: 登録ケースの 1 本でも現環境の行が無ければ赤（無いケースを名指しする）", () => {
+test("reference check: red if even one registered case has no row for the current environment (names the missing case)", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A }, "case-2": { [OTHER]: SHA_B } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: undefined,
     });
     const cases = ["case-1", "case-2"];
-    assertEquals(referenceGatePasses(references, cases), false, "書き忘れの行が緑で通った");
+    assertEquals(referenceGatePasses(references, cases), false, "a forgotten row passed");
     assertEquals(referenceGateFindings(references, cases), { missing: ["case-2"], staleHolds: [] });
   });
 });
 
-test("参照門: 登録ケースの全部に現環境の行があれば緑", () => {
+test("reference check: passes when every registered case has a row for the current environment", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A }, "case-2": { [CURRENT]: SHA_B } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -221,29 +234,30 @@ test("参照門: 登録ケースの全部に現環境の行があれば緑", () 
   });
 });
 
-test("参照門: 行が無いケースが現環境の held 行なら緑・他環境の held 行は数えない", () => {
+test("reference check: passes when a case without a row has a held row for the current environment; another environment's held row does not count", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: undefined,
     });
     const cases = ["case-1", "case-2"];
-    const heldHere: ReferenceHolds = { "case-2": { [CURRENT]: "この機では device lost" } };
+    const heldHere: ReferenceHolds = { "case-2": { [CURRENT]: "device lost on this machine" } };
     assertEquals(referenceGatePasses(references, cases, heldHere), true);
-    // 別の機の held 行はこの機の欠けを免除しない（全機共通で止めると走れる機の検証まで消える）。
-    const heldElsewhere: ReferenceHolds = { "case-2": { [OTHER]: "あの機では device lost" } };
+    // Another machine's held row does not excuse the gap on this machine (holding it on every
+    // machine would also remove verification on machines that can run it).
+    const heldElsewhere: ReferenceHolds = { "case-2": { [OTHER]: "device lost on that machine" } };
     assertEquals(referenceGatePasses(references, cases, heldElsewhere), false);
     assertEquals(referenceGateFindings(references, cases, heldElsewhere).missing, ["case-2"]);
   });
 });
 
-test("参照門: held 行と現環境の行が両方あるケースは赤（古い held 行を名指しする）", () => {
+test("reference check: red for a case with both a held row and a current-environment row (names the stale held row)", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: undefined,
     });
-    const holds: ReferenceHolds = { "case-1": { [CURRENT]: "解消済みのはず" } };
+    const holds: ReferenceHolds = { "case-1": { [CURRENT]: "should be resolved" } };
     assertEquals(referenceGatePasses(references, ["case-1"], holds), false);
     assertEquals(referenceGateFindings(references, ["case-1"], holds), {
       missing: [],
@@ -252,21 +266,22 @@ test("参照門: held 行と現環境の行が両方あるケースは赤（古�
   });
 });
 
-test("参照門: opt-in のケースは登録から外した走行では数えない", () => {
-  // `opt-in` は環境変数で有効になるケース（行は別の機にしか無い）。無効の走行では呼び手が登録に
-  // 含めない（e2e_wan_pipeline_test.ts の CASE_IDS の条件つき登録）— 門は fixture 全体ではなく
-  // 登録した集合だけを数える。
+test("reference check: an opt-in case is not counted in a run that leaves it out of the registration", () => {
+  // `opt-in` is a case enabled by an environment variable (its row exists only on another
+  // machine). In a run where it is disabled the caller does not register it (the conditional
+  // registration of CASE_IDS in e2e_wan_pipeline_test.ts) — the check counts only the registered
+  // set, not the whole fixture.
   withFixture({ "case-1": { [CURRENT]: SHA_A }, "opt-in": { [OTHER]: SHA_B } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
       mode: undefined,
     });
-    assertEquals(referenceGatePasses(references, ["case-1"]), true, "無効の opt-in を数えた");
+    assertEquals(referenceGatePasses(references, ["case-1"]), true, "counted a disabled opt-in");
     assertEquals(referenceGatePasses(references, ["case-1", "opt-in"]), false);
   });
 });
 
-test("参照門: 走れる門に登録ケースが 0 件なら赤", () => {
+test("reference check: red when a check that can run has zero registered cases", () => {
   withFixture({ "case-1": { [CURRENT]: SHA_A } }, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -276,7 +291,7 @@ test("参照門: 走れる門に登録ケースが 0 件なら赤", () => {
   });
 });
 
-test("参照 fixture: 未設定モードで行が無いケースを突き合わせると throw する", () => {
+test("reference fixture: matching a case without a row in the unset mode throws", () => {
   withFixture({}, (fixtureUrl) => {
     const references = openReferences(fixtureUrl, {
       environment: environment(CURRENT),
@@ -286,7 +301,7 @@ test("参照 fixture: 未設定モードで行が無いケースを突き合わ�
   });
 });
 
-test("参照 fixture: 書き出しは辞書順で安定する（2 度書いてバイト同一）", () => {
+test("reference fixture: output is stable in lexicographic order (written twice, byte-identical)", () => {
   withFixture({ "case-2": { [OTHER]: SHA_A }, "case-1": { [OTHER]: SHA_A } }, (fixtureUrl) => {
     openReferences(fixtureUrl, { environment: environment(CURRENT), mode: "write" }).check(
       "case-2",
@@ -298,20 +313,25 @@ test("参照 fixture: 書き出しは辞書順で安定する（2 度書いて�
       SHA_B,
     );
     const second = readTextFileSync(fixtureUrl);
-    assertEquals(second, first, "同じ内容を書き直したのにバイトが動いた");
-    // JSON の鍵は挿入順で読み戻るので、並びの検査は parse した鍵の列で足りる。
+    assertEquals(second, first, "rewriting the same content moved bytes");
+    // JSON keys read back in insertion order, so checking the parsed key list is enough to check
+    // the order.
     const document = JSON.parse(first) as { cases: Record<string, Record<string, string>> };
-    assertEquals(Object.keys(document.cases), ["case-1", "case-2"], "ケース名が辞書順でない");
+    assertEquals(
+      Object.keys(document.cases),
+      ["case-1", "case-2"],
+      "case names are not in lexicographic order",
+    );
     assertEquals(
       Object.keys(document.cases["case-2"]),
       [CURRENT, OTHER].sort(),
-      "環境キーが辞書順でない",
+      "environment keys are not in lexicographic order",
     );
-    assert(first.endsWith("}\n"), "末尾改行が無い");
+    assert(first.endsWith("}\n"), "no trailing newline");
   });
 });
 
-test("参照 fixture: 読めない fixture は空として扱わず throw する", () => {
+test("reference fixture: an unreadable fixture throws instead of being treated as empty", () => {
   withFixture({}, (fixtureUrl) => {
     assertThrows(
       () =>
@@ -337,7 +357,7 @@ test("参照 fixture: 読めない fixture は空として扱わず throw する
   });
 });
 
-test("参照 fixture: KARUME_REFERENCE の未知の綴りは throw する", () => {
+test("reference fixture: an unknown spelling of KARUME_REFERENCE throws", () => {
   assertEquals(parseReferenceMode(undefined), undefined);
   assertEquals(parseReferenceMode("write"), "write");
   assertEquals(parseReferenceMode("rewrite"), "rewrite");
@@ -345,13 +365,19 @@ test("参照 fixture: KARUME_REFERENCE の未知の綴りは throw する", () =
   assertThrows(() => parseReferenceMode(""), Error, "KARUME_REFERENCE");
 });
 
-// --- 参照値の決着（settleReference と、その結果・診断への写し）-----------------------
+// --- Settling a reference (settleReference, and copying its result into results and diagnostics)
+// ---
 //
-// ここで縛るのは「実物は突合の成否に依らず結果の席に残る」「sha は実物のバイト列から採る」
-// 「決着の写しが expected の有無を取り違えない」の 3 つ。どれかが崩れると、割れた回の A/B の
-// 材料が消えるか、結果 JSON が参照値を作った回を「何かと突き合わせた」と誤読させる。
+// What this binds is threefold: "the artifact stays in the results location whether or not the
+// match succeeds", "the sha is taken from the artifact's bytes", and "the copy of the settlement
+// does not mistake whether expected is present". If any breaks, the material for an A/B of a
+// mismatching run disappears, or the results JSON misleads readers into thinking a run that
+// recorded a reference "was matched against something".
 
-/** fixture と結果の席を同じ一時ディレクトリに置く（実 GPU も outputs/ も要らない）。 */
+/**
+ * Puts the fixture and the results location in the same temporary directory (needs neither a real
+ * GPU nor outputs/).
+ */
 const withSeats = async (
   cases: Record<string, Record<string, string>>,
   body: (fixtureUrl: URL, results: Results) => Promise<void>,
@@ -379,7 +405,7 @@ const BYTES = new TextEncoder().encode("karume-artifact");
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-/** fixture 文書の `cases`（ケース → 環境キー → sha）の形か。 */
+/** Whether this has the shape of a fixture document's `cases` (case → environment key → sha). */
 const isCasesDocument = (
   value: unknown,
 ): value is { readonly cases: Record<string, Record<string, string>> } =>
@@ -389,15 +415,18 @@ const isCasesDocument = (
     (rows) => isRecord(rows) && Object.values(rows).every((sha) => typeof sha === "string"),
   );
 
-/** ディスク上の fixture の `cases` を読む（型ガードで絞る — 形が崩れていれば落ちる）。 */
+/**
+ * Reads the `cases` of the fixture on disk (narrowed by a type guard — fails if the shape is
+ * broken).
+ */
 const readCases = (fixtureUrl: URL): Record<string, Record<string, string>> => {
   const document: unknown = JSON.parse(readTextFileSync(fixtureUrl));
-  assert(isCasesDocument(document), `${fixtureUrl.pathname} が { cases } の形でない`);
+  assert(isCasesDocument(document), `${fixtureUrl.pathname} does not have the shape { cases }`);
   return document.cases;
 };
 
 describe("sha256Hex", () => {
-  it("FIPS 180-2 の既知ベクトル（'abc'）と一致する小文字 16 進 64 桁を返す", async () => {
+  it("returns 64 lowercase hex digits matching the known FIPS 180-2 vector ('abc')", async () => {
     assertEquals(
       await sha256Hex(new TextEncoder().encode("abc")),
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
@@ -406,7 +435,7 @@ describe("sha256Hex", () => {
 });
 
 describe("settleReference", () => {
-  it("write モードで行が無ければ実測を行として書き、実物を結果の席に残す", async () => {
+  it("in write mode without a row, writes the measurement as the row and keeps the artifact in the results location", async () => {
     await withSeats({}, async (fixtureUrl, results) => {
       const references = openReferences(fixtureUrl, {
         environment: environment(CURRENT),
@@ -421,7 +450,8 @@ describe("settleReference", () => {
       assertEquals(settlement.check, { status: "written" });
       assertEquals(settlement.sha256, expectedSha);
       assertEquals(settlement.artifactUrl.href, new URL("case-1.png", results.dir).href);
-      // sha は実物ファイルのバイト列と一致する（結果の actual と実物が食い違わない）。
+      // The sha matches the bytes of the artifact file (the result's actual and the artifact do not
+      // disagree).
       const onDisk = await readFile(settlement.artifactUrl);
       assertEquals(onDisk, BYTES);
       assertEquals(await sha256Hex(onDisk), settlement.sha256);
@@ -429,7 +459,7 @@ describe("settleReference", () => {
     });
   });
 
-  it("比較モードで行と食い違えば fail を返し、実物は書かれ、行は動かない", async () => {
+  it("in compare mode, a mismatch with the row returns fail, writes the artifact, and leaves the row unchanged", async () => {
     await withSeats({ "case-1": { [CURRENT]: SHA_A } }, async (fixtureUrl, results) => {
       const before = readTextFileSync(fixtureUrl);
       const references = openReferences(fixtureUrl, {
@@ -442,12 +472,16 @@ describe("settleReference", () => {
         bytes: BYTES,
       });
       assertEquals(settlement.check, { status: "fail", expected: SHA_A });
-      assertEquals(await readFile(settlement.artifactUrl), BYTES, "不一致の回に実物が残っていない");
-      assertEquals(readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
+      assertEquals(
+        await readFile(settlement.artifactUrl),
+        BYTES,
+        "the artifact was not kept on the mismatching run",
+      );
+      assertEquals(readTextFileSync(fixtureUrl), before, "compare mode rewrote the reference");
     });
   });
 
-  it("比較モードで一致すれば pass を返す", async () => {
+  it("in compare mode, a match returns pass", async () => {
     const sha = await sha256Hex(BYTES);
     await withSeats({ "case-1": { [CURRENT]: sha } }, async (fixtureUrl, results) => {
       const references = openReferences(fixtureUrl, {
@@ -464,11 +498,12 @@ describe("settleReference", () => {
   });
 });
 
-// 追加検査としての sha の末端。行が無いケースの決着の形を 1 つに決めるのがこの関数の役目で、
-// 崩れると「実測 sha を積む系列と何も積まない系列」が再び混ざる（環境横断の actual 比較が
-// 一部の系列でしか効かなくなる）。
+// The end point of the sha as an additional check. This function's job is to give a single shape
+// to the settlement of a case without a row; if it breaks, "suites that record the measured sha and
+// suites that record nothing" mix again (the cross-environment comparison of actual would work only
+// in some suites).
 describe("settleOrObserve", () => {
-  it("比較モードで行が無ければ突合を飛ばし、実物を書いて pass + actual + artifact（expected 無し）を返す", async () => {
+  it("in compare mode without a row, skips the match, writes the artifact and returns pass + actual + artifact (no expected)", async () => {
     await withSeats({ "case-1": { [OTHER]: SHA_A } }, async (fixtureUrl, results) => {
       const before = readTextFileSync(fixtureUrl);
       const references = openReferences(fixtureUrl, {
@@ -490,14 +525,15 @@ describe("settleOrObserve", () => {
       assertEquals(
         await readFile(new URL("case-1.safetensors", results.dir)),
         BYTES,
-        "突合を飛ばした回に実物が残っていない",
+        "the artifact was not kept on the run that skipped the match",
       );
-      // 他環境の行（OTHER）とは突き合わせず、この環境の行も作らない。
-      assertEquals(readTextFileSync(fixtureUrl), before, "比較モードが参照値を書き換えた");
+      // It neither matches against another environment's row (OTHER) nor creates a row for this
+      // environment.
+      assertEquals(readTextFileSync(fixtureUrl), before, "compare mode rewrote the reference");
     });
   });
 
-  it("比較モードで行があれば突き合わせ、決着と referenceEntryFields の欄を返す", async () => {
+  it("in compare mode with a row, matches against it and returns the settlement and the fields of referenceEntryFields", async () => {
     await withSeats({ "case-1": { [CURRENT]: SHA_A } }, async (fixtureUrl, results) => {
       const references = openReferences(fixtureUrl, {
         environment: environment(CURRENT),
@@ -518,7 +554,7 @@ describe("settleOrObserve", () => {
     });
   });
 
-  it("write モードで行が無ければ行を作り、written の欄を返す", async () => {
+  it("in write mode without a row, creates the row and returns the written fields", async () => {
     await withSeats({}, async (fixtureUrl, results) => {
       const references = openReferences(fixtureUrl, {
         environment: environment(CURRENT),
@@ -544,7 +580,7 @@ describe("settleOrObserve", () => {
 describe("f32ArtifactBytes", () => {
   const data = Float32Array.from([0.5, -1, 2.25, Number.MIN_VALUE, -0, 3]);
 
-  it("テンソル名・F32・shape・値のビット列をそのまま持ち、metadata を持たない", () => {
+  it("holds the tensor name, F32, the shape and the bit pattern of the values as is, with no metadata", () => {
     const bytes = f32ArtifactBytes("logits", [1, 2, 3], data);
     const parsed = parseSafetensors(bytes.buffer);
     assertEquals([...parsed.tensors.keys()], ["logits"]);
@@ -553,26 +589,26 @@ describe("f32ArtifactBytes", () => {
     assert(view !== undefined);
     assertEquals(view.dtype, "F32");
     assertEquals(view.shape, [1, 2, 3]);
-    // ビット列で比べる（-0 と 0 を同一視しない）。
+    // Compare by bit pattern (do not treat -0 and 0 as the same).
     assertEquals(
       new Uint8Array(parsed.buffer, view.byteOffset, view.byteLength),
       new Uint8Array(data.buffer),
     );
   });
 
-  it("同じ入力から同じバイト列を作る（sha が走行ごとに動かない）", () => {
+  it("builds the same bytes from the same input (the sha does not move between runs)", () => {
     assertEquals(
       f32ArtifactBytes("logits", [1, 2, 3], data),
       f32ArtifactBytes("logits", [1, 2, 3], data),
     );
   });
 
-  it("shape の要素数とデータ長が食い違えば throw する", () => {
+  it("throws when the shape's element count and the data length disagree", () => {
     assertThrows(() => f32ArtifactBytes("logits", [1, 2, 2], data), Error, "食い違う");
   });
 });
 
-/** 写しの検査用の決着（実物の置き場は写しに関与しない）。 */
+/** A settlement for checking the copy (where the artifact lives plays no part in the copy). */
 const settlementOf = (check: ReferenceSettlement["check"]): ReferenceSettlement => ({
   sha256: SHA_B,
   check,
@@ -580,13 +616,13 @@ const settlementOf = (check: ReferenceSettlement["check"]): ReferenceSettlement 
 });
 
 describe("referenceEntryFields", () => {
-  it("written は expected を欄ごと持たない", () => {
+  it("written has no expected field at all", () => {
     const fields = referenceEntryFields(settlementOf({ status: "written" }), "case-1.png");
     assertEquals(fields, { status: "written", actual: SHA_B, artifact: "case-1.png" });
     assertEquals(Object.keys(fields), ["status", "actual", "artifact"]);
   });
 
-  it("rewritten は焼き直す前の値を expected に持つ", () => {
+  it("rewritten holds the value before re-recording in expected", () => {
     const fields = referenceEntryFields(
       settlementOf({ status: "rewritten", previous: SHA_A }),
       "case-1.png",
@@ -600,7 +636,7 @@ describe("referenceEntryFields", () => {
     });
   });
 
-  it("pass / fail は突き合わせた行を expected に持つ", () => {
+  it("pass / fail hold the matched row in expected", () => {
     for (const status of ["pass", "fail"] as const) {
       assertEquals(referenceEntryFields(settlementOf({ status, expected: SHA_A }), "case-1.png"), {
         status,
@@ -615,7 +651,7 @@ describe("referenceEntryFields", () => {
 describe("referenceMismatchMessage", () => {
   const fixtureUrl = new URL("file:///repo/fixtures/references/family.json");
 
-  it("期待 / 実測の sha・実物の置き場・fixture の置き場を含む", () => {
+  it("includes the expected / actual sha, where the artifact is and where the fixture is", () => {
     const message = referenceMismatchMessage(
       "case-1",
       settlementOf({ status: "fail", expected: SHA_A }),
@@ -629,7 +665,7 @@ describe("referenceMismatchMessage", () => {
     assertStringIncludes(message, "tolerance に逃げない");
   });
 
-  it("不一致でない決着を渡されたら throw する（呼び手の誤りを黙って文にしない）", () => {
+  it("throws when given a settlement that is not a mismatch (does not silently turn a caller error into a sentence)", () => {
     assertThrows(
       () => referenceMismatchMessage("case-1", settlementOf({ status: "written" }), { fixtureUrl }),
       Error,

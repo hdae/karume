@@ -1,17 +1,21 @@
 /**
- * census（席を指定したとき変種が**実際に**走った本数の検査 — ADR 0058 決定 4 ③ / ADR 0110 決定 5）の
- * 共通ヘルパ。
+ * Shared helpers of the census (the check of how many dispatches **actually** ran the variant when
+ * an option is set — ADR 0058 decision 4 ③ / ADR 0110 decision 5).
  *
- * 源は `SessionDiagnostics.lastRunPipelines`（直近 run の**計画上の** dispatch 本数 — 計測に依らず
- * 常駐経路でも埋まる）。計測表（`lastRunTiming`）を源にすると timestamp-query の無い機・計測が
- * device ごと落ちる機（Metal の query set 上限）で census が丸ごと SKIP になり、席の沈黙縮退を
- * 検出する門がその機では 1 本も無くなる。
- * NOTE: states 形（論理長から workgroup 数を算出する dispatch）は仕事量ゼロの step でも 1 本と
- * 数える（計画の census であって発行の census ではない — src/runtime/recipe.ts `pipelineCensus`）。
+ * The source is `SessionDiagnostics.lastRunPipelines` (the **planned** dispatch count of the latest
+ * run — filled independently of timing, on the resident path too). With the timing table
+ * (`lastRunTiming`) as the source, the census would be skipped entirely on machines without
+ * timestamp-query and on machines where timing drops out for the whole device (the Metal query set
+ * limit), leaving not a single check that detects a silent fallback of an option there.
+ * NOTE: the states form (dispatches whose workgroup count is computed from the logical length)
+ * counts as one dispatch even on a step with no work (it is a census of the plan, not of what was
+ * issued — `pipelineCensus` in src/runtime/recipe.ts).
  *
- * 述語の綴りは src の key 関数 / 定数から組む（ここで文字列を二重に持つと、キーの改名で述語だけが
- * 空振りして census が恒真になる）。判別断片（`:c16` / `:subgroup32` / `i8a8` など）は複数の族で
- * 共有されるので、述語は必ず**族（キー先頭の `:` より前）との組**で書く。
+ * Predicates are spelled from the key functions / constants of src (keeping a second copy of the
+ * strings here would let a key rename make only the predicates miss, turning the census
+ * tautological). Distinguishing fragments (`:c16` / `:subgroup32` / `i8a8` and so on) are shared by
+ * several families, so a predicate is always written **paired with the family (the part of the key
+ * before the first `:`)**.
  */
 
 import { assert } from "@std/assert";
@@ -50,26 +54,28 @@ import { stateStatsPvKey } from "../../src/kernels/state-attention-stats-pv.ts";
 import { STATIC_QUANTIZE_PACKED_KEY } from "../../src/kernels/static-quantize.ts";
 import type { SessionDiagnostics, SessionOptions } from "../../src/runtime/session-types.ts";
 
-/** census の行（`lastRunPipelines` の要素）。 */
+/** A census row (an element of `lastRunPipelines`). */
 export type CensusRow = NonNullable<SessionDiagnostics["lastRunPipelines"]>[number];
 
-/** パイプラインキーの判別述語。 */
+/** Predicate that recognizes a pipeline key. */
 export type KeyPredicate = (key: string) => boolean;
 
 // ---------------------------------------------------------------------------
-// 席の網羅表
+// The table covering every option
 // ---------------------------------------------------------------------------
 
 /**
- * 数値を変えない `SessionOptions` の欄（census の対象外）。
+ * Fields of `SessionOptions` that do not change numerics (outside the census).
  *
- * MUST: 除外リスト方式（許可リストにしない）。`SessionOptions` に文字列キーの欄を 1 つ足すと
- * {@link NumericSeat} に自動で入り、{@link SEAT_REFERENCE} / {@link SEAT_SIGNATURES} の網羅が
- * 型検査で落ちる — 足した人が「数値を変える席か」を必ず判断する。
- * NOTE: unique symbol のテスト専用ノブ（`I8A8_DOT` / `ROW_BLOCK_SPLIT`）は `Extract<…, string>` で
- * 外れる。どちらも参照と整数一致 / Uint32 一致が契約の変種選択で、数値を変えない。
- * `attentionRowBlockMaxBytes` は行ブロックの枚数だけを変える資源の政策（出力は予算なしと Uint32 で
- * 一致 — ADR 0124 決定 3 / 4）。
+ * MUST: an exclusion list (not an allow list). Adding a string-keyed field to `SessionOptions` puts
+ * it into {@link NumericSeat} automatically, and the coverage of {@link SEAT_REFERENCE} /
+ * {@link SEAT_SIGNATURES} fails the type check — whoever adds it must decide "is this an option
+ * that changes numerics".
+ * NOTE: the test-only knobs keyed by unique symbols (`I8A8_DOT` / `ROW_BLOCK_SPLIT`) drop out via
+ * `Extract<…, string>`. Both select a variant whose contract is an integer match / Uint32 match
+ * with the reference, and do not change numerics. `attentionRowBlockMaxBytes` is a resource policy
+ * that changes only the number of row blocks (the output matches the no-budget run in Uint32 —
+ * ADR 0124 decisions 3 / 4).
  */
 type NonNumericField =
   | "submitPolicy"
@@ -78,14 +84,17 @@ type NonNumericField =
   | "linearGemvRowsThreadTarget"
   | "attentionRowBlockMaxBytes";
 
-/** 数値を変える `SessionOptions` の席（文字列キーから {@link NonNumericField} を除いた集合）。 */
+/**
+ * Options of `SessionOptions` that change numerics (the string keys minus {@link NonNumericField}).
+ */
 export type NumericSeat = Exclude<Extract<keyof SessionOptions, string>, NonNumericField>;
 
 type SeatValue<Seat extends NumericSeat> = NonNullable<SessionOptions[Seat]>;
 
 /**
- * 各席の参照値（= runtime の省略値 — src/runtime/session-build.ts の既定代入と同じ値）。
- * 型が各席の union へ縛るので、綴りを誤れば型検査で落ちる。
+ * Reference value of each option (= the runtime's value when omitted — the same values as the
+ * defaults assigned in src/runtime/session-build.ts). The type pins each to the option's union, so
+ * a misspelling fails the type check.
  */
 export const SEAT_REFERENCE = {
   linearCompute: "f32",
@@ -108,35 +117,48 @@ type NonReference<Seat extends NumericSeat> = Exclude<
   (typeof SEAT_REFERENCE)[Seat]
 >;
 
-/** 席 × 非参照値 → 判別述語（真偽の席は `"true"` をキーにする）。 */
+/** Option × non-reference value → predicate (boolean options use `"true"` as the key). */
 export type SeatSignatures = {
   readonly [Seat in NumericSeat]: {
     readonly [Value in NonReference<Seat> as `${Value}`]: KeyPredicate;
   };
 };
 
-/** キーの族（先頭の `:` より前 — `linear` / `attention_qk` / `linear_gemv_parallel` …）。 */
+/**
+ * Family of a key (before the first `:` — `linear` / `attention_qk` / `linear_gemv_parallel` …).
+ */
 const familyOf = (key: string): string => {
   const colon = key.indexOf(":");
   return colon < 0 ? key : key.slice(0, colon);
 };
 
-/** キーの dtype 欄（`族:世代:dtype:…` の 3 つ目 — i8a8 変種はここが `i8a8`）。 */
+/**
+ * dtype field of a key (the third of `family:generation:dtype:…` — `i8a8` for the i8a8 variants).
+ */
 const dtypeOf = (key: string): string | undefined => key.split(":")[2];
 
 /**
- * `:` 区切りの断片を含むか（部分文字列ではなく区切りの境界で見る — `:s16` が `:s16x` に
- * 当たらないように）。
+ * Whether the key contains a `:`-delimited fragment (matched at delimiter boundaries, not as a
+ * substring — so that `:s16` does not match `:s16x`).
  */
 const hasFragment = (key: string, fragment: string): boolean => `${key}:`.includes(`${fragment}:`);
 
-/** 変種キーが基準キーの末尾に足した断片（src の key 関数が「基準 + 断片」で組む族に使う）。 */
+/**
+ * The fragment a variant key appends to the base key (for families whose key functions in src build
+ * "base + fragment").
+ */
 const suffixOf = (variant: string, base: string): string => {
-  assert(variant.startsWith(base), `断片の導出: '${variant}' が '${base}' で始まらない`);
+  assert(
+    variant.startsWith(base),
+    `fragment derivation: '${variant}' does not start with '${base}'`,
+  );
   return variant.slice(base.length);
 };
 
-/** `(sliding, gqa)` の 4 通り全てで key 関数を回した集合（states 形の変種ビットは 2 つだけ）。 */
+/**
+ * The key function evaluated for all 4 combinations of `(sliding, gqa)` (the states form has only
+ * two variant bits).
+ */
 const stateVariants = (
   ...keyOf: readonly ((sliding: boolean, gqa: boolean) => string)[]
 ): ReadonlySet<string> =>
@@ -146,7 +168,8 @@ const stateVariants = (
     ),
   );
 
-// 断片・族の導出に使う代表引数（どの引数でも断片は同じ — key 関数が「基準 + 断片」で組むため）。
+// Representative arguments for deriving fragments and families (any arguments give the same
+// fragment — the key functions build "base + fragment").
 const GEMV_PARALLEL_SAMPLE = linearGemvParallelKey("i8", undefined, 4);
 
 const LINEAR_FAMILY = familyOf(linearKey("f32", true));
@@ -201,11 +224,12 @@ const GEMV_PLANES_FAMILY = familyOf(planesGemvKey({ lanes: 8, rows: 4 }));
 const isGemvParallel = (key: string): boolean => familyOf(key) === GEMV_PARALLEL_FAMILY;
 
 /**
- * 数値を変える席 × 非参照値 → 「その変種が走った」ことを示すキーの述語。
+ * Numerics-changing option × non-reference value → predicate on the key showing "that variant ran".
  *
- * MUST: 同じ席の非参照値どうしの述語は互いに素（{@link assertSeatsApplied} が値ごとに数えるため）。
- * 席を跨いだ重なりは設計どおり（SRQ 融合・packed は並列 GEMV 族の上に立つ・subgroup32 の RMS→add
- * 融合キーは `fuseRmsNormAdd` と `rmsNormReduce` の両方の証拠）。
+ * MUST: the predicates of different non-reference values of one option are disjoint
+ * ({@link assertSeatsApplied} counts per value). Overlap across options is by design (SRQ fusion
+ * and packed sit on top of the parallel GEMV family; the subgroup32 RMS→add fusion key is evidence
+ * for both `fuseRmsNormAdd` and `rmsNormReduce`).
  */
 export const SEAT_SIGNATURES: SeatSignatures = {
   linearCompute: {
@@ -244,7 +268,8 @@ export const SEAT_SIGNATURES: SeatSignatures = {
     true: (key) => familyOf(key) === GELU_MUL_STATIC_QUANTIZE_FAMILY,
   },
   packedStaticQuantize: {
-    // 生産側（単体 SRQ の packed 変種）と消費側（並列 GEMV の packed 変種）のどちらでも立つ。
+    // True on both the producer side (the packed variant of standalone SRQ) and the consumer side
+    // (the packed variant of parallel GEMV).
     true: (key) =>
       key === STATIC_QUANTIZE_PACKED_KEY || (isGemvParallel(key) && hasFragment(key, GEMV_PACKED)),
   },
@@ -260,14 +285,14 @@ export const SEAT_SIGNATURES: SeatSignatures = {
 };
 
 // ---------------------------------------------------------------------------
-// 検査
+// Checks
 // ---------------------------------------------------------------------------
 
 /**
- * census の行を取り出す。undefined / 空は fail loudly。
+ * Takes the census rows. undefined / empty fails loudly.
  *
- * MUST: 空を「何も見ない」で通さない — 空の表どうしの一致・0 本の断言は恒真になり、
- * census が 1 つも検査しないまま緑になる。
+ * MUST: empty never passes as "nothing to look at" — a match of two empty tables or an assertion of
+ * zero dispatches is tautological, and the census would turn green without checking anything.
  */
 export const requireCensus = (
   rows: SessionDiagnostics["lastRunPipelines"],
@@ -275,13 +300,16 @@ export const requireCensus = (
 ): readonly CensusRow[] => {
   assert(
     rows !== undefined,
-    `${where}: lastRunPipelines が埋まっていない（直近 run が無い / 失敗）`,
+    `${where}: lastRunPipelines is not filled (no latest run / it failed)`,
   );
-  assert(rows.length > 0, `${where}: census が空（数え損ねを 0 本の断言で隠す）`);
+  assert(
+    rows.length > 0,
+    `${where}: the census is empty (would hide a miscount behind an assertion of zero)`,
+  );
   return rows;
 };
 
-/** 述語（または完全一致のキー）に当たる行の dispatch 本数の合計。 */
+/** Sum of the dispatch counts of the rows matching the predicate (or the exact key). */
 export const countDispatches = (
   rows: readonly CensusRow[],
   match: string | KeyPredicate,
@@ -291,10 +319,11 @@ export const countDispatches = (
 };
 
 /**
- * 複数 run の census を 1 つの表へ畳む（キー別に本数を足す・キーの辞書順）。
+ * Folds the census of several runs into one table (counts summed per key, keys in lexicographic
+ * order).
  *
- * MUST: 要素に undefined があれば fail loudly（成功した run の直後に census が無いのは
- * 源が壊れた形で、読み飛ばすと「その run の変種」が集計から黙って消える）。
+ * MUST: an undefined element fails loudly (no census right after a successful run means the source
+ * is broken; skipping it would silently drop "that run's variants" from the totals).
  */
 export const mergeCensus = (
   runs: readonly SessionDiagnostics["lastRunPipelines"][],
@@ -302,7 +331,7 @@ export const mergeCensus = (
 ): readonly CensusRow[] => {
   const counts = new Map<string, number>();
   runs.forEach((rows, index) => {
-    assert(rows !== undefined, `${where}: ${index} 本目の run の lastRunPipelines が無い`);
+    assert(rows !== undefined, `${where}: run ${index} has no lastRunPipelines`);
     for (const { key, dispatchCount } of rows) {
       counts.set(key, (counts.get(key) ?? 0) + dispatchCount);
     }
@@ -312,15 +341,15 @@ export const mergeCensus = (
     .map(([key, dispatchCount]) => ({ key, dispatchCount }));
 };
 
-/** census の期待 1 件（「本数ちょうど」か「下限」）。 */
+/** One census expectation ("exactly this count" or "at least"). */
 export type CensusExpectation = {
-  /** 失敗文言に出す名前。 */
+  /** Name shown in the failure message. */
   readonly label: string;
-  /** 判別述語（文字列はキーの完全一致）。 */
+  /** Predicate (a string is an exact key match). */
   readonly match: string | KeyPredicate;
 } & ({ readonly count: number } | { readonly atLeast: number });
 
-/** 期待ごとの本数を検査する。rows が undefined / 空なら fail loudly（{@link requireCensus}）。 */
+/** Checks the count per expectation. undefined / empty rows fail loudly ({@link requireCensus}). */
 export const assertPipelineCensus = (
   rows: SessionDiagnostics["lastRunPipelines"],
   expected: readonly CensusExpectation[],
@@ -333,30 +362,35 @@ export const assertPipelineCensus = (
     if ("count" in expectation) {
       assert(
         actual === expectation.count,
-        `${where}: ${expectation.label} が ${actual} 本（期待 ${expectation.count} 本）— ${keys}`,
+        `${where}: ${expectation.label} ran ${actual} times (expected ${expectation.count}) — ${keys}`,
       );
     } else {
       assert(
         actual >= expectation.atLeast,
-        `${where}: ${expectation.label} が ${actual} 本（期待 ${expectation.atLeast} 本以上）— ${keys}`,
+        `${where}: ${expectation.label} ran ${actual} times (expected at least ${expectation.atLeast}) — ${keys}`,
       );
     }
   }
 };
 
-/** 網羅表の席名（`Object.keys` は string[] を返すので、網羅表の型から取り直す）。 */
+/**
+ * Option names of the coverage table (`Object.keys` returns string[], so the names are re-typed
+ * from the table's type).
+ */
 const NUMERIC_SEATS = Object.keys(SEAT_REFERENCE) as readonly NumericSeat[];
 
 /**
- * 渡した席が実際に効いたことの両側検査。
+ * Two-sided check that the options passed actually took effect.
  *
- * - 非参照値の席: その値の述語に当たる dispatch が 1 本以上。
- * - 参照値を**明示した**席: その席の非参照値の述語のどれにも当たる dispatch が 0 本。
+ * - An option with a non-reference value: at least one dispatch matches that value's predicate.
+ * - An option **explicitly set** to its reference value: no dispatch matches any of its
+ *   non-reference predicates.
  *
- * 渡していない（undefined の）席は検査しない — 省略時の実効値は呼び手（quant 席の宣言など）が
- * 決めるので、ここで参照値と決めつけない。
- * NOTE: 「1 本以上」は席が**どこかで**効いた証拠で、完全適格（全対象が変種へ落ちた）の証拠では
- * ない。対象ごとの本数は {@link assertPipelineCensus} で持つ。
+ * Options not passed (undefined) are not checked — the effective value when omitted is decided by
+ * the caller (a preset declaration and the like), so it is not assumed to be the reference here.
+ * NOTE: "at least one" is evidence that the option took effect **somewhere**, not evidence of full
+ * eligibility (every target went to the variant). Per-target counts belong in
+ * {@link assertPipelineCensus}.
  */
 export const assertSeatsApplied = (
   rows: SessionDiagnostics["lastRunPipelines"],
@@ -373,7 +407,7 @@ export const assertSeatsApplied = (
         const hits = census.filter((row) => predicate(row.key)).map((row) => row.key);
         assert(
           hits.length === 0,
-          `${where}: ${seat} は参照値 ${JSON.stringify(value)} なのに ${variant} の変種が走った — ${hits.join(
+          `${where}: ${seat} is the reference value ${JSON.stringify(value)} yet the ${variant} variant ran — ${hits.join(
             " / ",
           )}`,
         );
@@ -383,11 +417,11 @@ export const assertSeatsApplied = (
     const predicate = variants[String(value)];
     assert(
       predicate !== undefined,
-      `${where}: ${seat}=${JSON.stringify(value)} の述語が網羅表に無い`,
+      `${where}: ${seat}=${JSON.stringify(value)} has no predicate in the coverage table`,
     );
     assert(
       countDispatches(census, predicate) > 0,
-      `${where}: ${seat}=${JSON.stringify(value)} の変種が 1 本も走っていない — ${census
+      `${where}: no dispatch of the ${seat}=${JSON.stringify(value)} variant ran — ${census
         .map((row) => row.key)
         .join(" / ")}`,
     );
@@ -395,22 +429,28 @@ export const assertSeatsApplied = (
 };
 
 /**
- * 融合 attention の席の**完全適格**の検査 — 宣言した a8 / s16 が、census に載った融合 attention の
- * **全** dispatch で効いたこと（ADR 0058 の追記 2026-10-10）。
+ * **Full-eligibility** check of the fused-attention options — the declared a8 / s16 took effect on
+ * **every** fused-attention dispatch in the census (ADR 0058 addendum 2026-10-10).
  *
- * - `attentionCompute: "a8"`: ①QK 族・③PV 族のそれぞれで、全本数 == i8a8 変種の本数。
- * - `attentionScoreStorage: "f16"`: ①QK・②行統計・③PV の 3 族のそれぞれで、全本数 == `:s16` 付きの本数。
+ * - `attentionCompute: "a8"`: in each of the ①QK and ③PV families, total count == i8a8 variant
+ *   count.
+ * - `attentionScoreStorage: "f16"`: in each of the 3 families ①QK / ②row statistics / ③PV, total
+ *   count == count with `:s16`.
  *
- * 全本数との一致（比）で見るので、行ブロックの枚数（device の束縛上限で変わる）は両辺に同じだけ掛かって
- * 消える — 本数そのものを表に書かない census 表（models の census-table.ts）とも両立する。
- * {@link assertSeatsApplied} には混ぜない: あちらは「どこかで効いた」の検査で、縮退する形を意図して
- * 踏む runtime のテストも呼ぶ。形の適格判定による縮退（src/runtime/attention-route.ts）は仕様として
- * 許されている（ADR 0058 決定 3）ので、これは**宣言どおりの経路を期待できる形**の census にだけ掛ける。
- * MUST: 渡す census は a8 / s16 を宣言した Session の run だけにする — 別の Session（VAE・text
- * encoder）の f32 の attention が混ざると、正当な f32 が縮退に見えて赤になる。
- * MUST: 対象の族が 1 本も無い census は fail loudly（0 == 0 の恒真で緑にしない）。
- * NOTE: 融合されずに残った分解 attention（bmm の経路）は attention 族のキーを持たないので対象外。
- * `attentionCompute: "f16"` は形による縮退を持たないので見ない。
+ * It compares against the total (a ratio), so the number of row blocks (which varies with the
+ * device's binding limits) multiplies both sides equally and cancels — compatible with census
+ * tables that do not write the counts themselves (census-table.ts in models).
+ * Not mixed into {@link assertSeatsApplied}: that one checks "took effect somewhere" and is also
+ * called by runtime tests that hit fallback shapes on purpose. A fallback by the shape-eligibility
+ * decision (src/runtime/attention-route.ts) is allowed by the spec (ADR 0058 decision 3), so this
+ * is applied only to the census of **shapes that can be expected to take the declared path**.
+ * MUST: the census passed covers only runs of the Session that declared a8 / s16 — mixing in the
+ * f32 attention of another Session (VAE, text encoder) would make legitimate f32 look like a
+ * fallback and turn red.
+ * MUST: a census without any dispatch of a target family fails loudly (no green from a tautological
+ * 0 == 0).
+ * NOTE: an unfused decomposed attention (the bmm path) has no attention-family key, so it is out of
+ * scope. `attentionCompute: "f16"` has no shape-based fallback, so it is not checked.
  */
 export const assertAttentionSeatsComplete = (
   rows: SessionDiagnostics["lastRunPipelines"],
@@ -432,11 +472,11 @@ export const assertAttentionSeatsComplete = (
         .filter((row) => inFamily(row.key))
         .map((row) => `${row.key}×${row.dispatchCount}`)
         .join(" / ");
-      assert(total > 0, `${where}: ${seat} を宣言したのに ${family} の dispatch が 1 本も無い`);
+      assert(total > 0, `${where}: ${seat} was declared but there is no ${family} dispatch`);
       assert(
         applied === total,
-        `${where}: ${seat} の ${family} が ${total} 本中 ${applied} 本だけ ${variantLabel}` +
-          `（残りは f32 へ縮退 — 形の適格判定 attentionRoute）— ${keys}`,
+        `${where}: ${seat}: of the ${family} dispatches, ${total} in all, only ${applied} are ${variantLabel}` +
+          ` (the rest fell back to f32 — shape eligibility in attentionRoute) — ${keys}`,
       );
     }
   };

@@ -1,9 +1,11 @@
 /**
- * packed int8 活性（ADR 0105）の**対付けと生成物**の門（GPU 不要）。
+ * The check of **pairing and generated code** for packed int8 activations (ADR 0105) (no GPU
+ * needed).
  *
- * 対付けは「生産側 SRQ を packed で書く」と「消費側 linear を packed で読む」の対でしか
- * 成立しない。片側だけ立つと `vec4<u32>` 束縛に f32 の語が流れる = 例外なしの沈黙誤値に
- * なるので、受理集合（席・消費先・格納・形）と、生成 WGSL の活性ロード本数の両方を固定する。
+ * Pairing holds only as a pair of "the producer SRQ writes packed" and "the consumer linear reads
+ * packed". If only one side is set, f32 words flow into a `vec4<u32>` binding = a silent wrong
+ * value with no exception, so both the accepted set (option, consumer, storage, shape) and the
+ * number of activation loads in the generated WGSL are pinned.
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
@@ -36,7 +38,9 @@ import { type DeclarationJson, GRAPH_NAME } from "./helpers/model-fixture.ts";
 
 type Storage = "i2" | "i4" | "i8";
 
-/** 実測表（`PARALLEL_SHAPES`）の 1 行 — 消費先 linear の形をそのまま指す。 */
+/**
+ * One row of the measured table (`PARALLEL_SHAPES`) — points to the consumer linear's shape as is.
+ */
 type Shape = {
   readonly storage: Storage;
   readonly n: number;
@@ -46,8 +50,9 @@ type Shape = {
 };
 
 /**
- * `packedActivations: true` の行（ADR 0105 追記 1 の per-key 実測で効いた形）。
- * どれも「K が長く lanes 32」= 1 スレッドが 1 重み語あたりに読む活性が多い形。
+ * Rows with `packedActivations: true` (the shapes that helped in the per-key measurements of ADR
+ * 0105 addendum 1). All are "long K, 32 lanes" = shapes where one thread reads many activations per
+ * weight word.
  */
 const PACKED_SHAPES: readonly Shape[] = [
   { storage: "i2", n: 1536, k: 12288, lanes: 32 },
@@ -56,48 +61,65 @@ const PACKED_SHAPES: readonly Shape[] = [
   { storage: "i4", n: 1536, k: 4096, group: 4096, lanes: 32 },
 ];
 
-/** `packedActivations: false` の行 — 並列 GEMV には落ちるが packed にはしない。 */
+/**
+ * A row with `packedActivations: false` — it falls back to parallel GEMV but is not made packed.
+ */
 const PLAIN_SHAPES: readonly Shape[] = [
   { storage: "i2", n: 12288, k: 1536, lanes: 2 },
   { storage: "i4", n: 6144, k: 1536, group: 512, lanes: 4 },
   { storage: "i8", n: 256, k: 1536, lanes: 32 },
-  // 同じ (格納, n, k) でも group 長が違えば別の行 = 別の採否（下の `plainConsumer` が使う）。
+  // Even with the same (storage, n, k), a different group length is a different row = a different
+  // decision (used by `plainConsumer` below).
   { storage: "i4", n: 1536, k: 2048, group: 32, lanes: 32 },
 ];
 
-/** 既定の消費先 — packed が効く実測形の代表（i2 down 形）。 */
+/**
+ * The default consumer — representative of the measured shapes where packed helps (the i2 down
+ * shape).
+ */
 const DEFAULT_SHAPE = PACKED_SHAPES[0];
 
 type Options = {
-  /** 消費先 linear の形（実測表の行）。 */
+  /** The consumer linear's shape (a row of the measured table). */
   shape?: Shape;
   m?: number;
   scale?: number;
-  /** SRQ 出力に linear 以外の消費先（neg）を足す。 */
+  /** Adds a consumer other than linear (neg) to the SRQ output. */
   extraConsumer?: boolean;
-  /** SRQ 出力を**並列 GEMV に落ちない形**の linear にも食わせる。 */
+  /**
+   * Also feeds the SRQ output to a linear of **a shape that does not fall back to parallel GEMV**.
+   */
   unparallelConsumer?: boolean;
-  /** SRQ 出力を**フラグ false の行**（並列 GEMV には落ちる）の linear にも食わせる。 */
+  /**
+   * Also feeds the SRQ output to a linear of **a row with the flag false** (which does fall back to
+   * parallel GEMV).
+   */
   plainConsumer?: boolean;
-  /** SRQ 出力を linear の**重み**スロットで消費する（活性スロット以外）。 */
+  /** Consumes the SRQ output in a linear's **weight** slot (a slot other than the activation). */
   weightConsumer?: boolean;
-  /** SRQ 出力を graph output にする。 */
+  /** Makes the SRQ output a graph output. */
   publicQuantized?: boolean;
-  /** SRQ の直前に linear を置き、linear→SRQ 融合（ADR 0103）に飲ませる。 */
+  /** Puts a linear right before the SRQ so the linear→SRQ fusion (ADR 0103) swallows it. */
   afterLinear?: boolean;
 };
 
 const GROUP = 512;
-/** 前段 linear（`afterLinear`）の縮約長 — `i2 12288×1536` は PARALLEL_SHAPES の実測形。 */
+/**
+ * The contraction length of the preceding linear (`afterLinear`) — `i2 12288×1536` is a measured
+ * shape in PARALLEL_SHAPES.
+ */
 const PRE_K = 1536;
 
-/** 重み 1 本の格納（IR v2 の宣言は持たない — 束縛表側の欄。group 長は実測表の行から引く）。 */
+/**
+ * Storage of one weight (the IR v2 declaration does not carry it — a binding-table field; the group
+ * length comes from the measured table's row).
+ */
 const weightStorage = (shape: Shape): StorageSpec =>
   shape.storage === "i4"
     ? { codec: "int4-sym-g", groupSize: shape.group ?? GROUP }
     : { codec: shape.storage === "i2" ? "int2-off" : "int8-sym" };
 
-/** `x → static_quantize → linear` の最小形（消費先を options で崩せる）。 */
+/** The minimal `x → static_quantize → linear` form (the consumer can be broken through options). */
 const packedGraph = (o: Options = {}): DeclarationJson => {
   const shape = o.shape ?? DEFAULT_SHAPE,
     m = o.m ?? 1,
@@ -120,7 +142,8 @@ const packedGraph = (o: Options = {}): DeclarationJson => {
     nodes: [],
   };
   if (o.afterLinear) {
-    // linear → SRQ の隣接形（ADR 0103 の融合が掴む綴り）。SRQ の入力を linear 出力にする。
+    // The adjacent linear → SRQ form (the spelling ADR 0103's fusion matches). The SRQ's input is
+    // the linear's output.
     graph.values.pre = { dtype: "f32", shape: [m, k] };
     graph.initializers.wp = {};
     graph.initializers.bp = {};
@@ -141,7 +164,8 @@ const packedGraph = (o: Options = {}): DeclarationJson => {
     graph.outputs.push("copy");
   }
   if (o.unparallelConsumer) {
-    // n=260 は PARALLEL_SHAPES に無い形（= 並列 GEMV へ落ちない linear）。
+    // n=260 is a shape not in PARALLEL_SHAPES (= a linear that does not fall back to parallel
+    // GEMV).
     graph.initializers.w2 = {};
     graph.initializers.b2 = {};
     graph.values.w2 = { dtype: "f32", shape: [260, k] };
@@ -151,9 +175,10 @@ const packedGraph = (o: Options = {}): DeclarationJson => {
     graph.outputs.push("y2");
   }
   if (o.plainConsumer) {
-    // 並列 GEMV へは落ちるが **フラグ false の行**（同じ n/k で group 長だけ違う）。
+    // It does fall back to parallel GEMV, but is **a row with the flag false** (same n/k, only the
+    // group length differs).
     const plain = PLAIN_SHAPES.find((s) => s.storage === shape.storage && s.k === k);
-    if (plain === undefined) throw Error(`k=${k} に対するフラグ false の実測形が無い`);
+    if (plain === undefined) throw Error(`no measured shape with the flag false for k=${k}`);
     graph.initializers.w4 = {};
     graph.initializers.b4 = {};
     graph.values.w4 = { dtype: "f32", shape: [plain.n, k] };
@@ -163,7 +188,8 @@ const packedGraph = (o: Options = {}): DeclarationJson => {
     graph.outputs.push("y4");
   }
   if (o.weightConsumer) {
-    // 活性スロット以外（重み）で同じ値を取る linear。f32 の語を期待する束縛なので packed 不可。
+    // A linear that takes the same value in a slot other than the activation (the weight). The
+    // binding expects f32 words, so packed is impossible.
     graph.initializers.b3 = {};
     graph.values.b3 = { dtype: "f32", shape: [m] };
     graph.values.y3 = { dtype: "f32", shape: [m, m] };
@@ -174,7 +200,10 @@ const packedGraph = (o: Options = {}): DeclarationJson => {
   return graph;
 };
 
-/** グラフの重み初期化子ごとの格納（合流の材料 — `weightLayouts` と同じ実測表の行から引く）。 */
+/**
+ * Storage per weight initializer of the graph (merge input — taken from the same measured table
+ * rows as `weightLayouts`).
+ */
 const storageMap = (o: Options = {}): StorageMap => {
   const shape = o.shape ?? DEFAULT_SHAPE;
   const plain = PLAIN_SHAPES.find((s) => s.storage === shape.storage && s.k === shape.k);
@@ -212,7 +241,7 @@ const plan = (o: Options = {}, context: Partial<Parameters<typeof planFusions>[1
   });
 };
 
-/** 素のノードに付いた packed の役割（op 名で引く）。 */
+/** The packed role attached to plain nodes (looked up by op name). */
 const roles = (steps: ReturnType<typeof plan>["steps"]): readonly string[] =>
   steps.flatMap((step) =>
     step.kind === "node" && step.packedActivations !== undefined
@@ -220,8 +249,8 @@ const roles = (steps: ReturnType<typeof plan>["steps"]): readonly string[] =>
       : [],
   );
 
-describe("packed int8 活性の対付け（ADR 0105）", () => {
-  it("フラグ true の実測形では SRQ と消費先 linear に対で役割が付き、カウンタが立つ", () => {
+describe("pairing of packed int8 activations (ADR 0105)", () => {
+  it("for a measured shape with the flag true, the SRQ and the consumer linear get paired roles and the counter goes up", () => {
     for (const shape of PACKED_SHAPES) {
       for (const m of [1, 4, 8]) {
         const scale = Math.fround(0.00071);
@@ -231,17 +260,21 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
         assertEquals(roles(fused.steps), ["static_quantize:write", "linear:read"], label);
         for (const step of fused.steps) {
           if (step.kind !== "node" || step.packedActivations === undefined) continue;
-          assertEquals(step.packedActivations.scale, scale, "生産側 SRQ の scale を両側が持つ");
+          assertEquals(
+            step.packedActivations.scale,
+            scale,
+            "both sides carry the producer SRQ's scale",
+          );
         }
       }
     }
   });
 
   /**
-   * 形ごとの採否（ADR 0105 追記 1）。並列 GEMV へ落ちることは packed の十分条件ではない —
-   * 実測で効かなかった行は f32 のまま渡す。
+   * Per-shape decisions (ADR 0105 addendum 1). Falling back to parallel GEMV is not a sufficient
+   * condition for packed — rows that did not help in measurements are passed as f32.
    */
-  it("フラグ false の実測形へ落ちる消費先は、並列 GEMV でも packed にしない", () => {
+  it("a consumer that falls back to a measured shape with the flag false is not made packed, even under parallel GEMV", () => {
     for (const shape of PLAIN_SHAPES) {
       const fused = plan({ shape });
       assertEquals(fused.counts.packedStaticQuantize, 0, JSON.stringify(shape));
@@ -249,16 +282,17 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
     }
   });
 
-  it("フラグ false の行が 1 本でも混ざる SRQ は f32 のまま（同じ n/k でも group 長で割れる）", () => {
-    // i4 1536×2048: group 2048 は true / group 32 は false（同じ (格納, n, k) の別行）。
+  it("an SRQ mixed with even one row with the flag false stays f32 (split by group length even for the same n/k)", () => {
+    // i4 1536×2048: group 2048 is true / group 32 is false (different rows of the same (storage, n,
+    // k)).
     const shape = PACKED_SHAPES[1];
-    assertEquals(plan({ shape }).counts.packedStaticQuantize, 1, "true の行だけなら packed");
+    assertEquals(plan({ shape }).counts.packedStaticQuantize, 1, "packed with true rows only");
     const mixed = plan({ shape, plainConsumer: true });
-    assertEquals(mixed.counts.packedStaticQuantize, 0, "false の行が 1 本混ざれば f32");
+    assertEquals(mixed.counts.packedStaticQuantize, 0, "f32 once one false row is mixed in");
     assertEquals(roles(mixed.steps), []);
   });
 
-  it("席・縮約方式・計算方式が揃わなければ f32 のまま", () => {
+  it("stays f32 unless the option, reduction method and compute method all line up", () => {
     for (const context of [
       { packedStaticQuantize: undefined },
       { packedStaticQuantize: false },
@@ -275,7 +309,7 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
     }
   });
 
-  it("消費先が 1 本でも並列 GEMV の活性でなければ f32 のまま", () => {
+  it("stays f32 if even one consumer is not a parallel GEMV activation", () => {
     for (const o of [
       { extraConsumer: true },
       { unparallelConsumer: true },
@@ -290,19 +324,20 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
     }
   });
 
-  it("linear→SRQ 融合に飲まれた SRQ は packed の対象にしない（出力側は範囲外）", () => {
+  it("an SRQ swallowed by the linear→SRQ fusion is not a packed target (the output side is out of scope)", () => {
     const fused = plan({ afterLinear: true }, { fuseLinearStaticQuantize: true });
     assertEquals(fused.counts.linearStaticQuantize, 1);
     assertEquals(fused.counts.packedStaticQuantize, 0);
     assertEquals(roles(fused.steps), []);
-    // 融合を切れば素のノードに戻り、同じ SRQ が packed の対象になる。
+    // With fusion off it goes back to a plain node, and the same SRQ becomes a packed target.
     const unfused = plan({ afterLinear: true }, { fuseLinearStaticQuantize: false });
     assertEquals(unfused.counts.packedStaticQuantize, 1);
     assertEquals(roles(unfused.steps), ["static_quantize:write", "linear:read"]);
   });
 
-  it("packed 活性を取る linear が linear→SRQ 融合の頭でも、融合側が packed のキーへ落ちる", () => {
-    // `src → SRQ → linear → SRQ` の綴り: 前段 SRQ が packed 生産、後段は出力側エピローグ。
+  it("even when a linear taking packed activations heads a linear→SRQ fusion, the fused side falls back to the packed key", () => {
+    // The spelling `src → SRQ → linear → SRQ`: the first SRQ produces packed, the second is the
+    // output-side epilogue.
     const graph = packedGraph({ shape: DEFAULT_SHAPE });
     graph.values.z = { dtype: "f32", shape: graph.values.y.shape };
     graph.nodes.push({
@@ -329,9 +364,9 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
     assertEquals(fused.counts.packedStaticQuantize, 1);
     assertEquals(fused.counts.linearStaticQuantize, 1);
     const step = fused.steps.find((s) => s.kind === "fused");
-    if (step === undefined || step.kind !== "fused") throw Error("融合されていない");
+    if (step === undefined || step.kind !== "fused") throw Error("not fused");
     assertEquals(step.dispatches[0].key, linearGemvStaticQuantizePackedKey("i2", undefined, 32));
-    // 出力側 SRQ の表は語 4〜263、活性 scale は末尾の語 264。
+    // The output-side SRQ's table is words 4–263, and the activation scale is the last word, 264.
     assertEquals(
       step.dispatches[0].params,
       linearGemvStaticQuantizePackedParams(
@@ -346,8 +381,8 @@ describe("packed int8 活性の対付け（ADR 0105）", () => {
   });
 });
 
-describe("形ごとの採否（ADR 0105 追記 1）", () => {
-  it("packed の述語は並列 GEMV の述語の真部分集合（効いた行だけ lane を返す）", () => {
+describe("per-shape decisions (ADR 0105 addendum 1)", () => {
+  it("the packed predicate is a proper subset of the parallel GEMV predicate (it returns lanes only for rows that helped)", () => {
     for (const shape of PACKED_SHAPES) {
       const label = JSON.stringify(shape);
       const { storage, n, k, group, lanes } = shape;
@@ -362,16 +397,16 @@ describe("形ごとの採否（ADR 0105 追記 1）", () => {
     }
   });
 
-  it("表に無い形と M > 8 はどちらの述語も undefined", () => {
-    assertEquals(linearGemvPackedEligible("i2", 1, 260, 1536), undefined, "表に無い n");
+  it("shapes not in the table and M > 8 are undefined for both predicates", () => {
+    assertEquals(linearGemvPackedEligible("i2", 1, 260, 1536), undefined, "n not in the table");
     const { storage, n, k, group } = PACKED_SHAPES[0];
-    assertEquals(linearGemvParallelEligible(storage, 9, n, k, group), undefined, "M=9 並列");
+    assertEquals(linearGemvParallelEligible(storage, 9, n, k, group), undefined, "M=9 parallel");
     assertEquals(linearGemvPackedEligible(storage, 9, n, k, group), undefined, "M=9 packed");
   });
 });
 
-describe("packed 活性の生成物（ADR 0105）", () => {
-  it("重み 1 語あたりの活性ロードが i2 16→4 / i4 8→2 / i8 4→1 本に減る", () => {
+describe("generated code for packed activations (ADR 0105)", () => {
+  it("activation loads per weight word drop from 16→4 for i2 / 8→2 for i4 / 4→1 for i8", () => {
     const loads = (wgsl: string): number => (wgsl.match(/= x\[/g) ?? []).length;
     const cases = [
       ["i2", undefined, 2, 16, 4],
@@ -379,7 +414,11 @@ describe("packed 活性の生成物（ADR 0105）", () => {
       ["i8", undefined, 16, 4, 1],
     ] as const;
     for (const [storage, group, lanes, plain, packed] of cases) {
-      assertEquals(loads(linearGemvParallelWgsl(storage, group, lanes)), plain, `${storage} 現行`);
+      assertEquals(
+        loads(linearGemvParallelWgsl(storage, group, lanes)),
+        plain,
+        `${storage} current`,
+      );
       assertEquals(
         loads(linearGemvParallelPackedWgsl(storage, group, lanes)),
         packed,
@@ -388,7 +427,7 @@ describe("packed 活性の生成物（ADR 0105）", () => {
     }
   });
 
-  it("packed 変種は束縛の要素型と Dims の末尾だけが違う（キーは末尾の断片で分かれる）", () => {
+  it("the packed variant differs only in the binding's element type and the end of Dims (the key splits on its last fragment)", () => {
     const packed = linearGemvParallelPackedWgsl("i8", undefined, 16);
     assertEquals(packed.includes("x: array<vec4<u32>>"), true);
     assertEquals(packed.includes("x_scale: f32,"), true);
@@ -403,7 +442,7 @@ describe("packed 活性の生成物（ADR 0105）", () => {
     );
   });
 
-  it("params は活性 scale を Dims の末尾へ置き、表せない scale を fail loudly で断る", () => {
+  it("params put the activation scale at the end of Dims and refuse an unrepresentable scale by failing loudly", () => {
     const scale = Math.fround(0.00071);
     const bits = new Uint32Array(Float32Array.of(scale).buffer)[0];
     const plain = linearGemvParallelPackedParams("i2", 1, 12288, 1536, scale);
@@ -413,14 +452,14 @@ describe("packed 活性の生成物（ADR 0105）", () => {
     const fused = linearGemvStaticQuantizePackedParams("i2", 1, 12288, 1536, scale, scale);
     assertEquals(fused.length, 268);
     assertEquals(fused[264], bits);
-    // 出力側 SRQ の表は既存の位置（語 4〜）のまま。
+    // The output-side SRQ's table stays at its existing position (from word 4).
     assertEquals([...fused.subarray(4, 264)], [...staticQuantizeParams(12288, scale)]);
     for (const bad of [0, -1, Number.NaN, 0.00071]) {
       assertThrows(() => linearGemvParallelPackedParams("i2", 1, 12288, 1536, bad));
     }
   });
 
-  it("packed 出力の SRQ params は恒等 scale と 4 の倍数でない要素数を断る", () => {
+  it("the SRQ params of a packed output refuse the identity scale and element counts that are not a multiple of 4", () => {
     const scale = Math.fround(0.00071);
     assertEquals(
       [...staticQuantizePackedParams(1536, scale)],
@@ -436,7 +475,8 @@ const fuseLinearStaticQuantize = (
   o: LinearStaticQuantizeOptions = {},
   context: Partial<Parameters<typeof planFusions>[1]> = {},
 ) => {
-  // 合流結果（格納つき IrGraph）は供給元に依らない — メモリ内容器 1 本で足りる。
+  // The merge result (an IrGraph with storage) does not depend on the source — one in-memory
+  // container is enough.
   const graph = mergedGraph(linearStaticQuantizeModel(o).graphs[GRAPH_NAME], GRAPH_NAME);
   const weight: FusionWeightLayout =
     o.storage === "i4"
@@ -457,15 +497,15 @@ const fuseLinearStaticQuantize = (
   });
 };
 
-describe("linear→static_quantizeの任意融合", () => {
-  it("明示指定と実測形だけを受理し、出力・外部入力・scaleの借用元を保持する", () => {
+describe("optional linear→static_quantize fusion", () => {
+  it("accepts only explicit opt-in and measured shapes, and keeps the outputs, external inputs and the scale's borrowing source", () => {
     for (const storage of ["i2", "i4", "i8"] as const) {
       for (const m of [1, 4, 8]) {
         const n = storage === "i2" ? 12288 : 256,
           planned = fuseLinearStaticQuantize({ storage, m, n }),
           step = planned.steps[0];
         assertEquals(planned.counts.linearStaticQuantize, 1);
-        if (step.kind !== "fused") throw Error("融合されていない");
+        if (step.kind !== "fused") throw Error("not fused");
         assertEquals(step.ins, ["x", "w", "b"]);
         assertEquals(step.binds, ["x", "w", "b"]);
         assertEquals(step.outputName, "y");
@@ -483,7 +523,7 @@ describe("linear→static_quantizeの任意融合", () => {
       }
     }
   });
-  it("無指定・別計算方式・展開済み重み・未検収形は既存経路へ残す", () => {
+  it("leaves no opt-in, another compute method, expanded weights and unvalidated shapes on the existing path", () => {
     for (const context of [
       { fuseLinearStaticQuantize: undefined },
       { fuseLinearStaticQuantize: false },
@@ -506,9 +546,9 @@ describe("linear→static_quantizeの任意融合", () => {
     ])
       assertEquals(fuseLinearStaticQuantize(o).counts.linearStaticQuantize, 0);
   });
-  it("scale 0は既存の恒等演算を維持し、tile数の上限を黙って縮めない", () => {
+  it("scale 0 keeps the existing identity operation and does not silently shrink the tile count limit", () => {
     const step = fuseLinearStaticQuantize({ scale: 0 }).steps[0];
-    if (step.kind !== "fused") throw Error("融合されていない");
+    if (step.kind !== "fused") throw Error("not fused");
     assertEquals(step.dispatches[0].params[262], 1);
     assertThrows(() =>
       fuseLinearStaticQuantize(

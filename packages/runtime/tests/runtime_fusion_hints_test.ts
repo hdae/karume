@@ -1,12 +1,15 @@
 /**
- * 融合候補の列挙（`enumerateUnfusedWindows`）の単体検証。GPU 不要・合成 IR だけを使う。
+ * Unit tests of fusion candidate enumeration (`enumerateUnfusedWindows`). No GPU; synthetic IR
+ * only.
  *
- * 見るのは窓の作り方 =「どの連続窓を候補にし、どれを落とすか」で、適格条件（単一出力 /
- * state 不触 / f32 / 鎖の内部値が外へ出ない）の 1 本ずつに対照を置く。
+ * What is checked is how windows are formed = "which contiguous windows become candidates and which
+ * are dropped", with a control for each eligibility condition (single output / no state access /
+ * f32 / the chain's internal values do not escape).
  *
- * 実資産に掛けた答え合わせ（既知のヒット数の再現・二重計上の検出）と集計は、道具側の
- * tools/fusion-hints/enumerate_test.ts にある — 資産の発見・束縛・集計は道具の面で、
- * runtime のテストから tools を import しない（ADR 0008 追記 2026-09-03）。
+ * The cross-check against real assets (reproducing known hit counts, detecting double counting)
+ * and the aggregation live in the tool's tools/fusion-hints/enumerate_test.ts — discovering,
+ * binding and aggregating assets are the tool's concern, and runtime tests do not import tools
+ * (ADR 0008 addendum 2026-09-03).
  */
 
 import { test } from "vite-plus/test";
@@ -23,7 +26,7 @@ import { bindSymbols, countUses, ExecutionError, planGraph } from "../src/runtim
 import type { DeclarationJson } from "./helpers/model-fixture.ts";
 import { mergeGraph } from "./helpers/merged-graph.ts";
 
-/** 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。 */
+/** Device capabilities used for the decision (WebGPU core defaults — 128MiB / 65535). */
 const TEST_LIMITS = {
   maxStorageBufferBindingSize: 128 * 1024 * 1024,
   maxComputeWorkgroupsPerDimension: 65535,
@@ -35,7 +38,7 @@ const shaped = (name: string, shape: readonly number[]) => ({
   shape: [...shape],
 });
 
-/** グラフ JSON → 計画済みノード列 + 融合の判定文脈。 */
+/** Graph JSON → planned node sequence + the fusion decision context. */
 const plan = (graph: DeclarationJson, inputShapes: Readonly<Record<string, readonly number[]>>) => {
   const ir: IrGraph = mergeGraph(graph);
   const nodes = planGraph(ir, bindSymbols(ir, inputShapes)).nodes;
@@ -49,13 +52,13 @@ const plan = (graph: DeclarationJson, inputShapes: Readonly<Record<string, reado
   };
 };
 
-/** 融合を切った計画（全ノードが素のステップ）。 */
+/** A plan with fusion turned off (every node is a plain step). */
 const unfused = (nodes: ReturnType<typeof plan>["nodes"]): readonly ExecStep[] => {
   const aliases = planAliases(nodes);
   return nodes.map((node) => ({ kind: "node", plan: node, aliasesInput: aliases.has(node) }));
 };
 
-/** 窓の要約（op 名列 / 窓幅 / 先頭ノード位置 / 鎖の出力名）。 */
+/** A window summary (op names / window width / first node position / chain output name). */
 const outline = (windows: readonly UnfusedWindow[]): readonly string[] =>
   windows.map(
     (window) =>
@@ -63,8 +66,8 @@ const outline = (windows: readonly UnfusedWindow[]): readonly string[] =>
   );
 
 /**
- * 素の 3 ノード鎖（`neg → add → mul`）。どのルールの綴りにも当たらないので、計画は必ず素の
- * 列になる（= 列挙器の入力として素直な形）。
+ * A plain 3-node chain (`neg → add → mul`). It matches no rule's spelling, so the plan is always a
+ * plain sequence (= a straightforward input for the enumerator).
  */
 const chainGraph = (
   options: {
@@ -106,29 +109,29 @@ const chainGraph = (
 
 const CHAIN_INPUTS = { x: [4, 8], w: [4, 8] } as const;
 
-test("素のノード列から長さ 2〜maxWindow の窓を全て列挙する", () => {
+test("enumerates every window of length 2 to maxWindow from a plain node sequence", () => {
   const { nodes, context } = plan(chainGraph(), CHAIN_INPUTS);
-  assertEquals(planFusions(nodes, context).steps.length, 3, "前提: どのルールも掴まない");
+  assertEquals(planFusions(nodes, context).steps.length, 3, "precondition: no rule matches");
   assertEquals(outline(enumerateUnfusedWindows(unfused(nodes), context, 3)), [
     "neg,add@0+2=b",
     "neg,add,mul@0+3=c",
     "add,mul@1+2=c",
   ]);
-  // 窓幅の上限は受理集合を絞るだけ（長さ 3 の窓が消える）。
+  // The window width limit only narrows the accepted set (the length-3 window disappears).
   assertEquals(outline(enumerateUnfusedWindows(unfused(nodes), context, 2)), [
     "neg,add@0+2=b",
     "add,mul@1+2=c",
   ]);
 });
 
-test("鎖の内部値が外へ出る窓は候補にならない（別 consumer / graph output）", () => {
+test("a window whose chain's internal value escapes is not a candidate (another consumer / graph output)", () => {
   for (const [label, graph] of [
-    ["別 consumer", chainGraph({ extraConsumer: true })],
+    ["another consumer", chainGraph({ extraConsumer: true })],
     ["graph output", chainGraph({ internalOutput: true })],
   ] as const) {
     const { nodes, context } = plan(graph, CHAIN_INPUTS);
-    // 残るのは `b` を**最終出力**にする窓だけ（融合ステップは最終出力を実体化するので、
-    // 最終ノードの出力が外へ出ることは適格）。
+    // Only the window that makes `b` its **final output** remains (a fused step materializes the
+    // final output, so the final node's output escaping is eligible).
     assertEquals(
       outline(enumerateUnfusedWindows(unfused(nodes), context, 4)),
       ["neg,add@0+2=b"],
@@ -138,11 +141,12 @@ test("鎖の内部値が外へ出る窓は候補にならない（別 consumer /
 });
 
 /**
- * 窓内 passthrough（鎖に入らない窓内ノード）の切り出し。RoPE の cos / sin 表の
- * `sym_prefix_slice` と同じ形 — 鎖の `add` へ流れ込むが、他でも読まれる（消費者 2 本）ので
- * 鎖には入らず、窓幅だけが鎖より 1 大きくなる。
+ * Splitting out an in-window passthrough (an in-window node not in the chain). The same shape as
+ * the `sym_prefix_slice` of RoPE's cos / sin tables — it flows into the chain's `add` but is also
+ * read elsewhere (2 consumers), so it does not join the chain, and only the window width becomes
+ * 1 larger than the chain.
  */
-test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大きくなる", () => {
+test("an in-window passthrough leaves the chain, and only the window width grows beyond the chain", () => {
   const shape = [4, 8];
   const graph: DeclarationJson = {
     format: "karume-ir",
@@ -161,7 +165,7 @@ test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大きく�
     },
     nodes: [
       { op: "neg", ins: ["x"], outs: ["a"], attrs: {} },
-      // t は窓内 passthrough（下の add と、窓の外の mul の 2 本が読む）。
+      // t is an in-window passthrough (read by the add below and by the mul outside the window).
       { op: "neg", ins: ["w"], outs: ["t"], attrs: {} },
       { op: "add", ins: ["a", "t"], outs: ["b"], attrs: {} },
       { op: "mul", ins: ["b", "w"], outs: ["c"], attrs: {} },
@@ -170,17 +174,17 @@ test("窓内 passthrough は鎖から外れ、窓幅だけが鎖より大きく�
   };
   const { nodes, context } = plan(graph, CHAIN_INPUTS);
   const windows = enumerateUnfusedWindows(unfused(nodes), context, 4);
-  // `neg,add` は窓幅 3（passthrough の neg を挟む）で拾える。
+  // `neg,add` is picked up with window width 3 (with the passthrough neg in between).
   assertEquals(outline(windows).includes("neg,add@0+3=b"), true, outline(windows).join(" / "));
-  // passthrough 自身を先頭にした窓（`neg,add` の重複計上）は出ない — 鎖の先頭が窓の先頭で
-  // ない窓は落とすため。
+  // A window starting at the passthrough itself (double counting of `neg,add`) does not appear —
+  // windows whose first node is not the chain's first node are dropped.
   assertEquals(
     windows.filter((window) => window.ops.join(",") === "neg,add").map((w) => w.nodeIndex),
     [0],
   );
 });
 
-test("多出力 op を含む窓は候補にならない", () => {
+test("a window containing a multi-output op is not a candidate", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -205,17 +209,18 @@ test("多出力 op を含む窓は候補にならない", () => {
   assertEquals(outline(enumerateUnfusedWindows(unfused(nodes), context, 3)), []);
 });
 
-test("state を触るノードを含む窓は候補にならない", () => {
+test("a window containing a node that touches state is not a candidate", () => {
   const { nodes, context } = plan(chainGraph(), CHAIN_INPUTS);
-  // 現行の op 語彙では `states` 欄を持てるのが `attention` / `state_append` だけで、この綴りの
-  // 窓は実グラフから踏めない。窓の仕組み側の不変条件として、合成ノードで判定点を固定する。
+  // In the current op vocabulary only `attention` / `state_append` can have a `states` field, and a
+  // window of this spelling cannot be reached from a real graph. As an invariant of the window
+  // mechanism, a synthetic node pins the decision point.
   const tainted = nodes.map((node, index) =>
     index === 1 ? { ...node, node: { ...node.node, states: { k: "kv" } } } : node,
   );
   assertEquals(outline(enumerateUnfusedWindows(unfused(tainted), context, 3)), []);
 });
 
-test("f32 でない鎖は候補にならない", () => {
+test("a chain that is not f32 is not a candidate", () => {
   const reshapeGraph = (dtype: "f32" | "i32"): DeclarationJson => ({
     format: "karume-ir",
     version: 2,
@@ -236,13 +241,14 @@ test("f32 でない鎖は候補にならない", () => {
     ],
   });
   const f32 = plan(reshapeGraph("f32"), { x: [4, 8] });
-  // 対照: 同じ綴りの f32 なら 3 本出る（i32 の 0 が「そもそも窓が無い」でないことの裏）。
+  // Control: the same spelling in f32 yields 3 (the flip side showing that i32's 0 is not "there
+  // are no windows at all").
   assertEquals(enumerateUnfusedWindows(unfused(f32.nodes), f32.context, 3).length, 3);
   const i32 = plan(reshapeGraph("i32"), { x: [4, 8] });
   assertEquals(enumerateUnfusedWindows(unfused(i32.nodes), i32.context, 3), []);
 });
 
-test("融合ステップを跨いだ窓は作らない（掴めている鎖の二重計上なし）", () => {
+test("no window crosses a fused step (no double counting of chains already matched)", () => {
   const shape = [4, 8];
   const graph: DeclarationJson = {
     format: "karume-ir",
@@ -267,19 +273,20 @@ test("融合ステップを跨いだ窓は作らない（掴めている鎖の�
   };
   const { nodes, context } = plan(graph, { x: shape });
   const fused = planFusions(nodes, context);
-  assertEquals(fused.counts.silu, 1, "前提: SiLU が掴めている");
-  // 融合を切れば sigmoid,mul も候補に出る。
+  assertEquals(fused.counts.silu, 1, "precondition: SiLU is matched");
+  // With fusion off, sigmoid,mul also shows up as a candidate.
   assertEquals(outline(enumerateUnfusedWindows(unfused(nodes), context, 2)), [
     "sigmoid,mul@0+2=y",
     "mul,neg@1+2=z",
     "neg,add@2+2=o",
   ]);
-  // 現行計画では融合ステップを跨がないので、残る素のノードの走りだけが候補になる。
-  // `nodeIndex` は畳んだノード数だけ進む（融合ステップ = 2 ノード → neg は 2）。
+  // The current plan does not cross fused steps, so only the runs of remaining plain nodes are
+  // candidates. `nodeIndex` advances by the number of folded nodes (fused step = 2 nodes → neg is
+  // 2).
   assertEquals(outline(enumerateUnfusedWindows(fused.steps, context, 2)), ["neg,add@2+2=o"]);
 });
 
-test("窓幅の上限が 2 未満なら fail loudly", () => {
+test("fails loudly if the window width limit is below 2", () => {
   const { nodes, context } = plan(chainGraph(), CHAIN_INPUTS);
   for (const maxWindow of [1, 0, -1, 2.5, Number.NaN]) {
     assertThrows(

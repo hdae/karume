@@ -1,15 +1,16 @@
-// 通常 run のフェンス構成（H-1）の門。
+// Checks for the fence layout of an ordinary run (H-1).
 //
-// 狙いは「run 1 本の待ちを mapAsync の 1 本に畳む」ことなので、この門が固定するのは
-// ①gpuTiming OFF の run が `onSubmittedWorkDone` を **1 本も張らない**こと（例外は backing を新しく作る
-// run の確保前の解放待ち 1 本だけ — signature ごとに 1 回）②それでも値が
-// 二段待ち経路とビット単位で一致すること ③二段待ちへ落ちる 2 条件（gpuTiming ON / グラフ出力
-// 0 本）では**黙って無フェンスにしない**こと ④submit だけして待たないアリーナ後始末が
-// 「未 submit を残して destroy」に退化していないこと。
+// The aim is "fold the wait of one run into a single mapAsync", so these checks pin
+// ① a run with gpuTiming OFF sets **no** `onSubmittedWorkDone` at all (the only exception is the
+// one wait for releases before allocation in a run that creates a new backing — once per signature)
+// ② the values are still bit-identical to the two-stage wait path ③ the two conditions that fall
+// back to the two-stage wait (gpuTiming ON / zero graph outputs) **do not silently go fenceless**
+// ④ the arena cleanup that only submits without waiting has not regressed into "destroy while
+// leaving unsubmitted work".
 //
-// ① が無いと、内部で flush へ戻しても値は正しいまま緑になる（例外も警告も出ない）。
-// ③ の出力 0 本は、copy が 1 件も積まれない = 待つ相手が居ない形で、単一フェンス経路のまま
-// 通すと GPU 実行の完了前に run が戻る。
+// Without ①, an internal return to flush would still pass with correct values (no exception, no
+// warning). The zero-output case of ③ is the shape where no copy is queued = there is nothing to
+// wait on; passed through the single-fence path, the run would return before the GPU finishes.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -25,7 +26,7 @@ const ROWS = 4;
 const COLS = 3;
 const COUNT = ROWS * COLS;
 
-/** y = x + x、s = y * y。**出力 2 本**（mapAsync を並列に待つ形を実際に通す）。 */
+/** y = x + x, s = y * y. **Two outputs** (actually exercises waiting on mapAsync in parallel). */
 const graph = (outputs: readonly string[]): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -45,7 +46,7 @@ const graph = (outputs: readonly string[]): DeclarationJson => ({
 });
 
 const TWO_OUTPUTS = graph(["y", "s"]);
-/** 出力 0 本（IR は空の `graph.outputs` を受理する）。 */
+/** Zero outputs (the IR accepts an empty `graph.outputs`). */
 const NO_OUTPUT = graph([]);
 
 const input = (phase: number): Tensor => ({
@@ -54,7 +55,10 @@ const input = (phase: number): Tensor => ({
   data: Float32Array.from({ length: COUNT }, (_, i) => (((i + phase * 3) % 9) - 4) * 0.5),
 });
 
-/** 参照値（ノードごとに f32 へ丸めながら手計算する — 実装とは独立）。 */
+/**
+ * Reference values (computed by hand, rounding to f32 at every node — independent of the
+ * implementation).
+ */
 const expected = (
   phase: number,
 ): {
@@ -66,7 +70,7 @@ const expected = (
   return { y, s: Float32Array.from(y, (value) => Math.fround(value * value)) };
 };
 
-/** ビット列比較（丸めの取り違えを許容しない）。 */
+/** Bit-pattern comparison (does not tolerate a rounding mix-up). */
 const bits = (data: Tensor["data"] | Float32Array<ArrayBuffer>): readonly number[] =>
   Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
 
@@ -74,31 +78,33 @@ const session = async (gpu: GpuContext, json: DeclarationJson): Promise<Session>
   await createSessionFromContainer(gpu, await openGraphModel(json), "model");
 
 test.skipIf(!GPU_AVAILABLE)(
-  "gpuTiming OFF の run はフェンスを mapAsync 1 本に畳む（onSubmittedWorkDone 0 回・実 GPU）",
+  "a run with gpuTiming OFF folds its fence into a single mapAsync (zero onSubmittedWorkDone calls, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const target = await session(gpu, TWO_OUTPUTS);
-    // 計数は Session 構築（重みアップロードの 1 本）の**後**から始める。
+    // Start counting **after** the Session is built (which sets one for the weight upload).
     const fences = countFences(gpu);
     try {
-      // 1 run 目は非 backed（アリーナ経路）、2 run 目は backing を作る run、3 run 目は保持済みの backing。
-      // run のフェンスは 0 本で、張られるのは 2 run 目の確保前の解放待ち 1 本だけ（累計で数える）。
+      // Run 1 is not backed (the arena path), run 2 creates the backing, run 3 uses the retained
+      // backing. Runs set no fence; the only one set is run 2's wait for releases before allocation
+      // (counted cumulatively).
       const waits = [0, 1, 1];
       for (const phase of [0, 1, 2]) {
         const outputs = await target.run({ x: input(phase) });
         const reference = expected(phase);
-        assertEquals(bits(outputs["y"].data), bits(reference.y), `phase ${phase} の y`);
-        assertEquals(bits(outputs["s"].data), bits(reference.s), `phase ${phase} の s`);
+        assertEquals(bits(outputs["y"].data), bits(reference.y), `y of phase ${phase}`);
+        assertEquals(bits(outputs["s"].data), bits(reference.s), `s of phase ${phase}`);
         assertEquals(
           fences.count(),
           waits[phase],
-          `run ${phase + 1} 本目までの onSubmittedWorkDone の本数（二段待ちへの退化 / 解放待ちの欠落）`,
+          `onSubmittedWorkDone calls through run ${phase + 1} (regression to the two-stage wait / missing release wait)`,
         );
       }
-      assertEquals(target.diagnostics().lastRunPrepared?.hit, true, "3 run 目は導出済み計画");
-      assertEquals(target.diagnostics().lastRunTiming, undefined, "計測は無効な device");
-      // 計測窓は run ごとに 1 本閉じている（フェンスを畳んでも適応制御の材料は生きている）。
-      assertEquals(target.diagnostics().submit.measuredCount, 3, "run ごとに窓が 1 本閉じる");
+      assertEquals(target.diagnostics().lastRunPrepared?.hit, true, "run 3 uses the derived plan");
+      assertEquals(target.diagnostics().lastRunTiming, undefined, "a device with timing disabled");
+      // One measurement window closes per run (folding the fence keeps the input of the adaptive
+      // control alive).
+      assertEquals(target.diagnostics().submit.measuredCount, 3, "one window closes per run");
     } finally {
       fences.restore();
       await target.dispose();
@@ -108,7 +114,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
-  "gpuTiming ON の run は二段待ちのまま（timestamp 回収が flush に乗る・実 GPU）",
+  "a run with gpuTiming ON keeps the two-stage wait (timestamp collection rides on flush, real GPU)",
   async () => {
     const gpu = await acquireGpu({ gpuTiming: true });
     const target = await session(gpu, TWO_OUTPUTS);
@@ -116,14 +122,16 @@ test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
     try {
       const outputs = await target.run({ x: input(0) });
       const reference = expected(0);
-      // 計測モードでも値は単一フェンス経路とビット一致（1 dispatch = 1 pass は意味論を変えない）。
+      // In timing mode the values are bit-identical to the single-fence path too (1 dispatch =
+      // 1 pass does not change semantics).
       assertEquals(bits(outputs["y"].data), bits(reference.y));
       assertEquals(bits(outputs["s"].data), bits(reference.s));
-      // run 本体の flush と arena.destroy の flush で 2 本（H-1 前の構成そのまま）。
-      assertEquals(fences.count(), 2, "gpuTiming ON では二段待ちを据え置く");
+      // Two: the flush of the run itself and the flush of arena.destroy (the layout before H-1, as
+      // is).
+      assertEquals(fences.count(), 2, "gpuTiming ON keeps the two-stage wait");
       const timing = target.diagnostics().lastRunTiming;
-      assert(timing !== undefined, "計測が有効なら内訳は必ず取れる");
-      assert(timing.entries.length > 0, "内訳が空（回収が flush から外れている）");
+      assert(timing !== undefined, "with timing enabled the breakdown is always available");
+      assert(timing.entries.length > 0, "the breakdown is empty (collection left the flush)");
     } finally {
       fences.restore();
       await target.dispose();
@@ -133,18 +141,18 @@ test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "グラフ出力 0 本の run は従来のフェンスへ落ちる（無フェンスで返さない・実 GPU）",
+  "a run with zero graph outputs falls back to the original fence (does not return fenceless, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const target = await session(gpu, NO_OUTPUT);
     const fences = countFences(gpu);
     try {
       const outputs = await target.run({ x: input(0) });
-      assertEquals(Object.keys(outputs).length, 0, "読み戻す出力が無い");
-      // 待つ相手（積んだ copy）が 1 件も無いので、mapAsync はフェンスになりえない。
+      assertEquals(Object.keys(outputs).length, 0, "there is no output to read back");
+      // There is nothing to wait on (no queued copy), so mapAsync cannot serve as the fence.
       assert(
         fences.count() > 0,
-        "出力 0 本の run が onSubmittedWorkDone を 1 本も張っていない（GPU 実行の完了前に返る）",
+        "a zero-output run set no onSubmittedWorkDone (it returns before the GPU finishes)",
       );
     } finally {
       fences.restore();
@@ -155,14 +163,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "submit だけして待たない ArenaFlush でも destroy 前に未 submit を残さない（実 GPU）",
+  "an ArenaFlush that only submits without waiting leaves nothing unsubmitted before destroy (real GPU)",
   async () => {
-    // 単一フェンス run が RunArena へ渡す後始末そのもの（`submitPending` のみ・完了は待たない）。
-    // 故障注入は 2 方向:
-    // ①closure から `submitPending()` を抜く → copy が未 submit のまま捨てられ、読み戻しが
-    //   全 0 になる（submitCount も 0 のまま）。
-    // ②submit を destroy の後に回す → コピー元が破棄済みでエンコードが validation で落ち、
-    //   errorScope に残る。
+    // Exactly the cleanup a single-fence run passes to RunArena (`submitPending` only; it does not
+    // wait for completion). Fault injection goes two ways:
+    // ① drop `submitPending()` from the closure → the copy is discarded unsubmitted and the
+    //   readback is all zeros (submitCount stays 0 too).
+    // ② move the submit after destroy → the copy source is already destroyed, the encoding fails
+    //   validation and stays in the errorScope.
     const gpu = await acquireGpu();
     const scheduler = new SubmitScheduler(gpu);
     const arena = new RunArena(gpu.device, () => {
@@ -170,7 +178,8 @@ test.skipIf(!GPU_AVAILABLE)(
       return Promise.resolve();
     });
     const values = Float32Array.from({ length: COUNT }, (_, i) => i * 1.5 - 3);
-    // 読み戻し先はアリーナの**外**に置く（アリーナ所有だと destroy で消えて内容を確かめられない）。
+    // Keep the readback target **outside** the arena (owned by the arena, it would vanish on
+    // destroy and its contents could not be checked).
     const staging = gpu.device.createBuffer({
       size: values.byteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -178,24 +187,27 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const source = arena.allocHostWritten(values.byteLength, STORAGE_USAGE);
       gpu.device.queue.writeBuffer(source, 0, values);
-      // 未 submit のまま destroy を呼ぶ（積んだ copy を出し切るのは注入した closure の責務）。
+      // Call destroy while unsubmitted (flushing the queued copy is the injected closure's job).
       scheduler.copyBuffer(source, 0, staging, 0, values.byteLength);
-      assertEquals(scheduler.stats.submitCount, 0, "この時点では 1 度も submit していない");
+      assertEquals(scheduler.stats.submitCount, 0, "nothing has been submitted at this point");
 
       gpu.device.pushErrorScope("validation");
       await arena.destroy();
-      assertEquals(scheduler.stats.submitCount, 1, "destroy の後始末が copy を submit した");
+      assertEquals(scheduler.stats.submitCount, 1, "the destroy cleanup submitted the copy");
       assertEquals(
         await gpu.device.popErrorScope(),
         null,
-        "破棄済みバッファを参照したまま submit している（submit が destroy の後に回っている）",
+        "submitted while still referencing a destroyed buffer (the submit ran after destroy)",
       );
 
-      await gpu[RUNTIME_INTERNAL].raceDeviceLost(staging.mapAsync(GPUMapMode.READ), "検算");
+      await gpu[RUNTIME_INTERNAL].raceDeviceLost(
+        staging.mapAsync(GPUMapMode.READ),
+        "readback check",
+      );
       assertEquals(
         bits(new Float32Array(staging.getMappedRange().slice(0))),
         bits(values),
-        "積んだ copy が実行されていない（未 submit のまま捨てられた）",
+        "the queued copy did not run (it was discarded unsubmitted)",
       );
       staging.unmap();
     } finally {

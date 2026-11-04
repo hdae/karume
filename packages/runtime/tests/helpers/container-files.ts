@@ -1,25 +1,26 @@
 /**
- * 系列出力 / 配布形ミラーの**容器ファイル**（`krm` の part 列）を、runtime の容器面
- * （`openContainer`）へ繋ぐテスト用の面。テストが持つのは「ファイルの見つけ方」と
- * 「区間の読み方」だけである。
+ * Test surface that connects the **container files** of a series output / distribution mirror
+ * (the part sequence of a `krm`) to the runtime's container surface (`openContainer`). All the
+ * tests own is "how to find the files" and "how to read a range".
  *
- * Python 側 `karume.container.resolve_sequence` / `container_parts`
- * （tools/exporter/src/karume/container.py）の**鏡像**。MUST: 連番の綴りを 2 箇所で別々に
- * 育てない — 焼く側と読み返す側で規則が割れると、前回の書き出しの残骸を今回の期待値で読む形が
- * 黙って通る。
+ * The **mirror image** of the Python side's `karume.container.resolve_sequence` /
+ * `container_parts` (tools/exporter/src/karume/container.py). MUST: the numbering spelling is not
+ * grown separately in two places — when the writer and the reader disagree on the rule, reading the
+ * leftovers of a previous write-out against this run's expected values passes silently.
  *
- * ## part の番号づけ（file 番号と `BlockSource` の添字は 1 ずれる）
+ * ## Part numbering (file numbers and `BlockSource` indices are off by one)
  *
- * ファイル名の連番は **1 始まり**で、`model-00001-of-000NN.krm` が `BlockSource` の **part 0**
- * （`[ヘッダ][グラフ記述][モデル記述]`）である。以降 `-00002-` が part 1（const 領域）、
- * `-00003-` 以降が part 2..（重み / 資産）。{@link fileBlockSource} は `parts[i]` をそのまま
- * part `i` に対応づけるので、{@link resolveParts} が返す**添字順を崩してはならない** MUST。
+ * File-name numbering **starts at 1**: `model-00001-of-000NN.krm` is **part 0** of the
+ * `BlockSource` (`[header][graph descriptor][model descriptor]`). After it, `-00002-` is part 1
+ * (the const region) and `-00003-` onward are parts 2.. (weights / assets). {@link fileBlockSource}
+ * maps `parts[i]` to part `i` as is, so the **index order {@link resolveParts} returns MUST NOT be
+ * disturbed**.
  *
- * ## 読む量
+ * ## How much is read
  *
- * `read` は毎回 `Deno.open` + `seek` で区間だけを取る（ファイルを丸ごと RAM に載せない）。
- * `verified: false` MUST — ローカルのファイル列は誰も検証していないので、`openContainer` 側で
- * block ごとの sha256 を掛けてもらう（true を名乗ると改ざんが素通りする — container-v1 §7）。
+ * Each `read` takes only the range with `Deno.open` + `seek` (a file is never loaded whole into
+ * RAM). `verified: false` is a MUST — nobody has verified the local files, so `openContainer`
+ * applies the per-block sha256 (claiming true would let tampering through — container-v1 §7).
  */
 
 import {
@@ -36,16 +37,17 @@ import {
   type OpenedContainer,
 } from "../../mod.ts";
 
-/** 連番の桁数（`-NNNNN-of-NNNNN`）— Python 側 `SEQUENCE_DIGITS` と同値。 */
+/** Digits of the numbering (`-NNNNN-of-NNNNN`) — equal to the Python side's `SEQUENCE_DIGITS`. */
 const INDEX_DIGITS = 5;
 
 const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * この代表 path と同じ容器の part ファイル名に一致する正規表現。
+ * A regular expression that matches the part file names of the same container as this
+ * representative path.
  *
- * MUST: stem / suffix は escape する — 実 path にはドットもハイフンも入る（`model.i8.krm`）ので、
- * 素で埋めると無関係なファイルを拾う（glob を使わないのも同じ理由）。
+ * MUST: escape the stem / suffix — real paths contain dots and hyphens (`model.i8.krm`), so
+ * inserting them raw would pick up unrelated files (the same reason glob is not used).
  */
 const sequencePattern = (name: string): RegExp => {
   const dot = name.lastIndexOf(".");
@@ -58,13 +60,13 @@ const sequencePattern = (name: string): RegExp => {
   );
 };
 
-/** URL の最終要素（`%` エスケープを解いた実ファイル名）。 */
+/** The last segment of a URL (the real file name with `%` escapes decoded). */
 const baseName = (url: URL): string => decodeURIComponent(url.pathname).split("/").pop() ?? "";
 
 /**
- * ファイルの有無。
- * MUST: NotFound 以外は伝播させる — 全 I/O エラーを「資産が無い」に丸めると、資産ルートの
- * マウント異常が SKIP に化けて、実行されていない検証が静かに緑になる。
+ * Whether a file exists.
+ * MUST: propagate everything but NotFound — rounding every I/O error to "no assets" would turn a
+ * mount failure of the asset root into a SKIP, and checks that never ran would go green quietly.
  */
 const isFile = (url: URL): boolean => {
   try {
@@ -75,7 +77,7 @@ const isFile = (url: URL): boolean => {
   }
 };
 
-/** ディレクトリの列挙（不在は空 — 中身の異常は伝播させる）。 */
+/** Lists a directory (missing = empty — failures inside it propagate). */
 const listDir = (url: URL): readonly DirEntry[] => {
   try {
     return readDirSync(url);
@@ -86,13 +88,14 @@ const listDir = (url: URL): readonly DirEntry[] => {
 };
 
 /**
- * 容器の**代表 path**（`…/model.krm` / `…/model.i8.krm`）→ 実在する part ファイル列（添字順 =
- * `BlockSource` の part 順）。単一形と存在しない容器はどちらも `[representative]` を返す
- * （不在の診断は呼び手の既存の門が持つ — ここで先回りすると綴りが 2 つに割れる）。
+ * A container's **representative path** (`…/model.krm` / `…/model.i8.krm`) → the part files that
+ * exist (index order = the `BlockSource` part order). The single form and a container that does
+ * not exist both return `[representative]` (the caller's existing checks own the diagnosis of a
+ * missing container — anticipating it here would split the wording in two).
  *
- * MUST: 曖昧な現場は fail loudly。単一形と連番の同居・`of` の食い違い・番号の欠けやはみ出しは、
- * どれも「どのバイト列を読むか」が一意に決まらない。黙って一方を選ぶと、前回の書き出しを
- * 今回の期待値で突き合わせる形になる。
+ * MUST: an ambiguous directory fails loudly. The single form next to numbered parts, disagreeing
+ * `of` totals, and missing or out-of-range numbers all leave "which bytes to read" undetermined.
+ * Silently picking one would compare a previous write-out against this run's expected values.
  */
 export const resolveParts = (representative: URL): readonly URL[] => {
   const parent = new URL("./", representative);
@@ -129,9 +132,10 @@ export const resolveParts = (representative: URL): readonly URL[] => {
     files.push(file);
   }
   if (found.size !== total) {
-    // MUST: 下にも上にもはみ出しを数える。上側だけを見ると `model-00000-of-00003.krm` のような
-    // 0 以下の番号が混ざった現場で「はみ出した番号 []」と空リストで落ち、診断が読めなくなる
-    // （落ちること自体は本数の不一致が保証する）。
+    // MUST: count numbers out of range both below and above. Looking only above would, in a
+    // directory with a number of 0 or less such as `model-00000-of-00003.krm`, fail with an empty
+    // list ("out-of-range numbers []") and an unreadable diagnosis (that it fails at all is
+    // guaranteed by the count mismatch).
     const surplus = [...found.keys()]
       .filter((index) => index < 1 || index > total)
       .sort((a, b) => a - b);
@@ -141,19 +145,19 @@ export const resolveParts = (representative: URL): readonly URL[] => {
 };
 
 /**
- * 容器が実在するか（単一形 / 連番のどちらでも）。資産の有無で SKIP を決める門が
- * 「`model.krm` があるか」を直に見ていた席の置き換え。
+ * Whether the container exists (single form or numbered parts). Replaces the places where the
+ * checks that SKIP on missing assets looked directly at "is there a `model.krm`".
  *
- * MUST: 同期であること — 呼び手はモジュール先頭の `const ANY_PRESENT = …` で引く。
+ * MUST: synchronous — callers read it in a module-level `const ANY_PRESENT = …`.
  */
 export const modelPresent = (representative: URL): boolean =>
   isFile(resolveParts(representative)[0]);
 
 /**
- * part ファイル列 → `BlockSource`（区間読み）。`parts[i]` が part `i`。
+ * Part files → `BlockSource` (range reads). `parts[i]` is part `i`.
  *
- * part 長はここで一度だけ `stat` して持つ（`BlockSource.partLength` は同期の面で、
- * `openContainer` が宣言長との突合に使う）。
+ * The part lengths are `stat`ed once here and kept (`BlockSource.partLength` is a synchronous
+ * surface that `openContainer` uses to compare against the declared lengths).
  */
 export const fileBlockSource = (parts: readonly URL[]): BlockSource => {
   const lengths = parts.map((part) => statSync(part).size);
@@ -167,7 +171,7 @@ export const fileBlockSource = (parts: readonly URL[]): BlockSource => {
   };
   return {
     partCount: parts.length,
-    // MUST: ローカルのファイル列は誰も検証していない（container-v1 §7）。
+    // MUST: nobody has verified the local files (container-v1 §7).
     verified: false,
     partLength: (index) => at(index).length,
     read: async (part, offset, length) => {
@@ -185,20 +189,22 @@ export const fileBlockSource = (parts: readonly URL[]): BlockSource => {
 };
 
 /**
- * 系列出力 / ミラーの容器を代表 path から開く（part 列の解決 → 区間読みの `BlockSource` →
- * `openContainer`）。
+ * Opens the container of a series output / mirror from its representative path (resolve the part
+ * sequence → a range-reading `BlockSource` → `openContainer`).
  *
- * `expect` は外側が持つ 2 文書の期待値（manifest の `container.descriptor`）。系列出力には
- * manifest が無いので省略する — その場合 2 文書の完全性は誰も保証しないが、block ごとの
- * sha256 は `verified: false` の経路で掛かる。
+ * `expect` is the expected value of the two documents held outside (the manifest's
+ * `container.descriptor`). A series output has no manifest, so it is omitted — then nobody
+ * guarantees the integrity of the two documents, but the per-block sha256 still applies through
+ * the `verified: false` path.
  */
 export const openSeriesContainer = async (
   representative: URL,
   expect?: DescriptorExpectation,
 ): Promise<OpenedContainer> =>
-  // MUST: `async` にする — part 列の解決と `stat` は同期に落ちるので、素の式にすると
-  // 欠番やマウント異常だけが**同期の throw**で返る。呼び手が `await` と `.catch` のどちらで
-  // 受けても同じ形で届くことを、面の側で揃える。
+  // MUST: make it `async` — resolving the part sequence and `stat` fail synchronously, so as a bare
+  // expression only missing numbers and mount failures would come back as a **synchronous
+  // throw**. The surface makes them arrive the same way whether the caller uses `await` or
+  // `.catch`.
   await openContainer(
     { kind: "source", source: fileBlockSource(resolveParts(representative)) },
     expect,

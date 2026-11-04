@@ -1,5 +1,5 @@
-// half-split RoPE の exact peephole（融合ルール rope — src/runtime/fusion.ts）:
-// 既存 primitive 列とのビット parity と dispatch 削減を直接固定する。
+// The exact peephole for half-split RoPE (fusion rule rope — src/runtime/fusion.ts): pins bit
+// parity with the existing primitive sequence and the dispatch reduction directly.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
@@ -10,15 +10,16 @@ import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helper
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
-// H=1, S=3 では n=384 となり、256 スレッド workgroup の末尾端数も通る。
+// With H=1, S=3, n=384, which also exercises a partial trailing 256-thread workgroup.
 type RopeOrder = "slice-first" | "direct-first";
 
 /**
- * `interpose=true` は first slice の直後へ 0 dispatch の reshape を挟み、式を変えず exact
- * matcher だけを外す。これで同一バックエンド上の既存 8 dispatch 列を正本として直接比較できる。
+ * `interpose=true` inserts a zero-dispatch reshape right after the first slice, which breaks only
+ * the exact matcher without changing the expression. This lets the existing 8-dispatch sequence on
+ * the same backend serve as the reference for a direct comparison.
  *
- * `heads` は x の H 軸。カーネルは `row = i / head_dim` を `sequence` で割って token を出す形で
- * head 方向を畳んでいるので、H≥2 を通さないとその添字が 1 度も踏まれない。
+ * `heads` is the H axis of x. The kernel folds the head direction by dividing `row = i / head_dim`
+ * by `sequence` to get the token, so that index is never exercised unless H≥2 runs.
  */
 const ropeGraph = (
   order: RopeOrder,
@@ -115,7 +116,7 @@ const assertFloatParity = (actual: Uint32Array, expected: Uint32Array): void => 
     assertEquals(
       Number.isNaN(actualValue) && Number.isNaN(expectedValue),
       true,
-      "非 NaN はビット一致する index=" +
+      "non-NaN values must be bit-identical index=" +
         i +
         " actual=0x" +
         actual[i].toString(16) +
@@ -125,20 +126,20 @@ const assertFloatParity = (actual: Uint32Array, expected: Uint32Array): void => 
   }
 };
 
-/** x の先頭に ±0 / subnormal / ±Inf / NaN payload を差し込んだ入力一式。 */
+/** The full input set, with ±0 / subnormals / ±Inf / NaN payloads written at the start of x. */
 const ropeInputs = (heads: number, sequence: number): Readonly<Record<string, Tensor>> => {
   const x = fill([1, heads, sequence, 128], (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
   new Uint32Array(x.data.buffer).set([
     0x00000000, // +0
     0x80000000, // -0
-    0x00000001, // 最小正 subnormal
-    0x80000001, // 最小負 subnormal
-    0x007fffff, // 最大正 subnormal
-    0x807fffff, // 最大負 subnormal
+    0x00000001, // smallest positive subnormal
+    0x80000001, // smallest-magnitude negative subnormal
+    0x007fffff, // largest positive subnormal
+    0x807fffff, // largest-magnitude negative subnormal
     0x7f800000, // +Inf
     0xff800000, // -Inf
     0x7fc01234, // quiet NaN payload
-    0xff801234, // 負の signaling NaN payload
+    0xff801234, // negative signaling NaN payload
   ]);
   return {
     x,
@@ -148,7 +149,7 @@ const ropeInputs = (heads: number, sequence: number): Readonly<Record<string, Te
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "half-split RoPE 融合は slice/direct-first 両順で有限値ビット / NaN 分類が一致し 1 dispatch へ畳む（実 GPU）",
+  "half-split RoPE fusion matches in finite bits and NaN class in both slice/direct-first orders and folds into 1 dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const inputs = ropeInputs(1, 3);
@@ -174,8 +175,12 @@ test.skipIf(!GPU_AVAILABLE)(
             8,
             `${order}: slice×2 + neg + cat×2 + mul×2 + add`,
           );
-          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${order}: 融合カウンタ`);
-          assertEquals(split.diagnostics().lastRunFusions?.rope, 0, `${order}: 反例のカウンタは 0`);
+          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${order}: fusion counter`);
+          assertEquals(
+            split.diagnostics().lastRunFusions?.rope,
+            0,
+            `${order}: the counter of the counterexample is 0`,
+          );
         } finally {
           await fused.dispose();
           await split.dispose();
@@ -188,14 +193,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **census**（ADR 0058 決定 4）。融合が RoPE カーネル 1 本だけで済んでいることはキーでしか
- * 見えない（dispatch 数だけでは別カーネル 1 本へ化けた形を見逃す）。
+ * **census** (ADR 0058 decision 4). Only the keys show that the fusion needs a single RoPE kernel
+ * (the dispatch count alone misses a fusion that turned into one different kernel).
  *
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。census は無条件に
- * 検査する（空・undefined は tests/helpers/pipeline-census.ts の `requireCensus` が落とす）。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing (it works on machines
+ * without timing support). The census is checked unconditionally (an empty or undefined one is
+ * failed by `requireCensus` in tests/helpers/pipeline-census.ts).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "half-split RoPE 融合が走らせるのは RoPE カーネル 1 本だけ（実 GPU）",
+  "half-split RoPE fusion runs only a single RoPE kernel (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const inputs = ropeInputs(1, 3);
@@ -222,10 +228,10 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// H=1 だけでは `row / sequence` の head 方向の畳み込みが 1 度も踏まれない（row < sequence の
-// ままなので token = row になってしまう）。実配布は H=16 なのでここが本番の添字。
+// With H=1 alone, the head-direction folding of `row / sequence` is never exercised (row stays
+// below sequence, so token = row). The real distribution has H=16, so this is the production index.
 test.skipIf(!GPU_AVAILABLE)(
-  "RoPE 融合は H≥2 でも head 方向の添字が primitive 列とビット一致する（実 GPU）",
+  "RoPE fusion's head-direction index is bit-identical to the primitive sequence with H≥2 too (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const inputs = ropeInputs(3, 5);
@@ -244,10 +250,10 @@ test.skipIf(!GPU_AVAILABLE)(
         try {
           const fusedOut = (await fused.run(inputs)).y;
           const splitOut = (await split.run(inputs)).y;
-          assertEquals(fusedOut.shape, [1, 3, 5, 128], `${order}: 出力 shape`);
+          assertEquals(fusedOut.shape, [1, 3, 5, 128], `${order}: output shape`);
           assertFloatParity(bits(fusedOut), bits(splitOut));
           assertEquals(fused.diagnostics().submit.dispatchCount, 1, `${order}: RoPE 1 pass`);
-          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${order}: 融合カウンタ`);
+          assertEquals(fused.diagnostics().lastRunFusions?.rope, 1, `${order}: fusion counter`);
         } finally {
           await fused.dispose();
           await split.dispose();
@@ -260,7 +266,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "RoPE の内部値が graph output または別 consumer を持てば融合しない（実 GPU）",
+  "RoPE does not fuse when an inner value is a graph output or has another consumer (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const sequence = 2;
@@ -283,9 +289,9 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           outputSession.diagnostics().submit.dispatchCount,
           8,
-          "内部 output があれば fallback",
+          "an inner output causes a fallback",
         );
-        assertEquals(outputSession.diagnostics().lastRunFusions?.rope, 0, "融合カウンタ 0");
+        assertEquals(outputSession.diagnostics().lastRunFusions?.rope, 0, "fusion counter 0");
         const first = outputs.first.data;
         for (let row = 0; row < sequence; row++) {
           for (let d = 0; d < 64; d++) {
@@ -308,9 +314,9 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           directOutputSession.diagnostics().submit.dispatchCount,
           8,
-          "direct-first の先頭内部 output があれば fallback",
+          "a leading inner output of direct-first causes a fallback",
         );
-        assertEquals(directOutputSession.diagnostics().lastRunFusions?.rope, 0, "融合カウンタ 0");
+        assertEquals(directOutputSession.diagnostics().lastRunFusions?.rope, 0, "fusion counter 0");
         const direct = outputs.direct.data;
         for (let i = 0; i < direct.length; i++) {
           assertEquals(direct[i], Math.fround(x.data[i] * inputs.cos.data[i]), `direct i=${i}`);
@@ -338,9 +344,9 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           consumerSession.diagnostics().submit.dispatchCount,
           9,
-          "内部値の use count が 2 なら 8 dispatch 列 + consumer へ fallback",
+          "an inner value with use count 2 falls back to the 8-dispatch sequence + the consumer",
         );
-        assertEquals(consumerSession.diagnostics().lastRunFusions?.rope, 0, "融合カウンタ 0");
+        assertEquals(consumerSession.diagnostics().lastRunFusions?.rope, 0, "fusion counter 0");
         const firstCopy = outputs.first_copy.data;
         for (let row = 0; row < sequence; row++) {
           for (let d = 0; d < 64; d++) {
@@ -361,7 +367,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "BSHD RoPEはtoken/head軸・端数・幅・特殊値をprimitive列とビット一致で処理する（実GPU）",
+  "BSHD RoPE handles the token/head axes, partial workgroups, widths and special values bit-identically to the primitive sequence (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -414,7 +420,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "BSHD RoPEはgrid-strideの複数巡回でもprimitive列とビット一致する（実GPU）",
+  "BSHD RoPE is bit-identical to the primitive sequence across multiple grid-stride passes too (real GPU)",
   async () => {
     const gpu = await acquireGpu({ [LIMIT_CAPS]: { maxComputeWorkgroupsPerDimension: 2 } });
     const heads = 8,
@@ -450,7 +456,7 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test.skipIf(!GPU_AVAILABLE)("BSHD RoPEは専用キーだけで走る（実GPU）", async () => {
+test.skipIf(!GPU_AVAILABLE)("BSHD RoPE runs only its dedicated keys (real GPU)", async () => {
   const gpu = await acquireGpu();
   try {
     const session = await createSessionFromContainer(

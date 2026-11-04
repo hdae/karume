@@ -1,8 +1,9 @@
-// dp4a の無い device で int8 活性（a8）を要求したときの警告（ADR 0128 決定 5 — フォールバックでも
-// 自動の兄弟プリセットでもなく、警告）。判定は純関数（src/runtime/a8-emulation-warning.ts）、
-// 「device ごとに 1 回」は GpuContext の `warnOnce` が担う。どちらも GPU 無しで固定する。
-// 実 GPU で Session 構築から警告が出ること（と dp4a のある device では出ないこと）は
-// tests/gpu_i8a8_test.ts の「dp4a の無い device」の節が持つ。
+// The warning when int8 activations (a8) are requested on a device without dp4a (ADR 0128 decision
+// 5 — a warning, neither a fallback nor an automatic sibling preset). The decision is a pure
+// function (src/runtime/a8-emulation-warning.ts); "once per device" is handled by GpuContext's
+// `warnOnce`. Both are pinned here without a GPU. That a real GPU emits the warning from Session
+// construction (and does not on a device with dp4a) is covered by the "device without dp4a"
+// section of tests/gpu_i8a8_test.ts.
 
 import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
@@ -14,7 +15,7 @@ import {
 } from "../src/runtime/a8-emulation-warning.ts";
 import { fakeDevice, fakeGpuContext } from "./helpers/fake-gpu.ts";
 
-/** `console.warn` を差し替えて `body` を走らせ、必ず元へ戻す（出た文言をそのまま返す）。 */
+/** Replaces `console.warn`, runs `body` and always restores it (returns the emitted text as is). */
 const captureWarnings = (body: () => void): string[] => {
   const original = console.warn;
   const warnings: string[] = [];
@@ -32,76 +33,79 @@ const captureWarnings = (body: () => void): string[] => {
 const WITHOUT_DP4A: ReadonlySet<string> = new Set();
 const WITH_DP4A: ReadonlySet<string> = new Set([DP4A_WGSL_FEATURE]);
 
-describe("a8EmulationWarning（a8 を要求したが device に dp4a が無い）", () => {
-  it("linear の a8 だけを要求した dp4a 無しの device では、linearCompute を名指しして警告する", () => {
+describe("a8EmulationWarning (a8 requested but the device has no dp4a)", () => {
+  it("on a device without dp4a that requests a8 only for linear, the warning names linearCompute", () => {
     const message = a8EmulationWarning("a8", "f32", "f32", WITHOUT_DP4A);
     assert(message !== undefined);
     assertStringIncludes(message, "@karume/runtime");
     assertStringIncludes(message, DP4A_WGSL_FEATURE);
     assertStringIncludes(message, 'linearCompute: "a8"');
-    assert(!message.includes("attentionCompute: "), "要求していない attention を名指ししない");
-    // 何をすれば消えるか（逃げ先 2 つ）を文言が持つ
+    assert(
+      !message.includes("attentionCompute: "),
+      "does not name attention, which was not requested",
+    );
+    // The text says what makes the warning go away (the two ways out)
     assertStringIncludes(message, "pass quant explicitly");
     assertStringIncludes(message, "'f32'");
   });
 
-  it("linear と attention の両方を要求すれば両方を名指しする", () => {
+  it("requesting both linear and attention names both", () => {
     const message = a8EmulationWarning("a8", "f32", "a8", WITHOUT_DP4A);
     assert(message !== undefined);
     assertStringIncludes(message, 'linearCompute / attentionCompute: "a8"');
   });
 
-  it("conv の a8 だけでも警告し、convCompute を名指しする", () => {
+  it("warns for a8 on conv alone and names convCompute", () => {
     const message = a8EmulationWarning("f32", "a8", "f32", WITHOUT_DP4A);
     assert(message !== undefined);
     assertStringIncludes(message, 'convCompute: "a8"');
-    assert(!message.includes("linearCompute: "), "要求していない linear を名指ししない");
+    assert(!message.includes("linearCompute: "), "does not name linear, which was not requested");
   });
 
-  it("attention の a8 だけでも警告する", () => {
+  it("warns for a8 on attention alone", () => {
     const message = a8EmulationWarning("f32", "f32", "a8", WITHOUT_DP4A);
     assert(message !== undefined);
     assertStringIncludes(message, 'attentionCompute: "a8"');
   });
 
-  it("dp4a のある device では a8 を要求しても警告しない", () => {
+  it("does not warn on a device with dp4a even when a8 is requested", () => {
     assertEquals(a8EmulationWarning("a8", "f32", "a8", WITH_DP4A), undefined);
   });
 
-  it("a8 を要求しなければ dp4a の無い device でも警告しない（f32 / f16 の計算は無関係）", () => {
+  it("does not warn on a device without dp4a when a8 is not requested (f32 / f16 compute is unaffected)", () => {
     assertEquals(a8EmulationWarning("f32", "f32", "f32", WITHOUT_DP4A), undefined);
     assertEquals(a8EmulationWarning("f16", "f32", "f16", WITHOUT_DP4A), undefined);
   });
 });
 
-describe("GpuContext.warnOnce（device ごとに 1 回）", () => {
-  it("同じキーは何度呼んでも 1 回しか出ない", () => {
+describe("GpuContext.warnOnce (once per device)", () => {
+  it("the same key is emitted only once however many times it is called", () => {
     const gpu = fakeGpuContext(fakeDevice());
     const warnings = captureWarnings(() => {
-      gpu[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "1 回目");
-      gpu[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "2 回目（出ない）");
-      gpu[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "3 回目（出ない）");
+      gpu[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "1st");
+      gpu[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "2nd (not emitted)");
+      gpu[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "3rd (not emitted)");
     });
-    assertEquals(warnings, ["1 回目"]);
+    assertEquals(warnings, ["1st"]);
   });
 
-  it("キーが違えば別の事実として出る", () => {
+  it("a different key is emitted as a separate fact", () => {
     const gpu = fakeGpuContext(fakeDevice());
     const warnings = captureWarnings(() => {
       gpu[RUNTIME_INTERNAL].warnOnce("a", "A");
       gpu[RUNTIME_INTERNAL].warnOnce("b", "B");
-      gpu[RUNTIME_INTERNAL].warnOnce("a", "A（出ない）");
+      gpu[RUNTIME_INTERNAL].warnOnce("a", "A (not emitted)");
     });
     assertEquals(warnings, ["A", "B"]);
   });
 
-  it("別の GpuContext（別 device）では改めて 1 回出る", () => {
+  it("a different GpuContext (another device) emits once again", () => {
     const first = fakeGpuContext(fakeDevice());
     const second = fakeGpuContext(fakeDevice());
     const warnings = captureWarnings(() => {
       first[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "device 1");
       second[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "device 2");
-      first[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "device 1（出ない）");
+      first[RUNTIME_INTERNAL].warnOnce(A8_EMULATION_WARNING_KEY, "device 1 (not emitted)");
     });
     assertEquals(warnings, ["device 1", "device 2"]);
   });

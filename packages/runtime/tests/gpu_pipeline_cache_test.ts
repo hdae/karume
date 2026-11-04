@@ -14,17 +14,17 @@ import { createSessionFromContainer } from "../src/runtime/executor.ts";
 import { fill, openGraphModel, singleOpDeclaration } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** PipelineCache が触る面だけを持つフェイク。DOM 型全体は再現しないため cast で渡す。 */
+/** A fake holding only the surface PipelineCache touches. The full DOM types are not reproduced, so it is passed with a cast. */
 type FakeGpu = {
   readonly device: GPUDevice;
-  /** 呼び出し順の記録（errorScope の張り方を観測する）。 */
+  /** Record of the call order (to observe how the errorScopes are set up). */
   readonly calls: string[];
   readonly modules: string[];
-  /** 次の popErrorScope が返す検証エラー。差し替えて「失敗 → 再試行で成功」を作る。 */
+  /** The validation error the next popErrorScope returns. Swapped to produce "failure → success on retry". */
   scopeError: GPUError | null;
   /**
-   * 次の popErrorScope が **internal スコープ**で返すエラー。実 GPU では作れない失敗
-   * （シェーダが複雑すぎてコンパイルできない等）を踏むための面。
+   * The error the next popErrorScope returns from the **internal scope**. The surface for hitting failures that
+   * cannot be produced on a real GPU (a shader too complex to compile and the like).
    */
   internalError: GPUError | null;
 };
@@ -35,9 +35,9 @@ const createFakeGpu = (
 ): FakeGpu => {
   const calls: string[] = [];
   const modules: string[] = [];
-  // 実 device はフィルタに一致したスコープのエラーしか返さないため、フェイクも push された
-  // フィルタを LIFO で追跡し、フィルタ別に返し分ける（両方に同じエラーを返すと、
-  // withPipelineScope の internal 優先規則が誤発火する）。
+  // A real device returns only the errors of the scope whose filter matches, so the fake also tracks the pushed
+  // filters LIFO and answers per filter (returning the same error to both would misfire the internal-first rule
+  // of withPipelineScope).
   const filters: string[] = [];
   const device = {
     pushErrorScope: (filter: string): void => {
@@ -84,7 +84,7 @@ const createFakeGpu = (
 const WGSL_A = "@compute @workgroup_size(1) fn main() {}";
 const WGSL_B = "@compute @workgroup_size(2) fn main() {}";
 
-test("PipelineCache は同一キー・同一 WGSL でパイプラインを再生成しない", async () => {
+test("PipelineCache does not regenerate a pipeline for the same key and the same WGSL", async () => {
   const gpu = createFakeGpu();
   const cache = new PipelineCache(gpu.device);
 
@@ -93,34 +93,34 @@ test("PipelineCache は同一キー・同一 WGSL でパイプラインを再生
 
   assertStrictEquals(first, second);
   assertEquals(cache.size, 1);
-  assertEquals(gpu.modules, [WGSL_A], "2 回目はシェーダモジュールを作らない");
+  assertEquals(gpu.modules, [WGSL_A], "the second call does not create a shader module");
 });
 
-test("PipelineCache は未決着の同一キー要求でも生成を 1 本だけ共有する", async () => {
+test("PipelineCache shares a single generation even for requests of the same key that are still pending", async () => {
   const gpu = createFakeGpu();
   const cache = new PipelineCache(gpu.device);
 
-  // await を挟まずに 2 本走らせる = 1 本目がまだ解決していない状態で 2 本目が来る
+  // Starting 2 without an await in between = the second arrives while the first is still unresolved
   const first = cache.get("elementwise:add:f32", WGSL_A);
   const second = cache.get("elementwise:add:f32", WGSL_A);
   const [firstPipeline, secondPipeline] = await Promise.all([first, second]);
 
   assertStrictEquals(firstPipeline, secondPipeline);
   assertEquals(cache.size, 1);
-  assertEquals(gpu.modules, [WGSL_A], "同時要求でもシェーダモジュールは 1 回だけ作る");
+  assertEquals(gpu.modules, [WGSL_A], "concurrent requests create the shader module only once");
   assertEquals(
     gpu.calls.filter((call) => call === "createComputePipelineAsync").length,
     1,
-    "同時要求でもパイプライン生成は 1 回だけ",
+    "concurrent requests generate the pipeline only once",
   );
   assertEquals(
     gpu.calls.filter((call) => call === "push:validation").length,
     2,
-    "module と layout を個別に囲み、同キーで重複させない",
+    "module and layout are scoped separately, without duplication for the same key",
   );
 });
 
-test("PipelineCache は失敗した生成を持ち越さず、再試行で作り直す", async () => {
+test("PipelineCache does not carry over a failed generation and rebuilds on retry", async () => {
   const error = { message: "shader compile failed" } as unknown as GPUError;
   const gpu = createFakeGpu(error);
   const cache = new PipelineCache(gpu.device);
@@ -130,19 +130,23 @@ test("PipelineCache は失敗した生成を持ち越さず、再試行で作り
     GpuValidationError,
     "shader compile failed",
   );
-  assertEquals(cache.size, 0, "失敗したエントリは残さない");
+  assertEquals(cache.size, 0, "a failed entry is not kept");
 
-  // 失敗が拒否済み Promise としてキャッシュに残っていると、以後の get() は device に
-  // 触れないまま同じ拒否を返し続ける（= 一時的な失敗から復帰できなくなる）
+  // If the failure stayed in the cache as a rejected Promise, every later get() would keep returning the same
+  // rejection without touching the device (= no recovery from a transient failure)
   gpu.scopeError = null;
   const pipeline = await cache.get("retry", WGSL_A);
 
   assertEquals(cache.size, 1);
-  assertEquals(gpu.modules, [WGSL_A, WGSL_A], "再試行では作り直す");
-  assertStrictEquals(await cache.get("retry", WGSL_A), pipeline, "成功後は共有に戻る");
+  assertEquals(gpu.modules, [WGSL_A, WGSL_A], "a retry rebuilds");
+  assertStrictEquals(
+    await cache.get("retry", WGSL_A),
+    pipeline,
+    "after success it is shared again",
+  );
 });
 
-test("PipelineCache は同一キーに異なる WGSL が来たら即例外にする（決定性の破れ）", async () => {
+test("PipelineCache throws immediately when a different WGSL arrives for the same key (determinism broken)", async () => {
   const gpu = createFakeGpu();
   const cache = new PipelineCache(gpu.device);
 
@@ -152,10 +156,10 @@ test("PipelineCache は同一キーに異なる WGSL が来たら即例外にす
     PipelineKeyConflictError,
     "elementwise:add:f32",
   );
-  assertEquals(gpu.modules, [WGSL_A], "衝突時は device に触らない");
+  assertEquals(gpu.modules, [WGSL_A], "a conflict does not touch the device");
 });
 
-test("PipelineCache はパイプライン生成を internal + validation の 2 スコープで囲む", async () => {
+test("PipelineCache wraps pipeline generation in 2 scopes, internal + validation", async () => {
   const gpu = createFakeGpu();
   const cache = new PipelineCache(gpu.device);
 
@@ -176,7 +180,7 @@ test("PipelineCache はパイプライン生成を internal + validation の 2 �
   ]);
 });
 
-test("PipelineCache は errorScope が捕捉した検証エラーを例外に変換し、キャッシュしない", async () => {
+test("PipelineCache turns a validation error caught by the errorScope into an exception and does not cache it", async () => {
   const error = { message: "workgroup size exceeds limit" } as unknown as GPUError;
   const gpu = createFakeGpu(error);
   const cache = new PipelineCache(gpu.device);
@@ -189,10 +193,10 @@ test("PipelineCache は errorScope が捕捉した検証エラーを例外に変
   assertEquals(cache.size, 0);
 });
 
-// GpuInternalError は実 GPU では作れない（internal エラーは実装都合の失敗）ため、この型を
-// 生成する経路はフェイクでしか踏めない。環境の限界（internal）と WGSL の記述不正（validation）
-// の分岐先が違うことが公開面の意味なので、型のマッピングをここで固定する。
-test("PipelineCache は internal スコープの捕捉を GpuInternalError に変換する", async () => {
+// GpuInternalError cannot be produced on a real GPU (internal errors are implementation-specific failures), so
+// the path that creates this type can only be hit with a fake. The meaning of the public surface is that the
+// limits of the environment (internal) and malformed WGSL (validation) branch differently, so the type mapping is pinned here.
+test("PipelineCache turns a catch in the internal scope into GpuInternalError", async () => {
   const internal = { message: "shader too complex" } as unknown as GPUError;
   const gpu = createFakeGpu(null, internal);
   const cache = new PipelineCache(gpu.device);
@@ -200,17 +204,17 @@ test("PipelineCache は internal スコープの捕捉を GpuInternalError に�
   const error = await assertRejects(() => cache.get("k", WGSL_A), GpuInternalError);
   assert(error.message.includes("k"), error.message);
   assert(error.message.includes("shader too complex"), error.message);
-  assertEquals(cache.size, 0, "失敗したエントリは残さない");
+  assertEquals(cache.size, 0, "a failed entry is not kept");
 
-  // 積み残しが無いことの裏（2 本とも pop されていれば直後の正常な生成が通る）。
+  // The other side of nothing being left over (if both scopes were popped, a normal generation right after passes).
   gpu.internalError = null;
   assert((await cache.get("k", WGSL_A)) !== undefined);
 });
 
-// 優先順位の門: internal で無効化されたパイプラインを触る後続の操作は**派生の** validation を
-// 立てるので、validation を先に返すと根因の internal が捨てられる。この 2 本同時の形だけが
-// 「internal 優先」を落とす（internal 単独のケースは順序を戻しても緑のまま通る）。
-test("PipelineCache は internal と validation を同時に捕捉したら internal を返す", async () => {
+// Priority check: later operations that touch a pipeline invalidated by internal raise a **derived** validation
+// error, so returning validation first throws away the root-cause internal. Only this form with both at once
+// catches a loss of "internal first" (the internal-only case stays green even with the order reverted).
+test("PipelineCache returns internal when it catches internal and validation at the same time", async () => {
   const gpu = createFakeGpu(
     { message: "derived: pipeline is invalid" } as unknown as GPUError,
     { message: "shader too complex" } as unknown as GPUError,
@@ -221,12 +225,12 @@ test("PipelineCache は internal と validation を同時に捕捉したら inte
   assert(error.message.includes("shader too complex"), error.message);
   assert(
     !error.message.includes("derived"),
-    `派生の validation が根因を上書きしている: ${error.message}`,
+    `the derived validation overwrites the root cause: ${error.message}`,
   );
   assertEquals(cache.size, 0);
 });
 
-test("SessionPipelines は device 寿命の 1 本を共有し、2 本目の Session で再コンパイルしない", async () => {
+test("SessionPipelines shares the one device-lifetime cache and a second Session does not recompile", async () => {
   const gpu = createFakeGpu();
   const cache = new PipelineCache(gpu.device);
   const first = new SessionPipelines(cache);
@@ -235,13 +239,13 @@ test("SessionPipelines は device 寿命の 1 本を共有し、2 本目の Sess
   await first.get("elementwise:add:f32", WGSL_A);
   await second.get("elementwise:add:f32", WGSL_A);
 
-  assertEquals(gpu.modules, [WGSL_A], "2 本目の Session はシェーダモジュールを作らない");
+  assertEquals(gpu.modules, [WGSL_A], "the second Session does not create a shader module");
   assertEquals(first.usedCount, 1);
-  assertEquals(second.usedCount, 1, "共有していても『自分が使った本数』は自分ぶんだけ");
-  assertEquals(second.deviceCount, 1, "device 合計は和集合");
+  assertEquals(second.usedCount, 1, "even when shared, 'the count I used' covers only its own");
+  assertEquals(second.deviceCount, 1, "the device total is the union");
 });
 
-test("SessionPipelines の使用本数はキー集合の大きさ（引いた回数ではない）", async () => {
+test("SessionPipelines' used count is the size of the key set (not the number of lookups)", async () => {
   const gpu = createFakeGpu();
   const use = new SessionPipelines(new PipelineCache(gpu.device));
 
@@ -252,22 +256,26 @@ test("SessionPipelines の使用本数はキー集合の大きさ（引いた回
   assertEquals(use.usedCount, 2);
 });
 
-test("SessionPipelines は失敗したキーを使用集合に数えない", async () => {
+test("SessionPipelines does not count a failed key in the used set", async () => {
   const error = { message: "shader compile failed" } as unknown as GPUError;
   const gpu = createFakeGpu(error);
   const use = new SessionPipelines(new PipelineCache(gpu.device));
 
   await assertRejects(() => use.get("broken", WGSL_A), GpuValidationError);
 
-  assertEquals(use.usedCount, 0, "device に残らないキーを Session だけが使ったことにしない");
+  assertEquals(
+    use.usedCount,
+    0,
+    "a key that does not remain on the device is not counted as used by the Session alone",
+  );
   assertEquals(use.deviceCount, 0);
 });
 
-test("PipelineKeyConflictError は Session を跨いで検出される（同一 device・同一キー）", async () => {
+test("PipelineKeyConflictError is detected across Sessions (same device, same key)", async () => {
   const gpu = createFakeGpu();
-  // 決定性の破れは「同じキーに別の WGSL」で起きる。キャッシュが Session ごとだった頃は
-  // 別 Session 同士の衝突がそもそも突き合わされず、後発の Session が黙って別カーネルを
-  // 走らせられた（ブラウザの暗黙キャッシュは WGSL 文字列がキーなので警告も出ない）。
+  // Determinism breaks when "the same key gets a different WGSL". When the cache was per Session, conflicts
+  // between different Sessions were never compared at all, and a later Session could silently run a different
+  // kernel (the browser's implicit cache is keyed by the WGSL string, so no warning either).
   const cache = new PipelineCache(gpu.device);
   await new SessionPipelines(cache).get("matmul:v4", WGSL_A);
 
@@ -276,11 +284,11 @@ test("PipelineKeyConflictError は Session を跨いで検出される（同一 
     PipelineKeyConflictError,
     "matmul:v4",
   );
-  assertEquals(gpu.modules, [WGSL_A], "衝突時は device に触らない");
+  assertEquals(gpu.modules, [WGSL_A], "a conflict does not touch the device");
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "パイプラインキャッシュは device 寿命で、dispose 済み Session のキーも残る（実 GPU）",
+  "the pipeline cache lives as long as the device, and keys of a disposed Session remain (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const model = () => openGraphModel(singleOpDeclaration("relu", [[8, 8]], [[8, 8]]));
@@ -291,15 +299,15 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         first.diagnostics().pipelineCount,
         0,
-        "構築相はパイプラインを 1 本も引かない（生成は初回 run のミス経路）",
+        "the construction phase does not look up a single pipeline (generation is the miss path of the first run)",
       );
       await first.run({ x0: x });
       const used = first.diagnostics().pipelineCount;
-      assert(used > 0, "run でパイプラインが立つ");
+      assert(used > 0, "run creates pipelines");
       assertEquals(
         first.diagnostics().devicePipelineCount,
         used,
-        "この device には 1 本目ぶんだけ",
+        "this device holds only the first Session's",
       );
       await first.dispose();
 
@@ -307,17 +315,25 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         second.diagnostics().devicePipelineCount,
         used,
-        "dispose 済み Session のキーは device 合計に残る（寿命は GpuContext と一致）",
+        "keys of a disposed Session remain in the device total (the lifetime matches GpuContext)",
       );
-      assertEquals(second.diagnostics().pipelineCount, 0, "使用本数は Session ごとに 0 から");
+      assertEquals(
+        second.diagnostics().pipelineCount,
+        0,
+        "the used count starts from 0 per Session",
+      );
 
       await second.run({ x0: x });
 
-      assertEquals(second.diagnostics().pipelineCount, used, "使った本数は 1 本目と同じ");
+      assertEquals(
+        second.diagnostics().pipelineCount,
+        used,
+        "the used count is the same as the first Session's",
+      );
       assertEquals(
         second.diagnostics().devicePipelineCount,
         used,
-        "2 本目は device 合計を 1 本も増やさない = 同じ WGSL を再コンパイルしていない",
+        "the second Session does not add a single pipeline to the device total = it did not recompile the same WGSL",
       );
       await second.dispose();
     } finally {
@@ -327,10 +343,10 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// storage 束縛の役割（WGSL 宣言 → 計画の材料 — ADR 0093 決定 1）
+// Roles of the storage bindings (WGSL declarations → planning input — ADR 0093 decision 1)
 // ---------------------------------------------------------------------------
 
-test("parseStorageRoles は group 0 の storage 宣言から読み / 読み書きの binding を採る", () => {
+test("parseStorageRoles takes the read / read-write bindings from the storage declarations of group 0", () => {
   const roles = parseStorageRoles(`
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> a: array<f32>;
@@ -338,14 +354,14 @@ test("parseStorageRoles は group 0 の storage 宣言から読み / 読み書�
 @group(0) @binding(3) var<storage , read > scale: array<f32>;
   `);
   assertEquals(roles, { reads: new Set([1, 3]), writes: new Set([2]) });
-  // storage 宣言が 1 本も無い WGSL は空集合（uniform だけのカーネルも合法）。
+  // A WGSL without a single storage declaration gives an empty set (a uniform-only kernel is legal too).
   assertEquals(parseStorageRoles("@group(0) @binding(0) var<uniform> p: P;"), {
     reads: new Set<number>(),
     writes: new Set<number>(),
   });
 });
 
-test("parseStorageRoles は同じ binding の read / read_write 二重宣言を fail loudly にする", () => {
+test("parseStorageRoles fails loudly on a double read / read_write declaration of the same binding", () => {
   assertThrows(
     () =>
       parseStorageRoles(`
@@ -357,7 +373,7 @@ test("parseStorageRoles は同じ binding の read / read_write 二重宣言を 
   );
 });
 
-test("PipelineCache.get は役割を WGSL から採って返す（生成の前に宣言の矛盾で落ちる）", async () => {
+test("PipelineCache.get takes the roles from the WGSL and returns them (fails on conflicting declarations before generation)", async () => {
   const gpu = createFakeGpu();
   const cache = new PipelineCache(gpu.device);
   const { roles } = await cache.get(
@@ -373,10 +389,10 @@ test("PipelineCache.get は役割を WGSL から採って返す（生成の前�
       ),
     StorageRoleError,
   );
-  assertEquals(gpu.modules.length, 1, "矛盾した WGSL はシェーダモジュールを作らない");
+  assertEquals(gpu.modules.length, 1, "a conflicting WGSL does not create a shader module");
 });
 
-test("async compile の internal / validation 拒否を型で区別し、原因を残す", async () => {
+test("distinguishes internal / validation rejections of an async compile by type and keeps the cause", async () => {
   for (const reason of ["internal", "validation"] as const) {
     const gpu = createFakeGpu();
     const cause = Object.assign(new Error(`compile ${reason}`), { reason });
@@ -392,7 +408,7 @@ test("async compile の internal / validation 拒否を型で区別し、原因�
   }
 });
 
-test("async compile の既知でない例外を validation へ塗り替えない", async () => {
+test("does not repaint an unknown exception of an async compile as validation", async () => {
   const gpu = createFakeGpu();
   const cause = new RangeError("unexpected rejection");
   gpu.device.createComputePipelineAsync = () => Promise.reject(cause);
@@ -402,7 +418,7 @@ test("async compile の既知でない例外を validation へ塗り替えない
   assertEquals(cache.size, 0);
 });
 
-test("module の検証失敗でも発行済み compile の決着を待ってから拒否する", async () => {
+test("even when module validation fails, waits for the issued compile to settle before rejecting", async () => {
   const gpu = createFakeGpu({ message: "module validation" } as GPUError);
   const compiling = Promise.withResolvers<GPUComputePipeline>();
   gpu.device.createComputePipelineAsync = () => compiling.promise;
@@ -427,7 +443,7 @@ test("module の検証失敗でも発行済み compile の決着を待ってか�
   assertEquals(cache.size, 0);
 });
 
-test("非同期 compile の完了順が逆でもキーと layout を取り違えない", async () => {
+test("does not mix up keys and layouts when async compiles complete in reverse order", async () => {
   const gpu = createFakeGpu();
   const first = Promise.withResolvers<GPUComputePipeline>();
   const second = Promise.withResolvers<GPUComputePipeline>();
@@ -451,7 +467,7 @@ test("非同期 compile の完了順が逆でもキーと layout を取り違え
   assertEquals(cache.size, 2);
 });
 
-test("コンパイル診断の取得失敗でも元の拒否理由と原因を保持する", async () => {
+test("keeps the original rejection reason and cause even when fetching the compile diagnostics fails", async () => {
   const gpu = createFakeGpu();
   const cause = Object.assign(new Error("compile internal"), { reason: "internal" });
   gpu.device.createComputePipelineAsync = () => Promise.reject(cause);

@@ -1,15 +1,18 @@
 /**
- * `ternary` codec（container-v1 §6.3・ADR 0108 決定 13）— `int2-off` の値域の部分集合を別名で
- * 宣言する codec。
+ * The `ternary` codec (container-v1 §6.3, ADR 0108 decision 13) — a codec that declares a subset of
+ * the `int2-off` value range under another name.
  *
- * 固定するのは 3 つ:
- * - 詰め方と復元式は i2 と同一なので、展開経路は i2 を**そのまま共有する**（受理と layout）。
- * - 「三値である」という主張の検査可能な中身 = payload の全 2 bit コードが `{1, 2, 3}`。判定は
- *   1 バイトの 4 レーンのマスクで、どのレーンのコード 0 も落とす（1 レーンの見落としは、
- *   その位置の要素が三値の外の値 `q = −2` のまま黙って通る）。
- * - その検査が Session 構築の入口（`containerBatches` の items）で実際に効くこと。
+ * Three things are pinned:
+ * - The packing and the decode formula are identical to i2, so the decode path **shares i2 as is**
+ *   (acceptance and layout).
+ * - The checkable content of the claim "it is ternary" = every 2-bit code of the payload is in
+ *   `{1, 2, 3}`. The check is a mask over the 4 lanes of a byte and rejects code 0 in any lane
+ *   (missing one lane lets the element at that position pass silently as `q = −2`, a value outside
+ *   the ternary set).
+ * - That check actually takes effect at the entry of Session construction (the items of
+ *   `containerBatches`).
  *
- * 実 GPU は使わない（検査は block を読んだ直後のホスト側）。
+ * No real GPU is used (the check runs on the host right after the block is read).
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -30,7 +33,10 @@ import {
 const ROWS = 4;
 const ROW_LENGTH = 16;
 
-/** y = linear(x, w, b) — `w` は [4,16]（i2 経路の宣言 shape: 正の rank 2・行長 16 の倍数）。 */
+/**
+ * y = linear(x, w, b) — `w` is [4,16] (the declared shape of the i2 path: positive rank 2, row
+ * length a multiple of 16).
+ */
 const declaration = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -47,7 +53,7 @@ const declaration = (): DeclarationJson => ({
   nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
 });
 
-/** `w` を ternary（per-channel・f32 scale）で、`payload` をそのまま供給する（16 B = 64 要素）。 */
+/** Supplies `w` as ternary (per-channel, f32 scale) with `payload` as is (16 B = 64 elements). */
 const tensors = (payload: Uint8Array<ArrayBuffer>): readonly TensorInput[] => [
   {
     graph: GRAPH_NAME,
@@ -67,25 +73,25 @@ const tensors = (payload: Uint8Array<ArrayBuffer>): readonly TensorInput[] => [
   },
 ];
 
-/** 全コードが 1 / 2 / 3 の payload（0x55 = コード 1 × 4・0xFF = 3 × 4・0xAA = 2 × 4）。 */
+/** A payload whose codes are all 1 / 2 / 3 (0x55 = code 1 × 4, 0xFF = 3 × 4, 0xAA = 2 × 4). */
 const validPayload = (): Uint8Array<ArrayBuffer> =>
   Uint8Array.from({ length: (ROWS * ROW_LENGTH) / 4 }, (_, i) => [0x55, 0xff, 0xaa][i % 3]);
 
-describe("ternary: i2 経路の共有", () => {
-  it("krm の ternary 宣言は受理され、展開経路は i2", async () => {
+describe("ternary: sharing the i2 path", () => {
+  it("a ternary declaration in krm is accepted and decodes through the i2 path", async () => {
     const opened = await openModelBytes(declaration(), tensors(validPayload()));
     assertEquals(opened.graphs[GRAPH_NAME].supplies.get("w")?.encoding.codec, "ternary");
     assertEquals(codecLayout("ternary"), "i2");
   });
 });
 
-describe("assertTernaryCodes: payload の全コードが {1, 2, 3}", () => {
-  it("コード 0 を含まない payload は通す", () => {
+describe("assertTernaryCodes: every code of the payload is in {1, 2, 3}", () => {
+  it("passes a payload without code 0", () => {
     assertTernaryCodes(Uint8Array.of(0x55, 0xff, 0xaa), "w");
   });
 
-  it("コード 0 を含むバイトを、その位置つきで落とす", () => {
-    // 0x54 = 01 01 01 00 — 最下位レーンだけがコード 0。
+  it("rejects a byte containing code 0, naming its position", () => {
+    // 0x54 = 01 01 01 00 — only the lowest lane is code 0.
     assertThrows(
       () => assertTernaryCodes(Uint8Array.of(0x55, 0x54), "w"),
       ContainerFormatError,
@@ -93,8 +99,8 @@ describe("assertTernaryCodes: payload の全コードが {1, 2, 3}", () => {
     );
   });
 
-  it("4 レーンのどの位置のコード 0 も落とす", () => {
-    // 各レーンだけを 0 にした 4 通り（他の 3 レーンはコード 1）。
+  it("rejects code 0 at any of the 4 lane positions", () => {
+    // 4 variants with only one lane set to 0 (the other 3 lanes are code 1).
     for (const byte of [0x54, 0x51, 0x45, 0x15]) {
       assertThrows(
         () => assertTernaryCodes(Uint8Array.of(byte), "w"),
@@ -106,16 +112,16 @@ describe("assertTernaryCodes: payload の全コードが {1, 2, 3}", () => {
   });
 });
 
-describe("ternary: Session 構築の入口（containerBatches）", () => {
-  it("コード 0 を含む供給は items の反復で落ちる", async () => {
+describe("ternary: the entry of Session construction (containerBatches)", () => {
+  it("a supply containing code 0 is rejected while iterating items", async () => {
     const payload = validPayload();
-    payload[9] = 0xa8; // 10 10 10 00 — 最下位レーンだけがコード 0。
+    payload[9] = 0xa8; // 10 10 10 00 — only the lowest lane is code 0.
     const opened = memoryModel(declaration(), tensors(payload));
     await assertRejects(
       async () => {
         for await (const batch of containerBatches(opened, GRAPH_NAME)) {
           for await (const _item of batch.items) {
-            /* 引くたびに block を読んで検査する */
+            /* each pull reads the block and checks it */
           }
         }
       },
@@ -124,7 +130,7 @@ describe("ternary: Session 構築の入口（containerBatches）", () => {
     );
   });
 
-  it("コード 0 を含まない供給は items を最後まで引ける", async () => {
+  it("a supply without code 0 lets items be pulled to the end", async () => {
     const opened = memoryModel(declaration(), tensors(validPayload()));
     const names: string[] = [];
     for await (const batch of containerBatches(opened, GRAPH_NAME)) {

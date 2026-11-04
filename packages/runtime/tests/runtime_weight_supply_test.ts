@@ -18,9 +18,9 @@
 // - a read failing ahead of its turn is reported when its block is reached, after the earlier
 //   blocks' failures; a failed or abandoned build settles the reads in flight before it returns
 //
-// 実 GPU は使わない。順序と回数は、確保・書き込み・フェンスを記録するフェイク device で
-// 決定論的に固定できる。writeBuffer が「呼んだ時点で写す」こと自体は実機でしか固定できないので
-// tests/gpu_write_buffer_copy_test.ts が持つ。
+// No real GPU is used. The order and the counts can be pinned deterministically with a fake device
+// that records allocations, writes and fences. That writeBuffer "copies at the time of the call"
+// can only be pinned on real hardware, so tests/gpu_write_buffer_copy_test.ts holds that.
 
 import {
   assert,
@@ -42,15 +42,15 @@ import { mergeGraph } from "./helpers/merged-graph.ts";
 import { f32Bytes, GRAPH_NAME } from "./helpers/model-fixture.ts";
 
 // ---------------------------------------------------------------------------
-// 材料（part 3 本のモデル・記録するフェイク device）
+// Fixtures (a model with 3 parts, a recording fake device)
 // ---------------------------------------------------------------------------
 
 /**
- * part 3 本に割れる最小のグラフ: y = x·w + b + c。
+ * The smallest graph that splits into 3 parts: y = x·w + b + c.
  *
- * メモリ内容器は丸ごと供給（`b` / `c`）を同じ part に積み、piece は 1 本 1 part に置く
- * （`openMemoryContainer` の part 割り）ので、part は `{b, c}` → `w` piece 1 → `w` piece 2 の
- * 3 本になる。先頭の part に block が 2 本あるので「part の中の交互」も見える。
+ * The in-memory container puts whole supplies (`b` / `c`) into the same part and each piece into a
+ * part of its own (the part split of `openMemoryContainer`), so the parts are `{b, c}` → `w` piece
+ * 1 → `w` piece 2. The first part has 2 blocks, so the "interleaving within a part" is visible too.
  */
 const declaration = () =>
   parseIrDeclarationValue({
@@ -76,7 +76,7 @@ const declaration = () =>
     ],
   });
 
-/** `w` の 1 行ぶんのバイト長（f32 × 3 列）。 */
+/** The byte length of one row of `w` (f32 × 3 columns). */
 const W_ROW_BYTES = 3 * 4;
 
 const container = (): BoundContainer => {
@@ -87,7 +87,8 @@ const container = (): BoundContainer => {
       [GRAPH_NAME]: {
         w: {
           encoding: { codec: "f32" },
-          // piece は読むたびに別の器（写し）を返す — 書き込みの記録が器で block を見分けるため。
+          // Each read of a piece returns a different buffer (a copy) — so the write record can tell
+          // blocks apart by buffer.
           pieces: [
             { rows: [0, 2], read: () => Promise.resolve(w.slice(0, 2 * W_ROW_BYTES)) },
             {
@@ -103,7 +104,10 @@ const container = (): BoundContainer => {
   });
 };
 
-/** 上限は門に掛からない値でよい（見たいのは順序で、確保の寸法ではない）。 */
+/**
+ * The limits only need values that pass the checks (what matters is the order, not the allocation
+ * sizes).
+ */
 const LIMITS: RequiredLimits = {
   maxBufferSize: 1 << 20,
   maxStorageBufferBindingSize: 1 << 20,
@@ -118,19 +122,20 @@ const LIMITS: RequiredLimits = {
   maxComputeWorkgroupsPerDimension: 65535,
 };
 
-/** 取得元の読みの前に差し込む処理（遅延・失敗の注入口）。 */
+/** A step inserted before each source read (the injection point for delays and failures). */
 type BeforeRead = (id: string) => Promise<void>;
 
 /**
- * 記録するフェイク device と、取得元を包む口。
+ * A recording fake device, and a wrapper around the source.
  *
- * 記録は 1 本の列 `events` に時系列で積む: `read <block>`（取得元の読みの開始）/
- * `write <block>`（`queue.writeBuffer` — 渡された器から、どの block の読みが返した器かを引く）/
- * `push` / `pop`（errorScope 1 本の push / pop）/ `submit`（空 submit）/ `fence`
- * （`onSubmittedWorkDone` の完了待ち）。
+ * The record is one chronological sequence `events`: `read <block>` (a source read starts) /
+ * `write <block>` (`queue.writeBuffer` — the passed buffer is looked up to find which block's read
+ * returned it) / `push` / `pop` (push / pop of one errorScope) / `submit` (an empty submit) /
+ * `fence` (waiting for `onSubmittedWorkDone` to complete).
  *
- * DOM 型全体は再現しないので cast で渡す（tests/helpers/fake-gpu.ts と同じテスト専用の境界）。
- * GpuContext 自体は本物を使う（消失購読と errorScope の経路は本番実装のまま通す）。
+ * The whole DOM type is not reproduced, so it is passed with a cast (the same test-only boundary as
+ * tests/helpers/fake-gpu.ts). GpuContext itself is the real one (the device-loss subscription and
+ * the errorScope paths go through the production implementation).
  */
 const recorder = (
   // What the n-th `popErrorScope` (0-based, over the whole build) resolves with — the injection
@@ -167,7 +172,7 @@ const recorder = (
     },
     queue: {
       writeBuffer: (_buffer: GPUBuffer, _offset: number, data: ArrayBufferView): void => {
-        events.push(`write ${blockOf.get(data.buffer) ?? "（読んでいない器）"}`);
+        events.push(`write ${blockOf.get(data.buffer) ?? "(a buffer no read returned)"}`);
       },
       submit: (): void => {
         events.push("submit");
@@ -208,14 +213,16 @@ describe("the weight supply uploads one block at a time", () => {
   it("writes each block as it is taken with the reads 2 blocks ahead, an errorScope pair per block and one fence per part", async () => {
     const { events, gpu, trace } = recorder();
     const session = await createSessionFromContainer(gpu, trace(container()), GRAPH_NAME);
-    // 破棄の flush も完了待ちを 1 回呼ぶので、構築が終わった時点の列を写しておく。
+    // The flush on dispose also waits for completion once, so copy the sequence as it stands when
+    // construction finishes.
     const built = [...events];
     const { partCount } = session.diagnostics().buildStats;
     await session.dispose();
 
-    // errorScope は block（item）ごとに 1 対（out-of-memory + validation の 2 本 push → write →
-    // 2 本 pop）。part 単位へ粗くなると確保失敗の帰属が block から part へ落ちる。空 submit の
-    // 周りには張らない（確保も検証も伴わない — session-build.ts のフェンスの NOTE）。
+    // One errorScope pair per block (item) (push the 2 scopes out-of-memory + validation → write →
+    // pop the 2). Coarsening it to per part would drop the attribution of an allocation failure
+    // from the block to the part. None is set around the empty submit (it involves no allocation
+    // and no validation — the NOTE on the fence in session-build.ts).
     assertEquals(built, [
       // The first part (whole supplies b / c): uploaded one at a time without reading the part
       // through. Taking b reads b and the next 2 blocks, c and piece 1 of the next part.
@@ -252,8 +259,9 @@ describe("the weight supply uploads one block at a time", () => {
       "submit",
       "fence",
     ]);
-    // フェンスの回数は上の事象列の完全一致が固定する。ここが数えるのは消費した batch の本数。
-    assertEquals(partCount, 3, "消費した batch の本数 = part の本数");
+    // The exact match of the event sequence above pins the number of fences. What this counts is
+    // the number of batches consumed.
+    assertEquals(partCount, 3, "the number of batches consumed = the number of parts");
   });
 
   it("supplyWaitMs includes the wait for block reads (a slow source)", async () => {
@@ -271,8 +279,11 @@ describe("the weight supply uploads one block at a time", () => {
     const { supplyWaitMs } = session.diagnostics().buildStats;
     await session.dispose();
 
-    assertEquals(reads, 4, "block 4 本（b / c / w の piece 2 本）を 1 回ずつ読む");
-    assert(readMs >= DELAY_MS, `読みの遅延が効いていない（${readMs} ms — 検出器が空振りする）`);
+    assertEquals(reads, 4, "reads each of the 4 blocks (b / c / the 2 pieces of w) once");
+    assert(
+      readMs >= DELAY_MS,
+      `the read delay did not take effect (${readMs} ms — the detector would miss)`,
+    );
     // The lower bound on supplyWaitMs is one read's delay: the read-ahead keeps up to 3 reads in
     // flight at once, so their delays overlap with one another and with the uploads, and the wait
     // can be shorter than their sum. The first read cannot be hidden behind anything (nothing has
@@ -285,10 +296,11 @@ describe("the weight supply uploads one block at a time", () => {
     );
   });
 
-  it("supplyWaitMs は列の終わりを知るまでの待ちも含む（最後の item の後で遅れる列）", async () => {
-    // 容器経路（`containerBatches`）の列の終わりは読みを伴わず、取得元の読みに遅延を入れても
-    // ここには届かない。そこで構築の入口（`Session.build`）へ、終わりを告げる前に遅れる列を
-    // 直接渡す — item 0 本なので、測られる待ちは列の終わりの待ちだけになる。
+  it("supplyWaitMs also includes the wait until the end of the sequence is known (a sequence that is late after its last item)", async () => {
+    // On the container path (`containerBatches`) the end of the sequence involves no read, so a
+    // delay in the source reads never reaches it. So a sequence that is late before announcing its
+    // end is passed directly to the construction entry (`Session.build`) — with 0 items, the only
+    // wait measured is the wait for the end of the sequence.
     const DELAY_MS = 20;
     const { gpu } = recorder();
     let tailMs = 0;
@@ -323,25 +335,25 @@ describe("the weight supply uploads one block at a time", () => {
     assertEquals(partCount, 1);
     assert(
       tailMs >= DELAY_MS,
-      `列の終わりの遅延が効いていない（${tailMs} ms — 検出器が空振りする）`,
+      `the end-of-sequence delay did not take effect (${tailMs} ms — the detector would miss)`,
     );
     const SUM_ORDER_EPSILON_MS = 1e-6;
     assert(
       supplyWaitMs >= tailMs - SUM_ORDER_EPSILON_MS,
-      `supplyWaitMs ${supplyWaitMs} ms が列の終わりの待ち ${tailMs} ms を含んでいない`,
+      `supplyWaitMs ${supplyWaitMs} ms does not include the end-of-sequence wait of ${tailMs} ms`,
     );
   });
 
   it("when a read fails mid-part, destroys the arena with the uploaded weights and reads nothing beyond the read-ahead bound", async () => {
     const { events, counts, gpu, trace } = recorder();
-    const injected = new Error("注入: block の取得に失敗");
-    // part 1 本目の 2 本目（b を上げた後・フェンスの前）で落とす。
+    const injected = new Error("injected: block fetch failed");
+    // Fail at the second block of the first part (after b is uploaded, before the fence).
     const failing = trace(container(), (id) =>
       id === "model/c" ? Promise.reject(injected) : Promise.resolve(),
     );
     const error = await assertRejects(() => createSessionFromContainer(gpu, failing, GRAPH_NAME));
 
-    assertStrictEquals(error, injected, "読みの失敗は包み直さずにそのまま抜ける");
+    assertStrictEquals(error, injected, "a read failure passes through as is, without re-wrapping");
     assertEquals(
       events.filter((event) => event.startsWith("read ") || event.startsWith("write ")),
       // Taking c (the failing block) read 2 ahead of it, up to piece 2 — the last block here. The
@@ -355,10 +367,17 @@ describe("the weight supply uploads one block at a time", () => {
       ],
       "the reads around the failure differ (the supply was not closed at the bound)",
     );
-    assertEquals(events.includes("submit"), false, "失敗した part のフェンスを張っている");
-    assert(counts.created > 0, "上げ済みの重みが無い（part の前半を上げた状態を作れていない）");
-    assertEquals(counts.destroyed, counts.created, "上げ済みの重みのバッファが破棄されていない");
-    assertEquals(counts.openScopes, 0, "errorScope を積み残している");
+    assertEquals(events.includes("submit"), false, "the fence of the failed part was set");
+    assert(
+      counts.created > 0,
+      "no weights were uploaded (the state with the first half of a part uploaded was not produced)",
+    );
+    assertEquals(
+      counts.destroyed,
+      counts.created,
+      "the buffers of the uploaded weights were not destroyed",
+    );
+    assertEquals(counts.openScopes, 0, "errorScopes were left open");
   });
 });
 

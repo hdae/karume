@@ -1,15 +1,20 @@
 /**
- * テスト専用の容器の書き手（単一形 / 分割形 / `krg`）— docs/container-v1.md §3 / §4 / §8 / §9。
+ * Test-only container writer (single form / split form / `krg`) — docs/container-v1.md §3 / §4 /
+ * §8 / §9.
  *
- * 製品の書き手は Python（exporter の `karume.container`）だけで、これは**読み手のテストが合成資産を
- * 作るための補助**である。守る規則は製品の書き手と同じ:
+ * The only production writer is Python (the exporter's `karume.container`); this is **a helper for
+ * the reader's tests to build synthetic assets**. It follows the same rules as the production
+ * writer:
  *
- * - block は part をまたがない・1 block ≤ 上限（既定 32 MiB — テストでは下げられる）。
- * - block の先頭は 64 B 整列、格納長は 4 の倍数（**末尾の詰め物を書き手が焼く**）。中間 piece には
- *   詰め物を掛けない（次の piece の先頭を潰す）ので、行の刻みを `4 / gcd(rowBytes, 4)` に丸めて切る。
- * - companion scale は piece 1（丸ごとなら唯一の実体）と同じ part。
- * - descriptor のバイト列は**単一形と分割形で同一**（part の絶対 offset を書かない）。
- * - 区間読みを要する資産（`dedicatedPart`）は専用 part に単独で置く。
+ * - A block never crosses a part; 1 block ≤ the limit (32 MiB by default — tests can lower it).
+ * - A block starts 64 B aligned and its stored length is a multiple of 4 (**the writer bakes in the
+ *   tail padding**). Intermediate pieces get no padding (it would overwrite the next piece's
+ *   start), so the row step is rounded to `4 / gcd(rowBytes, 4)` when cutting.
+ * - A companion scale is in the same part as piece 1 (or as the only block when the tensor is
+ *   whole).
+ * - The descriptor bytes are **identical in the single and the split form** (no absolute part
+ *   offsets are written).
+ * - An asset that needs range reads (`dedicatedPart`) is placed alone in a part of its own.
  */
 
 import { codecEntry, type CodecName, payloadBytes } from "../../src/format/container/codecs.ts";
@@ -50,9 +55,9 @@ import type { IrDeclaration } from "../../src/format/ir.ts";
 
 export type EncodingInput = {
   readonly codec: CodecName;
-  /** 量子化 codec のみ。省略時 0。 */
+  /** Quantized codecs only. Defaults to 0. */
   readonly rowAxis?: 0 | 1;
-  /** 量子化 codec のみ。per-channel なら行長。 */
+  /** Quantized codecs only. The row length for per-channel. */
   readonly groupSize?: number;
   readonly scale?: { readonly bytes: Uint8Array<ArrayBuffer>; readonly dtype: "f32" };
 };
@@ -73,7 +78,10 @@ export type AssetInput = {
 
 export type ModelInput = {
   readonly graphs: Readonly<Record<string, IrDeclaration>>;
-  /** グラフ所有の定数（const 領域 = part 1 行き。piece 分割はしない）。 */
+  /**
+   * Constants owned by the graph (they go to the const region = part 1; never split into
+   * pieces).
+   */
   readonly consts: readonly TensorInput[];
   readonly weights: readonly TensorInput[];
   readonly assets: readonly AssetInput[];
@@ -81,9 +89,9 @@ export type ModelInput = {
 };
 
 export type WriteOptions = {
-  /** part 長。既定 256 MiB（テストでは小さくしてよい）。 */
+  /** Part length. 256 MiB by default (tests may make it smaller). */
   readonly partBytes?: number;
-  /** block 上限。既定 32 MiB（テストのために下げられる・上げられない）。 */
+  /** Block limit. 32 MiB by default (tests can lower it, not raise it). */
   readonly blockBytes?: number;
 };
 
@@ -92,11 +100,11 @@ export type WrittenContainer = {
   readonly model: ModelDescriptor;
   readonly graphDescriptorBytes: Uint8Array<ArrayBuffer>;
   readonly modelDescriptorBytes: Uint8Array<ArrayBuffer>;
-  /** 分割形。index 0 が `[ヘッダ][グラフ記述][モデル記述]`。 */
+  /** Split form. Index 0 is `[header][graph descriptor][model descriptor]`. */
   readonly parts: readonly Uint8Array<ArrayBuffer>[];
-  /** 単一形。 */
+  /** Single form. */
   readonly single: Uint8Array<ArrayBuffer>;
-  /** part 1 までを抜いた `krg`。 */
+  /** The `krg` taken from parts 0..1. */
   readonly graphContainer: Uint8Array<ArrayBuffer>;
 };
 
@@ -111,19 +119,19 @@ const resolveEncoding = (
   if (entry.scale === "forbidden") {
     if (input.scale !== undefined || input.groupSize !== undefined || input.rowAxis !== undefined) {
       throw new ContainerFormatError(
-        `codec '${input.codec}' は scale / groupSize / rowAxis を持てない`,
+        `codec '${input.codec}' cannot have scale / groupSize / rowAxis`,
       );
     }
     return { codec: input.codec, packing: entry.packing };
   }
   if (input.scale === undefined || input.groupSize === undefined) {
-    throw new ContainerFormatError(`codec '${input.codec}' は scale と groupSize が要る`);
+    throw new ContainerFormatError(`codec '${input.codec}' needs scale and groupSize`);
   }
   const dtype = input.scale.dtype;
   let scale: ScaleRef;
   if (scalePieces !== undefined) scale = { pieces: scalePieces, dtype };
   else if (scaleBlock !== undefined) scale = { block: scaleBlock, dtype };
-  else throw new ContainerFormatError(`codec '${input.codec}' は scale の block が要る`);
+  else throw new ContainerFormatError(`codec '${input.codec}' needs a scale block`);
   return {
     codec: input.codec,
     packing: entry.packing,
@@ -133,17 +141,21 @@ const resolveEncoding = (
   };
 };
 
-/** 末尾のゼロ詰めを焼いた格納バイト列（`tailPad = false` なら長さ検査だけ）。 */
+/**
+ * The stored bytes with the tail zero padding baked in (`tailPad = false`: only the length
+ * check).
+ */
 const storedPayload = (
   bytes: Uint8Array<ArrayBuffer>,
   tailPad: boolean,
   path: string,
 ): Uint8Array<ArrayBuffer> => {
-  if (bytes.byteLength === 0) throw new ContainerFormatError(`${path}: 長さ 0 の block は作らない`);
+  if (bytes.byteLength === 0)
+    throw new ContainerFormatError(`${path}: no block of length 0 is made`);
   if (!tailPad) {
     if (bytes.byteLength % BLOCK_TAIL_ALIGN !== 0) {
       throw new ContainerFormatError(
-        `${path}: 中間 piece の長さ ${bytes.byteLength} が ${BLOCK_TAIL_ALIGN} の倍数でない`,
+        `${path}: intermediate piece length ${bytes.byteLength} is not a multiple of ${BLOCK_TAIL_ALIGN}`,
       );
     }
     return bytes;
@@ -163,7 +175,7 @@ type PlacedBlock = {
   readonly payload: Uint8Array<ArrayBuffer>;
 };
 
-/** 1 part ぶんの詰め込み器。offset は part 先頭からの相対。 */
+/** Packer for one part. Offsets are relative to the part's start. */
 class PartBuilder {
   #cursor = 0;
   readonly #blocks: PlacedBlock[] = [];
@@ -199,11 +211,11 @@ class PartBuilder {
 const shapeOf = (input: ModelInput, tensor: TensorInput, path: string): readonly number[] => {
   const graph = input.graphs[tensor.graph];
   if (graph === undefined) {
-    throw new ContainerFormatError(`${path}: グラフ '${tensor.graph}' が無い`);
+    throw new ContainerFormatError(`${path}: no graph '${tensor.graph}'`);
   }
   const value = graph.values[tensor.initializer];
   if (value === undefined) {
-    throw new ContainerFormatError(`${path}: initializer '${tensor.initializer}' の宣言が無い`);
+    throw new ContainerFormatError(`${path}: initializer '${tensor.initializer}' is not declared`);
   }
   return value.shape.map(Number);
 };
@@ -236,9 +248,10 @@ const buildConstRegion = async (input: ModelInput, blockBytes: number): Promise<
     assertPayloadLength(input, tensor, path);
     const payload = storedPayload(tensor.bytes, true, path);
     if (payload.byteLength > blockBytes) {
-      // const は piece 分割の機構を持たない（§3 — 束縛表が krg に無いので piece 列を表せない）。
+      // Consts have no piece-splitting mechanism (§3 — the binding table is not in the krg, so a
+      // piece list cannot be expressed).
       throw new ContainerFormatError(
-        `${path}: const は 1 block に収める必要があるが ${payload.byteLength} バイト（上限 ${blockBytes}）`,
+        `${path}: a const must fit in one block but is ${payload.byteLength} bytes (limit ${blockBytes})`,
       );
     }
     const id = nextId("c");
@@ -273,7 +286,10 @@ type PieceCut = {
   readonly last: boolean;
 };
 
-/** テンソルを block 上限以下の piece へ行境界で切る。切る必要が無ければ 1 本返す。 */
+/**
+ * Cuts a tensor at row boundaries into pieces within the block limit. Returns one piece when no
+ * cut is needed.
+ */
 const cutPieces = (
   bytes: Uint8Array<ArrayBuffer>,
   rows: number,
@@ -284,9 +300,12 @@ const cutPieces = (
   if (alignUp(total, BLOCK_TAIL_ALIGN) <= blockBytes) {
     return [{ rows: [0, rows], bytes, last: true }];
   }
-  if (rows <= 1) throw new ContainerFormatError(`${path}: 1 行で block 上限を超えるので切れない`);
+  if (rows <= 1)
+    throw new ContainerFormatError(`${path}: cannot cut — one row exceeds the block limit`);
   if (total % rows !== 0) {
-    throw new ContainerFormatError(`${path}: ${total} バイトが ${rows} 行で割り切れない`);
+    throw new ContainerFormatError(
+      `${path}: ${total} bytes do not divide evenly into ${rows} rows`,
+    );
   }
   const rowBytes = total / rows;
   const step = BLOCK_TAIL_ALIGN / gcd(rowBytes, BLOCK_TAIL_ALIGN);
@@ -294,7 +313,7 @@ const cutPieces = (
   const rowsPerPiece = capacity - (capacity % step);
   if (rowsPerPiece < step || rowsPerPiece === 0) {
     throw new ContainerFormatError(
-      `${path}: 1 行 ${rowBytes} バイトでは block 上限 ${blockBytes} に 4 バイト整列した行束を収められない`,
+      `${path}: with ${rowBytes} bytes per row, no 4-byte-aligned group of rows fits the block limit ${blockBytes}`,
     );
   }
   const cuts: PieceCut[] = [];
@@ -362,7 +381,10 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
     parts.push(next);
     return next;
   };
-  /** 「同じ part に置く」必要がある一群をまとめて置く。入らなければ新しい part を開く。 */
+  /**
+   * Places a group that "must be in the same part" together. Opens a new part when it does not
+   * fit.
+   */
   const placeGroup = (
     items: readonly { readonly id: string; readonly payload: Uint8Array<ArrayBuffer> }[],
     path: string,
@@ -370,7 +392,7 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
     const lengths = items.map((item) => item.payload.byteLength);
     if (new PartBuilder().probe(lengths) > partBytes) {
       throw new ContainerFormatError(
-        `${path}: 同一 part に置く必要がある一群が part 長 ${partBytes} を超える`,
+        `${path}: a group that must be in one part exceeds the part length ${partBytes}`,
       );
     }
     let target = current();
@@ -401,7 +423,8 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
         payload: storedPayload(cut.bytes, cut.last, `${path} scale ${i}`),
       });
     }
-    // 規則③: piece 1 と scale（分割 scale なら全 piece）は同一 part。残りの piece は独立に置ける。
+    // Rule ③: piece 1 and the scale (every piece of a split scale) share a part. The remaining
+    // pieces can be placed independently.
     placeGroup(head, path);
     for (const [i, cut] of cuts.entries()) {
       if (i === 0) continue;
@@ -434,12 +457,13 @@ const planDataParts = (input: ModelInput, partBytes: number, blockBytes: number)
     const payload = storedPayload(asset.bytes, true, path);
     if (payload.byteLength > blockBytes) {
       throw new ContainerFormatError(
-        `${path}: ${payload.byteLength} バイトが block 上限 ${blockBytes} を超える`,
+        `${path}: ${payload.byteLength} bytes exceed the block limit ${blockBytes}`,
       );
     }
     const id = nextId("a", "asset");
     if (asset.dedicatedPart === true) {
-      // 区間読みが offset 比例で走査になる取得元のために、単独 part へ隔離する（§4.2）。
+      // Isolated in a part of its own for sources where a range read scans in proportion to the
+      // offset (§4.2).
       if (!current().isEmpty) openPart();
       current().push(id, payload);
       openPart();
@@ -463,7 +487,10 @@ const buildGraphDescriptor = (input: ModelInput, region: ConstRegion): GraphDesc
   const: { length: region.bytes.byteLength, blocks: region.blocks, constants: region.constants },
 });
 
-/** `krg`（グラフ容器）だけを書く。`krm` の part 0..1 と**同じ関数**でグラフ側を作る。 */
+/**
+ * Writes only a `krg` (graph container). The graph side is built by **the same function** as
+ * parts 0..1 of a `krm`.
+ */
 export const writeGraphContainer = async (
   input: ModelInput,
   options: WriteOptions = {},
@@ -476,7 +503,7 @@ export const writeGraphContainer = async (
   return { bytes: assembleGraphContainer(descriptorBytes, region.bytes), descriptorBytes };
 };
 
-/** `krm`（モデル容器）を単一形・分割形の両方で書く。 */
+/** Writes a `krm` (model container) in both the single and the split form. */
 export const writeModelContainer = async (
   input: ModelInput,
   options: WriteOptions = {},
@@ -484,7 +511,9 @@ export const writeModelContainer = async (
   const partBytes = options.partBytes ?? DEFAULT_PART_BYTES;
   const blockBytes = options.blockBytes ?? BLOCK_MAX_BYTES;
   if (blockBytes > BLOCK_MAX_BYTES) {
-    throw new ContainerFormatError(`block 上限 ${blockBytes} が仕様の ${BLOCK_MAX_BYTES} を超える`);
+    throw new ContainerFormatError(
+      `block limit ${blockBytes} exceeds the spec's ${BLOCK_MAX_BYTES}`,
+    );
   }
 
   const region = await buildConstRegion(input, blockBytes);

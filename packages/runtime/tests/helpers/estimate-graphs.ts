@@ -1,5 +1,6 @@
-// estimator の門が使う共有グラフと小物（estimate_test.ts と gpu_estimate_test.ts の両方から
-// 同じ形を引くため。期待値そのものは各テストに置く — 手計算定数を helper へ逃がすと恒真化する）。
+// Shared graphs and small utilities of the estimator checks (so estimate_test.ts and
+// gpu_estimate_test.ts both take the same shapes. The expected values themselves stay in each test
+// — moving hand-computed constants into a helper makes the tests tautological).
 
 import { assertEquals } from "@std/assert";
 import type { AdmissionReport, AdmissionScenario } from "../../src/runtime/estimate.ts";
@@ -9,10 +10,11 @@ import { f16BytesFromBits, f32ToF16Bits } from "./f16.ts";
 import { type DeclarationJson, f32Bytes, GRAPH_NAME, memoryModel } from "./model-fixture.ts";
 
 /**
- * 宣言 + 供給 → `PreparedModel`（admission の入口）。
+ * Declaration + supplies → `PreparedModel` (the entry to admission).
  *
- * 供給元は**メモリ内容器**にしてある: 見積りは合流後の `IrGraph` だけで決まり `krm` の目次には
- * 1 バイトも依らないので、容器を書く（= sha256 を掛ける非同期）経路を通す理由が無い。
+ * The source is an **in-memory container**: the estimate depends only on the merged `IrGraph` and
+ * not on a single byte of the `krm` index, so there is no reason to go through the path that
+ * writes a container (= the asynchronous sha256 pass).
  */
 export const openGraph = (
   graph: DeclarationJson,
@@ -20,8 +22,8 @@ export const openGraph = (
 ): PreparedModel => prepareContainer(memoryModel(graph, tensors), GRAPH_NAME);
 
 /**
- * 供給 1 本（IR v2 では**initializer 名がそのまま実体の鍵**なので、渡すのは宣言の名前）。
- * 既定の格納は `f32`（丸ごと 1 本・companion scale なし）。
+ * One supply (in IR v2 **the initializer name is the data's key as is**, so the declared name is
+ * what is passed). The default storage is `f32` (one whole tensor, no companion scale).
  */
 export const weight = (
   initializer: string,
@@ -29,11 +31,14 @@ export const weight = (
   encoding: EncodingInput = { codec: "f32" },
 ): TensorInput => ({ graph: GRAPH_NAME, initializer, bytes, encoding });
 
-/** f16 のバイト列（値そのものは見ないので 0 で埋める — 見るのはバイト数だけ）。 */
+/** f16 bytes (filled with 0 because the values are never looked at — only the byte count is). */
 export const f16Zeros = (count: number): Uint8Array<ArrayBuffer> =>
   f16BytesFromBits(new Array(count).fill(f32ToF16Bits(0)));
 
-/** 記号容量 `C` の k と数値容量の v を持つグラフ（append は 1 スロット 1 本 MUST）。 */
+/**
+ * A graph with k of symbolic capacity `C` and v of numeric capacity (one append per slot is a
+ * MUST).
+ */
 export const stateGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -58,7 +63,7 @@ export const stateGraph = (): DeclarationJson => ({
   ],
 });
 
-/** {@link stateGraph} に対応する供給（値は見ないので 0 で埋める）。 */
+/** The supplies of {@link stateGraph} (filled with 0 because the values are never looked at). */
 export const stateTensors = (): readonly TensorInput[] => [
   weight("w", f32Bytes(new Array(12).fill(0))),
   weight("chunk", f32Bytes(new Array(32).fill(0))),
@@ -67,13 +72,15 @@ export const stateTensors = (): readonly TensorInput[] => [
 export const stateModel = (): PreparedModel => openGraph(stateGraph(), stateTensors());
 
 /**
- * states 形 attention 1 本 + `state_append` 2 本（gpu_state_execution_test の実行形と同じ姿の
- * 最小版）。`B=1` / `Hkv=2`（GQA）/ `D=8` で、`M` が物理 chunk 行・`C` がスロット容量。
+ * One states-form attention + two `state_append`s (the minimal version of the executed shape of
+ * gpu_state_execution_test). `B=1` / `Hkv=2` (GQA) / `D=8`; `M` is the physical chunk rows and `C`
+ * the slot capacity.
  *
- * `window` を渡すと sliding 変種（読み書き同式 MUST — attention と append の両方に載せる）。
- * `heads`（既定 4）は **S の 1 行バイト数 `H·colCap·4` だけを動かす**軸 — state スロットは
- * `Hkv·C·D·4` で H に依らないので、H を上げると「スロットは束縛上限に収まるが S の 1 行は
- * 収まらない」形（= 行ブロックが複数枚に割れる形）を絞った device 上で作れる。
+ * Passing `window` gives the sliding variant (reads and writes MUST use the same formula — it goes
+ * on both the attention and the appends). `heads` (default 4) is the axis that **moves only the
+ * byte size of one row of S, `H·colCap·4`** — a state slot is `Hkv·C·D·4` and does not depend on
+ * H, so raising H builds, on a device with tightened limits, the shape where "the slot fits the
+ * binding limit but one row of S does not" (= the row blocks split into several).
  */
 export const stateAttentionGraph = (window?: number, heads = 4): DeclarationJson => {
   const windowAttrs: Record<string, number> = window === undefined ? {} : { window };
@@ -116,11 +123,12 @@ export const stateAttentionGraph = (window?: number, heads = 4): DeclarationJson
 };
 
 /**
- * エクスポータが出す分解 attention の 9 ノード窓（irodori DiT の綴り — 行ブロック attention に
- * 融合される形・ADR 0060）。全値 f32・`y` だけがグラフ出力。スコアは `heads·queries·keys·4` バイト。
+ * The 9-node window of a decomposed attention as the exporter emits it (the irodori DiT spelling —
+ * the shape that fuses into the row-block attention, ADR 0060). Every value is f32 and only `y` is
+ * a graph output. The scores are `heads·queries·keys·4` bytes.
  *
- * `interpose` は bmm と reshape の間に 0 バイトの別名を 1 本挟むだけで、窓の隣接条件だけを外す
- * （融合が成立しない同じ計算）。
+ * `interpose` only puts one zero-byte alias between the bmm and the reshape, which breaks just the
+ * window's adjacency condition (the same computation, with the fusion not matching).
  */
 export const decomposedAttentionGraph = (
   dims: {
@@ -176,7 +184,7 @@ export const decomposedAttentionGraph = (
   };
 };
 
-/** prefill / decode の 2 本を名前つきで引く（並びの前提もここで一緒に押さえる）。 */
+/** Takes the prefill / decode pair by name (pinning the assumed order here as well). */
 export const bothScenarios = (
   report: AdmissionReport,
 ): { readonly prefill: AdmissionScenario; readonly decode: AdmissionScenario } => {

@@ -17,14 +17,16 @@
 // operand order. The `+0.0` (identity) fold is not skipped. The tree itself is checked symbolically,
 // without a GPU, in tests/reduce_axis_tree_test.ts (ADR 0035 addendum 2026-10-26).
 //
-// MUST: 恒真化しないこと。①② は**別のパイプライン・別の WGSL**で、生成関数も別。
-// MUST: **巡回長 3 以上の軸ケース**を必ず 1 本持つ（ACTIVE_DESIGN の落とし穴「実測グラフの
-// permute は全て対合」対策 — 軸並べ替えの取り違えが対合ケースだけでは空振りする）。
-// MUST: rows（= 出力要素数）が 65,535 の**両側**を踏む。行 reduce 側は行数がそのまま
-// workgroup 数になるので、上限超えは縮退経路（本番経路）になる。
-// MUST: `amax` / `amin` の **NaN 入りケース**を持つ（縮約長が 256 の両側で 1 本ずつ）。
-// ADR 0020 決定 1 の「実 GPU で実走して確かめる」水準は、軸変種についてはここにしか無い
-// （tests/gpu_ops_test.ts の NaN ケースは rank 2 の最終次元 = 行変種しか踏まない）。
+// MUST: the check must not become vacuous. ① and ② are **different pipelines with different WGSL**, and their
+// generator functions differ too.
+// MUST: always carry at least one **axis case with a cycle length of 3 or more** (the countermeasure for the
+// ACTIVE_DESIGN pitfall "every permute of the measured graphs is an involution" — a mixed-up axis reorder goes
+// unnoticed if only involution cases are tested).
+// MUST: rows (= number of output elements) hit **both sides** of 65,535. On the row reduce side the row count
+// becomes the workgroup count directly, so exceeding the limit takes the degraded path (the production path).
+// MUST: carry **NaN cases** for `amax` / `amin` (one on each side of a reduction length of 256).
+// The ADR 0020 decision 1 level of "confirm by actually running on a real GPU" exists only here for the axis
+// variant (the NaN cases of tests/gpu_ops_test.ts only hit the last dimension of rank 2 = the row variant).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -63,14 +65,15 @@ const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
 /**
- * CPU 参照との突合の許容誤差。参照は JS の f64 で縮約するので f32 の 2 段縮約とは丸めが違い、
- * ビット一致は原理的に成立しない（`amax` / `amin` / bool の `sum` は丸めが無いので実測 0）。
+ * Tolerance for the comparison with the CPU reference. The reference reduces in JS f64, so its rounding differs
+ * from the two-stage f32 reduction and bit identity cannot hold in principle (`amax` / `amin` / bool `sum` have
+ * no rounding, so they measure 0).
  *
- * 実測（2026-08-04・`atol=rtol=0` の素の突合、下の {@link CASES} の NaN 無し 9 本）:
- * `[300,7] axis=0` maxAbs **7.15e-7** / maxRel **2.37e-6**（最悪）、
- * `[1,96,255,257]` 5.96e-7 / 1.67e-6、`[1,384,128,128]` 5.36e-7 / 7.01e-7。
- * atol 5e-6 は最悪の約 7.0 倍・rtol 2e-5 は約 8.4 倍。**実装バグの誤差は O(1)** なので
- * 桁が大きく離れている。
+ * Measured (2026-08-04, a plain comparison with `atol=rtol=0`, the 9 NaN-free cases of {@link CASES} below):
+ * `[300,7] axis=0` maxAbs **7.15e-7** / maxRel **2.37e-6** (worst),
+ * `[1,96,255,257]` 5.96e-7 / 1.67e-6, `[1,384,128,128]` 5.36e-7 / 7.01e-7.
+ * atol 5e-6 is about 7.0× the worst and rtol 2e-5 about 8.4×. **The error of an implementation bug is O(1)**, so
+ * the orders of magnitude are far apart.
  */
 const CPU_REFERENCE_TOLERANCE = { atol: 5e-6, rtol: 2e-5 } as const;
 
@@ -85,25 +88,27 @@ const CPU_REFERENCE_TOLERANCE = { atol: 5e-6, rtol: 2e-5 } as const;
  */
 const C1024_CPU_REFERENCE_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 2e-5 };
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** A deterministic data sequence (no random numbers — a failure would not reproduce). */
 const SIGNED = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
-/** bool 入力（真の個数を数える形 — 0/1 が偏らないように 3 要素周期にしない）。 */
+/** A bool input (counting the true values — not a 3-element period, so that 0/1 are not skewed). */
 const BOOLEAN = (i: number): number => ((i * 5) % 7 < 3 ? 1 : 0);
 
 /**
- * 縮約軸に沿って NaN を散らす入力生成器（`amax` / `amin` の NaN 伝播 — ADR 0020 決定 1）。
+ * Input generator that scatters NaN along the reduced axis (NaN propagation of `amax` / `amin` — ADR 0020 decision 1).
  *
- * 出力 1 要素ぶんの縮約列ごとに NaN の位置を **先頭 / 中間 / 末尾 / 無し**の 4 通りへ
- * 振り分ける。MUST: **NaN を含まない対照列**を必ず混ぜる — 位置の一致だけを見ると
- * 「常に NaN を返す」実装が落ちない（tests/gpu_ops_test.ts の `NAN_REDUCE_ROWS` と同じ理由）。
+ * For each reduction column of one output element, the NaN position is distributed over 4 cases: **first /
+ * middle / last / none**. MUST: always mix in **NaN-free control columns** — checking only that the positions
+ * match does not catch an implementation that "always returns NaN" (the same reason as `NAN_REDUCE_ROWS` in
+ * tests/gpu_ops_test.ts).
  */
 /**
- * 縮約列を**丸ごと ±Infinity** にする入力生成器（`amax` / `amin` の identity の門 — E-R2-2）。
+ * Input generator that makes reduction columns **entirely ±Infinity** (the identity check of `amax` / `amin` — E-R2-2).
  *
- * 出力 1 要素ぶんの縮約列を、偶数番目は全要素 `sign`·Infinity、奇数番目は有限の対照列にする。
- * MUST: 全 −Inf の列の `amax` は GPU・CPU 参照とも **−F32_MAX**（identity 始まりで畳む —
- * `reference/ops.ts` の MUST）。参照が先頭要素始まりだった頃は −Infinity を返し、GPU と
- * 例外なしに割れていた。
+ * Of the reduction columns of one output element, even-numbered ones are all `sign`·Infinity and odd-numbered ones
+ * are finite control columns.
+ * MUST: the `amax` of an all −Inf column is **−F32_MAX** on both the GPU and the CPU reference (fold starting from
+ * the identity — the MUST of `reference/ops.ts`). When the reference started from the first element it returned
+ * −Infinity and disagreed with the GPU on every such column.
  */
 const infAlongAxis = (
   shape: readonly number[],
@@ -121,10 +126,10 @@ const infAlongAxis = (
 const nanAlongAxis = (shape: readonly number[], axis: number): ((i: number) => number) => {
   const axisLen = shape[axis];
   const inner = numel(shape.slice(axis + 1));
-  /** 縮約列ごとの NaN の位置（-1 = NaN 無しの対照）。 */
+  /** NaN position per reduction column (-1 = a NaN-free control). */
   const positions = [0, axisLen >> 1, axisLen - 1, -1];
   return (i: number): number => {
-    // 入力添字 i = (outer·axis_len + c)·inner + j を分解する
+    // Decompose the input index i = (outer·axis_len + c)·inner + j
     const c = Math.floor(i / inner) % axisLen;
     const out = Math.floor(i / (axisLen * inner)) * inner + (i % inner);
     return c === positions[out % positions.length] ? Number.NaN : SIGNED(i);
@@ -134,13 +139,13 @@ const nanAlongAxis = (shape: readonly number[], axis: number): ((i: number) => n
 type ParityCase = {
   readonly name: string;
   readonly shape: readonly number[];
-  /** 縮約軸（最終次元は行 reduce の担当なので、ここでは常に最終次元より前）。 */
+  /** The reduced axis (the last dimension belongs to the row reduce, so here it is always before the last dimension). */
   readonly axis: number;
   readonly op: ReduceOpName;
   readonly dtype: IrDtype;
-  /** NaN 入り入力（{@link nanAlongAxis}）を使うか。既定は NaN を含まない決定的な列。 */
+  /** Whether to use a NaN input ({@link nanAlongAxis}). By default a deterministic NaN-free sequence. */
   readonly nan?: true;
-  /** 縮約列を丸ごと ±Infinity にする（{@link infAlongAxis} — identity の門）。 */
+  /** Makes reduction columns entirely ±Infinity ({@link infAlongAxis} — the identity check). */
   readonly inf?: -1 | 1;
   /** The CPU-reference tolerance when it is not {@link CPU_REFERENCE_TOLERANCE}. */
   readonly tolerance?: Tolerance;
@@ -167,9 +172,9 @@ const readbackBits = async (
 };
 
 /**
- * 「permute + 行 reduce」と「軸 reduce」を**同じ入力バッファ**で走らせ、出力のビット列を
- * 組で返す。ホスト側で 2 度書くと「書き込みの差」が「カーネルの差」に化けるので、入力は
- * 1 本だけ確保して両方に束縛する。
+ * Runs "permute + row reduce" and "axis reduce" on **the same input buffer** and returns the output bit patterns
+ * as a pair. Writing from the host twice would turn "a difference in writes" into "a difference in kernels", so
+ * only one input is allocated and bound to both.
  */
 const runBoth = async (
   gpu: GpuContext,
@@ -230,7 +235,7 @@ const runBoth = async (
       });
     };
 
-    // ① 縮約軸を最終次元へ回す permute（現行のエクスポータが出していた形）→ 行 reduce
+    // ① a permute that moves the reduced axis to the last dimension (the form the current exporter used to emit) → row reduce
     const permuteDims = [...shape.keys()].filter((d) => d !== axis).concat(axis);
     const permutedShape = permuteDims.map((d) => shape[d]);
     const permuted = arena.allocRegion(Math.max(4, numel(shape) * 4));
@@ -306,54 +311,54 @@ const runBoth = async (
 
 const CASES: readonly ParityCase[] = [
   {
-    // census（VAE decoder 1024px）の実形状: rows 16,384 / dim 384（11 ノード）。
-    // rows < 65,535 なので行 reduce 側は縮退しない。
-    name: "実形状 [1,384,128,128] axis=1（rows 16,384 / dim 384）",
+    // A real shape from the census (VAE decoder 1024px): rows 16,384 / dim 384 (11 nodes).
+    // rows < 65,535, so the row reduce side does not degrade.
+    name: "real shape [1,384,128,128] axis=1 (rows 16,384 / dim 384)",
     shape: [1, 384, 128, 128],
     axis: 1,
     op: "sum",
     dtype: "f32",
   },
   {
-    // census 実形状: rows 65,536 / dim 192（6 ノード側の縮小）。**rows > 65,535** なので
-    // 行 reduce 側は grid-stride の縮退経路（本番経路）に入る。
-    name: "実形状 [1,192,256,256] axis=1（rows 65,536 > 65,535 / dim 192）",
+    // A real census shape: rows 65,536 / dim 192 (reduced from the 6-node side). **rows > 65,535**, so the row
+    // reduce side takes the degraded grid-stride path (the production path).
+    name: "real shape [1,192,256,256] axis=1 (rows 65,536 > 65,535 / dim 192)",
     shape: [1, 192, 256, 256],
     axis: 1,
     op: "sum",
     dtype: "f32",
   },
   {
-    // rows = 65,535 ちょうど（クランプの境界そのもの）。dim 96 は census で要素の 58% を
-    // 占める形で、workgroup 幅 256 に対し 160 レーンが identity のまま木を回る。
-    name: "実形状 [1,96,255,257] axis=1（rows 65,535 = 境界 / dim 96）",
+    // rows = exactly 65,535 (the clamp boundary itself). dim 96 is the shape that holds 58% of the elements in the
+    // census; against a workgroup width of 256, 160 lanes go round the tree as identity.
+    name: "real shape [1,96,255,257] axis=1 (rows 65,535 = boundary / dim 96)",
     shape: [1, 96, 255, 257],
     axis: 1,
     op: "sum",
     dtype: "f32",
   },
   {
-    // rows が上限の 2 倍超（縮退経路を確実に 2 周させる）。dim 96。
-    name: "実形状 [1,96,512,257] axis=1（rows 131,584 / dim 96）",
+    // rows more than twice the limit (makes the degraded path go round twice for sure). dim 96.
+    name: "real shape [1,96,512,257] axis=1 (rows 131,584 / dim 96)",
     shape: [1, 96, 512, 257],
     axis: 1,
     op: "sum",
     dtype: "f32",
   },
   {
-    // **巡回長 3 以上の軸ケース（MUST）**: rank-4 の中間軸を畳むと permute は [0,2,3,1] で
-    // 逆置換は [0,3,1,2]（= 自分自身ではない）。しかも 4 次元が全て違うので、outer / inner /
-    // axis_len のどれを取り違えても値が割れる。
-    name: "巡回長 3 [2,3,4,5] axis=1（permute [0,2,3,1] は対合でない）",
+    // **An axis case with a cycle length of 3 or more (MUST)**: reducing the middle axis of rank 4 gives the permute
+    // [0,2,3,1] with inverse [0,3,1,2] (= not itself). And all 4 dimensions differ, so mixing up any of outer /
+    // inner / axis_len breaks the values.
+    name: "cycle length 3 [2,3,4,5] axis=1 (permute [0,2,3,1] is not an involution)",
     shape: [2, 3, 4, 5],
     axis: 1,
     op: "sum",
     dtype: "f32",
   },
   {
-    // 縮約長が 256 を跨ぐ（slot ごとの走査が 2 周する = carry-stack の葉が「1 要素」でない）。
-    // 先頭軸の縮約（outer = 1）も同時に踏む。
-    name: "縮約長 300 > 256 [300,7] axis=0（slot 走査が 2 周）",
+    // The reduction length crosses 256 (the per-slot scan goes round twice = the carry-stack leaves are not "1 element").
+    // It also covers a reduction of the leading axis (outer = 1).
+    name: "reduction length 300 > 256 [300,7] axis=0 (slot scan goes round twice)",
     shape: [300, 7],
     axis: 0,
     op: "sum",
@@ -387,7 +392,7 @@ const CASES: readonly ParityCase[] = [
     dtype: "f32",
   },
   {
-    // amax（NaN 伝播の畳み込み関数と ±F32_MAX の identity）。軸は rank-3 の中間。
+    // amax (the NaN-propagating fold function and the ±F32_MAX identity). The axis is the middle one of rank 3.
     name: "amax [5,9,11] axis=1",
     shape: [5, 9, 11],
     axis: 1,
@@ -395,7 +400,7 @@ const CASES: readonly ParityCase[] = [
     dtype: "f32",
   },
   {
-    // amin も同じ骨格（identity の符号だけが違う — 取り違えると全要素が +F32_MAX になる）
+    // amin has the same skeleton (only the sign of the identity differs — mixing them up makes every element +F32_MAX)
     name: "amin [5,9,11] axis=1",
     shape: [5, 9, 11],
     axis: 1,
@@ -403,11 +408,11 @@ const CASES: readonly ParityCase[] = [
     dtype: "f32",
   },
   {
-    // **NaN 伝播の実 GPU の門（ADR 0020 決定 1・4）**。生成 WGSL の文字列の門は軸変種にも
-    // 掛かっているが、ADR 0020 が「文字列では足りない」と名指しした畳み込みの故障
-    // （バックエンドが `nan_max` を素の `max` へ畳む）は実走でしか見えない。縮約長 9 < 256 =
-    // slot ごとの走査は 1 周（葉が 1 要素）。
-    name: "amax NaN [5,9,11] axis=1（縮約長 9 < 256 / 走査 1 周）",
+    // **The real-GPU check of NaN propagation (ADR 0020 decisions 1 and 4)**. The string check of the generated
+    // WGSL covers the axis variant too, but the fold failure ADR 0020 names as "strings are not enough" (a backend
+    // folding `nan_max` into a plain `max`) is visible only by running. Reduction length 9 < 256 = the per-slot
+    // scan goes round once (a leaf is 1 element).
+    name: "amax NaN [5,9,11] axis=1 (reduction length 9 < 256 / scan goes round once)",
     shape: [5, 9, 11],
     axis: 1,
     op: "amax",
@@ -415,8 +420,8 @@ const CASES: readonly ParityCase[] = [
     nan: true,
   },
   {
-    // amin も同じ骨格（NaN を飲むと identity の +F32_MAX に化ける）
-    name: "amin NaN [5,9,11] axis=1（縮約長 9 < 256 / 走査 1 周）",
+    // amin has the same skeleton (swallowing NaN turns it into the +F32_MAX identity)
+    name: "amin NaN [5,9,11] axis=1 (reduction length 9 < 256 / scan goes round once)",
     shape: [5, 9, 11],
     axis: 1,
     op: "amin",
@@ -424,9 +429,9 @@ const CASES: readonly ParityCase[] = [
     nan: true,
   },
   {
-    // 縮約長 300 > 256 = slot ごとの走査が 2 周し、carry-stack が実際に段を積む形。
-    // 走査ループと畳み込みループの**両方**を NaN が通ることをここで見る。
-    name: "amax NaN [300,7] axis=0（縮約長 300 > 256 / 走査 2 周）",
+    // Reduction length 300 > 256 = the per-slot scan goes round twice and the carry-stack actually stacks levels.
+    // This checks that NaN passes through **both** the scan loop and the fold loop.
+    name: "amax NaN [300,7] axis=0 (reduction length 300 > 256 / scan goes round twice)",
     shape: [300, 7],
     axis: 0,
     op: "amax",
@@ -434,7 +439,7 @@ const CASES: readonly ParityCase[] = [
     nan: true,
   },
   {
-    name: "amin NaN [300,7] axis=0（縮約長 300 > 256 / 走査 2 周）",
+    name: "amin NaN [300,7] axis=0 (reduction length 300 > 256 / scan goes round twice)",
     shape: [300, 7],
     axis: 0,
     op: "amin",
@@ -442,10 +447,10 @@ const CASES: readonly ParityCase[] = [
     nan: true,
   },
   {
-    // **identity の門（E-R2-2）**: 縮約列が丸ごと −Inf の `amax` は −F32_MAX を返す（GPU は
-    // identity 始まりで畳む。CPU 参照も同じ始点でなければ −Infinity を返して例外なしに割れる —
-    // 有限の対照列を混ぜて `SIGNED` 側の値も同時に見る）。
-    name: "amax 全 −Inf 列 [4,9,6] axis=1（identity −F32_MAX の門）",
+    // **The identity check (E-R2-2)**: the `amax` of a reduction column that is entirely −Inf returns −F32_MAX (the
+    // GPU folds starting from the identity. Unless the CPU reference starts from the same point, it returns
+    // −Infinity and disagrees on every such column — finite control columns are mixed in to check the `SIGNED` side too).
+    name: "amax all −Inf columns [4,9,6] axis=1 (identity −F32_MAX check)",
     shape: [4, 9, 6],
     axis: 1,
     op: "amax",
@@ -453,7 +458,7 @@ const CASES: readonly ParityCase[] = [
     inf: -1,
   },
   {
-    name: "amin 全 +Inf 列 [4,9,6] axis=1（identity +F32_MAX の門）",
+    name: "amin all +Inf columns [4,9,6] axis=1 (identity +F32_MAX check)",
     shape: [4, 9, 6],
     axis: 1,
     op: "amin",
@@ -461,8 +466,8 @@ const CASES: readonly ParityCase[] = [
     inf: 1,
   },
   {
-    // bool → i32（真の個数）。累算器の型と `load` の真偽化が軸変種にも入っていること。
-    name: "bool sum [3,13,5] axis=1（真の個数 → i32）",
+    // bool → i32 (the number of true values). The accumulator type and the truthiness of `load` are in the axis variant too.
+    name: "bool sum [3,13,5] axis=1 (number of true values → i32)",
     shape: [3, 13, 5],
     axis: 1,
     op: "sum",
@@ -484,7 +489,7 @@ const CLAMPED_CASE: ParityCase = {
   dtype: "f32",
 };
 
-/** ビット列の食い違い（先頭 4 件）を人が読める形にする。 */
+/** Makes bit-pattern mismatches (the first 4) human-readable. */
 const firstMismatches = (a: Uint32Array, b: Uint32Array): readonly string[] => {
   const found: string[] = [];
   for (let i = 0; i < a.length && found.length < 4; i += 1) {
@@ -494,7 +499,7 @@ const firstMismatches = (a: Uint32Array, b: Uint32Array): readonly string[] => {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "軸 reduce は「permute + 行 reduce」と**ビット単位で一致**する（実 GPU）",
+  "the axis reduce is **bit-identical** to permute + row reduce (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     let sawNonInvolution = false;
@@ -505,32 +510,32 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           firstMismatches(viaPermute, viaAxis),
           [],
-          `${testCase.name}: permute + 行 reduce とビット列が違う`,
+          `${testCase.name}: bit patterns differ from permute + row reduce`,
         );
-        // 恒真化の門（出力が定数なら一致は何も検証していない）
+        // Vacuity check (if the output is constant, the match verifies nothing)
         assert(
           new Set(viaAxis).size > 1,
-          `${testCase.name}: 出力が定数（ビット一致が恒真になっている）`,
+          `${testCase.name}: the output is constant (the bit identity is vacuous)`,
         );
-        // 両カーネルが**揃って**誤る形の検出器（ビット比較だけでは気づけない）
+        // Detector for both kernels being wrong **together** (bit comparison alone cannot notice it)
         const values =
           testCase.dtype === "bool"
             ? new Int32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length)
             : new Float32Array(viaAxis.buffer, viaAxis.byteOffset, viaAxis.length);
         if (testCase.nan === true) {
-          // MUST: allclose は NaN をどちらの側でも不合格にするので NaN ケースには使えない —
-          // **isNaN パターンの一致 + 非 NaN 要素の厳密一致**で突き合わせる
-          // （tests/gpu_ops_test.ts の行変種の NaN 判定と同じ形）。
+          // MUST: allclose fails NaN on either side, so it cannot be used for NaN cases —
+          // compare by **matching isNaN patterns + exact equality of the non-NaN elements**
+          // (the same form as the NaN check of the row variant in tests/gpu_ops_test.ts).
           const actualValues = [...values];
           const expectedValues = [...reference];
           const actualNan = actualValues.map((value) => Number.isNaN(value));
           const expectedNan = expectedValues.map((value) => Number.isNaN(value));
-          assert(expectedNan.includes(true), `${testCase.name}: 参照に NaN が 1 つも無い`);
-          // MUST: 対照要素を持つこと（「常に NaN を返す」実装は位置の一致では落ちない）
-          assert(expectedNan.includes(false), `${testCase.name}: 対照要素が無い`);
-          assertEquals(actualNan, expectedNan, `${testCase.name}: NaN の位置`);
-          // 非 NaN 側は `amax` / `amin` なので丸め差が入らない（NaN 同士は比較が成立しない
-          // ので該当要素だけ 0 に潰してから見る）
+          assert(expectedNan.includes(true), `${testCase.name}: the reference has no NaN at all`);
+          // MUST: have control elements (an implementation that "always returns NaN" passes a position match)
+          assert(expectedNan.includes(false), `${testCase.name}: no control elements`);
+          assertEquals(actualNan, expectedNan, `${testCase.name}: NaN positions`);
+          // The non-NaN side is `amax` / `amin`, so no rounding difference enters (NaN never compares equal, so
+          // only those elements are flattened to 0 before checking)
           const finiteOnly = (
             source: readonly number[],
             isNan: readonly boolean[],
@@ -538,20 +543,23 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             finiteOnly(actualValues, actualNan),
             finiteOnly(expectedValues, expectedNan),
-            `${testCase.name}: 非 NaN の値`,
+            `${testCase.name}: non-NaN values`,
           );
         } else {
           const report = allclose(values, reference, testCase.tolerance ?? CPU_REFERENCE_TOLERANCE);
           assert(
             report.pass,
-            `${testCase.name}: CPU 参照と食い違う（maxAbs ${report.maxAbsError} @${report.worstIndex} / 破り ${report.failCount}）`,
+            `${testCase.name}: disagrees with the CPU reference (maxAbs ${report.maxAbsError} @${report.worstIndex} / violations ${report.failCount})`,
           );
         }
-        // 巡回長 3 以上（逆置換が自分自身でない）を 1 本以上踏んでいること
+        // At least one case with a cycle length of 3 or more (inverse not itself) must be covered
         const inverse = permuteDims.map((_, d) => permuteDims.indexOf(d));
         if (inverse.some((value, index) => value !== permuteDims[index])) sawNonInvolution = true;
       }
-      assert(sawNonInvolution, "permute が全て対合のケースしか無い（軸取り違えが空振りする）");
+      assert(
+        sawNonInvolution,
+        "only involution permute cases (a mixed-up axis would go unnoticed)",
+      );
     } finally {
       gpu.destroy();
     }
@@ -595,10 +603,11 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * executor の踏み分け。最終次元 = 行 reduce（既存キー）、それ以外 = 軸変種。
+ * Which kernel the executor dispatches. The last dimension = the row reduce (the existing key), any other = the
+ * axis variant.
  *
- * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのカーネルも正しいので、
- * 出力の一致は踏み分けの証拠にならない（ADR 0024 / 0030 と同型の規律）。
+ * MUST: check by **the pipeline key that actually ran**, not by values. Both kernels are correct, so matching
+ * outputs are no evidence of the dispatch (the same discipline as ADR 0024 / 0030).
  */
 const reduceKeysUsed = async (
   shape: readonly number[],
@@ -624,7 +633,7 @@ const reduceKeysUsed = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "executor は縮約軸で 2 カーネルを踏み分ける（最終次元 = 行 / それ以外 = 軸・実 GPU）",
+  "the executor dispatches to 2 kernels by the reduced axis (last dimension = row / any other = axis; real GPU)",
   async () => {
     assertEquals(
       await reduceKeysUsed([4, 6, 8], 2),

@@ -11,7 +11,10 @@ export type RmsNormAddGraphOptions = {
   sharedResidual?: boolean;
 };
 
-/** 内部値の公開・別consumer・broadcastで融合の適格性だけを変える。 */
+/**
+ * Varies only fusion eligibility, through exposing the internal value, another consumer, or
+ * broadcast.
+ */
 export const rmsNormAddGraph = (options: RmsNormAddGraphOptions = {}): DeclarationJson => {
   const dim = options.dim ?? 1536,
     shape = [options.rows ?? 4, dim];
@@ -42,7 +45,8 @@ export const rmsNormAddGraph = (options: RmsNormAddGraphOptions = {}): Declarati
     outs: ["y"],
     attrs: {},
   });
-  // 融合後もxを生かす必要がある。外部入力の解放が早すぎればcopyで検出する。
+  // x must stay alive after the fusion. If the external input is released too early, copy catches
+  // it.
   nodes.push({ op: "neg", ins: ["x"], outs: ["copy"], attrs: {} });
   const outputs = ["y", "copy", ...(options.normOutput ? ["n"] : [])];
   if (options.extraNormConsumer) {

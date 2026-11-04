@@ -1,19 +1,22 @@
-// states 形 attention 3 段 + `state_append`（ADR 0067 決定 4〜7）の**実 GPU 直接 dispatch 門**。
-// executor / recipe-builder への結線は波 D-3 なので、ここではカーネルを手組みバッファで直接撃ち、
-// CPU 参照（src/reference/state-attention.ts）と突き合わせる。
+// **Real-GPU direct-dispatch checks** for the three stages of states-form attention +
+// `state_append` (ADR 0067 decisions 4–7). Wiring into the executor / recipe builder is phase D-3,
+// so here the kernels are dispatched directly on hand-built buffers and compared against the CPU
+// reference (src/reference/state-attention.ts).
 //
-// 格子は {full, sliding} × {r=1,2,8} × {P=0 / 1..W−1 / ≥W（ring wrap 跨ぎ）} × {Q=1, chunk>1} ×
-// {pad 行あり / なし} × {B=1, B>1} × {行ブロック 1 枚 / 複数枚}。
+// The grid is {full, sliding} × {r=1,2,8} × {P=0 / 1..W−1 / ≥W (across a ring wrap)} ×
+// {Q=1, chunk>1} × {with / without pad rows} × {B=1, B>1} × {1 row block / several}.
 //
-// MUST: 突合だけで終わらせない。states 形の**構造的保証**は tolerance に隠れるので、
-//   ① 空行の出力は**厳密 0**（Object.is）
-//   ② 述語外の S は**厳密 −inf のビット列**（0xff800000）
-//   ③ 非 resident なスロット行・pad 行の ins には毒値を置き、読まれたら値が跳ねる
-//   ④ 容量 C を変えても出力が**ビット同一**（仕事量条件の裏 = 値が容量に依存しない）
-//   ⑤ 行ブロックを割っても出力が**ビット同一**（ADR 0067 決定 7）
-// を別々に見る。
-// MUST: 故障注入で**各門がそれぞれの変異を検出する**ことを同じテストで示す（検出しない門は
-// 何も見ていない）。
+// MUST: do not stop at the comparison. The **structural guarantees** of the states form hide behind
+// the tolerance, so these are checked separately:
+//   ① the output of an empty row is **exactly 0** (Object.is)
+//   ② S outside the predicate is **exactly the −inf bit pattern** (0xff800000)
+//   ③ non-resident slot rows and the pad rows of ins hold poison values, so reading them makes the
+//      values jump
+//   ④ changing the capacity C leaves the output **bit-identical** (the flip side of the work
+//      condition = the values do not depend on the capacity)
+//   ⑤ splitting into row blocks leaves the output **bit-identical** (ADR 0067 decision 7)
+// MUST: show in the same test, by fault injection, that **each check detects its own mutation** (a
+// check that detects nothing verifies nothing).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -40,39 +43,47 @@ import {
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
- * 突合の許容誤差。
+ * The comparison tolerance.
  *
- * 根拠: 参照は f64 で積んで格納時に 1 度だけ丸める・GPU は f32 の逐次累積で、差は内積長 `D` と
- * 縮約長 `live` に比例する。下の `PARITY_CASES` 全 18 ケース（`live` は 1 〜 4,096）の
- * **実測最悪は maxAbs 6.6e-7**（2026-08-18 初測。`live 4096` のケースを足した 2026-09-03 の
- * 再測でも同値 — RTX 3080 Ti・Vulkan / 出力の大きさは O(1)）で、`atol = 5e-6` はそこへ
- * 約 7.6 倍の余裕を積んだ値。最悪値を作るのは live が**小さい**側で、live を伸ばすと誤差は
- * むしろ縮む（メイン実測〈レビュー 2026-09-03〉= live 4,096 で 4.9e-8・16,384 で 4.1e-8・
- * 65,536 で 3.6e-8）。
- * MUST: `DEFAULT_TOLERANCE`（atol 1e-5 / rtol 1e-3）を使わない — rtol 1e-3 は「窓の外の key が
- * 混ざった」級の誤りを平気で通す（このファイルの門はそれを見るためにある）。
- * MUST: `rtol = 0`。states 形は**厳密 0 が正解の要素**（空行・述語外の寄与）を正規に含むので、
- * 相対項は 0 近傍で効かない一方、大きい要素の誤りを隠す側にだけ働く。
- * NOTE: 実測値はドライバの fma 使用に依るので、別アダプタでの再測定は「実測 → 余裕を積む」の
- * 手順ごと繰り返すこと（テストは最悪値を毎回 stdout に出す）。
+ * Rationale: the reference accumulates in f64 and rounds once when storing; the GPU accumulates
+ * sequentially in f32, and the difference grows with the dot-product length `D` and the reduction
+ * length `live`. Over all 18 `PARITY_CASES` below (`live` from 1 to 4,096) **the measured worst is
+ * maxAbs 6.6e-7** (first measured 2026-08-18; the same on the 2026-09-03 re-measurement that added
+ * the `live 4096` case — RTX 3080 Ti, Vulkan / outputs of magnitude O(1)), and `atol = 5e-6` adds
+ * about 7.6× headroom to it. The worst value comes from the **small** live side; lengthening live
+ * actually shrinks the error (main-session measurement (review 2026-09-03) = 4.9e-8 at live 4,096,
+ * 4.1e-8 at 16,384, 3.6e-8 at 65,536).
+ * MUST: do not use `DEFAULT_TOLERANCE` (atol 1e-5 / rtol 1e-3) — rtol 1e-3 easily passes an error
+ * on the scale of "keys outside the window got mixed in" (which is what the checks in this file are
+ * for).
+ * MUST: `rtol = 0`. The states form legitimately contains **elements whose correct value is exactly
+ * 0** (empty rows, contributions outside the predicate), so a relative term does nothing near 0 and
+ * only works to hide errors in large elements.
+ * NOTE: the measured values depend on the driver's use of fma, so a re-measurement on another
+ * adapter must repeat the whole "measure → add headroom" procedure (the test prints the worst value
+ * to stdout on every run).
  */
 const STATE_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
-/** 決定的な入力列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic input sequences (no random numbers — a failure would not reproduce). */
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.23;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
 
-/** 読まれてはいけない場所に置く毒値（読まれたら tolerance を軽く超える大きさ）。 */
+/**
+ * Poison values placed where nothing may read (large enough to exceed the tolerance easily if
+ * read).
+ */
 const SLOT_POISON_K = 9;
 const SLOT_POISON_V = 400;
 
 /**
- * ①③ が読む 5 本を組む。
+ * Builds the five buffers ①③ read.
  *
- * MUST: **非 resident なスロット物理行**（sliding のエビクト済み行 / full の未書込み行）と
- * **ins の pad 行**（`row ≥ Q`）には毒値を置く。契約上どちらも読まれないので、読む実装が
- * 値で落ちる（構造の誤りを tolerance の内側に隠さない唯一の方法）。
+ * MUST: put poison values in **non-resident physical slot rows** (evicted rows for sliding /
+ * unwritten rows for full) and in **the pad rows of ins** (`row ≥ Q`). By contract neither is read,
+ * so an implementation that reads them fails on the values (the only way not to hide a structural
+ * error inside the tolerance).
  */
 const makeInputs = (spec: StateCase): StateInputs => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = spec;
@@ -82,7 +93,7 @@ const makeInputs = (spec: StateCase): StateInputs => {
   const insV = seeded(kvPlanes * chunkRows * depth, VALUE);
   const slotK = seeded(kvPlanes * capacity * depth, (i) => KEY(i + 3));
   const slotV = seeded(kvPlanes * capacity * depth, (i) => VALUE(i + 5));
-  // resident な物理行の集合（論理 col [colBase, past) の像）
+  // The set of resident physical rows (the image of logical col [colBase, past))
   const resident = new Set<number>();
   const base = stateColumnBase(window, past);
   for (let col = base; col < past; col += 1) {
@@ -96,7 +107,7 @@ const makeInputs = (spec: StateCase): StateInputs => {
         slotV[(plane * capacity + row) * depth + d] = SLOT_POISON_V;
       }
     }
-    // ins の pad 行（row ≥ Q）は論理 col 空間 [0, P+Q) に入らない = 読まれない
+    // The pad rows of ins (row ≥ Q) are outside the logical col space [0, P+Q) = never read
     for (let row = query; row < chunkRows; row += 1) {
       for (let d = 0; d < depth; d += 1) {
         insK[(plane * chunkRows + row) * depth + d] = SLOT_POISON_K;
@@ -123,7 +134,7 @@ const refInput = (spec: StateCase, inputs: StateInputs): StateAttentionRefInput 
 
 const PARITY_CASES: readonly StateCase[] = [
   // ── full ──────────────────────────────────────────────────────────────────
-  // decode の最小形（Q=1・P=0 = 自己参照だけの causal 三角）
+  // The smallest decode shape (Q=1, P=0 = a causal triangle with only the self-reference)
   {
     name: "full r1 decode P0",
     batch: 1,
@@ -136,7 +147,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 0,
     query: 1,
   },
-  // prefill chunk（Q=M・pad 行なし）× B>1
+  // A prefill chunk (Q=M, no pad rows) × B>1
   {
     name: "full r1 prefill B2",
     batch: 2,
@@ -149,7 +160,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 0,
     query: 6,
   },
-  // pad 行あり（Q<M）× GQA r=2 × D 端数
+  // With pad rows (Q<M) × GQA r=2 × an uneven D
   {
     name: "full r2 pad B2 D6",
     batch: 2,
@@ -162,7 +173,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 5,
     query: 3,
   },
-  // MQA 8:1 の decode（Gemma 4 E2B 型）× 大きめ P
+  // MQA 8:1 decode (Gemma 4 E2B type) × a larger P
   {
     name: "full r8 MQA decode",
     batch: 2,
@@ -175,7 +186,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 17,
     query: 1,
   },
-  // 行ブロック 3 枚（端数ブロックを含む）
+  // Three row blocks (including a partial block)
   {
     name: "full r1 rowblock 4x3",
     batch: 1,
@@ -189,7 +200,7 @@ const PARITY_CASES: readonly StateCase[] = [
     query: 9,
     rowsBlock: 4,
   },
-  // タイル境界（live = 16 の倍数ちょうど・D = 16 の倍数ちょうど）
+  // Tile boundaries (live exactly a multiple of 16, D exactly a multiple of 16)
   {
     name: "full r2 tile exact",
     batch: 1,
@@ -203,7 +214,7 @@ const PARITY_CASES: readonly StateCase[] = [
     query: 16,
   },
   // ── sliding ───────────────────────────────────────────────────────────────
-  // P=0（窓が効かない decode）
+  // P=0 (a decode where the window has no effect)
   {
     name: "sliding W8 P0 decode",
     batch: 1,
@@ -216,7 +227,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 0,
     query: 1,
   },
-  // 0 < P < W−1（全 past が resident・wrap しない）+ pad 行
+  // 0 < P < W−1 (the whole past is resident, no wrap) + pad rows
   {
     name: "sliding W8 P3 pad",
     batch: 2,
@@ -229,7 +240,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 3,
     query: 2,
   },
-  // P = W−1（下限が効き始める境界）
+  // P = W−1 (the boundary where the lower bound starts to apply)
   {
     name: "sliding W4 P3 edge",
     batch: 1,
@@ -242,7 +253,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 3,
     query: 2,
   },
-  // P ≫ W（ring が何周もした後 — 物理行の写像が効く）
+  // P ≫ W (after the ring has wrapped many times — the physical-row mapping matters)
   {
     name: "sliding W4 P10 wrap",
     batch: 2,
@@ -255,7 +266,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 10,
     query: 2,
   },
-  // C > W（ring の法は容量 — 読み書きのどちらかが `% W` に化けたら落ちる形）
+  // C > W (the ring's modulus is the capacity — fails if either read or write turns into `% W`)
   {
     name: "sliding W4 C8 wrap",
     batch: 1,
@@ -268,7 +279,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 9,
     query: 2,
   },
-  // GQA r=2 × wrap × pad 行
+  // GQA r=2 × wrap × pad rows
   {
     name: "sliding W6 r2 wrap pad",
     batch: 2,
@@ -281,7 +292,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 13,
     query: 3,
   },
-  // MQA 8:1 × wrap decode（Gemma 4 E2B の sliding 層型）
+  // MQA 8:1 × wrap decode (the Gemma 4 E2B sliding-layer type)
   {
     name: "sliding W8 r8 MQA",
     batch: 2,
@@ -294,7 +305,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 21,
     query: 1,
   },
-  // **空行が正規に出る形**（pad 行が窓から落ちる）
+  // **A shape where empty rows occur legitimately** (pad rows drop out of the window)
   {
     name: "sliding W2 empty rows",
     batch: 1,
@@ -307,7 +318,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 0,
     query: 1,
   },
-  // Q > W（今 step の key が窓より多い — current は ins から読むので正規形）
+  // Q > W (this step has more keys than the window — legitimate, since current is read from ins)
   {
     name: "sliding W2 Q4 gt W",
     batch: 1,
@@ -320,7 +331,7 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 5,
     query: 4,
   },
-  // 行ブロック 2 枚 × sliding
+  // Two row blocks × sliding
   {
     name: "sliding W6 rowblock",
     batch: 1,
@@ -334,9 +345,10 @@ const PARITY_CASES: readonly StateCase[] = [
     query: 8,
     rowsBlock: 5,
   },
-  // **P が u32 の上限近く**（下限述語の引き算がどちら向きかで値が変わる唯一の形）。
-  // `col + W > limit` の加算形だと `P + 0` に対する causal 対角 `col = P` で
-  // `P + 2` が 2^32 を跨いで 0 に巻き戻り、自己参照の key が窓外と判定されて値が飛ぶ。
+  // **P near the u32 maximum** (the only shape where the direction of the lower-bound predicate's
+  // subtraction changes the values). With the additive form `col + W > limit`, at the causal
+  // diagonal `col = P` for `P + 0`, `P + 2` crosses 2^32 and wraps to 0, the self-referencing key
+  // is judged out of window, and the values jump.
   {
     name: "sliding W2 P near u32 max",
     batch: 1,
@@ -349,11 +361,12 @@ const PARITY_CASES: readonly StateCase[] = [
     past: 0xfffffffe,
     query: 1,
   },
-  // ── 射程宣言 ──────────────────────────────────────────────────────────────
-  // 縮約長 `live` を実運用の桁（4 桁）まで伸ばした decode。上の格子は live ≤ 数十なので、
-  // 「`atol` の根拠が小さい live の外挿ではない」ことをここで門にする（レビュー W-G1-1）。
-  // 形は Gemma 4 E2B の decode（MQA 8:1・D 32）。**末尾に足す** — 上の添字を動かすと
-  // `PREDICATE_CASES` / `INJECTIONS` の参照がずれる。
+  // ── Coverage statement ────────────────────────────────────────────────────────
+  // A decode with the reduction length `live` extended to production scale (four digits). The grid
+  // above has live ≤ a few dozen, so this checks that "the rationale for `atol` is not an
+  // extrapolation from small live" (review W-G1-1).
+  // The shape is the Gemma 4 E2B decode (MQA 8:1, D 32). **Append at the end** — moving the indices
+  // above would shift the references of `PREDICATE_CASES` / `INJECTIONS`.
   {
     name: "full r8 MQA decode live 4096",
     batch: 1,
@@ -368,7 +381,7 @@ const PARITY_CASES: readonly StateCase[] = [
   },
 ];
 
-/** 参照が「空行」と判定する行（`[B·H, M]` の平坦添字）。 */
+/** The rows the reference judges "empty" (flat indices into `[B·H, M]`). */
 const emptyRows = (spec: StateCase): readonly number[] => {
   const rows: number[] = [];
   const base = stateColumnBase(spec.window, spec.past);
@@ -390,7 +403,7 @@ const emptyRows = (spec: StateCase): readonly number[] => {
   return rows;
 };
 
-/** pad 行（`row ≥ Q`）の `[B·H, M]` 平坦添字。 */
+/** Flat indices into `[B·H, M]` of the pad rows (`row ≥ Q`). */
 const padRows = (spec: StateCase): readonly number[] => {
   const rows: number[] = [];
   for (let plane = 0; plane < spec.batch * spec.heads; plane += 1) {
@@ -405,7 +418,7 @@ const bitsOf = (data: Float32Array<ArrayBuffer>): Uint32Array =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention が CPU 参照と一致する（実 GPU・full / sliding × GQA × 行ブロック）",
+  "states-form attention matches the CPU reference (real GPU, full / sliding × GQA × row blocks)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -424,51 +437,57 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(report.pass, true, `${spec.name}: ${formatAllclose(report)}`);
         worstAbs = Math.max(worstAbs, report.maxAbsError);
         worstRel = Math.max(worstRel, report.maxRelError);
-        // ① pad 行は**厳密 0**（tolerance の内側に隠れる誤りを別途締める）。空行はその
-        //   部分集合（valid 行は causal 自己参照で必ず非空）なので、包含も併せて見る —
-        //   崩れたら「空行 → 0」を pad 行の 0 書きが包含している根拠が消える
+        // ① pad rows are **exactly 0** (pins separately the errors that hide inside the
+        //   tolerance). Empty rows are a subset of them (a valid row is never empty thanks to the
+        //   causal self-reference), so check the inclusion too — if it broke, the ground for the
+        //   pad rows' zero write covering "empty row → 0" would be gone
         const empties = emptyRows(spec);
         const pads = padRows(spec);
         assertEquals(
           empties.filter((row) => !pads.includes(row)),
           [],
-          `${spec.name}: 空行が pad 行の外に出た（空行 ⊂ pad 行が崩れている）`,
+          `${spec.name}: an empty row appeared outside the pad rows (empty rows ⊂ pad rows is broken)`,
         );
         for (const row of pads) {
           for (let d = 0; d < spec.depth; d += 1) {
             assertEquals(
               Object.is(actual.out[row * spec.depth + d], 0),
               true,
-              `${spec.name}: pad 行 ${row} の出力が厳密 0 でない（${
+              `${spec.name}: the output of pad row ${row} is not exactly 0 (${
                 actual.out[row * spec.depth + d]
-              }）`,
+              })`,
             );
           }
         }
-        // ③ 出力に毒値が残っていない（pad 行を含む全 M 行が書かれた = full-write）
+        // ③ no poison value remains in the output (all M rows including the pad rows were written =
+        // full-write)
         assertEquals(
           actual.out.some((value) => value === STATE_S_POISON),
           false,
-          `${spec.name}: 出力に毒値が残っている（③PV が全行を書いていない）`,
+          `${spec.name}: poison remains in the output (③PV did not write every row)`,
         );
       }
     } finally {
       gpu.destroy();
     }
-    // 実測最悪値を tolerance の根拠として残す（緩めた瞬間・誤差が伸びた瞬間に桁で気づける）
+    // Print the measured worst value as the tolerance's rationale (loosening the tolerance or a
+    // growing error shows up in the order of magnitude at once)
     console.log(`[states parity] maxAbs=${worstAbs} maxRel=${worstRel}`);
   },
 );
 
 /**
- * 述語の直接検査に使う 1 枚ブロックのケース（S を読み戻してビット列で見る）。
+ * Single-block cases for checking the predicate directly (S is read back and inspected as bit
+ * patterns).
  *
- * 条件は 3 つ: ①有効行に述語内・述語外の列が**両方**実在する（causal 上限は全ケース・sliding の
- * 下限は `P10 wrap` / `W6 r2 wrap pad` が踏む）②pad 行が実在する（S が書かれないことの門）
- * ③行ブロック 1 枚（局所行 = グローバル行）。
- * NOTE: 波 D-7 で ① が有効行だけを覆うようになったので、`sliding W2 empty rows`（Q=1 で
- * 有効行が row 0 の 1 本・その 1 列は必ず述語内）はここでは述語外の列を作れない。同ケースは
- * parity 側と故障注入（③PV の pad 行 0 書き）で引き続き踏む。
+ * Three conditions: ① valid rows have **both** columns inside and outside the predicate (the
+ * causal upper bound in every case; the sliding lower bound is exercised by `P10 wrap` /
+ * `W6 r2 wrap pad`) ② pad rows exist (the check that S is not written) ③ one row block (local row =
+ * global row).
+ * NOTE: since phase D-7, ① covers only the valid rows, so `sliding W2 empty rows` (with Q=1 the
+ * only valid row is row 0, and its one column is always inside the predicate) cannot produce a
+ * column outside the predicate here. That case is still exercised by the parity side and the fault
+ * injection (③PV's zero write of pad rows).
  */
 const PREDICATE_CASES: readonly StateCase[] = [
   PARITY_CASES[2],
@@ -478,7 +497,7 @@ const PREDICATE_CASES: readonly StateCase[] = [
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "①QK が書く S は述語外が厳密 −inf・live 範囲は全列が書かれる（実 GPU）",
+  "the S that ①QK writes is exactly −inf outside the predicate, and every column in the live range is written (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -490,7 +509,8 @@ test.skipIf(!GPU_AVAILABLE)(
         const base = stateColumnBase(spec.window, spec.past);
         const live = stateLiveColumns(spec.window, spec.past, spec.query);
         const rowsBlock = spec.rowsBlock ?? spec.chunkRows;
-        // 単一ブロックのケースだけを並べているので rowOffset = 0 = 有効行は先頭 Q 行
+        // Only single-block cases are listed, so rowOffset = 0 = the valid rows are the first Q
+        // rows
         const effRows = Math.min(spec.query, rowsBlock);
         const bits = bitsOf(scores);
         let masked = 0;
@@ -498,7 +518,7 @@ test.skipIf(!GPU_AVAILABLE)(
         let skipped = 0;
         for (let plane = 0; plane < spec.batch * spec.heads; plane += 1) {
           for (let local = 0; local < effRows; local += 1) {
-            // 単一ブロックのケースだけを並べているので、局所行 = グローバル行
+            // Only single-block cases are listed, so local row = global row
             const limit = spec.past + local;
             for (let cl = 0; cl < live; cl += 1) {
               const col = base + cl;
@@ -509,42 +529,47 @@ test.skipIf(!GPU_AVAILABLE)(
                 assertEquals(
                   Number.isFinite(scores[at]),
                   true,
-                  `${spec.name}: 述語内 (${local},${cl}) が有限でない`,
+                  `${spec.name}: (${local},${cl}) inside the predicate is not finite`,
                 );
                 assertEquals(
                   scores[at] === STATE_S_POISON,
                   false,
-                  `${spec.name}: 述語内 (${local},${cl}) に毒値が残っている（書かれていない）`,
+                  `${spec.name}: poison remains at (${local},${cl}) inside the predicate (not written)`,
                 );
                 written += 1;
               } else {
                 assertEquals(
                   bits[at],
                   0xff800000,
-                  `${spec.name}: 述語外 (${local},${cl}) が −inf のビット列でない`,
+                  `${spec.name}: (${local},${cl}) outside the predicate is not the −inf bit pattern`,
                 );
                 masked += 1;
               }
             }
           }
-          // pad 行の S は**1 語も書かれない**（仕事量が M ではなく Q に比例することの直接の裏 —
-          // 毒値がそのまま残る。ここが書かれていたら ① が全 M 行を回している）
+          // **Not one word** of S in the pad rows is written (direct evidence that the work scales
+          // with Q, not M — the poison stays as it is. If this were written, ① would be looping
+          // over all M rows)
           for (let local = effRows; local < rowsBlock; local += 1) {
             for (let cl = 0; cl < live; cl += 1) {
               const at = (plane * rowsBlock + local) * colCap + cl;
               assertEquals(
                 scores[at],
                 STATE_S_POISON,
-                `${spec.name}: pad 行 (${local},${cl}) の S が書かれている（① が M 行を回した）`,
+                `${spec.name}: S of pad row (${local},${cl}) was written (① looped over M rows)`,
               );
               skipped += 1;
             }
           }
         }
-        // 門が空振りしていない（両側の列と pad 行が実在する形を選んである）
-        assert(written > 0, `${spec.name}: 述語内の列が 1 つも無い`);
-        assert(masked > 0, `${spec.name}: 述語外の列が 1 つも無い（下限 / 上限が効いていない形）`);
-        assert(skipped > 0, `${spec.name}: pad 行が 1 つも無い（仕事量の門が空振り）`);
+        // The checks do fire (the shapes are chosen so that columns on both sides and pad rows
+        // exist)
+        assert(written > 0, `${spec.name}: no column inside the predicate`);
+        assert(
+          masked > 0,
+          `${spec.name}: no column outside the predicate (a shape where the lower / upper bound has no effect)`,
+        );
+        assert(skipped > 0, `${spec.name}: no pad row (the work check never fires)`);
       }
     } finally {
       gpu.destroy();
@@ -553,13 +578,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "state_append がスロットへ書いた値を ①③ が読み戻す（ring 往復・実 GPU）",
+  "①③ read back what state_append wrote into the slots (ring round trip, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
-      // W=4 / C=8（ring の法は容量 — 読み書きのどちらかが `% W` に化けたら落ちる）・P=6 で
-      // ring が一周した後の形
+      // W=4 / C=8 (the ring's modulus is the capacity — fails if either read or write turns into
+      // `% W`), P=6: the shape after the ring has wrapped once
       const spec: StateCase = {
         name: "append→attention round trip",
         batch: 2,
@@ -580,7 +605,8 @@ test.skipIf(!GPU_AVAILABLE)(
         capacity: spec.capacity,
         window: spec.window,
       };
-      // 「前 step までの append」を 3 回（P: 0→2→4→6）積んで実際のスロットを作る
+      // Build real slots by stacking "the appends of the previous steps" three times
+      // (P: 0→2→4→6)
       let slotK = seeded(kvPlanes * spec.capacity * spec.depth, () => STATE_S_POISON);
       let slotV = slotK.slice();
       let expectedK = slotK.slice();
@@ -592,26 +618,27 @@ test.skipIf(!GPU_AVAILABLE)(
         const lengths = { ...appendSpec, past, query: 2 };
         slotK = await runStateAppend(gpu.device, lengths, xK, slotK, { cache });
         slotV = await runStateAppend(gpu.device, lengths, xV, slotV, { cache });
-        // MUST: copy なので**ビット一致**（参照は同じ写像で書いた slot の複製）
+        // MUST: a copy, so **bit-identical** (the reference is a copy of the slot written with the
+        // same mapping)
         expectedK = referenceStateAppend({ ...lengths, x: xK, slot: expectedK })
           .data as Float32Array<ArrayBuffer>;
         expectedV = referenceStateAppend({ ...lengths, x: xV, slot: expectedV })
           .data as Float32Array<ArrayBuffer>;
-        assertEquals([...bitsOf(slotK)], [...bitsOf(expectedK)], `step ${step}: k スロット`);
-        assertEquals([...bitsOf(slotV)], [...bitsOf(expectedV)], `step ${step}: v スロット`);
+        assertEquals([...bitsOf(slotK)], [...bitsOf(expectedK)], `step ${step}: k slot`);
+        assertEquals([...bitsOf(slotV)], [...bitsOf(expectedV)], `step ${step}: v slot`);
       }
-      // wrap で潰れた行（論理 col 0,1 = 物理行 0,1 が論理 col 4,5 で上書き済み）が
-      // 実際に「古い値ではない」ことを確認する
+      // Confirm that the rows overwritten by the wrap (logical col 0,1 = physical rows 0,1, already
+      // overwritten by logical col 4,5) really are "not the old values"
       assert(
         slotK.some((value) => value !== STATE_S_POISON),
-        "append が 1 行も書いていない",
+        "append wrote no row at all",
       );
-      // 読み戻し: この slot をそのまま ①③ に食わせる（pad 行の ins は毒値のまま）
+      // Read back: feed these slots to ①③ as they are (the pad rows of ins keep their poison)
       const inputs = { ...makeInputs(spec), slotK, slotV };
       const expected = referenceStateAttention(refInput(spec, inputs));
       const actual = await runStateAttention(gpu.device, spec, inputs, { cache });
       const report = compareTensors({ dtype: "f32", data: actual.out }, expected, STATE_TOLERANCE);
-      assertEquals(report.pass, true, `ring 往復: ${formatAllclose(report)}`);
+      assertEquals(report.pass, true, `ring round trip: ${formatAllclose(report)}`);
     } finally {
       gpu.destroy();
     }
@@ -619,24 +646,26 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * `C > W` のスロットで `Q > C` の chunk を書いたときの**重複排除**（ring が 1 回の append の中で
- * 一周する形）。
+ * **Deduplication** when a chunk with `Q > C` is written into a slot with `C > W` (the ring wraps
+ * within a single append).
  *
- * ring の法が窓から容量へ移ったので、重複排除の条件も `row + W ≥ Q` から `row + C ≥ Q` になる。
- * 窓のまま切ると、`W ≤ row < C` の行は**誰とも alias しないのに書かれない**（例外も警告も出ず、
- * その物理行だけが前 step の残骸を持ち続ける）。
+ * The ring's modulus moved from the window to the capacity, so the deduplication condition also
+ * changed from `row + W ≥ Q` to `row + C ≥ Q`. Cutting at the window would leave the rows
+ * `W ≤ row < C` **unwritten even though they alias nothing** (no exception, no warning; only those
+ * physical rows keep the leftovers of the previous step).
  *
- * MUST: 期待値は参照実装ではなく**論理行から直に**組む（参照も同じ写像を共有しているので、
- * 両側が同じ誤りを持つと突合が恒真になる）。物理行 `r` の中身は「`r` へ写る論理行のうち最後の
- * 1 本」= `Q` 未満で `col ≡ r (mod C)` の最大の `col`。
+ * MUST: build the expected values **directly from the logical rows**, not from the reference
+ * implementation (the reference shares the same mapping, so if both sides had the same error the
+ * comparison would be a tautology). The contents of physical row `r` are "the last of the logical
+ * rows that map to `r`" = the largest `col` below `Q` with `col ≡ r (mod C)`.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "Q > C の append は物理行ごとに最後の論理行だけを残す（C > W の重複排除・実 GPU）",
+  "an append with Q > C keeps only the last logical row per physical row (deduplication with C > W, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
-      // 余裕 8 行（投機デコードの draft 上限ぶん）を持つ sliding スロット。
+      // A sliding slot with 8 rows of headroom (the draft limit of speculative decoding).
       const spec = {
         kvPlanes: 2,
         chunkRows: 20,
@@ -654,18 +683,19 @@ test.skipIf(!GPU_AVAILABLE)(
         for (let row = 0; row < spec.capacity; row += 1) {
           let last = -1;
           for (let col = row; col < spec.query; col += spec.capacity) last = col;
-          assert(last >= 0, `物理行 ${row} へ写る論理行が 1 本も無い（格子の作り方が誤り）`);
+          assert(last >= 0, `no logical row maps to physical row ${row} (the grid is built wrong)`);
           for (let d = 0; d < spec.depth; d += 1) {
             assertEquals(
               written[(plane * spec.capacity + row) * spec.depth + d],
               x[(plane * spec.chunkRows + last) * spec.depth + d],
-              `plane ${plane} row ${row}: 論理行 ${last} が残っていない`,
+              `plane ${plane} row ${row}: logical row ${last} did not survive`,
             );
           }
         }
       }
 
-      // 故障注入: 重複排除を窓で切ると `8 ≤ row < 16` の論理行が書かれず、毒値が残る。
+      // Fault injection: cutting the deduplication at the window leaves the logical rows
+      // `8 ≤ row < 16` unwritten, and poison remains.
       const mutated = await runStateAppend(gpu.device, spec, x, slot, {
         cache,
         mutate: replaceIn(
@@ -677,11 +707,11 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         [...bitsOf(mutated)].every((value, at) => value === bitsOf(written)[at]),
         false,
-        "故障注入 '重複排除を窓で切る' が検出されなかった",
+        "fault injection 'cut the deduplication at the window' was not detected",
       );
       assert(
         mutated.some((value) => value === STATE_S_POISON),
-        "窓で切った変異でも全行が埋まっている（格子が Q > C を満たしていない）",
+        "every row is filled even with the window-cut mutation (the grid does not satisfy Q > C)",
       );
     } finally {
       gpu.destroy();
@@ -690,7 +720,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "同一入力の 2 回 dispatch はビット単位で同一（states 形の決定性・実 GPU）",
+  "two dispatches on the same input are bit-identical (determinism of the states form, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -699,7 +729,11 @@ test.skipIf(!GPU_AVAILABLE)(
         const inputs = makeInputs(spec);
         const first = await runStateAttention(gpu.device, spec, inputs, { cache });
         const second = await runStateAttention(gpu.device, spec, inputs, { cache });
-        assertEquals([...bitsOf(first.out)], [...bitsOf(second.out)], `${spec.name}: 2 回目が違う`);
+        assertEquals(
+          [...bitsOf(first.out)],
+          [...bitsOf(second.out)],
+          `${spec.name}: the second run differs`,
+        );
       }
     } finally {
       gpu.destroy();
@@ -708,13 +742,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "容量 C と行ブロック分割は出力のビット列を動かさない（実 GPU）",
+  "the capacity C and the row-block split do not move the output bits (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
-      // ④ 容量非依存: 同じ (P, Q) で C を 32 → 4096 に増やしても出力はビット同一
-      // （増えるのは S の列ストライドと未読の毒値領域だけ = 仕事量条件の裏返し）
+      // ④ capacity independence: with the same (P, Q), growing C from 32 → 4096 leaves the output
+      // bit-identical (only S's column stride and the unread poison area grow = the flip side of
+      // the work condition)
       const small: StateCase = {
         name: "capacity 32",
         batch: 2,
@@ -729,8 +764,9 @@ test.skipIf(!GPU_AVAILABLE)(
       };
       const large: StateCase = { ...small, name: "capacity 4096", capacity: 4096 };
       const smallInputs = makeInputs(small);
-      // MUST: 大容量側のスロットは**同じ物理行に同じ値**を置き直す（生成器が添字依存なので、
-      // 容量を変えたまま作り直すと平面ごとの起点がずれて「入力が違う 2 回」を比べてしまう）
+      // MUST: the large-capacity slots get **the same values in the same physical rows** (the
+      // generator depends on the index, so regenerating at another capacity would shift each
+      // plane's origin and compare "two runs with different inputs")
       const relayout = (source: Float32Array<ArrayBuffer>): Float32Array<ArrayBuffer> => {
         const planes = small.batch * small.kvHeads;
         const grown = seeded(planes * large.capacity * small.depth, () => SLOT_POISON_V);
@@ -750,9 +786,14 @@ test.skipIf(!GPU_AVAILABLE)(
       };
       const smallOut = await runStateAttention(gpu.device, small, smallInputs, { cache });
       const largeOut = await runStateAttention(gpu.device, large, largeInputs, { cache });
-      assertEquals([...bitsOf(smallOut.out)], [...bitsOf(largeOut.out)], "容量で出力が動いた");
+      assertEquals(
+        [...bitsOf(smallOut.out)],
+        [...bitsOf(largeOut.out)],
+        "the output moved with the capacity",
+      );
 
-      // ⑤ 行ブロック非依存: 1 枚と 3 枚（端数込み）で出力はビット同一（ADR 0067 決定 7）
+      // ⑤ row-block independence: 1 block and 3 blocks (with a partial one) give bit-identical
+      // output (ADR 0067 decision 7)
       const whole: StateCase = {
         name: "rowblock whole",
         batch: 1,
@@ -772,7 +813,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         [...bitsOf(wholeOut.out)],
         [...bitsOf(splitOut.out)],
-        "行ブロックで出力が動いた",
+        "the output moved with the row blocks",
       );
     } finally {
       gpu.destroy();
@@ -780,10 +821,10 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 故障注入 1 件（`apply` は対象カーネルの WGSL だけを書き換える）。 */
+/** One fault injection (`apply` rewrites only the target kernel's WGSL). */
 type Injection = {
   readonly label: string;
-  /** どのケースで撃つか（変異が値に出る形を選ぶ）。 */
+  /** Which case it runs on (a shape where the mutation shows in the values). */
   readonly spec: StateCase;
   readonly apply: (kernel: string, wgsl: string) => string;
 };
@@ -802,44 +843,50 @@ const replaceIn =
   };
 
 const INJECTIONS: readonly Injection[] = [
-  // ① sliding の下限述語を落とす（= causal 上限だけの実装。ADR 0067 決定 4 の第 5 巡 high）
+  // ① Drop the sliding lower-bound predicate (= an implementation with only the causal upper
+  // bound; the high-severity finding of review round 5 on ADR 0067 decision 4)
   {
-    label: "sliding の下限述語を削除",
+    label: "remove the sliding lower-bound predicate",
     spec: PARITY_CASES[9],
     apply: replaceIn(["qk"], " && (limit - col) < params.window", ""),
   },
-  // ①' 下限の引き算を u32 で巻き戻る加算形へ戻す（P が u32 上限近くでのみ値が変わる）
+  // ①' Turn the lower bound's subtraction back into the additive form that wraps in u32 (the
+  // values change only with P near the u32 maximum)
   {
-    label: "下限述語を col + W > limit の加算形へ差し替え",
+    label: "replace the lower-bound predicate with the additive form col + W > limit",
     spec: PARITY_CASES[16],
     apply: replaceIn(["qk"], "(limit - col) < params.window", "col + params.window > limit"),
   },
-  // ② 読み側の ring 写像だけを `% W` に差し替える（読み書き同式 MUST を破る。法が窓ではなく
-  //   容量になった今、窓へ戻すのがこの規律を破る側 — `C > W` のケースでしか値に出ない）
+  // ② Replace only the read-side ring mapping with `% W` (breaks the MUST that read and write use
+  //   the same expression. Now that the modulus is the capacity rather than the window, going
+  //   back to the window is what breaks the rule — it shows in the values only with `C > W`)
   {
-    label: "読み側の ring 写像を col % window に差し替え",
+    label: "replace the read-side ring mapping with col % window",
     spec: PARITY_CASES[10],
     apply: replaceIn(["qk", "pv"], "col % params.capacity", "col % params.window"),
   },
-  // ③ ③PV の pad 行 0 書きを外す（pad 行が live 走査へ落ち、①② が覆っていない S / stats を食う）。
-  //   NOTE: 波 D-7 で ①② が有効行だけを覆うようになった結果、**空行は構造的に生じなくなった**
-  //   （valid 行は causal 自己参照で必ず非空・空行 ⊂ pad 行）。② の空行ガードは防御として残るが、
-  //   もう検出器を持てない — 「空行 / pad 行 → 厳密 0」（ADR 0067 決定 6 / ADR 0066 追記 6）を
-  //   守っているのはこの分岐なので、故障注入の相手をそちらへ移した。
+  // ③ Remove ③PV's zero write of pad rows (pad rows fall into the live scan and consume S / stats
+  //   that ①② do not cover).
+  //   NOTE: since phase D-7, ①② cover only the valid rows, so **empty rows no longer occur
+  //   structurally** (a valid row is never empty thanks to the causal self-reference; empty rows ⊂
+  //   pad rows). ②'s empty-row guard stays as a defense but can no longer have a detector — this
+  //   branch is what guards "empty row / pad row → exactly 0" (ADR 0067 decision 6 / ADR 0066
+  //   addendum 6), so the fault injection moved its target there.
   {
-    label: "③PV の pad 行 0 書きを削除",
+    label: "remove ③PV's zero write of pad rows",
     spec: PARITY_CASES[13],
     apply: replaceIn(["pv"], "    out[at] = 0.0;\n    return;\n", ""),
   },
-  // ④ GQA の kv 写像で r を無視する（head 対応が崩れる）
+  // ④ Ignore r in the GQA kv mapping (the head correspondence breaks)
   {
-    label: "kv 平面の写像で r を無視",
+    label: "ignore r in the kv-plane mapping",
     spec: PARITY_CASES[11],
     apply: replaceIn(["qk", "pv"], "z / params.kv_repeat", "z"),
   },
-  // ⑤ ①QK が述語外を書かない（S の残骸を ② が食う — live 範囲の全書きが要る根拠）
+  // ⑤ ①QK does not write outside the predicate (② consumes S's leftovers — the reason the whole
+  // live range must be written)
   {
-    label: "述語外の S を書かない",
+    label: "do not write S outside the predicate",
     spec: PARITY_CASES[9],
     apply: replaceIn(
       ["qk"],
@@ -847,16 +894,17 @@ const INJECTIONS: readonly Injection[] = [
       "  if (!in_window(col, past + row)) { return; }\n  s[(z * params.rows_block",
     ),
   },
-  // ⑥ 半スケールを片側だけにする（値が √ 倍ずれる — 契約の写し間違い）
+  // ⑥ Apply the half scale on one side only (the values are off by a factor of √ — a mistake in
+  // copying the contract)
   {
-    label: "半スケールを k 側だけにする",
+    label: "apply the half scale on the k side only",
     spec: PARITY_CASES[2],
     apply: replaceIn(["qk"], "(q[q_base + d] * params.scale)", "q[q_base + d]"),
   },
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "故障注入: 変異版はいずれも突合で赤くなる（門が実際に検出器であることの実証・実 GPU）",
+  "fault injection: every mutated version turns the comparison red (proof that the checks really detect, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -877,12 +925,14 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           report.pass,
           false,
-          `故障注入 '${injection.label}' が ${spec.name} で検出されなかった`,
+          `fault injection '${injection.label}' was not detected on ${spec.name}`,
         );
       }
-      // ⑦ `state_append` の ring 写像を落とす（書き側 — 往復のビット一致門が検出器）。
-      //    MUST: `P` は**容量**を跨がせる（`P ≥ C`）。法が容量になった今、`P < C` では恒等写像と
-      //    区別が付かず、変異が値に出ないまま門が緑になる。
+      // ⑦ Drop the ring mapping of `state_append` (the write side — the round trip's bit-identity
+      //    check is the detector).
+      //    MUST: make `P` cross the **capacity** (`P ≥ C`). Now that the modulus is the capacity,
+      //    with `P < C` the mapping is indistinguishable from the identity, the mutation never
+      //    shows in the values and the check stays green.
       const appendSpec = {
         kvPlanes: 2,
         chunkRows: 3,
@@ -903,7 +953,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         [...bitsOf(mutated)].every((value, at) => value === bitsOf(expected)[at]),
         false,
-        "故障注入 'append の ring 写像を落とす' が検出されなかった",
+        "fault injection 'drop the append ring mapping' was not detected",
       );
     } finally {
       gpu.destroy();
@@ -912,17 +962,18 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 非有限値の伝播（ADR 0020 の NaN 伝播契約が states 形でも成立していること）
+// Propagation of non-finite values (ADR 0020's NaN propagation contract holds for the states form
+// too)
 // ---------------------------------------------------------------------------
 
-/** `[B·H, M, D]` の平坦添字（q と out で共通）。 */
+/** The flat index into `[B·H, M, D]` (shared by q and out). */
 const rowBase = (spec: StateCase, plane: number, row: number): number =>
   (plane * spec.chunkRows + row) * spec.depth;
 
 /**
- * ins（`[B·Hkv, M, D]`）の**今 step の先頭行**を全 kv 平面で `value` にする。全平面へ置くのは、
- * GQA では出力平面 `z` が `z / r` の kv 平面しか読まないため（片方だけ汚すと、汚れていない
- * 平面まで「非有限になるはず」と主張することになる）。
+ * Sets **this step's first row** of ins (`[B·Hkv, M, D]`) to `value` on every kv plane. It goes on
+ * every plane because under GQA the output plane `z` reads only kv plane `z / r` (poisoning only
+ * one would claim "should become non-finite" even for planes that were not poisoned).
  */
 const poisonFirstInsRow = (
   spec: StateCase,
@@ -936,36 +987,38 @@ const poisonFirstInsRow = (
 };
 
 /**
- * ② が行 max に `nan_max`（ビット列 NaN 判定 — ADR 0020）を使うことの**唯一の実 GPU 門**。
+ * **The only real-GPU check** that ② uses `nan_max` (a bit-pattern NaN test — ADR 0020) for the
+ * row max.
  *
- * 素の `max` は仕様レベルで NaN を落とす（「e1 < e2 なら e2、さもなくば e1」）ので、全 NaN 行の
- * `amax` が identity の −inf に留まり、②が**空行と判定して stats (0,0) を書き**、③ が
- * 厳密 0 を出す。例外も NaN も出ないので、キー `attention_state_stats:v2` の存在理由
- * （src/kernels/state-attention.ts の MUST）が丸ごと沈黙で失われる。
+ * Plain `max` drops NaN at the spec level ("e2 if e1 < e2, otherwise e1"), so `amax` of an all-NaN
+ * row stays at the identity −inf, ② **judges it empty and writes stats (0,0)**, and ③ outputs
+ * exactly 0. There is neither an exception nor a NaN, so the whole reason the key
+ * `attention_state_stats:v2` exists (the MUST in src/kernels/state-attention.ts) would be lost
+ * silently.
  *
- * MUST: 恒真化しないこと。NaN を入れない対照 run で同じ行が**非 0 の有限値**になることを
- * 併せて見る（「その行はもともと 0」で緑になる形を塞ぐ）。
+ * MUST: do not let this become a tautology. Also check that the same row is a **non-zero finite
+ * value** in a control run without NaN (closes off passing because "that row was 0 anyway").
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形は全 NaN の q 行を NaN のまま出し、他の行へ漏らさない（②の nan_max・実 GPU）",
+  "the states form keeps an all-NaN q row NaN in the output without leaking into other rows (②'s nan_max, real GPU)",
   async () => {
-    const spec = PARITY_CASES[1]; // full r1 prefill B2（B2 H4 M6 D8 C32 P0 Q6・pad 行なし）
+    const spec = PARITY_CASES[1]; // full r1 prefill B2 (B2 H4 M6 D8 C32 P0 Q6, no pad rows)
     const plane = 1;
     const row = 2;
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
-      // 対照（NaN なし）— 同じ行が非 0 の有限値であることが門の前提
+      // Control (no NaN) — the check presupposes that the same row is a non-zero finite value
       const clean = makeInputs(spec);
       const control = await runStateAttention(gpu.device, spec, clean, { cache });
       const at = rowBase(spec, plane, row);
       assert(
         [...control.out.slice(at, at + spec.depth)].every(Number.isFinite),
-        "対照 run の対象行が有限でない",
+        "the target row of the control run is not finite",
       );
       assert(
         [...control.out.slice(at, at + spec.depth)].some((value) => value !== 0),
-        "対照 run の対象行が全て 0（NaN 門が恒真になる）",
+        "the target row of the control run is all 0 (the NaN check would be a tautology)",
       );
 
       for (const pvReduce of ["sequential", "parallel"] as const) {
@@ -973,22 +1026,23 @@ test.skipIf(!GPU_AVAILABLE)(
         for (let d = 0; d < spec.depth; d += 1) inputs.q[at + d] = Number.NaN;
         const actual = await runStateAttention(gpu.device, spec, inputs, { cache, pvReduce });
         const where = `③ ${pvReduce}`;
-        // ① NaN を入れた (z, row) の D 成分は全て NaN
+        // ① every D component of the (z, row) given NaN is NaN
         for (let d = 0; d < spec.depth; d += 1) {
           assert(
             Number.isNaN(actual.out[at + d]),
-            `${where}: NaN 行の出力 [${d}] が ${actual.out[at + d]}（NaN が保存されていない）`,
+            `${where}: output [${d}] of the NaN row is ${actual.out[at + d]} (NaN was not preserved)`,
           );
         }
-        // ③ 厳密 0 へ化けていない（素の max へ戻すとここが 0 になる）
+        // ③ it has not turned into exactly 0 (going back to plain max makes this 0)
         for (let d = 0; d < spec.depth; d += 1) {
           assertEquals(
             Object.is(actual.out[at + d], 0),
             false,
-            `${where}: NaN 行の出力 [${d}] が厳密 0（空行判定へ化けている）`,
+            `${where}: output [${d}] of the NaN row is exactly 0 (it turned into an empty-row verdict)`,
           );
         }
-        // ② 他の行・他の z は有限のまま（states 形は行ごとに独立な統計を持つ）
+        // ② other rows and other z stay finite (the states form keeps independent statistics per
+        // row)
         for (let p = 0; p < spec.batch * spec.heads; p += 1) {
           for (let r = 0; r < spec.chunkRows; r += 1) {
             if (p === plane && r === row) continue;
@@ -996,7 +1050,7 @@ test.skipIf(!GPU_AVAILABLE)(
             for (let d = 0; d < spec.depth; d += 1) {
               assert(
                 Number.isFinite(actual.out[other + d]),
-                `${where}: 平面 ${p} 行 ${r} の出力へ NaN が漏れた`,
+                `${where}: NaN leaked into the output of plane ${p} row ${r}`,
               );
             }
           }
@@ -1009,18 +1063,20 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * ③PV の pad 行 0 書きが **0·NaN の穴も閉じている**こと（src/kernels/state-attention.ts の
- * 「値が契約上無意味」を 0 で固定する分岐）。非有限な V が混ざっても、pad 行は live を 1 度も
- * 走査しないので厳密 0 のまま — 走査してから 0 を掛ける実装だと `0 · ±Inf = NaN` になる。
+ * ③PV's zero write of pad rows **also closes the 0·NaN hole** (the branch in
+ * src/kernels/state-attention.ts that pins "values meaningless by contract" to 0). Even with
+ * non-finite V mixed in, pad rows never scan live, so they stay exactly 0 — an implementation that
+ * scans first and multiplies by 0 afterwards gets `0 · ±Inf = NaN`.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形は非有限な V を有効行だけへ伝え、pad 行 / 空行は厳密 0 のまま（実 GPU）",
+  "the states form propagates non-finite V only to valid rows, and pad rows / empty rows stay exactly 0 (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
-      // ② +Infinity（pad 行を持つ形）— ins の**今 step の先頭行**を全 kv 平面で非有限にする
-      const padSpec = PARITY_CASES[2]; // full r2 pad B2 D6（M6 Q3 P5）
+      // ② +Infinity (a shape with pad rows) — make **this step's first row** of ins non-finite on
+      // every kv plane
+      const padSpec = PARITY_CASES[2]; // full r2 pad B2 D6 (M6 Q3 P5)
       const padInputs = makeInputs(padSpec);
       poisonFirstInsRow(padSpec, padInputs.insV, Number.POSITIVE_INFINITY);
       const padOut = await runStateAttention(gpu.device, padSpec, padInputs, { cache });
@@ -1029,7 +1085,7 @@ test.skipIf(!GPU_AVAILABLE)(
           const at = rowBase(padSpec, plane, r);
           assert(
             [...padOut.out.slice(at, at + padSpec.depth)].some((value) => !Number.isFinite(value)),
-            `+Inf: 平面 ${plane} 有効行 ${r} が有限のまま（V が読まれていない）`,
+            `+Inf: plane ${plane} valid row ${r} stays finite (V was not read)`,
           );
         }
       }
@@ -1038,23 +1094,24 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             Object.is(padOut.out[row * padSpec.depth + d], 0),
             true,
-            `+Inf: pad 行 ${row} の出力が厳密 0 でない（0·Inf の穴）`,
+            `+Inf: the output of pad row ${row} is not exactly 0 (the 0·Inf hole)`,
           );
         }
       }
 
-      // ③ −Infinity（空行が正規に出る形）— 空行 ⊂ pad 行なので同じ分岐が守る
-      const emptySpec = PARITY_CASES[13]; // sliding W2 empty rows（M4 Q1）
+      // ③ −Infinity (a shape where empty rows occur legitimately) — empty rows ⊂ pad rows, so the
+      // same branch guards them
+      const emptySpec = PARITY_CASES[13]; // sliding W2 empty rows (M4 Q1)
       const emptyInputs = makeInputs(emptySpec);
       poisonFirstInsRow(emptySpec, emptyInputs.insV, Number.NEGATIVE_INFINITY);
       const emptyOut = await runStateAttention(gpu.device, emptySpec, emptyInputs, { cache });
-      assert(emptyRows(emptySpec).length > 0, "空行が 1 本も無い（門が空振りしている）");
+      assert(emptyRows(emptySpec).length > 0, "no empty row at all (the check never fires)");
       for (const row of emptyRows(emptySpec)) {
         for (let d = 0; d < emptySpec.depth; d += 1) {
           assertEquals(
             Object.is(emptyOut.out[row * emptySpec.depth + d], 0),
             true,
-            `−Inf: 空行 ${row} の出力が厳密 0 でない`,
+            `−Inf: the output of empty row ${row} is not exactly 0`,
           );
         }
       }
@@ -1064,7 +1121,7 @@ test.skipIf(!GPU_AVAILABLE)(
           [...emptyOut.out.slice(at, at + emptySpec.depth)].some(
             (value) => !Number.isFinite(value),
           ),
-          `−Inf: 平面 ${plane} の有効行が有限のまま（V が読まれていない）`,
+          `−Inf: the valid row of plane ${plane} stays finite (V was not read)`,
         );
       }
     } finally {
@@ -1074,16 +1131,18 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * ② の**空行ガード**（`amax == -inf` の行は Σ ループを 1 度も回さない + stats (0,0) を書く）の
- * 検出器。波 D-7 以降 ①② が有効行だけを覆うので空行は構造的に生じない — そこで
- * **①QK の述語を常に偽へ落とす故障注入**で「全有効行が空行」の状態を作り、ガードを直接叩く。
+ * The detector for ②'s **empty-row guard** (a row with `amax == -inf` never runs the Σ loop +
+ * writes stats (0,0)). Since phase D-7, ①② cover only the valid rows, so empty rows do not occur
+ * structurally — so a **fault injection that forces ①QK's predicate to false** creates the state
+ * "every valid row is empty" and hits the guard directly.
  *
- * ガードが無いと `exp(-inf - (-inf))` = `exp(NaN)` = NaN が分母へ入り、行全体が NaN になる。
+ * Without the guard, `exp(-inf - (-inf))` = `exp(NaN)` = NaN enters the denominator and the whole
+ * row becomes NaN.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "①QK の述語を常に偽へ落としても ② の空行ガードで出力は厳密 0（NaN を出さない・実 GPU）",
+  "even with ①QK's predicate forced to false, ②'s empty-row guard keeps the output exactly 0 (no NaN, real GPU)",
   async () => {
-    const spec = PARITY_CASES[2]; // full r2 pad B2 D6（P5 Q3 M6）
+    const spec = PARITY_CASES[2]; // full r2 pad B2 D6 (P5 Q3 M6)
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
@@ -1092,26 +1151,31 @@ test.skipIf(!GPU_AVAILABLE)(
         cache,
         mutate: replaceIn(["qk"], "if (in_window(col, past + row)) {", "if (false) {"),
       });
-      // ① 全要素が厳密 0（空行 → (0,0) → exp(-inf - 0) · 0 = 0）
+      // ① every element is exactly 0 (empty row → (0,0) → exp(-inf - 0) · 0 = 0)
       const nonZero = [...injected.out].findIndex((value) => !Object.is(value, 0));
       assertEquals(
         nonZero,
         -1,
-        `空行ガード: 添字 ${nonZero} が厳密 0 でない（${injected.out[nonZero] ?? ""}）`,
+        `empty-row guard: index ${nonZero} is not exactly 0 (${injected.out[nonZero] ?? ""})`,
       );
-      // ② NaN が 1 つも無い（exp(-inf - (-inf)) 回避の直接の裏）
-      assertEquals(injected.out.some(Number.isNaN), false, "空行ガード: 出力に NaN が残っている");
-      // ③ 毒値も残っていない（③PV が全行を書いた = full-write は空行でも保たれる）
+      // ② not a single NaN (direct evidence that exp(-inf - (-inf)) is avoided)
+      assertEquals(
+        injected.out.some(Number.isNaN),
+        false,
+        "empty-row guard: NaN remains in the output",
+      );
+      // ③ no poison remains either (③PV wrote every row = full-write holds for empty rows too)
       assertEquals(
         injected.out.some((value) => value === STATE_S_POISON),
         false,
-        "空行ガード: 出力に毒値が残っている",
+        "empty-row guard: poison remains in the output",
       );
-      // 対照: 注入なしなら出力は非 0（この注入が「何でも 0 にする」形でないことの裏）
+      // Control: without the injection the output is non-zero (evidence that this injection is not
+      // a "make everything 0" kind)
       const control = await runStateAttention(gpu.device, spec, inputs, { cache });
       assert(
         [...control.out].some((value) => value !== 0),
-        "対照 run の出力が全て 0（注入の効果が見えない）",
+        "the control run's output is all 0 (the injection's effect cannot be seen)",
       );
     } finally {
       gpu.destroy();

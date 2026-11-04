@@ -1,9 +1,10 @@
 /**
- * 実 GPU テストの実行可否判定。
+ * Decides whether the real-GPU tests can run.
  *
- * アダプタが無い環境では `Deno.test({ ignore })` で**明示 SKIP** する（テスト自体を消して
- * 無音で緑にしない）。判定はテスト登録時点で必要なため、モジュール評価時に 1 回だけ行う。
- * `requestAdapter()` が例外を投げる環境は「壊れた環境」なので握り潰さず伝播させる。
+ * Without an adapter the tests are **explicitly SKIPped** with `Deno.test({ ignore })` (the tests
+ * are not removed to go green silently). The decision is needed when the tests are registered, so
+ * it runs once, at module evaluation. An environment where `requestAdapter()` throws is "a broken
+ * environment", so the exception propagates instead of being swallowed.
  */
 const detectAdapter = async (): Promise<boolean> => {
   const gpu: GPU | undefined = navigator.gpu;
@@ -16,11 +17,12 @@ const detectAdapter = async (): Promise<boolean> => {
 export const GPU_AVAILABLE: boolean = await detectAdapter();
 
 /**
- * f16 **計算**変種（ADR 0028）が使えるアダプタか。
+ * Whether the adapter can use the f16 **compute** variants (ADR 0028).
  *
- * MUST: 列挙は「使える候補」の判定でしかない — 実際に動くかどうかの門は `acquireGpu` の
- * 実走カナリアで、そちらが落ちれば列挙があってもテストは赤になる（denoland/deno#23125）。
- * 重み**格納** f16（ADR 0018）はこの feature を要らないので、格納側のテストは無条件に走る。
+ * MUST: the feature list only says "a candidate that may work" — the check that it actually works
+ * is the executing canary of `acquireGpu`, and when that fails the tests go red even with the
+ * feature listed (denoland/deno#23125). f16 weight **storage** (ADR 0018) does not need this
+ * feature, so the storage tests run unconditionally.
  */
 const detectShaderF16 = async (): Promise<boolean> => {
   const gpu: GPU | undefined = navigator.gpu;
@@ -32,15 +34,15 @@ const detectShaderF16 = async (): Promise<boolean> => {
 export const SHADER_F16_AVAILABLE: boolean = await detectShaderF16();
 
 /**
- * GPU 時間診断（ADR 0021）が使えるアダプタか。
+ * Whether the adapter can use the GPU timing diagnostics (ADR 0021).
  *
- * MUST: GPU 実時間（`lastRunTiming`）そのものを見るテストは `acquireGpu({gpuTiming: true})`
- * を明示的に渡し、列挙が無い環境ではこのフラグでケースごと SKIP する（`true` は feature
- * 不在で fail loudly する）。
- * MUST NOT: どのキーが何本走ったか（census）を見るために計測を要求する。census の源は計測に
- * 依らない `lastRunPipelines`（tests/helpers/pipeline-census.ts）で、計測を要求すると計測の
- * 無い機で SKIP になり、計測が device ごと落ちる機（Metal の query set 上限 —
- * docs/known-issues.md）で赤になる。
+ * MUST: a test that looks at the GPU time itself (`lastRunTiming`) passes
+ * `acquireGpu({gpuTiming: true})` explicitly, and where the feature is not listed this flag SKIPs
+ * the case (`true` fails loudly when the feature is absent).
+ * MUST NOT: request timing to see which keys ran how many times (the census). The census comes from
+ * `lastRunPipelines` (tests/helpers/pipeline-census.ts), which does not depend on timing;
+ * requesting timing would SKIP on machines without it and go red on machines where timing takes
+ * the device down (Metal's query set limit — docs/known-issues.md).
  */
 const detectTimestampQuery = async (): Promise<boolean> => {
   const gpu: GPU | undefined = navigator.gpu;
@@ -52,50 +54,53 @@ const detectTimestampQuery = async (): Promise<boolean> => {
 export const TIMESTAMP_QUERY_AVAILABLE: boolean = await detectTimestampQuery();
 
 /**
- * 「アダプタ無しでの全 SKIP」を明示的に許可する opt-out。
+ * Opt-out that explicitly allows "every case SKIPped without an adapter".
  *
- * MUST: 既定は fail loudly（ADR 0005「全ケース SKIP は明示 FAIL」）。GPU テストが全て消えても
- * 緑になる状態は、検証していないことを検証済みと誤読させる無音の見かけ成功そのもの。門番は
- * `tests/gpu_gate_test.ts` に置き、抜けるには意図表明としてこの環境変数を要求する。
+ * MUST: the default is fail loudly (ADR 0005 "all cases SKIPped is an explicit FAIL"). A state
+ * that stays green when every GPU test disappears is exactly the silent apparent success that
+ * makes unverified work read as verified. The guard lives in `tests/gpu_gate_test.ts`, and getting
+ * past it requires this environment variable as a statement of intent.
  */
 export const ALLOW_NO_GPU: boolean = process.env.KARUME_ALLOW_NO_GPU === "1";
 
 /**
- * 「`shader-f16` 不在での SKIP」を明示的に許可する opt-out（{@link ALLOW_NO_GPU} と同型）。
+ * Opt-out that explicitly allows "SKIP without `shader-f16`" (same shape as
+ * {@link ALLOW_NO_GPU}).
  *
- * MUST: 既定は fail loudly。この feature が無い機では f16 計算変種（ADR 0028）のケースが
- * 丸ごと消え、書き出しガードを 1 度も検証しないまま verify が緑になる。機を替えた瞬間に
- * 検証範囲が黙って縮むのを止めるのがこの門（門番は `tests/gpu_gate_test.ts`）。
+ * MUST: the default is fail loudly. On a machine without this feature the cases of the f16 compute
+ * variants (ADR 0028) disappear entirely, and verify goes green without ever checking the write-out
+ * guard. This check stops the verified scope from shrinking silently the moment the machine
+ * changes (the guard is `tests/gpu_gate_test.ts`).
  */
 export const ALLOW_NO_SHADER_F16: boolean = process.env.KARUME_ALLOW_NO_SHADER_F16 === "1";
 
 /**
- * 「`timestamp-query` 不在での SKIP」を明示的に許可する opt-out（同上）。
+ * Opt-out that explicitly allows "SKIP without `timestamp-query`" (same as above).
  *
- * この feature が無い機では GPU 時間診断（ADR 0021）のケースが消える（census は計測に
- * 依らないので残る）。
+ * On a machine without this feature the cases of the GPU timing diagnostics (ADR 0021) disappear
+ * (the census does not depend on timing, so it stays).
  */
 export const ALLOW_NO_TIMESTAMP_QUERY: boolean =
   process.env.KARUME_ALLOW_NO_TIMESTAMP_QUERY === "1";
 
 if (!GPU_AVAILABLE) {
   console.warn(
-    "[karume] GPUAdapter が無いため実 GPU テストを SKIP する（リリース判定は実 GPU 緑が必須）。" +
-      "GPU 無し環境で意図的に通すには KARUME_ALLOW_NO_GPU=1 を設定する",
+    "[karume] No GPUAdapter, so the real-GPU tests are SKIPped (a release requires them green on a real GPU). " +
+      "Set KARUME_ALLOW_NO_GPU=1 to pass on purpose in an environment without a GPU",
   );
 } else {
   if (!SHADER_F16_AVAILABLE) {
     console.warn(
-      "[karume] アダプタが 'shader-f16' を列挙しないため f16 計算変種（ADR 0028）の実 GPU " +
-        "テストを SKIP する。既定の f32 経路の検証には影響しない。" +
-        "この機で意図的に通すには KARUME_ALLOW_NO_SHADER_F16=1 を設定する",
+      "[karume] The adapter does not list 'shader-f16', so the real-GPU tests of the f16 compute variants (ADR 0028) " +
+        "are SKIPped. The checks of the default f32 path are unaffected. " +
+        "Set KARUME_ALLOW_NO_SHADER_F16=1 to pass on purpose on this machine",
     );
   }
   if (!TIMESTAMP_QUERY_AVAILABLE) {
     console.warn(
-      "[karume] アダプタが 'timestamp-query' を列挙しないため GPU 時間診断（ADR 0021）の " +
-        "実 GPU テストを SKIP する。数値の検証と census（キー別本数）には影響しない。" +
-        "この機で意図的に通すには KARUME_ALLOW_NO_TIMESTAMP_QUERY=1 を設定する",
+      "[karume] The adapter does not list 'timestamp-query', so the real-GPU tests of the GPU timing diagnostics (ADR 0021) " +
+        "are SKIPped. The numeric checks and the census (runs per key) are unaffected. " +
+        "Set KARUME_ALLOW_NO_TIMESTAMP_QUERY=1 to pass on purpose on this machine",
     );
   }
 }

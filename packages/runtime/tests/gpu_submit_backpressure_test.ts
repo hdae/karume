@@ -1,13 +1,16 @@
-// 送り込みの先行の上限（ADR 0123）の実 GPU の門。
+// Real-GPU checks of the in-flight submit bound (ADR 0123).
 //
-// 固定するのは ①長い run の値が変わらず、ステップの間で前の印から submit 64 回ごとに完了印が 1 本ずつ出る
-// こと ②run は上限を超えたらステップの間で印を待つこと（区間ロックを持ったまま）③enqueue は印を置かず待たない
-// こと — 非 await で続けた別 Session の enqueue が、常駐テンソル越しに前の enqueue の出力を読む形で呼び出し順を
-// 追い越さない（ADR 0123 決定 4）。
+// Pinned: ① a long run's values do not change, and between steps one completion marker appears
+// every 64 submits after the previous one; ② a run that exceeds the bound waits for a marker
+// between steps (holding the section lock); ③ an enqueue places no markers and does not wait — an
+// enqueue of another Session, issued next without await, that reads the previous enqueue's output
+// through a resident tensor does not overtake the call order (ADR 0123 decision 4).
 //
-// ③ が無いと、enqueue で待つ実装へ戻しても単独の enqueue の値は正しいまま緑になる。崩れるのは
-// 「待ちの間に別 Session の本体が走り、書かれる前の常駐テンソルを読む」形だけで、例外も警告も出ない。
-// enqueue に印を置く形は、Deno では batch の生成ループを遅くする（印が GPU の完了までホストを止める）。
+// Without ③, going back to an implementation that waits in enqueue stays green, since a single
+// enqueue's values are still correct. What breaks is only the shape where "another Session's body
+// runs during the wait and reads a resident tensor before it is written", with no exception and no
+// warning. Placing markers in enqueue slows a batch's generation loop on Deno (a marker stops the
+// host until the GPU completes).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -27,10 +30,10 @@ const COLS = 3;
 const COUNT = ROWS * COLS;
 const BYTES = COUNT * 4;
 
-/** 上限を超える（未完了の印が上限 + 1 本に届く）だけの add の段数。 */
+/** Enough add stages to exceed the bound (the pending markers reach the bound + 1). */
 const CHAIN = IN_FLIGHT_MARKER_INTERVAL * (IN_FLIGHT_MAX_MARKERS + 1) + 8;
 
-/** 1 dispatch = 1 submit（印の位置を dispatch の数から決められる形）。 */
+/** 1 dispatch = 1 submit (so the marker positions follow from the dispatch count). */
 const ONE_PER_SUBMIT: SubmitPolicy = {
   timeBudgetMs: 100,
   initialChunkSize: 1,
@@ -38,7 +41,7 @@ const ONE_PER_SUBMIT: SubmitPolicy = {
   maxChunkSize: 1,
 };
 
-/** y = x + x + … + x（add を {@link CHAIN} 段つなぐ）。 */
+/** y = x + x + … + x ({@link CHAIN} add stages in a chain). */
 const CHAIN_GRAPH: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -61,7 +64,7 @@ const CHAIN_GRAPH: DeclarationJson = {
   })),
 };
 
-/** w = z * z（{@link CHAIN_GRAPH} の出力を常駐テンソル経由で受ける）。 */
+/** w = z * z (receives the output of {@link CHAIN_GRAPH} through a resident tensor). */
 const SQUARE_GRAPH: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -74,14 +77,20 @@ const SQUARE_GRAPH: DeclarationJson = {
   nodes: [{ op: "mul", ins: ["z", "z"], outs: ["w"], attrs: {} }],
 };
 
-/** `phase` ごとに値が変わる入力（同じ値を配ると古い値を読んだことが検出できない）。 */
+/**
+ * An input whose values change with `phase` (with the same values, reading a stale value could
+ * not be detected).
+ */
 const input = (phase: number): Tensor => ({
   dtype: "f32",
   shape: [ROWS, COLS],
   data: Float32Array.from({ length: COUNT }, (_, i) => ((i + phase * 5) % 9) - 4),
 });
 
-/** 参照値（ノードごとに f32 へ丸めながら手計算する — 実装とは独立）。 */
+/**
+ * Reference values (computed by hand, rounding to f32 at every node — independent of the
+ * implementation).
+ */
 const expectedChain = (phase: number): Float32Array<ArrayBuffer> => {
   const x = input(phase).data;
   return Float32Array.from({ length: COUNT }, (_, i) => {
@@ -94,7 +103,10 @@ const expectedChain = (phase: number): Float32Array<ArrayBuffer> => {
 const expectedSquare = (phase: number): Float32Array<ArrayBuffer> =>
   Float32Array.from(expectedChain(phase), (value) => Math.fround(value * value));
 
-/** ビット列比較（丸めの取り違えを許容しない）。常駐テンソルの読み戻しは素の ArrayBuffer。 */
+/**
+ * Bit comparison (a rounding mix-up is not tolerated). A resident tensor reads back as a plain
+ * ArrayBuffer.
+ */
 const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
   Array.from(
     data instanceof ArrayBuffer
@@ -110,14 +122,14 @@ const session = async (
   await createSessionFromContainer(gpu, await openGraphModel(json), "model", { submitPolicy });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "長い run は値を変えず、ステップの間で前の印から submit 64 回ごとに完了印を 1 本置く（実 GPU）",
+  "a long run keeps its values and places one completion marker between steps every 64 submits after the previous one (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const chain = await session(gpu, CHAIN_GRAPH, ONE_PER_SUBMIT);
     const fences = countFences(gpu);
     try {
-      // 1 run 目は非 backed（アリーナ経路）、2 run 目は backing を作る run、3 run 目は保持済みの backing。
-      // どれもステップの間で待つ。
+      // The 1st run is unbacked (the arena path), the 2nd is the run that creates the backing, the
+      // 3rd uses the retained backing. All of them wait between steps.
       for (const phase of [0, 1, 2]) {
         const before = { fences: fences.count(), submits: chain.diagnostics().submit.submitCount };
         const outputs = await chain.run({ x: input(phase) });
@@ -125,15 +137,16 @@ test.skipIf(!GPU_AVAILABLE)(
         const submits = chain.diagnostics().submit.submitCount - before.submits;
         assert(
           submits > IN_FLIGHT_MARKER_INTERVAL * (IN_FLIGHT_MAX_MARKERS + 1),
-          `上限を超える長さの run になっていない（submit ${submits} 回 — 門が空振りする）`,
+          `the run is not long enough to exceed the bound (${submits} submits — the check would miss)`,
         );
-        // run のフェンスは mapAsync の 1 本（H-1）なので、onSubmittedWorkDone は完了印だけ（backing を作る
-        // 2 run 目だけは確保前の解放待ちの 1 本が加わる）。印はステップの間でだけ置くので、最後のステップの
-        // 後に積む読み戻しの写し（1 本 = 1 submit）は数えない。
+        // A run's fence is the one mapAsync (H-1), so onSubmittedWorkDone is only the completion
+        // markers (only the 2nd run, which creates the backing, adds one wait for releases before
+        // the allocation). Markers are placed only between steps, so the readback copy queued after
+        // the last step (1 copy = 1 submit) is not counted.
         assertEquals(
           fences.count() - before.fences,
           Math.floor((submits - 1) / IN_FLIGHT_MARKER_INTERVAL) + (phase === 1 ? 1 : 0),
-          `phase ${phase}: submit ${submits} 回に対する完了印の本数`,
+          `phase ${phase}: completion markers for ${submits} submits`,
         );
       }
     } finally {
@@ -145,7 +158,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "enqueue は待たない — 非 await で 2 周続けた別 Session の enqueue が常駐テンソル越しの順序を追い越さない（実 GPU）",
+  "enqueue does not wait — enqueues of another Session, issued for two rounds without await, do not overtake the order through a resident tensor (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const producer = await session(gpu, CHAIN_GRAPH, ONE_PER_SUBMIT);
@@ -154,17 +167,18 @@ test.skipIf(!GPU_AVAILABLE)(
     const sink = await gpu.createResident(BYTES, "sink");
     const later = await gpu.createResident(BYTES, "later");
     try {
-      // 1 batch 目は await で回して両 Session を導出済み計画 + backing にする（本体に await の無い
-      // 経路 — 本体は呼び出し順にマイクロタスクの内で走り切る）。
+      // The 1st batch runs with await to bring both Sessions to a derived plan + backing (the path
+      // whose body has no await — the bodies run to completion within microtasks in call order).
       const warm = await gpu.beginBatch();
       await producer.enqueue({ x: input(0) }, { batch: warm, copyOutputs: { y: carrier } });
       await consumer.enqueue({ z: carrier }, { batch: warm, copyOutputs: { w: sink } });
       await warm.finish();
-      assertEquals(bits(await sink.read()), bits(expectedSquare(0)), "1 batch 目");
+      assertEquals(bits(await sink.read()), bits(expectedSquare(0)), "1st batch");
 
-      // 2 batch 目は非 await で 2 周積む。producer が途中で待つと、その間に consumer の本体が走って先に
-      // submit し、前の carrier を読む。末尾で待つ形でも、2 周目の producer は同じ Session の直列化で
-      // 1 周目の待ちに止められ、2 周目の consumer だけが先に走る。
+      // The 2nd batch queues two rounds without await. If the producer waited midway, the
+      // consumer's body would run in the meantime, submit first and read the previous carrier. Even
+      // waiting at the end, the 2nd-round producer would be held by the 1st round's wait through
+      // the same Session's serialization, and only the 2nd-round consumer would run ahead.
       const batch = await gpu.beginBatch();
       await Promise.all([
         producer.enqueue({ x: input(1) }, { batch, copyOutputs: { y: carrier } }),
@@ -173,8 +187,8 @@ test.skipIf(!GPU_AVAILABLE)(
         consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: later } }),
       ]);
       await batch.finish();
-      assertEquals(bits(await sink.read()), bits(expectedSquare(1)), "2 batch 目の 1 周目");
-      assertEquals(bits(await later.read()), bits(expectedSquare(2)), "2 batch 目の 2 周目");
+      assertEquals(bits(await sink.read()), bits(expectedSquare(1)), "2nd batch, 1st round");
+      assertEquals(bits(await later.read()), bits(expectedSquare(2)), "2nd batch, 2nd round");
     } finally {
       await producer.dispose();
       await consumer.dispose();
@@ -187,13 +201,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * `onSubmittedWorkDone`（完了印とフェンス）の解決を手で止める。GPU の実行と `mapAsync` は止めない。
- * MUST: `release` を finally で必ず呼ぶ（開けて元の面へ戻す — 後始末の flush が固まる / 他のテストへ漏れる）。
+ * Holds the resolution of `onSubmittedWorkDone` (completion markers and fences) by hand. GPU
+ * execution and `mapAsync` are not held.
+ * MUST: always call `release` in finally (it opens the gate and restores the original surface —
+ * otherwise the cleanup flush hangs / it leaks into other tests).
  */
 const gateWorkDone = (
   gpu: GpuContext,
 ): {
-  /** 止めた `onSubmittedWorkDone` の呼び出しの回数（完了印とフェンス）。 */
+  /** The number of held `onSubmittedWorkDone` calls (completion markers and fences). */
   readonly calls: () => number;
   readonly open: () => void;
   readonly release: () => void;
@@ -224,7 +240,7 @@ const gateWorkDone = (
   };
 };
 
-/** 決着したかを外から読める形で Promise を見張る。 */
+/** Watches a Promise so whether it has settled can be read from outside. */
 const watch = <T>(
   promise: Promise<T>,
 ): { readonly settled: () => boolean; readonly done: Promise<T> } => {
@@ -236,40 +252,55 @@ const watch = <T>(
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "run は上限を超えたらステップの間で完了印を待ち、それまで決着せず区間ロックも離さない（実 GPU）",
+  "a run that exceeds the bound waits for a completion marker between steps, does not settle until then, and keeps the section lock (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const chain = await session(gpu, CHAIN_GRAPH, ONE_PER_SUBMIT);
     let gate: ReturnType<typeof gateWorkDone> | undefined;
     let entered: ReturnType<typeof watch<BatchScope>> | undefined;
     try {
-      // 導出済み計画 + backing にしておく（パイプラインの生成の待ちと、backing を作る run の確保前の
-      // 解放待ちを外す — backing はヒット run でしか作らないので 2 run 要る）。
+      // Bring it to a derived plan + backing (removing the wait for pipeline creation and the
+      // backing-creating run's wait for releases before the allocation — a backing is made only on
+      // a hit run, so two runs are needed).
       await chain.run({ x: input(0) });
       await chain.run({ x: input(0) });
 
       gate = gateWorkDone(gpu);
       const running = watch(chain.run({ x: input(1) }));
-      // run が上限を超える本数の印を置くまで進める（印は区間ロックの中で置かれる）。先に beginBatch を
-      // 呼ぶと、run の本体（マイクロタスクの先）より前に batch がロックを取ってしまう。
+      // Advance until the run has placed more markers than the bound (markers are placed inside the
+      // section lock). Calling beginBatch first would let the batch take the lock before the run's
+      // body (which is a microtask away).
       for (let tick = 0; tick < 200 && gate.calls() <= IN_FLIGHT_MAX_MARKERS; tick += 1) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
-      assert(gate.calls() > IN_FLIGHT_MAX_MARKERS, "run が上限を超える本数の完了印を置いていない");
-      // 待ちの間も run は errorScope 区間ロックを持ったまま — batch はロックを取れない（取れると、待ちの
-      // 間に別 Session の enqueue が同じ queue へ割り込む）。
+      assert(
+        gate.calls() > IN_FLIGHT_MAX_MARKERS,
+        "the run did not place more completion markers than the bound",
+      );
+      // During the wait the run still holds the errorScope section lock — the batch cannot take it
+      // (if it could, another Session's enqueue would cut into the same queue during the wait).
       entered = watch(gpu.beginBatch());
-      // run のフェンスは mapAsync（止めていない）なので、印を待たない run はこの間に決着する。
+      // A run's fence is mapAsync (not held), so a run that did not wait for markers would settle
+      // in this time.
       await new Promise((resolve) => setTimeout(resolve, 200));
-      assertEquals(running.settled(), false, "完了印が解けるまで run は決着しない");
-      assertEquals(entered.settled(), false, "待ちの間は batch が区間ロックを取れない");
+      assertEquals(
+        running.settled(),
+        false,
+        "the run does not settle until the completion marker resolves",
+      );
+      assertEquals(
+        entered.settled(),
+        false,
+        "during the wait the batch cannot take the section lock",
+      );
 
       gate.open();
       const outputs = await running.done;
       assertEquals(bits(outputs["y"].data), bits(expectedChain(1)));
     } finally {
       gate?.release();
-      // batch を閉じてから Session を畳む（batch が区間ロックを持ったままだと dispose が固まる）。
+      // Close the batch before disposing the Session (dispose hangs while the batch holds the
+      // section lock).
       if (entered !== undefined) await (await entered.done).finish();
       await chain.dispose();
       gpu.destroy();
@@ -278,15 +309,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "enqueue は完了印を置かず待たない — 上限を超える長さでも onSubmittedWorkDone を呼ばずに決着する（実 GPU）",
+  "enqueue places no completion marker and does not wait — even beyond the bound it settles without calling onSubmittedWorkDone (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const producer = await session(gpu, CHAIN_GRAPH, ONE_PER_SUBMIT);
     const carrier = await gpu.createResident(BYTES, "carrier");
     let gate: ReturnType<typeof gateWorkDone> | undefined;
     try {
-      // 導出済み計画 + backing にしておく（本体に await の無い経路 — 待たなければ本体は
-      // マイクロタスクの内に決着する）。
+      // Bring it to a derived plan + backing (the path whose body has no await — without waits the
+      // body settles within microtasks).
       const warm = await gpu.beginBatch();
       await producer.enqueue({ x: input(0) }, { batch: warm, copyOutputs: { y: carrier } });
       await warm.finish();
@@ -297,8 +328,12 @@ test.skipIf(!GPU_AVAILABLE)(
         producer.enqueue({ x: input(1) }, { batch, copyOutputs: { y: carrier } }),
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
-      assertEquals(enqueued.settled(), true, "上限を超える長さでも enqueue は印を待たない");
-      assertEquals(gate.calls(), 0, "enqueue は完了印を置かない");
+      assertEquals(
+        enqueued.settled(),
+        true,
+        "even beyond the bound, enqueue does not wait for markers",
+      );
+      assertEquals(gate.calls(), 0, "enqueue places no completion markers");
 
       gate.open();
       await enqueued.done;

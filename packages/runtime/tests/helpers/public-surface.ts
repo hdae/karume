@@ -1,20 +1,24 @@
-// 公開面のスナップショット門の実体（ADR [0008](../../../../docs/decisions/0008-public-api.md)
-// 追記 2026-09-20）。3 パッケージの `tests/public_surface_test.ts` が共通で使う。
+// Implementation of the public-surface snapshot check (ADR
+// [0008](../../../../docs/decisions/0008-public-api.md) addendum 2026-09-20). Shared by the
+// `tests/public_surface_test.ts` of the 3 packages.
 //
-// 名指しの門（`packages/models/tests/models_barrel_surface_test.ts`）との役割分担:
+// Division of roles with the by-name check (`packages/models/tests/models_barrel_surface_test.ts`):
 //
-// - **名指し = 意図の宣言** — 「この綴りは出す / この綴りは出さない」を人が書く。書いていない
-//   綴りは素通りする（リストに無い export が増えても減っても緑）。
-// - **スナップショット = 増減の検出**（ここ）— 何が正しいかは言わず、前回との差だけを見る。
-//   型 export も含めて採るので、値では観測できない面（`export type` だけの再輸出）も縛れる。
+// - **By name = a declaration of intent** — a person writes "this spelling is exported / this one
+//   is not". Spellings not written pass through (green whether exports missing from the list are
+//   added or removed).
+// - **Snapshot = detecting additions and removals** (this file) — it does not say what is right,
+//   it only looks at the difference from last time. Type exports are collected too, so it also
+//   pins surface that values cannot observe (re-exports that are only `export type`).
 //
-// 採り方は TypeScript 7 の同期 API（`typescript/unstable/sync`）で entry の module symbol の
-// exports を引く。`package.json` の `exports` が entry の真実源で、面が 1 つ増えれば走査も
-// 自動で増える（門の側に面の一覧を二重に持たない）。kind の語彙は以前の採り方（`deno doc`）の
-// 語彙を引き継ぐ（fixture をそのまま読むため — 分類規則は `kindsOf` に書く）。
+// Collection uses the synchronous API of TypeScript 7 (`typescript/unstable/sync`) to read the
+// exports of each entry's module symbol. The `exports` of `package.json` is the source of truth for
+// entries, so one more surface automatically means one more scan (the check keeps no second list of
+// surfaces). The kind vocabulary carries over the vocabulary of the earlier collector (`deno doc`)
+// (so the fixture is read as is — the classification rules are in `kindsOf`).
 //
-// MUST: 読めない形は推測せず throw する — 「採れなかった」を「面が空」と読み替えると、この門は
-// 面が丸ごと消えたことを緑で隠す。
+// MUST: a shape that cannot be read throws instead of being guessed — reading "could not collect"
+// as "the surface is empty" would let this check hide, in green, a surface that disappeared whole.
 
 import { fileURLToPath } from "node:url";
 import { assert } from "@std/assert";
@@ -34,25 +38,30 @@ import {
   SymbolFlags,
 } from "typescript/unstable/sync";
 
-/** fixture の形式版。形を変えるときは上げて、読み手（`parseSnapshot`）も直す。 */
+/**
+ * Format version of the fixture. Bump it when the shape changes, and fix the reader
+ * (`parseSnapshot`) too.
+ */
 const SCHEMA = 1;
 
-/** スナップショットの書き直しを指示する環境変数（未設定 = 比較 / `"write"` = 書き直し）。 */
+/**
+ * Environment variable that requests a snapshot rewrite (unset = compare / `"write"` = rewrite).
+ */
 const MODE_ENV = "KARUME_SURFACE";
 
-/** 面が食い違ったときに読み手へ渡す手順。 */
-const HOW_TO_UPDATE = `意図した変更なら ${MODE_ENV}=write で同じテストを回してスナップショットを更新し、差分を CHANGELOG に書くこと。`;
+/** The procedure handed to the reader when the surface differs. */
+const HOW_TO_UPDATE = `If the change is intended, run the same test with ${MODE_ENV}=write to update the snapshot, and write the difference into the CHANGELOG.`;
 
 /**
- * 公開シンボル 1 つ。`kind` は `deno doc` の語彙（`class` / `function` / `typeAlias` /
- * `variable` / `interface` / `enum` / `namespace`）— fixture はこの語彙で書かれている。
+ * One public symbol. `kind` uses the vocabulary of `deno doc` (`class` / `function` / `typeAlias` /
+ * `variable` / `interface` / `enum` / `namespace`) — the fixture is written in this vocabulary.
  */
 export type PublicSymbol = {
   readonly name: string;
   readonly kind: string;
 };
 
-/** fixture の形。`entries` のキーは `package.json` の `exports` の綴り。 */
+/** Shape of the fixture. The keys of `entries` are the spellings of `exports` in `package.json`. */
 type SurfaceSnapshot = {
   readonly schema: number;
   readonly entries: Readonly<Record<string, readonly PublicSymbol[]>>;
@@ -62,56 +71,62 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const record = (value: unknown, what: string): Record<string, unknown> => {
-  if (!isRecord(value)) throw new Error(`公開面の門: ${what} がオブジェクトでない`);
+  if (!isRecord(value)) throw new Error(`public-surface check: ${what} is not an object`);
   return value;
 };
 
 const text = (value: unknown, what: string): string => {
-  if (typeof value !== "string") throw new Error(`公開面の門: ${what} が文字列でない`);
+  if (typeof value !== "string") throw new Error(`public-surface check: ${what} is not a string`);
   return value;
 };
 
 const list = (value: unknown, what: string): readonly unknown[] => {
-  if (!Array.isArray(value)) throw new Error(`公開面の門: ${what} が配列でない`);
+  if (!Array.isArray(value)) throw new Error(`public-surface check: ${what} is not an array`);
   return value;
 };
 
-/** ロケール非依存の辞書順（fixture の並びを実行環境で揺らさない）。 */
+/**
+ * Locale-independent lexicographic order (so the fixture's order does not vary with the
+ * environment).
+ */
 const compare = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 const bySymbol = (left: PublicSymbol, right: PublicSymbol): number =>
   left.name === right.name ? compare(left.kind, right.kind) : compare(left.name, right.name);
 
 /**
- * 集合演算に使う「キー → シンボル」の索引。キーは `name` と `kind` の対を畳んだもので、区切りの
- * `::` は TS の識別子にも kind の語彙にも現れない。キーは**読み戻さない** —— 差分の表示は
- * 索引が持つシンボルそのものから組む。
+ * "Key → symbol" index for the set operations. A key folds the pair of `name` and `kind`, and the
+ * delimiter `::` appears neither in TS identifiers nor in the kind vocabulary. Keys are **never
+ * parsed back** — the difference is displayed from the symbols the index holds.
  */
 const index = (symbols: readonly PublicSymbol[]): ReadonlyMap<string, PublicSymbol> =>
   new Map(symbols.map((symbol) => [`${symbol.name}::${symbol.kind}`, symbol]));
 
-/** 差分の 1 行。 */
+/** One line of the difference. */
 const labelOf = (symbol: PublicSymbol): string => `${symbol.name} (${symbol.kind})`;
 
 /**
- * `package.json` の `exports` を「entry の綴り → パッケージ根からの相対パス」へ正規化する。
+ * Normalizes the `exports` of `package.json` to "entry spelling → path relative to the package
+ * root".
  *
- * 今の 3 パッケージはどれもマップ形で、値は文字列 1 本。文字列 1 本の形（`"exports": "./mod.ts"`）
- * はキーを持たないので、マップ形の既定面と同じ `"."` を綴りとして与える（fixture のキーを 2 つの
- * 形で割らない）。条件付き exports（値がオブジェクト）は読まずに throw する — どの条件の entry を
- * 面と見なすかはこの門では決めない。
+ * All 3 packages use the map form today, each value a single string. The single-string form
+ * (`"exports": "./mod.ts"`) has no key, so it gets `"."` as its spelling, the same as the default
+ * entry of the map form (so the fixture keys are not split between two forms). Conditional exports
+ * (an object value) throw unread — which condition's entry counts as the surface is not for this
+ * check to decide.
  */
 const exportEntries = (exports: unknown): ReadonlyMap<string, string> => {
   if (typeof exports === "string") return new Map([[".", exports]]);
   const entries = new Map<string, string>();
-  for (const [spec, target] of Object.entries(record(exports, "package.json の exports"))) {
+  for (const [spec, target] of Object.entries(record(exports, "exports of package.json"))) {
     entries.set(spec, text(target, `exports["${spec}"]`));
   }
-  if (entries.size === 0) throw new Error("公開面の門: package.json の exports が空である");
+  if (entries.size === 0)
+    throw new Error("public-surface check: the exports of package.json are empty");
   return entries;
 };
 
-/** symbol の flags → kind。1 つの symbol が複数を併せ持つ（宣言の併合）なら kind も複数出す。 */
+/** Symbol flags → kind. A symbol that has several (declaration merging) yields several kinds. */
 const KIND_BY_FLAG: readonly (readonly [SymbolFlags, string])[] = [
   [SymbolFlags.Class, "class"],
   [SymbolFlags.Function, "function"],
@@ -123,15 +138,18 @@ const KIND_BY_FLAG: readonly (readonly [SymbolFlags, string])[] = [
 ];
 
 /**
- * 変数宣言 1 つの kind。`deno doc` は初期化子が**直に** arrow 関数 / function 式なら
- * `function`、class 式なら `class` と数え、それ以外（括弧・`as`・`satisfies` で包んだ形を
- * 含む）は `variable` と数える（deno 2 系の `deno doc --json` で実測 2026-10-16）。fixture は
- * その語彙で書かれているので同じ規則で分ける。
+ * Kind of one variable declaration. `deno doc` counts it as `function` when the initializer is
+ * **directly** an arrow function / function expression, `class` for a class expression, and
+ * `variable` otherwise (including forms wrapped in parentheses, `as` or `satisfies`) (measured with
+ * `deno doc --json` of deno 2.x, 2026-10-16). The fixture is written in that vocabulary, so the
+ * same rule applies here.
  */
 const variableKind = (declaration: TsSymbol["declarations"][number], name: string): string => {
   const node = declaration.resolve();
   if (node === undefined || !isVariableDeclaration(node)) {
-    throw new Error(`公開面の門: ${name} の変数宣言を AST へ解決できない`);
+    throw new Error(
+      `public-surface check: cannot resolve the variable declaration of ${name} to the AST`,
+    );
   }
   const initializer = node.initializer;
   if (initializer === undefined) return "variable";
@@ -141,9 +159,9 @@ const variableKind = (declaration: TsSymbol["declarations"][number], name: strin
 };
 
 /**
- * export された symbol（別名なら解決済みの実体）1 つの kind の一覧。overload は flags が 1 つ
- * なので 1 件に畳まれる。型だけの再輸出（`export type { X }`）も実体の kind で数える
- * （`deno doc` も区別しなかった）。
+ * List of kinds of one exported symbol (for an alias, the resolved target). Overloads have one set
+ * of flags, so they fold into one entry. Type-only re-exports (`export type { X }`) are counted by
+ * the target's kind too (`deno doc` did not distinguish them either).
  */
 const kindsOf = (symbol: TsSymbol, name: string): readonly string[] => {
   const kinds: string[] = [];
@@ -158,42 +176,49 @@ const kindsOf = (symbol: TsSymbol, name: string): readonly string[] => {
       kinds.push(variableKind(declaration, name));
     }
   }
-  // 語彙に無い形（ここまで来るのは想定外）を「面に無い」と読み替えない。
+  // A shape outside the vocabulary (reaching here is unexpected) is not read as "not on the
+  // surface".
   if (kinds.length === 0) {
-    throw new Error(`公開面の門: ${name} の kind を決められない（flags: ${symbol.flags}）`);
+    throw new Error(
+      `public-surface check: cannot determine the kind of ${name} (flags: ${symbol.flags})`,
+    );
   }
   return kinds;
 };
 
-/** entry 1 つが export するシンボルを型検査器から採る。 */
+/** Collects the symbols one entry exports, from the type checker. */
 const readSurface = (checker: Checker, program: Program, entry: string): PublicSymbol[] => {
   const sourceFile = program.getSourceFile(entry);
   if (sourceFile === undefined) {
-    throw new Error(`公開面の門: ${entry} が tsconfig.json の program に入っていない`);
+    throw new Error(`public-surface check: ${entry} is not in the program of tsconfig.json`);
   }
   const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
   if (moduleSymbol === undefined) {
-    throw new Error(`公開面の門: ${entry} の module symbol が無い（module として読めない）`);
+    throw new Error(
+      `public-surface check: ${entry} has no module symbol (cannot be read as a module)`,
+    );
   }
   const collected: PublicSymbol[] = [];
   for (const exported of checker.getExportsOfModule(moduleSymbol)) {
-    // 名前は export 側の綴り（`export { a as b }` は `b`）、kind は別名を辿った実体から採る。
+    // The name is the export-side spelling (`b` for `export { a as b }`); the kind comes from the
+    // target the alias resolves to.
     const name = exported.name;
     const target =
       (exported.flags & SymbolFlags.Alias) === 0 ? exported : checker.getAliasedSymbol(exported);
     if (checker.isUnknownSymbol(target)) {
-      throw new Error(`公開面の門: ${entry} の ${name} の別名を解決できない`);
+      throw new Error(`public-surface check: ${entry}: cannot resolve the alias ${name}`);
     }
     for (const kind of kindsOf(target, name)) collected.push({ name, kind });
   }
-  // 同じ kind が重なる形（同名の変数宣言が複数）は索引に入れる過程で 1 つへ畳まれる。
+  // Duplicates of the same kind (several variable declarations of one name) fold into one when
+  // indexed.
   return [...index(collected).values()].sort(bySymbol);
 };
 
 /**
- * パッケージの全 entry の公開面を採る。tsgo のプロセスを 1 つ起こし、ワークスペース根の
- * `tsconfig.json` の program 上で読む（`@karume/*` の指定子をワークスペース内の実体へ
- * 解決させるため）。
+ * Collects the public surface of every entry of a package. Starts one tsgo process and reads on the
+ * program of the workspace root's `tsconfig.json` (so `@karume/*` specifiers resolve to the
+ * workspace's own sources).
  */
 const collectSurfaces = (
   entries: ReadonlyMap<string, string>,
@@ -205,7 +230,7 @@ const collectSurfaces = (
     const configFile = fileURLToPath(new URL("tsconfig.json", workspaceRoot));
     const project = api.updateSnapshot({ openProjects: [configFile] }).getProject(configFile);
     if (project === undefined) {
-      throw new Error(`公開面の門: ${configFile} の project を開けない`);
+      throw new Error(`public-surface check: cannot open the project of ${configFile}`);
     }
     const actual = new Map<string, readonly PublicSymbol[]>();
     for (const [spec, target] of entries) {
@@ -218,53 +243,53 @@ const collectSurfaces = (
   }
 };
 
-/** fixture を読み、形を検査して返す。 */
+/** Reads the fixture, checks its shape and returns it. */
 const parseSnapshot = (source: string, file: URL): SurfaceSnapshot => {
-  const parsed = record(JSON.parse(source), `${file.href} の中身`);
+  const parsed = record(JSON.parse(source), `contents of ${file.href}`);
   if (parsed.schema !== SCHEMA) {
     throw new Error(
-      `公開面の門: スナップショットの schema が ${SCHEMA} でない（${String(parsed.schema)}）`,
+      `public-surface check: the snapshot schema is not ${SCHEMA} (${String(parsed.schema)})`,
     );
   }
   const entries: Record<string, readonly PublicSymbol[]> = {};
-  for (const [spec, value] of Object.entries(
-    record(parsed.entries, "スナップショットの entries"),
-  )) {
+  for (const [spec, value] of Object.entries(record(parsed.entries, "entries of the snapshot"))) {
     entries[spec] = list(value, `entries["${spec}"]`).map((item) => {
-      const symbol = record(item, `entries["${spec}"] の要素`);
+      const symbol = record(item, `element of entries["${spec}"]`);
       return {
-        name: text(symbol.name, `entries["${spec}"] の name`),
-        kind: text(symbol.kind, `entries["${spec}"] の kind`),
+        name: text(symbol.name, `name of entries["${spec}"]`),
+        kind: text(symbol.kind, `kind of entries["${spec}"]`),
       };
     });
   }
   return { schema: SCHEMA, entries };
 };
 
-/** fixture の書き出し形（2 スペース・entry の綴り順・末尾改行）。 */
+/** Output form of the fixture (2 spaces, entries in spelling order, trailing newline). */
 const serialize = (entries: ReadonlyMap<string, readonly PublicSymbol[]>): string => {
   const ordered: Record<string, readonly PublicSymbol[]> = {};
-  // entry の綴りで並べる（`package.json` の並べ替えが fixture の差分に化けないようにする）。
+  // Order by entry spelling (so reordering `package.json` does not show up as a fixture diff).
   for (const spec of [...entries.keys()].sort(compare)) ordered[spec] = entries.get(spec) ?? [];
   return `${JSON.stringify({ schema: SCHEMA, entries: ordered }, null, 2)}\n`;
 };
 
 /**
- * パッケージ 1 つの公開面をスナップショットと突き合わせる（`KARUME_SURFACE=write` なら書き直す）。
+ * Compares the public surface of one package with the snapshot (rewrites it with
+ * `KARUME_SURFACE=write`).
  *
- * @param packageRoot パッケージ根（`package.json` の置き場）。fixture は
- *   `<packageRoot>/tests/fixtures/public-surface.json`。
+ * @param packageRoot The package root (where `package.json` lives). The fixture is
+ *   `<packageRoot>/tests/fixtures/public-surface.json`.
  */
 export const assertPublicSurface = async (packageRoot: URL): Promise<void> => {
   const mode = process.env[MODE_ENV];
   if (mode !== undefined && mode !== "write") {
-    throw new Error(`公開面の門: ${MODE_ENV} が受けるのは未設定か "write" だけである（${mode}）`);
+    throw new Error(`public-surface check: ${MODE_ENV} accepts only unset or "write" (${mode})`);
   }
   const config = record(
     JSON.parse(await readTextFile(new URL("package.json", packageRoot))),
     `${packageRoot.href}package.json`,
   );
-  // `packages/<pkg>/` の 2 つ上がワークスペース根（root `tsconfig.json` の置き場）。
+  // Two levels above `packages/<pkg>/` is the workspace root (where the root `tsconfig.json`
+  // lives).
   const workspaceRoot = new URL("../../", packageRoot);
   const actual = collectSurfaces(exportEntries(config.exports), packageRoot, workspaceRoot);
 
@@ -277,13 +302,14 @@ export const assertPublicSurface = async (packageRoot: URL): Promise<void> => {
   const expected = parseSnapshot(await readTextFile(snapshotFile), snapshotFile).entries;
   const specs = [...new Set([...Object.keys(expected), ...actual.keys()])].sort(compare);
   const diff: string[] = [];
-  // 面（entry）そのものの増減は symbol 差分と**独立に**出す。両側の不在は下の `?? []` で
-  // 空配列へ畳まれるので、シンボルを 1 つも出さない面（`export {}` だけのモジュール）の
-  // 追加も削除も symbol 差分には一度も現れない。
+  // Additions and removals of a surface (entry) itself are reported **independently** of the symbol
+  // diff. Absence on either side folds into an empty array via the `?? []` below, so adding or
+  // removing a surface that exports no symbol (a module with only `export {}`) never shows up in
+  // the symbol diff.
   for (const spec of specs) {
     const present = actual.has(spec);
     if (present === Object.hasOwn(expected, spec)) continue;
-    diff.push(`  ${present ? "+" : "-"} 公開面 ${spec}`);
+    diff.push(`  ${present ? "+" : "-"} surface ${spec}`);
   }
   for (const spec of specs) {
     const before = index(expected[spec] ?? []);
@@ -297,7 +323,7 @@ export const assertPublicSurface = async (packageRoot: URL): Promise<void> => {
   }
   assert(
     diff.length === 0,
-    `公開面がスナップショットと食い違う（+ = 増えた / - = 消えた）:\n${diff.join("\n")}\n` +
-      `スナップショット: ${snapshotFile.href}\n${HOW_TO_UPDATE}`,
+    `the public surface differs from the snapshot (+ = added / - = removed):\n${diff.join("\n")}\n` +
+      `snapshot: ${snapshotFile.href}\n${HOW_TO_UPDATE}`,
   );
 };

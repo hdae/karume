@@ -1,5 +1,6 @@
-// census 共通ヘルパ（tests/helpers/pipeline-census.ts）の純関数としての振る舞い。GPU は使わない —
-// 行は偽物で、述語の相手は src の key 関数が返す実物のキー。
+// The behavior of the shared census helpers (tests/helpers/pipeline-census.ts) as pure functions.
+// No GPU — the rows are fakes, and the predicates are matched against the real keys returned by
+// src's key functions.
 
 import { assertEquals, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -70,8 +71,9 @@ const rows = (...entries: readonly (readonly [string, number])[]): readonly Cens
   entries.map(([key, dispatchCount]) => ({ key, dispatchCount }));
 
 /**
- * 各席 × 非参照値の代表キー（src の key 関数が返す実物）。述語がこれに当たらなければ、
- * その席の census は実機で 1 本も数えない（恒真の赤か、見落としの緑になる）。
+ * Representative keys per option × non-reference value (the real ones returned by src's key
+ * functions). If a predicate does not match these, that option's census counts nothing on a real
+ * machine (a tautological red, or a green that misses something).
  */
 const REPRESENTATIVES: {
   readonly [Seat in NumericSeat]: {
@@ -153,7 +155,10 @@ const REPRESENTATIVES: {
   },
 };
 
-/** 参照経路（全席が省略値）で走るキー。どの席の述語にも当たってはならない。 */
+/**
+ * Keys run by the reference path (every option at its default). They must match no option's
+ * predicate.
+ */
 const REFERENCE_KEYS: readonly string[] = [
   linearKey("f32", true),
   linearKey("i8", true, "f32", 1),
@@ -176,43 +181,46 @@ const REFERENCE_KEYS: readonly string[] = [
   QUANTIZE_ROWS_KEY,
 ];
 
-/** 型の網羅は上の 2 表が持つので、走査は席名・値名を文字列で扱う。 */
+/**
+ * Type exhaustiveness is held by the two tables above, so the traversal handles option and value
+ * names as strings.
+ */
 const signatures: Readonly<Record<string, Readonly<Record<string, KeyPredicate>>>> =
   SEAT_SIGNATURES;
 const representatives: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> =
   REPRESENTATIVES;
 
-/** 網羅表を (席, 値, 述語) の平たい列に。 */
+/** The coverage table flattened into (option, value, predicate). */
 const signatureEntries = (): readonly (readonly [string, string, KeyPredicate])[] =>
   Object.entries(signatures).flatMap(([seat, variants]) =>
     Object.entries(variants).map(([value, predicate]) => [seat, value, predicate] as const),
   );
 
 describe("SEAT_SIGNATURES", () => {
-  it("各席 × 非参照値の述語は、その変種の代表キー全てに当たる", () => {
+  it("each option × non-reference value predicate matches every representative key of that variant", () => {
     for (const [seat, value, predicate] of signatureEntries()) {
       const keys = representatives[seat]?.[value] ?? [];
-      assertEquals(keys.length > 0, true, `${seat}=${value}: 代表キーが無い`);
+      assertEquals(keys.length > 0, true, `${seat}=${value}: no representative keys`);
       for (const key of keys) {
-        assertEquals(predicate(key), true, `${seat}=${value} が '${key}' に当たらない`);
+        assertEquals(predicate(key), true, `${seat}=${value} does not match '${key}'`);
       }
     }
   });
 
-  it("どの述語も参照経路のキーには当たらない（参照値の席で 0 本を断言できる前提）", () => {
+  it("no predicate matches the reference path's keys (the premise for asserting zero for a reference-value option)", () => {
     for (const [seat, value, predicate] of signatureEntries()) {
       for (const key of REFERENCE_KEYS) {
-        assertEquals(predicate(key), false, `${seat}=${value} が参照キー '${key}' に当たる`);
+        assertEquals(predicate(key), false, `${seat}=${value} matches the reference key '${key}'`);
       }
     }
   });
 
-  it("同じ席の非参照値どうしは互いの代表キーに当たらない（値ごとの census が混ざらない）", () => {
+  it("non-reference values of the same option do not match each other's representative keys (per-value censuses do not mix)", () => {
     for (const [seat, value, predicate] of signatureEntries()) {
       for (const [other, keys] of Object.entries(representatives[seat] ?? {})) {
         if (other === value) continue;
         for (const key of keys) {
-          assertEquals(predicate(key), false, `${seat}=${value} が ${other} の '${key}' に当たる`);
+          assertEquals(predicate(key), false, `${seat}=${value} matches ${other}'s '${key}'`);
         }
       }
     }
@@ -220,25 +228,25 @@ describe("SEAT_SIGNATURES", () => {
 });
 
 describe("requireCensus", () => {
-  it("undefined（直近 run が無い / 失敗）は fail loudly", () => {
+  it("undefined (no latest run / it failed) fails loudly", () => {
     assertThrows(() => requireCensus(undefined, "where"), Error, "lastRunPipelines");
   });
 
-  it("空の表は fail loudly（0 本の断言を恒真にしない）", () => {
-    assertThrows(() => requireCensus([], "where"), Error, "census が空");
+  it("an empty table fails loudly (an assertion of zero is not made tautological)", () => {
+    assertThrows(() => requireCensus([], "where"), Error, "the census is empty");
   });
 
-  it("行があればそのまま返す", () => {
+  it("returns the rows as is when there are any", () => {
     const census = rows(["a", 1]);
     assertEquals(requireCensus(census, "where"), census);
   });
 });
 
 describe("countDispatches", () => {
-  it("文字列は完全一致・述語は当たった行の本数を合計する", () => {
+  it("a string is an exact match, and a predicate sums the counts of the rows it matches", () => {
     const census = rows(["linear:a", 3], ["linear:b", 2], ["relu", 5]);
     assertEquals(countDispatches(census, "linear:a"), 3);
-    assertEquals(countDispatches(census, "linear"), 0, "前方一致ではない");
+    assertEquals(countDispatches(census, "linear"), 0, "not a prefix match");
     assertEquals(
       countDispatches(census, (key) => key.startsWith("linear:")),
       5,
@@ -247,53 +255,53 @@ describe("countDispatches", () => {
 });
 
 describe("mergeCensus", () => {
-  it("run を跨いでキー別に本数を足し、辞書順に並べる", () => {
+  it("sums counts per key across runs and orders them lexicographically", () => {
     assertEquals(
       mergeCensus([rows(["b", 1], ["a", 2]), rows(["a", 3], ["c", 1])], "where"),
       rows(["a", 5], ["b", 1], ["c", 1]),
     );
   });
 
-  it("census の無い run が混ざれば fail loudly（その run の変種を黙って落とさない）", () => {
-    assertThrows(() => mergeCensus([rows(["a", 1]), undefined], "where"), Error, "1 本目");
+  it("fails loudly if a run without a census is mixed in (that run's variants are not silently dropped)", () => {
+    assertThrows(() => mergeCensus([rows(["a", 1]), undefined], "where"), Error, "run 1 has no");
   });
 });
 
 describe("assertPipelineCensus", () => {
   const census = rows(["linear:a", 3], ["relu", 1]);
 
-  it("本数ちょうど・下限の両方を満たせば通る", () => {
+  it("passes when both the exact count and the lower bound hold", () => {
     assertPipelineCensus(
       census,
       [
         { label: "linear:a", match: "linear:a", count: 3 },
-        { label: "relu 以上", match: "relu", atLeast: 1 },
-        { label: "無いキー", match: "gelu", count: 0 },
+        { label: "relu or more", match: "relu", atLeast: 1 },
+        { label: "missing key", match: "gelu", count: 0 },
       ],
       "where",
     );
   });
 
-  it("本数ちょうどが外れれば落ちる", () => {
+  it("fails when the exact count is off", () => {
     assertThrows(
       () => assertPipelineCensus(census, [{ label: "L", match: "linear:a", count: 2 }], "where"),
       Error,
-      "L が 3 本（期待 2 本）",
+      "L ran 3 times (expected 2)",
     );
   });
 
-  it("下限を割れば落ちる", () => {
+  it("fails below the lower bound", () => {
     assertThrows(
       () => assertPipelineCensus(census, [{ label: "R", match: "relu", atLeast: 2 }], "where"),
       Error,
-      "R が 1 本（期待 2 本以上）",
+      "R ran 1 times (expected at least 2)",
     );
   });
 
-  it("行が undefined / 空なら期待が 0 本だけでも落ちる", () => {
+  it("undefined / empty rows fail even when only zero is expected", () => {
     const zero = [{ label: "Z", match: "x", count: 0 }] as const;
     assertThrows(() => assertPipelineCensus(undefined, zero, "where"), Error, "lastRunPipelines");
-    assertThrows(() => assertPipelineCensus([], zero, "where"), Error, "census が空");
+    assertThrows(() => assertPipelineCensus([], zero, "where"), Error, "the census is empty");
   });
 });
 
@@ -301,7 +309,7 @@ describe("assertSeatsApplied", () => {
   const parallel = linearGemvParallelKey("i4", 32, 4);
   const sequential = linearGemvKey("i4", 32);
 
-  it("非参照値の席は、その変種が 1 本以上あれば通る", () => {
+  it("an option with a non-reference value passes if at least one dispatch of that variant ran", () => {
     assertSeatsApplied(
       rows([parallel, 7], [RMS_NORM_KEY, 2]),
       {
@@ -311,15 +319,15 @@ describe("assertSeatsApplied", () => {
     );
   });
 
-  it("非参照値の席で変種が 1 本も無ければ落ちる（沈黙縮退の検出）", () => {
+  it("an option with a non-reference value fails if no dispatch of the variant ran (detects silent fallback)", () => {
     assertThrows(
       () => assertSeatsApplied(rows([sequential, 7]), { linearGemvReduce: "parallel" }, "where"),
       Error,
-      'linearGemvReduce="parallel" の変種が 1 本も走っていない',
+      'no dispatch of the linearGemvReduce="parallel" variant ran',
     );
   });
 
-  it("参照値を明示した席で変種が走っていれば落ちる（席が漏れた形）", () => {
+  it("an option explicitly set to its reference value fails if a variant ran (the option leaked)", () => {
     assertThrows(
       () =>
         assertSeatsApplied(
@@ -328,11 +336,11 @@ describe("assertSeatsApplied", () => {
           "where",
         ),
       Error,
-      "fuseRmsNormAdd は参照値 false なのに true の変種が走った",
+      "fuseRmsNormAdd is the reference value false yet the true variant ran",
     );
   });
 
-  it("参照値を明示した席は、どの非参照値の変種も無ければ通る", () => {
+  it("an option explicitly set to its reference value passes if no non-reference variant ran", () => {
     assertSeatsApplied(
       rows([sequential, 3], [RMS_NORM_KEY, 1]),
       {
@@ -344,7 +352,7 @@ describe("assertSeatsApplied", () => {
     );
   });
 
-  it("参照値の席は非参照値のどれか 1 つでも走れば落ちる（subgroup32 も parallel 族の変種）", () => {
+  it("a reference-value option fails if any one non-reference variant ran (subgroup32 is also a variant of the parallel family)", () => {
     assertThrows(
       () =>
         assertSeatsApplied(
@@ -353,29 +361,31 @@ describe("assertSeatsApplied", () => {
           "where",
         ),
       Error,
-      "parallel-subgroup32 の変種が走った",
+      "the parallel-subgroup32 variant ran",
     );
   });
 
-  it("渡していない席は検査しない（省略時の実効値は呼び手が決める）", () => {
+  it("options not passed are not checked (the caller decides the effective value when omitted)", () => {
     assertSeatsApplied(rows([parallel, 1]), { fuseRmsNormAdd: false }, "where");
   });
 
-  it("数値を変えない欄だけの指定でも census が空なら落ちる", () => {
+  it("fails on an empty census even when only fields that do not change numerics are given", () => {
     assertThrows(
       () => assertSeatsApplied([], { planBackingBudgetBytes: 0 }, "where"),
       Error,
-      "census が空",
+      "the census is empty",
     );
   });
 });
 
 /**
- * 融合 attention の完全適格の検査（tests/helpers/pipeline-census.ts の `assertAttentionSeatsComplete`）を、
- * 合成した census の行で固定する（GPU 不要）。キーは src の key 関数から組む — 実行が出すキーと同じ綴りで
- * 検査が当たることの裏取りで、文字列を二重に持たない。
+ * Pins the full-eligibility check of fused attention (`assertAttentionSeatsComplete` in
+ * tests/helpers/pipeline-census.ts) with synthetic census rows (no GPU needed). The keys are built
+ * from src's key functions — confirming that the check matches the same spelling execution emits,
+ * without keeping the strings twice.
  *
- * 故障注入の役: 宣言どおりの census に縮退した dispatch を 1 本混ぜると赤になる（恒真の検査でないこと）。
+ * Role of the fault injection: mixing one fallen-back dispatch into a census as declared turns it
+ * red (the check is not tautological).
  */
 
 const LAYERS = 30;
@@ -384,8 +394,9 @@ const A8_S16: SessionOptions = { attentionCompute: "a8", attentionScoreStorage: 
 const DEVICE: AttentionDeviceFacts = { subgroups: true, maxComputeWorkgroupStorageSize: 49152 };
 
 /**
- * 融合 attention 1 ノード × 行ブロック `blocks` 枚の census の行（①②③ が各 `blocks` 本）。経路は
- * `attentionRoute` の戻りをそのまま使う — 実行（buildAttention）と同じ判定から行を作る。
+ * Census rows for one fused-attention node × `blocks` row blocks (`blocks` each of ①②③). The path
+ * uses `attentionRoute`'s return value as is — the rows come from the same decision as execution
+ * (buildAttention).
  * `cols` (N) picks the online kernel's key-axis form, as execution does (`…:kpad` at N % 4 != 0).
  */
 const attentionRows = (
@@ -423,8 +434,9 @@ const attentionRows = (
 };
 
 /**
- * a8 + s16 の席で、D = 128 の self（キー長 `selfCols`・行ブロック `blocks` 枚）と cross（N = 512・1 枚）を
- * transformer 30 層ぶん回した census（linear の i8a8 も混ぜる — 族の外の行を数えないことの確認）。
+ * A census of 30 transformer layers with the a8 + s16 options, D = 128 self (key length `selfCols`,
+ * `blocks` row blocks) and cross (N = 512, 1 block) (linear i8a8 is mixed in too — confirming rows
+ * outside the families are not counted).
  */
 const ditCensus = (
   selfCols: number,
@@ -436,7 +448,7 @@ const ditCensus = (
     ...attentionRows(attentionRoute(seats, selfDepth, selfCols, DEVICE), blocks, selfCols),
     ...attentionRows(attentionRoute(seats, 128, 512, DEVICE), 1, 512),
   ];
-  // 族ごとに束ねる（実物の census と同じく、同じキーは 1 行に畳まれる）。
+  // Grouped per family (as in a real census, identical keys fold into one row).
   const counts = new Map<string, number>();
   for (const { key, dispatchCount } of nodeRows) {
     counts.set(key, (counts.get(key) ?? 0) + dispatchCount * LAYERS);
@@ -447,75 +459,76 @@ const ditCensus = (
   ];
 };
 
-describe("assertAttentionSeatsComplete: 宣言どおりの census", () => {
-  it("self / cross とも適格な形（N = 4096 / 512）は、行ブロックの枚数に依らず緑", () => {
+describe("assertAttentionSeatsComplete: a census as declared", () => {
+  it("shapes eligible for both self / cross (N = 4096 / 512) are green regardless of the row block count", () => {
     for (const blocks of [1, 3]) {
-      assertAttentionSeatsComplete(ditCensus(4096, blocks), A8_S16, `${blocks} 枚`);
+      assertAttentionSeatsComplete(ditCensus(4096, blocks), A8_S16, `${blocks} blocks`);
     }
   });
 
-  it("a8 / s16 を宣言しない席は、dense の attention があっても見ない", () => {
+  it("options that do not declare a8 / s16 are not checked even with dense attention", () => {
     const census = attentionRows(
       attentionRoute({ attentionCompute: "f32", attentionScoreStorage: "f32" }, 128, 1089, DEVICE),
       1,
       1089,
     );
-    assertAttentionSeatsComplete(census, {}, "席なし");
-    assertAttentionSeatsComplete(census, { attentionCompute: "f32" }, "参照値");
+    assertAttentionSeatsComplete(census, {}, "no options");
+    assertAttentionSeatsComplete(census, { attentionCompute: "f32" }, "reference value");
   });
 
-  it("a8 だけの席は S の格納を見ない（f32 格納の i8a8 で緑）", () => {
+  it("an a8-only option does not look at S's storage (green with i8a8 on f32 storage)", () => {
     const census = attentionRows(
       attentionRoute({ attentionCompute: "a8", attentionScoreStorage: "f32" }, 128, 4096, DEVICE),
       2,
       4096,
     );
-    assertAttentionSeatsComplete(census, { attentionCompute: "a8" }, "a8 だけ");
+    assertAttentionSeatsComplete(census, { attentionCompute: "a8" }, "a8 only");
   });
 });
 
-describe("assertAttentionSeatsComplete: 縮退を含む census（故障注入）", () => {
-  it("dense の attention_pv:v1:f32 を 1 本混ぜると、③PV 族の i8a8 の欠けで赤", () => {
+describe("assertAttentionSeatsComplete: censuses with fallbacks (fault injection)", () => {
+  it("mixing in one dense attention_pv:v1:f32 turns red on missing i8a8 in the ③PV family", () => {
     const census: CensusRow[] = [
       ...ditCensus(4096, 1),
       { key: attentionPvKey(true, "f32", "f16"), dispatchCount: 1 },
     ];
     assertThrows(
-      () => assertAttentionSeatsComplete(census, A8_S16, "混入"),
+      () => assertAttentionSeatsComplete(census, A8_S16, "mixed in"),
       Error,
-      'attentionCompute="a8" の attention_pv が',
+      'attentionCompute="a8": of the attention_pv dispatches',
     );
   });
 
-  it("②行統計の :s16 が 1 本欠けると、s16 の欠けで赤（a8 は満たしたまま）", () => {
+  it("one missing :s16 in ② row statistics turns red on missing s16 (a8 still satisfied)", () => {
     const census: CensusRow[] = [
       ...ditCensus(4096, 1),
       { key: attentionStatsKey("f32", "f32", 16), dispatchCount: 1 },
     ];
     assertThrows(
-      () => assertAttentionSeatsComplete(census, A8_S16, "s16 の欠け"),
+      () => assertAttentionSeatsComplete(census, A8_S16, "missing s16"),
       Error,
-      'attentionScoreStorage="f16" の attention_stats が',
+      'attentionScoreStorage="f16": of the attention_stats dispatches',
     );
   });
 
-  it("self が N % 4 != 0（N = 1089 — Anima の 528×528）の census は赤、assertSeatsApplied は緑のまま", () => {
+  it("a census where self has N % 4 != 0 (N = 1089 — Anima's 528×528) is red while assertSeatsApplied stays green", () => {
     const census = ditCensus(1089, 1);
-    // 「1 本以上」の検査は cross の i8a8 / s16 だけで満たされる — これが今回塞ぐ穴。
-    assertSeatsApplied(census, A8_S16, "1 本以上");
+    // The "at least one" check is satisfied by cross's i8a8 / s16 alone — this is the hole being
+    // closed here.
+    assertSeatsApplied(census, A8_S16, "at least one");
     assertThrows(
-      () => assertAttentionSeatsComplete(census, A8_S16, "self の縮退"),
+      () => assertAttentionSeatsComplete(census, A8_S16, "self falls back"),
       Error,
-      "f32 へ縮退",
+      "fell back to f32",
     );
   });
 
-  it("融合 attention が 1 本も無い census は、宣言した族の欠落として赤（0 == 0 で緑にしない）", () => {
+  it("a census with no fused attention at all is red as missing declared families (no green from 0 == 0)", () => {
     const census: CensusRow[] = [{ key: linearI8a8Key(true, true), dispatchCount: 4 }];
     assertThrows(
-      () => assertAttentionSeatsComplete(census, A8_S16, "attention なし"),
+      () => assertAttentionSeatsComplete(census, A8_S16, "no attention"),
       Error,
-      "1 本も無い",
+      "was declared but there is no",
     );
   });
 });

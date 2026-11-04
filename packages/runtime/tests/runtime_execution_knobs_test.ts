@@ -1,6 +1,7 @@
-// 実行形ノブの受理集合検査（{@link assertExecutionKnobs}）の門 — GPU に触れない純関数なので、
-// アダプタ無し環境でも回帰を撃てる位置に置く。`createSessionFromContainer` 経由の GPU テストは「実構築でも
-// 拒否される」1 本だけを残し、値の総当たりはここが正本。
+// The check of the execution-knob accepted-set test ({@link assertExecutionKnobs}) — a pure
+// function that touches no GPU, so it sits where regressions can be caught even without an adapter.
+// Of the GPU tests through `createSessionFromContainer`, only one is kept ("it is also rejected in
+// a real build"); the exhaustive sweep of values lives here.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -8,12 +9,15 @@ import { assertExecutionKnobs } from "../src/runtime/session-options-check.ts";
 import { ExecutionError } from "../src/runtime/plan.ts";
 
 /**
- * **型の外から来る呼び手**（JS の消費者・改名前の綴りを残した古いビルド）を再現する。TS の型は
- * この経路を 1 つも守らないので、受理集合の検査はここでしか撃てない。
+ * Reproduces **callers from outside the types** (JS consumers, old builds that kept a pre-rename
+ * spelling). TS types guard none of this path, so the accepted-set check can only be exercised
+ * here.
  */
 const jsCallerAssert = assertExecutionKnobs as unknown as (...knobs: readonly unknown[]) => void;
 
-/** 受理集合の中の綴り（この並びが {@link assertExecutionKnobs} の引数順）。 */
+/**
+ * Spellings inside the accepted set (this order is {@link assertExecutionKnobs}'s argument order).
+ */
 const VALID: readonly [string, string, string, string, string, string] = [
   "f32",
   "f32",
@@ -31,15 +35,16 @@ const NAMES: readonly [string, string, string, string, string, string] = [
   "linearGemvReduce",
 ];
 
-test("受理集合の中の綴りは 6 ノブとも通る（下が「何を渡しても落ちる」ではない証明）", () => {
+test("spellings inside the accepted set pass for all 6 knobs (proof that the tests below are not 'fails whatever is passed')", () => {
   assertExecutionKnobs("f32", "a8", "f32", "f32", "parallel-fused", "parallel");
 });
 
-test("実行形ノブの非文字列は受理集合を引く前に落ち、診断で利用者の変換を呼ばない", () => {
+test("non-string execution knobs fail before the accepted set is looked up, and the diagnostic does not call the caller's conversions", () => {
   for (const [index, name] of NAMES.entries()) {
     let conversions = 0;
-    // 受理集合の中の綴りへ**変換できる**オブジェクト。`Object.hasOwn` のキー変換や診断の
-    // 文字列化が走れば通ってしまうので、呼ばれた回数そのものを検査する。
+    // An object that **can convert** to a spelling inside the accepted set. If `Object.hasOwn`'s
+    // key conversion or the diagnostic's stringification ran, it would pass, so the call count
+    // itself is checked.
     const object = {
       [Symbol.toPrimitive](): string {
         conversions++;
@@ -47,23 +52,25 @@ test("実行形ノブの非文字列は受理集合を引く前に落ち、診�
       },
       toJSON(): string {
         conversions++;
-        throw new Error("診断で利用者の変換を呼ばない");
+        throw new Error("the diagnostic does not call the caller's conversions");
       },
     };
     for (const value of [[VALID[index]], object, false, 0, 1n, Symbol(VALID[index])]) {
       const knobs: unknown[] = [...VALID];
       knobs[index] = value;
       const error = assertThrows(() => jsCallerAssert(...knobs), ExecutionError, name);
-      // 型名だけを出す（利用者の `toString` の戻り値を載せない）。
+      // Only the type name is reported (the return value of the caller's `toString` is not
+      // included).
       assertEquals(error.message.includes(`${name}: ${typeof value}`), true, error.message);
       assertEquals(error.message.includes("outside the accepted set: 1"), true, error.message);
     }
-    assertEquals(conversions, 0, `${name}: 利用者の変換が呼ばれた`);
+    assertEquals(conversions, 0, `${name}: the caller's conversion was called`);
   }
 });
 
-test("union 外の綴りは全件列挙して 1 回で落ちる", () => {
-  // `"i8a8"` は 0.5.0 で `"a8"` へ改名した綴り（ADR 0074 決定 3・互換シム無し）。
+test("spellings outside the union are all listed and fail at once", () => {
+  // `"i8a8"` is the spelling renamed to `"a8"` in 0.5.0 (ADR 0074 decision 3, no compatibility
+  // shim).
   const error = assertThrows(
     () => jsCallerAssert("i8a8", "f32", "f32", "s16", "parallel-fused", "parallel"),
     ExecutionError,

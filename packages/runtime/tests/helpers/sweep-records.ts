@@ -1,8 +1,10 @@
-// 掃引の記録（`karume-geometry-sweep/2`）の合成 fixture — 生成器（src/tune/derive.ts）のテストが共有する。
+// Synthetic fixture of sweep records (`karume-geometry-sweep/2`) — shared by the tests of the
+// generator (src/tune/derive.ts).
 //
-// runtime の生成器のテスト（tune_profile_test.ts・tune_profile_test.ts）と、道具の生成物の描画・CLI の
-// テスト（tools/geometry-sweep/profile_test.ts・render_test.ts — 道具は tests/helpers を掴んでよい:
-// ADR 0008 追記 2026-09-05）が同じ記録から表を作る。GPU を使わない。
+// The runtime's generator tests (tune_profile_test.ts, tune_profile_test.ts) and the tests of the
+// tool's output rendering and CLI (tools/geometry-sweep/profile_test.ts, render_test.ts — tools may
+// reach into tests/helpers: ADR 0008 addendum 2026-09-05) build tables from the same records. No
+// GPU.
 
 import { defaultGemmGeometry, type GemmGeometry } from "../../src/kernels/gemm-geometry.ts";
 import type { I8a8Geometry } from "../../src/kernels/i8a8-geometry.ts";
@@ -11,15 +13,15 @@ import { gemmCandidate } from "../../src/tune/geometries.ts";
 import { parseSweepReport, type SlotVerdict, type SweepSource } from "../../src/tune/derive.ts";
 import { REPORT_FORMAT } from "../../src/tune/report.ts";
 
-// --- 規則の抽出のテスト（tune_profile_test.ts）の記録: ケースと候補を行で組む ---
+// --- Records of the rule-extraction tests (tune_profile_test.ts): cases and candidates as rows ---
 
 export const BIG = defaultGemmGeometry();
 export const A: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 export const B: GemmGeometry = { regM: 8, regN: 4, wgX: 16, wgY: 8 };
-/** 既定の表の ≤ 64 の段の幾何（A は 65〜512・BIG は > 512 の段の幾何）。 */
+/** Geometry of the ≤ 64 bucket of the default table (A is the 65〜512 bucket, BIG the > 512 one). */
 export const SMALL: GemmGeometry = { regM: 1, regN: 4, wgX: 4, wgY: 16 };
 
-/** 7 段の欄名（生成器の綴りの期待値 — 手で書いたもの）。 */
+/** Field names of the 7 buckets (expected spelling of the generator — written by hand). */
 export const ROWS_SLOT_NAMES = [
   "gemmRows ≤ 16",
   "gemmRows 17〜32",
@@ -38,14 +40,16 @@ export const linearCase = (m: number): CaseRef => ({
   shape: `M${m} N64 K64`,
 });
 
-/** matmul の shape は linear と同じ綴り（cases.ts の caseShape）。 */
+/** The matmul shape is spelled like linear (caseShape in cases.ts). */
 export const matmulCase = (m: number): CaseRef => ({
   caseId: `matmul-m${m}`,
   op: "matmul",
   shape: `M${m} N64 K64`,
 });
 
-/** bmm の shape はバッチを前に置く（cases.ts の caseShape — バケットは行列 1 枚の M）。 */
+/**
+ * The bmm shape puts the batch first (caseShape in cases.ts — the bucket is the M of one matrix).
+ */
 export const bmmCase = (batch: number, m: number): CaseRef => ({
   caseId: `bmm-b${batch}-m${m}`,
   op: "bmm",
@@ -56,12 +60,15 @@ export type Measured = {
   readonly speedup?: number;
   readonly identical?: boolean;
   readonly error?: string;
-  /** 計測 round ごとの pass の時間（丸め誤差の上界の材料 — 省くと行に載せない）。 */
+  /**
+   * Pass time per measurement round (input to the rounding-error upper bound — omitted from the row
+   * if left out).
+   */
   readonly rounds?: readonly number[];
   readonly reps?: number;
 };
 
-/** 掃引の 1 行（`report.ts` の `SweepRow` のうち生成が読む欄 + 数欄）。 */
+/** One sweep row (the fields of `SweepRow` in `report.ts` the generator reads + a few more). */
 export const row = (
   ref: CaseRef,
   candidate: { readonly name: string; readonly geometry: GemmGeometry | I8a8Geometry },
@@ -81,7 +88,10 @@ export const row = (
   ...(measured.reps === undefined ? {} : { reps: measured.reps }),
 });
 
-/** ケース 1 本ぶんの行（既定 + 候補ごとの測定・既定の行の rounds などは `defaultMeasured`）。 */
+/**
+ * The rows of one case (default + a measurement per candidate; the default row's rounds and the
+ * like come from `defaultMeasured`).
+ */
 export const caseRows = (
   ref: CaseRef,
   defaultGeometry: GemmGeometry,
@@ -101,7 +111,10 @@ export const ADAPTER = {
   description: "Test GPU",
 };
 
-/** ケースごとの既定の再測定（`cases[]`）。既定は全ケースで比 1（材料から外さない）。 */
+/**
+ * Re-measurement of the default per case (`cases[]`). By default every case has ratio 1 (not
+ * excluded from the input).
+ */
 export type Repeats = Readonly<Record<string, Record<string, unknown>>>;
 
 export const report = (
@@ -133,23 +146,26 @@ export const verdictOf = (
   slot: SlotVerdict["slot"],
 ): SlotVerdict => {
   const found = verdicts.find((verdict) => verdict.slot === slot);
-  if (found === undefined) throw new Error(`${slot} が無い`);
+  if (found === undefined) throw new Error(`${slot} is missing`);
   return found;
 };
 
 export const rejectionOf = (verdict: SlotVerdict, geometry: GemmGeometry): string => {
   const name = gemmCandidate(geometry).name;
   const found = verdict.rejected.find((entry) => entry.name === name);
-  if (found === undefined) throw new Error(`${name} が退けた一覧に無い`);
+  if (found === undefined) throw new Error(`${name} is not in the rejected list`);
   return found.reason;
 };
 
-// --- 注入の表のテスト（tune_profile_test.ts）の記録: linear 1 ケース・2 本の掃引 ---
+// --- Records for the injection-table tests (tune_profile_test.ts): one linear case, two sweeps ---
 
 export const DEFAULT = defaultGemmGeometry();
 export const FAST: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 
-/** linear M = 1024 の 1 ケース（既定と、既定より 1.2 倍速く出力の一致する幾何 1 つ）。 */
+/**
+ * One linear M = 1024 case (the default, and one geometry 1.2× faster than the default with
+ * matching output).
+ */
 export const sweep = (name: string, sha256: string): SweepSource =>
   parseSweepReport(
     {

@@ -1,8 +1,9 @@
-// GPU 時間診断（timestamp-query・op 別内訳 — ADR 0021）の検証。
+// Checks of the GPU timing diagnostics (timestamp-query, per-op breakdown — ADR 0021).
 //
-// 「計測が結果を変えない」ことと「内訳が実行そのものと一致する」ことを、実行済みの他の統計
-// （SubmitStats.dispatchCount / pipelineCount）との**相互検算**で固定する。内訳だけを単体で
-// 見ると、集計が空でも 0 件でも緑になってしまう（計測が黙って死んでいる形が素通りする）。
+// "Timing does not change the results" and "the breakdown matches the execution itself" are pinned
+// by **cross-checking** against the other statistics of the run (SubmitStats.dispatchCount /
+// pipelineCount). Looking at the breakdown alone would be green with an empty or zero-entry
+// aggregate (a silently dead measurement would slip through).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertGreater, assertThrows } from "@std/assert";
@@ -17,8 +18,8 @@ import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE, TIMESTAMP_QUERY_AVAILABLE } from "./helpers/gpu.ts";
 
 /**
- * y = relu(x·w + b) + b。**add を 2 回**通すのは、集計がキー単位でまとまること
- * （dispatch 4 件 → 内訳 3 キー）を、件数の一致だけで確かめられるようにするため。
+ * y = relu(x·w + b) + b. **add runs twice** so that the aggregation by key (4 dispatches → 3 keys
+ * in the breakdown) can be confirmed by the counts alone.
  */
 const GRAPH: DeclarationJson = {
   format: "karume-ir",
@@ -47,21 +48,24 @@ const GRAPH: DeclarationJson = {
 const W = [0.5, -1, 0.25, 2, 0.125, -0.5, -3, 1.5, 0.75, 1, -0.25, 0.5];
 const B = [1, -2, 0.5];
 
-/** グラフが実際に踏むパイプラインキー（executor と同じ生成関数から引く）。 */
+/** The pipeline keys the graph actually hits (taken from the same builders as the executor). */
 const expectedKeys = (profile: GeometryProfile): ReadonlySet<string> =>
   new Set([
-    // x[6,4] × w[4,3]: n = 3 は 4 の倍数でないのでスカラ変種を踏み、m = 6 は小 M の
-    // タイル幾何バケット（src/kernels/gemm-geometry.ts の `gemmGeometryForRows`）を踏む
+    // x[6,4] × w[4,3]: n = 3 is not a multiple of 4, so the scalar variant runs, and m = 6 hits
+    // the small-M tile geometry bucket (`gemmGeometryForRows` in src/kernels/gemm-geometry.ts)
     matmulKey(false, 6, gemmRowsGeometry(profile, 6)),
     elementwiseKey({ op: "add", rank: 2, dtype: "f32" }),
     elementwiseKey({ op: "relu", rank: 2, dtype: "f32" }),
   ]);
 
-/** 出力の**バイト列**（計測モードが結果を変えないことは値ではなくビットで見る）。 */
+/**
+ * The output's **bytes** (that timing mode does not change the results is checked on bits, not
+ * values).
+ */
 const outputBytes = (tensor: Tensor): Uint8Array =>
   new Uint8Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.byteLength).slice();
 
-/** グラフを 1 回だけ走らせ、出力バイト列と診断を返す。 */
+/** Runs the graph once and returns the output bytes and the diagnostics. */
 const runOnce = async (
   gpuTiming: boolean | undefined,
 ): Promise<{
@@ -97,18 +101,28 @@ const runOnce = async (
   }
 };
 
-// 三値のうち「true × feature 不在」だけは実機で作れない（アダプタの feature は消せない）ため、
-// 判定を切り出した純関数で全 6 通りを固定する。
-test("planTimestampFeature が gpuTiming の三値を判定し、必須指定の不足は fail loudly", () => {
+// Of the three values, only "true × feature absent" cannot be produced on real hardware (an
+// adapter's features cannot be removed), so all 6 combinations are pinned on the pure function the
+// decision was extracted into.
+test("planTimestampFeature decides the three values of gpuTiming and fails loudly when a required feature is missing", () => {
   const present = new Set(["shader-f16", "timestamp-query"]);
   const absent = new Set(["shader-f16"]);
 
-  // MUST: `undefined` は「要求しない」（shaderF16 と同じ規律）。ここを「持っていれば要求」に
-  // 戻すと、計測の代価（1 dispatch = 1 pass）がアダプタ次第で既定経路に乗る。
-  assertEquals(planTimestampFeature(present, undefined), false, "既定は持っていても要求しない");
+  // MUST: `undefined` means "do not request" (the same rule as shaderF16). Turning it back into
+  // "request when present" would put the cost of timing (1 dispatch = 1 pass) on the default path
+  // depending on the adapter.
+  assertEquals(
+    planTimestampFeature(present, undefined),
+    false,
+    "the default does not request it even when present",
+  );
   assertEquals(planTimestampFeature(absent, undefined), false);
   assertEquals(planTimestampFeature(present, true), true);
-  assertEquals(planTimestampFeature(present, false), false, "false は持っていても要求しない");
+  assertEquals(
+    planTimestampFeature(present, false),
+    false,
+    "false does not request it even when present",
+  );
   assertEquals(planTimestampFeature(absent, false), false);
 
   const error = assertThrows(
@@ -116,61 +130,74 @@ test("planTimestampFeature が gpuTiming の三値を判定し、必須指定の
     GpuFeatureError,
     "timestamp-query",
   );
-  // 不足内容が読めること（環境で何が使えるかまで書く）。
+  // The missing feature must be readable (the message also says what the environment offers).
   assert(error.message.includes("shader-f16"), error.message);
 });
 
 test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
-  "gpuTiming: true の内訳が dispatch 数・キー集合と相互に一致する（実 GPU）",
+  "the breakdown of gpuTiming: true agrees with the dispatch count and the key set (real GPU)",
   async () => {
     const result = await runOnce(true);
-    assert(result.timingEnabled, "true を要求して有効にならないのは device 側の矛盾");
+    assert(
+      result.timingEnabled,
+      "requesting true and not getting it enabled is a contradiction on the device side",
+    );
     const timing = result.timing;
-    assert(timing !== undefined, "計測が有効なら内訳は必ず出る");
+    assert(timing !== undefined, "with timing enabled the breakdown is always there");
 
     assertEquals(result.dispatchCount, 4, "matmul + add + relu + add");
-    assertEquals(timing.dispatchCount, result.dispatchCount, "内訳の dispatch 総数の相互検算");
+    assertEquals(
+      timing.dispatchCount,
+      result.dispatchCount,
+      "cross-check of the breakdown's total dispatch count",
+    );
     assertEquals(
       new Set(timing.entries.map((entry) => entry.key)),
       expectedKeys(result.profile),
-      "キー集合は実行された pipeline と一致する",
+      "the key set matches the pipelines that ran",
     );
-    assertEquals(timing.entries.length, result.pipelineCount, "生成した pipeline は全て走った");
+    assertEquals(timing.entries.length, result.pipelineCount, "every pipeline created ran");
 
     for (const entry of timing.entries) {
-      assert(entry.ns >= 0, `${entry.key}: ns が負（${entry.ns}）`);
-      assertGreater(entry.workgroupCount, 0, `${entry.key}: workgroup 数`);
+      assert(entry.ns >= 0, `${entry.key}: negative ns (${entry.ns})`);
+      assertGreater(entry.workgroupCount, 0, `${entry.key}: workgroup count`);
     }
     assertEquals(
       timing.entries.find((entry) => entry.key.includes(":add:"))?.dispatchCount,
       2,
-      "同じキーの dispatch はまとまる",
+      "dispatches of the same key are aggregated",
     );
     assertEquals(
       timing.totalNs,
       timing.entries.reduce((total, entry) => total + entry.ns, 0),
-      "合計は内訳の総和",
+      "the total is the sum of the breakdown",
     );
     assertEquals(
       [...timing.entries].sort((a, b) => b.ns - a.ns).map((entry) => entry.key),
       timing.entries.map((entry) => entry.key),
-      "表は ns の降順",
+      "the table is in descending order of ns",
     );
-    // 0 に丸めた負の差分（ドライバの非単調）は握り潰さず件数で観測する。
-    assertEquals(timing.clampedNegativeSamples, 0, "非単調な timestamp は観測されない");
-    assertGreater(timing.totalNs, 0, "実 GPU の計測が全て 0 になるのは計測が死んでいる形");
+    // Negative differences clamped to 0 (a non-monotonic driver) are not swallowed but observed as
+    // a count.
+    assertEquals(timing.clampedNegativeSamples, 0, "no non-monotonic timestamps are observed");
+    assertGreater(timing.totalNs, 0, "all-zero timings on a real GPU mean the measurement is dead");
   },
 );
 
-// 既定（undefined）と明示 false が**同じ**であることの門。ここが割れると、計測の代価が
-// アダプタ次第で既定経路に乗る（1 dispatch = 1 pass — ADR 0021 / 案 3）。
+// The check that the default (undefined) and an explicit false are **the same**. If they diverge,
+// the cost of timing lands on the default path depending on the adapter (1 dispatch = 1 pass —
+// ADR 0021 / option 3).
 test.skipIf(!GPU_AVAILABLE)(
-  "gpuTiming の既定と false は feature を要求せず、内訳も出さない（実 GPU）",
+  "gpuTiming's default and false request no feature and produce no breakdown (real GPU)",
   async () => {
     for (const requested of [undefined, false] as const) {
       const result = await runOnce(requested);
       const where = `gpuTiming: ${String(requested)}`;
-      assertEquals(result.features.has("timestamp-query"), false, `${where}: feature を持たない`);
+      assertEquals(
+        result.features.has("timestamp-query"),
+        false,
+        `${where}: does not have the feature`,
+      );
       assertEquals(result.timingEnabled, false, where);
       assertEquals(result.timing, undefined, where);
     }
@@ -178,12 +205,23 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
-  "計測モードは実行結果を変えない（同一グラフの出力がバイト一致・実 GPU）",
+  "timing mode does not change the results (the same graph's outputs match byte for byte, real GPU)",
   async () => {
     const timed = await runOnce(true);
     const plain = await runOnce(false);
-    assert(timed.timingEnabled, "対照が成立していない（計測側が有効になっていない）");
-    assertEquals(timed.bytes, plain.bytes, "1 dispatch = 1 pass に開いても出力は同一バイト");
-    assertEquals(timed.dispatchCount, plain.dispatchCount, "dispatch 数も変わらない");
+    assert(
+      timed.timingEnabled,
+      "the control does not hold (timing is not enabled on the timed side)",
+    );
+    assertEquals(
+      timed.bytes,
+      plain.bytes,
+      "opening to 1 dispatch = 1 pass leaves the output bytes identical",
+    );
+    assertEquals(
+      timed.dispatchCount,
+      plain.dispatchCount,
+      "the dispatch count does not change either",
+    );
   },
 );

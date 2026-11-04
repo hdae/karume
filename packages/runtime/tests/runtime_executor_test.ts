@@ -1,5 +1,6 @@
-// Session の構築・実行の受け口のうち、GPU を取らずに回る門（実 GPU 側は
-// gpu_runtime_executor_test.ts）と、容器の読み手が束縛の取れないシンボルを拒否する門。
+// The checks of Session's build / run entry points that run without a GPU (the real-GPU side is
+// gpu_runtime_executor_test.ts), and the check that the container reader rejects unbindable
+// symbols.
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { test } from "vite-plus/test";
@@ -27,10 +28,11 @@ import { writeModelContainer } from "./helpers/container-write.ts";
 // deno-lint-ignore no-explicit-any
 const anyOf = (value: unknown): any => value;
 
-test("束縛が取れないシンボルは容器の読み手が受理しない（入力 shape に素の形で現れない）", async () => {
-  // 書き手は宣言をパースしてから書くので、壊れた宣言は容器に入らない。読み手の側の門
-  // （`descriptor.ts` の宣言パース）を撃つには、**正しい krm を書いてからグラフ記述の
-  // バイト列を壊す**しかない。
+test("the container reader rejects a symbol that cannot be bound (one that does not appear bare in an input shape)", async () => {
+  // The writer parses declarations before writing, so a broken declaration never enters a
+  // container. The only way to exercise the reader-side check (declaration parsing in
+  // `descriptor.ts`) is to **write a correct krm and then corrupt the bytes of the graph
+  // descriptor**.
   const written = await writeModelContainer(
     {
       graphs: { [GRAPH_NAME]: parseIrDeclarationValue(chainGraph()) },
@@ -43,14 +45,14 @@ test("束縛が取れないシンボルは容器の読み手が受理しない�
   );
   const descriptorDoc = JSON.parse(new TextDecoder().decode(written.graphDescriptorBytes));
   const declaration = anyOf(descriptorDoc).graphs[GRAPH_NAME];
-  // `S` は入力 shape に素の形で現れないので、どの実行時値からも束縛が取れない。
+  // `S` does not appear bare in any input shape, so no runtime value can bind it.
   declaration.symbols = ["S", "T"];
   declaration.values.h = { dtype: "f32", shape: ["S", 3] };
   const graphBytes = new TextEncoder().encode(
     JSON.stringify(descriptorDoc),
   ) as Uint8Array<ArrayBuffer>;
-  // 単一形は block の offset が part 0 の長さから決まるので、長さの変わる書き換えは
-  // part 列で渡す（part 0 = ヘッダ + 2 文書）。
+  // In the single form a block's offset is determined by the length of part 0, so a rewrite that
+  // changes the length is passed as a part sequence (part 0 = header + 2 documents).
   const parts = [...written.parts];
   const model = written.modelDescriptorBytes;
   const part0 = new Uint8Array(
@@ -76,11 +78,15 @@ test("束縛が取れないシンボルは容器の読み手が受理しない�
 });
 
 // ---------------------------------------------------------------------------
-// 入力境界（型の外から来る JS の呼び手）— フェイク device の Session で撃つ。受け口の検査は
-// dispatch を 1 本も出さない同期区間の話なので、GPU 実体は要らない。
+// Input boundary (JS callers coming from outside the types) — exercised on a Session over a fake
+// device. The entry checks happen in a synchronous part that issues no dispatch, so no real GPU is
+// needed.
 // ---------------------------------------------------------------------------
 
-/** 上限は門に掛からない値でよい（見たいのは受け口で、確保の寸法ではない）。 */
+/**
+ * Any limits that do not trip a check will do (what matters is the entry point, not allocation
+ * sizes).
+ */
 const LIMITS: RequiredLimits = {
   maxBufferSize: 1 << 20,
   maxStorageBufferBindingSize: 1 << 20,
@@ -95,7 +101,10 @@ const LIMITS: RequiredLimits = {
   maxComputeWorkgroupsPerDimension: 65535,
 };
 
-/** 構築相（`buildSessionState`）が `minStorageBufferOffsetAlignment` を 1 回読むぶんだけ足す。 */
+/**
+ * Adds only what the build phase (`buildSessionState`) reads once:
+ * `minStorageBufferOffsetAlignment`.
+ */
 const fakeGpu = (): GpuContext =>
   new GpuContext(
     Object.assign(fakeDevice(), { limits: { minStorageBufferOffsetAlignment: 256 } }),
@@ -104,7 +113,7 @@ const fakeGpu = (): GpuContext =>
     new Set(),
   );
 
-/** ノード 0 本のグラフ（受け口の検査は積む中身を見ない）。 */
+/** A graph with 0 nodes (the entry checks do not look at what is enqueued). */
 const emptyGraph = (): IrGraph =>
   mergeGraph({
     format: "karume-ir",
@@ -127,7 +136,10 @@ const buildSession = async (
   return await Session.build(gpu, graph, new Map(), noShards(), options);
 };
 
-/** 数値へ変換できるが、変換されたら数える値（診断が利用者の変換を呼んだかの観測点）。 */
+/**
+ * A value convertible to a number that counts its conversions (the observation point for whether a
+ * diagnostic called the caller's conversion).
+ */
 const convertible = (): { readonly value: object; readonly conversions: () => number } => {
   let conversions = 0;
   return {
@@ -141,7 +153,7 @@ const convertible = (): { readonly value: object; readonly conversions: () => nu
   };
 };
 
-test("構築オプションの数値ノブの診断は利用者の変換を呼ばず、型外の値を ExecutionError で拒否する", async () => {
+test("diagnostics for numeric build-option knobs do not call the caller's conversions, and out-of-type values are rejected with ExecutionError", async () => {
   for (const knob of [
     "planBackingBudgetBytes",
     "linearGemvRowsThreadTarget",
@@ -162,14 +174,15 @@ test("構築オプションの数値ノブの診断は利用者の変換を呼�
         ExecutionError,
         knob,
       );
-      // 非数値は型名だけを出す（値そのものを綴ると利用者の変換が走る）。
+      // A non-number reports only its type name (spelling out the value itself would run the
+      // caller's conversion).
       assertStringIncludes(refused.message, `${knob} ${typeof value} `);
       assertEquals(conversions(), 0);
     }
   }
 });
 
-test("run の generation.commit の診断は利用者の変換を呼ばず、symbol でも ExecutionError で拒否する", async () => {
+test("the diagnostic for run's generation.commit does not call the caller's conversions and rejects even a symbol with ExecutionError", async () => {
   const session = await buildSession(fakeGpu(), emptyGraph(), {});
   try {
     const object = convertible();
@@ -188,10 +201,10 @@ test("run の generation.commit の診断は利用者の変換を呼ばず、sym
   }
 });
 
-test("run の generation の読みと context の内部面の取り出しは、同期 throw ではなく戻り Promise の reject になる", async () => {
+test("reading run's generation and extracting the context's internal surface reject the returned Promise instead of throwing synchronously", async () => {
   const session = await buildSession(fakeGpu(), emptyGraph(), {});
   try {
-    const failure = new Error("getter が throw した");
+    const failure = new Error("the getter threw");
     const throwingGetter = {
       get context(): never {
         throw failure;
@@ -203,7 +216,8 @@ test("run の generation の読みと context の内部面の取り出しは、�
       [throwingGetter, failure],
       [missingContext, undefined],
     ] as const) {
-      // 同期 throw なら `.then` に届かずここで例外が抜ける（受け口の契約違反としてテストが落ちる）。
+      // A synchronous throw would escape here without reaching `.then` (the test fails as an
+      // entry-point contract violation).
       const outcome = await session.run({}, {}, generation).then(
         () => "resolved",
         (cause: unknown) => cause,
@@ -216,7 +230,7 @@ test("run の generation の読みと context の内部面の取り出しは、�
   }
 });
 
-test("sharedWeights に SharedWeight でない値を渡すと、内部面を読む前に ExecutionError で拒否する", async () => {
+test("passing a value that is not a SharedWeight in sharedWeights is rejected with ExecutionError before the internal surface is read", async () => {
   const graph = mergeGraph({
     format: "karume-ir",
     version: 2,
@@ -241,11 +255,11 @@ test("sharedWeights に SharedWeight でない値を渡すと、内部面を読�
 });
 
 // ---------------------------------------------------------------------------
-// 構築と device の生存 — 構築は重みの完了待ちのほかに device を見ていなかったので、重みを 1 本も
-// 上げないグラフ（initializer 無し・全て shared）は消失済み device の上でも成功していた。
+// Build and device liveness — the build looked at nothing but the weights' completion, so a graph
+// that uploads no weight (no initializers, all shared) succeeded even on a lost device.
 // ---------------------------------------------------------------------------
 
-/** 消失を後から起こせる {@link fakeGpu}。 */
+/** A {@link fakeGpu} whose loss can be triggered later. */
 const losableFakeGpu = (): { readonly gpu: GpuContext; readonly lose: () => void } => {
   const lost = Promise.withResolvers<GPUDeviceLostInfo>();
   return {
@@ -259,12 +273,12 @@ const losableFakeGpu = (): { readonly gpu: GpuContext; readonly lose: () => void
     ),
     lose: (): void =>
       lost.resolve(
-        platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }),
+        platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "lost by the test" }),
       ),
   };
 };
 
-/** 重みが全て借り物（shared 1 本）のグラフと、その常駐分類。 */
+/** A graph whose weights are all borrowed (one shared), and its residency classification. */
 const allSharedGraph = (): IrGraph =>
   mergeGraph({
     format: "karume-ir",
@@ -281,7 +295,10 @@ const ALL_SHARED_RESIDENCY: ReadonlyMap<string, WeightResidency> = new Map([
   ["w", { seat: "shared", eligible: false, i4Eligible: false, i2Eligible: false }],
 ]);
 
-/** 借用の積み下ろしを数える貸し手の重み（実体は構築の照合を通る最小の形）。 */
+/**
+ * A lender's weight that counts borrow acquisitions and releases (the instance is the minimal shape
+ * that passes the build's matching).
+ */
 const countedSharedWeight = (
   gpu: GpuContext,
 ): { readonly weight: SharedWeight; readonly borrowed: () => number } => {
@@ -306,7 +323,7 @@ const countedSharedWeight = (
   return { weight, borrowed: () => borrowed };
 };
 
-test("消失済み・破棄要求済みの device では、重みを上げないグラフでも Session の構築が GpuDeviceLostError で reject する", async () => {
+test("on a lost or destroy-requested device, Session construction rejects with GpuDeviceLostError even for a graph that uploads no weights", async () => {
   const destroyed = fakeGpu();
   destroyed.destroy();
   await assertRejects(
@@ -333,14 +350,14 @@ test("消失済み・破棄要求済みの device では、重みを上げない
     GpuDeviceLostError,
     "Session construction",
   );
-  assertEquals(borrowed(), 0, "落ちた構築が借用を積んだまま");
+  assertEquals(borrowed(), 0, "the failed build still holds its borrows");
 });
 
-test("構築の途中（重みの供給待ち）で device が失われたら、構築は成功で返らず借用を返す", async () => {
+test("if the device is lost mid-build (waiting for weight supply), the build does not return success and returns its borrows", async () => {
   const { gpu, lose } = losableFakeGpu();
   const { weight, borrowed } = countedSharedWeight(gpu);
   const gate = Promise.withResolvers<void>();
-  // 供給は 1 本も出さずに終わるが、終わりを gate まで待たせる。
+  // The supply ends without issuing anything, but its end is held back until the gate.
   const stalledShards: AsyncIterable<never> = {
     [Symbol.asyncIterator]: () => ({
       next: async (): Promise<IteratorResult<never>> => {
@@ -352,26 +369,29 @@ test("構築の途中（重みの供給待ち）で device が失われたら、
   const building = Session.build(gpu, allSharedGraph(), ALL_SHARED_RESIDENCY, stalledShards, {
     sharedWeights: { w: weight },
   });
-  // 借用は供給を待つ前に積む（構築中に貸し手が dispose される窓を塞ぐ）。
+  // Borrows are taken before waiting for the supply (closing the window where the lender is
+  // disposed mid-build).
   while (borrowed() === 0) await Promise.resolve();
   lose();
   await gpu.device.lost;
   gate.resolve();
   await assertRejects(() => building, GpuDeviceLostError, "Session construction");
-  assertEquals(borrowed(), 0, "落ちた構築が借用を返していない");
+  assertEquals(borrowed(), 0, "the failed build did not return its borrows");
 });
 
-test("構築の後に device が失われたら、出力 0 本の run / enqueue も成功に化けず GpuDeviceLostError で reject する", async () => {
-  // 出力 0 本のグラフは読み戻しを持たないので、本体の失敗判定（errorScope・完了待ち）だけでは
-  // 消失を拾える保証が無い。受付の同期区間で device を見る。
+test("if the device is lost after the build, a run / enqueue with 0 outputs rejects with GpuDeviceLostError instead of turning into success", async () => {
+  // A graph with 0 outputs has no read-back, so the body's failure detection (errorScope,
+  // completion wait) alone is not guaranteed to catch the loss. The device is checked in the
+  // intake's synchronous part.
   const destroyed = fakeGpu();
   const onDestroyed = await buildSession(destroyed, emptyGraph(), {});
   destroyed.destroy();
   await assertRejects(() => onDestroyed.run({}), GpuDeviceLostError, "run acceptance");
   await onDestroyed.dispose();
 
-  // enqueue は消失の前に開いた区間へ積む（消失後は区間の開始そのものが落ちる）。区間は errorScope
-  // 区間ロックを握るので、run と同じ device では開いたままにしない。
+  // The enqueue goes into a scope opened before the loss (after the loss, opening a scope itself
+  // fails). A scope holds the errorScope scope lock, so it is not left open on the same device as
+  // the run.
   const enqueued = fakeGpu();
   const onEnqueued = await buildSession(enqueued, emptyGraph(), {});
   const opened = await enqueued.beginBatch();
@@ -386,7 +406,8 @@ test("構築の後に device が失われたら、出力 0 本の run / enqueue 
     GpuDeviceLostError,
     "enqueue acceptance",
   );
-  // 区間そのものの決着も消失で落ちる（ここが見るのは受付で、区間の後始末は別の門）。
+  // The scope's own settlement also fails on the loss (what this checks is intake; cleaning up the
+  // scope is another check).
   await assertRejects(() => opened.finish(), GpuDeviceLostError);
   await onEnqueued.dispose();
 
@@ -398,10 +419,11 @@ test("構築の後に device が失われたら、出力 0 本の run / enqueue 
   await onLost.dispose();
 });
 
-test("構築は入口時点の options で決まり、構築中の書き換えは検査を経ない state を作らない", async () => {
-  // 組合せの検査（ADR 0105 決定 1）は入口で 1 回だけ走る。構築は await を跨ぐので、待つ前に
-  // 呼び手が options を書き換えると、検査では拒否される組合せ（sequential + packedStaticQuantize）の
-  // state ができていた。submitPolicy は中身の書き換えも同じ形で効いていた。
+test("the build is determined by the options at entry, and rewriting them mid-build does not create unchecked state", async () => {
+  // The combination check (ADR 0105 decision 1) runs only once, at entry. The build spans awaits,
+  // so if the caller rewrote options before the wait, state for a combination the check rejects
+  // (sequential + packedStaticQuantize) was created. Rewriting submitPolicy's contents had the same
+  // effect.
   const policy = {
     timeBudgetMs: 100,
     initialChunkSize: 4,
@@ -421,19 +443,20 @@ test("構築は入口時点の options で決まり、構築中の書き換え�
   assertEquals(
     state.packedStaticQuantize,
     false,
-    "検査の後に書き換えた packedStaticQuantize が届いた",
+    "packedStaticQuantize rewritten after the check got through",
   );
-  assertEquals(state.fuseRmsNormAdd, false, "検査の後に書き換えた fuseRmsNormAdd が届いた");
+  assertEquals(state.fuseRmsNormAdd, false, "fuseRmsNormAdd rewritten after the check got through");
   assertEquals(
     state.scheduler.stats.currentChunkSize,
     4,
-    "検査の後に書き換えた submitPolicy の中身が届いた",
+    "submitPolicy contents rewritten after the check got through",
   );
 });
 
-test("attentionRowBlockMaxBytes は入口の写しから Session の状態へ届き、検査の後の書き換えは届かない", async () => {
-  // 予算は行ブロックの枚数を決める Session 単位の不変値（ADR 0124）。導出済み計画のキーは予算を含まない
-  // ので、構築の後で値が動くと同じキーが別の枚数の計画を指す。
+test("attentionRowBlockMaxBytes reaches the Session state from the entry copy, and rewrites after the check do not", async () => {
+  // The budget is a per-Session invariant that sets the number of row blocks (ADR 0124). Derived
+  // plan keys do not include the budget, so if the value moved after the build, the same key would
+  // point to a plan with a different count.
   const options: { -readonly [K in keyof SessionOptions]: SessionOptions[K] } = {
     attentionRowBlockMaxBytes: 64 * 1024 * 1024,
   };
@@ -441,13 +464,14 @@ test("attentionRowBlockMaxBytes は入口の写しから Session の状態へ届
   const building = buildSessionState(fakeGpu(), emptyGraph(), new Map(), noShards(), options);
   options.attentionRowBlockMaxBytes = 1;
   assertEquals((await building).attentionRowBlockMaxBytes, 64 * 1024 * 1024);
-  // 省略は予算なし（束縛上限のまま）。
+  // Omitted means no budget (the binding limit as is).
   const plain = await buildSessionState(fakeGpu(), emptyGraph(), new Map(), noShards(), {});
   assertEquals(plain.attentionRowBlockMaxBytes, undefined);
 });
 
-test("構築の入口の写しは非列挙・prototype 由来の欄も読み、写す前と同じ値を拒否する", async () => {
-  // 写しを spread で取ると自前の列挙可能な欄しか写らず、非列挙・継承の欄が黙って既定に化けて通る。
+test("the build entry's copy also reads non-enumerable and prototype fields, and rejects the same values as before copying", async () => {
+  // Taking the copy with spread copies only own enumerable fields, so non-enumerable and inherited
+  // fields silently turn into defaults and pass.
   const nonEnumerable: SessionOptions = {};
   Object.defineProperty(nonEnumerable, "stateAttentionReduce", { value: "bogus" });
   const inherited: SessionOptions = Object.create({ stateAttentionReduce: "bogus" });

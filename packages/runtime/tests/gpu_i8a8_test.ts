@@ -1,33 +1,39 @@
-// w8a8 / w4a8 linear（活性 per-token i8 × 重み i8 per-channel / i4 group の整数内積）の
-// 実行経路。
+// Execution path of w8a8 / w4a8 linear (integer dot products of per-token i8 activations × i8
+// per-channel / i4 group weights).
 //
-// 設計 = docs/research/2026-08-03-dp4a-w8a8-design.md（w4a8 は perf-ledger Q-8）、実装 =
-// src/kernels/quantize-rows.ts + src/kernels/linear-i8a8.ts、opt-in =
-// `SessionOptions.linearCompute: "a8"`（既定 "f32"・重みの格納形は別軸）。
+// Design = docs/research/2026-08-03-dp4a-w8a8-design.md (w4a8: perf-ledger Q-8), implementation =
+// src/kernels/quantize-rows.ts + src/kernels/linear-i8a8.ts, opt-in =
+// `SessionOptions.linearCompute: "a8"` (default "f32"; the weight storage is a separate axis).
 //
-// ## このファイルが固定する数値契約
+// ## The numeric contract this file pins
 //
-// **GPU と TS 参照が atol=0 で一致する**。他のカーネル（f32 の縮約順序が実装で変わる）とは
-// 質の違う契約で、成立の根拠は「内積が i32 の厳密加算（順序非依存）」+「浮動小数の演算が
-// 出力 1 要素あたり 3 つだけ（f32(acc) / xs·wscale / fma）」の 2 点だけ。したがって、
-// タイル分割・K 端数の 0 埋め・共有メモリの配置をどう変えても値は 1 ビットも動かないはずで、
-// 動いたらそれは実装の誤り — tolerance で吸収する余地が構造的に無い。
-// w4a8 も同じ性質だが根拠がずれる（group の中だけが i32 厳密で、浮動小数の演算は
-// `k/g + 1` 回）— 節ごとの docstring を参照。
+// **The GPU and the TS reference match with atol=0.** This contract is of a different kind from the
+// other kernels' (where the f32 reduction order varies by implementation), and it rests on only two
+// points: "the dot product is an exact i32 sum (order independent)" + "there are only 3 floating
+// point operations per output element (f32(acc) / xs·wscale / fma)". So however the tile split,
+// the zero padding of the K remainder or the shared-memory layout changes, the values should not
+// move by a single bit, and if they move it is an implementation error — there is structurally no
+// room for a tolerance to absorb.
+// w4a8 has the same property on a shifted basis (only the inside of a group is exact i32, and there
+// are `k/g + 1` floating point operations) — see each section's docstring.
 //
-// MUST: 比較は `compareTensors` ではなく {@link assertExact}（`===` の全数比較）で行う。
-// allclose は非有限を全て不合格にするので、NaN 行の伝播（設計の一部）を検証できない。
+// MUST: compare with {@link assertExact} (an exhaustive `===` comparison), not `compareTensors`.
+// allclose fails every non-finite value, so it cannot check the propagation of NaN rows (part of
+// the design).
 //
-// NOTE: 参照オラクル（src/reference/i8a8.ts）そのものの既知値門は tests/i8a8_reference_test.ts
-// が **CPU 単独**で持つ。ここの突合は「参照と GPU が同じ向きに壊れた」形を通してしまうので、
-// 参照の性質はアダプタ無しでも走る側に置く（そちらが落ちれば突合の土台が崩れている）。
+// NOTE: the known-value checks of the reference oracle itself (src/reference/i8a8.ts) are in
+// tests/i8a8_reference_test.ts, **CPU only**. The comparison here lets through "the reference and
+// the GPU broke in the same direction", so the reference's properties sit on the side that runs
+// without an adapter (if that fails, the comparison has lost its footing).
 //
-// ## 非有限値の扱い（契約の外側）
+// ## Handling of non-finite values (outside the contract)
 //
-// NaN 行は `xs[row] = NaN` 経由で**行全体が NaN**になる（f32 経路と同じ粒度）。Inf 行は
-// `xs[row] = Inf` になり、出力は ±Inf / NaN のどれか — **符号は f32 経路と一致しない**
-// （docs/limitations.md に記載）。量子化値 `xq` そのものは、行 scale が非有限のとき
-// `vec4<i32>(NaN)` が不定値になるので**契約の外**（突合は scale と最終出力だけ）。
+// A NaN row becomes **NaN across the whole row** through `xs[row] = NaN` (the same granularity as
+// the f32 path). An Inf row gives `xs[row] = Inf`, and the output is some of ±Inf / NaN — **the
+// sign does not match the f32 path** (recorded in docs/limitations.md). The quantized values `xq`
+// themselves are **outside the contract** when the row scale is non-finite, since
+// `vec4<i32>(NaN)` is an indeterminate value (the comparison covers only the scale and the final
+// output).
 
 import { test } from "vite-plus/test";
 import {
@@ -99,43 +105,51 @@ const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
 /**
- * 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。
+ * Deterministic data sequences (no random numbers — a failure would not reproduce).
  *
- * MUST: 活性の刻みを **scale の格子と共約にしない**。`0.75` 刻みのような素直な列は
- * `x/s` がちょうど半整数（例: 127·3/6 = 63.5）に乗り、GPU の除算が 2.5 ULP まで許されている
- * ぶんだけ量子化値が ±1 段揺れて atol=0 が「たまたま落ちる」ようになる。境界からの余裕は
- * {@link quantizeRowsTieMargin} で毎回実測して門にする（この列を変えたら門が教えてくれる）。
+ * MUST: the activation step **must not be commensurate with the scale grid**. A plain sequence such
+ * as steps of `0.75` puts `x/s` exactly on half-integers (e.g. 127·3/6 = 63.5), and since GPU
+ * division is allowed up to 2.5 ULP, the quantized value wobbles by ±1 step and atol=0 "fails by
+ * chance". The margin from the boundaries is measured every time with
+ * {@link quantizeRowsTieMargin} and made a check (if this sequence changes, the check says so).
  */
 const SIGNED = (i: number): number => ((i % 29) - 14) * 0.3717 + 0.0131;
 const POSITIVE = (i: number): number => 0.125 + (i % 17) * 0.5;
 
-/** atol=0 を主張してよい丸め境界からの余裕（2.5 ULP ≈ 1.9e-5 に対し 50 倍以上）。 */
+/**
+ * The margin from the rounding boundaries at which atol=0 may be claimed (over 50 times 2.5 ULP ≈
+ * 1.9e-5).
+ */
 const TIE_MARGIN = 1e-3;
 
 /**
- * atol=0 の全数比較。`===` なので ±0 は同一視するが、それ以外は 1 ビットの差も許さない。
- * 参照が NaN の位置は「実測も NaN」であることだけを見る（値の同一性は契約の外）。
+ * Exhaustive atol=0 comparison. `===` treats ±0 as equal, but otherwise not even a 1-bit difference
+ * is allowed. Where the reference is NaN it only checks that "the measured value is NaN too" (the
+ * identity of the value is outside the contract).
  */
 const assertExact = (
   actual: ArrayLike<number>,
   expected: ArrayLike<number>,
   where: string,
 ): void => {
-  assertEquals(actual.length, expected.length, `${where}: 長さ`);
+  assertEquals(actual.length, expected.length, `${where}: length`);
   for (let i = 0; i < actual.length; i += 1) {
     if (Number.isNaN(expected[i])) {
-      assert(Number.isNaN(actual[i]), `${where}[${i}]: 参照 NaN に対し ${actual[i]}`);
+      assert(Number.isNaN(actual[i]), `${where}[${i}]: ${actual[i]} against a reference NaN`);
       continue;
     }
-    assert(actual[i] === expected[i], `${where}[${i}]: GPU ${actual[i]} / 参照 ${expected[i]}`);
+    assert(
+      actual[i] === expected[i],
+      `${where}[${i}]: GPU ${actual[i]} / reference ${expected[i]}`,
+    );
   }
 };
 
 // ---------------------------------------------------------------------------
-// 丸めの同点規則（GPU 非依存の側）
+// Rounding tie rule (the GPU-independent side)
 // ---------------------------------------------------------------------------
 
-test("roundTiesToEven は偶数丸め（Math.round の half-up と割れる点を固定する）", () => {
+test("roundTiesToEven rounds half to even (pins the points where it differs from Math.round's half-up)", () => {
   const cases: readonly (readonly [number, number])[] = [
     [0.5, 0],
     [1.5, 2],
@@ -152,16 +166,16 @@ test("roundTiesToEven は偶数丸め（Math.round の half-up と割れる点�
   for (const [value, expected] of cases) {
     assertEquals(roundTiesToEven(value), expected, `round(${value})`);
   }
-  // MUST: Math.round では代用できない（同点で +∞ 方向へ倒れる）
+  // MUST: Math.round cannot stand in (on a tie it goes toward +∞)
   assertEquals(Math.round(0.5), 1);
   assertEquals(Math.round(2.5), 3);
-  // 非有限はそのまま通す（clamp が受け取って ±127 に倒す）
+  // Non-finite values pass through as is (clamp takes them and pushes them to ±127)
   assertEquals(roundTiesToEven(Number.POSITIVE_INFINITY), Number.POSITIVE_INFINITY);
   assertEquals(Number.isNaN(roundTiesToEven(Number.NaN)), true);
 });
 
 // ---------------------------------------------------------------------------
-// quantize_rows 単体（生 dispatch）
+// quantize_rows alone (raw dispatch)
 // ---------------------------------------------------------------------------
 
 const readbackBytes = async (
@@ -185,19 +199,22 @@ const readbackBytes = async (
 };
 
 type QuantizeResult = {
-  /** 4 詰めから展開した i8 値（`[rows, dim]` の平坦）。 */
+  /** i8 values unpacked from the 4-per-word packing (flat `[rows, dim]`). */
   readonly q: Int8Array<ArrayBuffer>;
   readonly scale: Float32Array<ArrayBuffer>;
 };
 
-/** `quantize_rows` を 1 dispatch だけ流す（`groups` を絞れば縮退経路も踏める）。 */
+/**
+ * Runs `quantize_rows` as a single dispatch (narrowing `groups` also exercises the reduced path).
+ */
 const runQuantizeRows = async (
   gpu: GpuContext,
   x: Float32Array<ArrayBuffer>,
   rows: number,
   dim: number,
   groups?: number,
-  // 既定は従来形（1 行 = 1 workgroup）。小 D 変種の門は幾何を明示して呼ぶ。
+  // The default is the original form (1 row = 1 workgroup). The small-D variant's check passes the
+  // geometry explicitly.
   geometry: QuantizeRowsGeometry = { lanesPerRow: 256, rowsPerGroup: 1 },
 ): Promise<QuantizeResult> => {
   const scheduler = new SubmitScheduler(gpu);
@@ -397,20 +414,26 @@ test("quantize_rows padded form rejects row lengths the plain form owns", () => 
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "quantize_rows: WGSL の round は偶数丸め（同点 3 点をカーネル内で実測固定・実 GPU）",
+  "quantize_rows: WGSL's round rounds half to even (3 tie points measured and pinned in the kernel, real GPU)",
   async () => {
-    // amax = 127 にすると s = f32(127 · (1/127)) = 1.0 ちょうどになり、x/s が入力そのものに
-    // なる（除数 1.0 の除算は 2.5 ULP の余地が無く**厳密**なので、同点規則だけを切り出せる）。
-    // 同点（±0.5 / ±1.5 / 2.5 / ±3.5）の丸め先がそのまま量子化値として観測できる。
+    // With amax = 127, s = f32(127 · (1/127)) is exactly 1.0 and x/s is the input itself
+    // (division by 1.0 has no room for 2.5 ULP and is **exact**, so the tie rule alone is
+    // isolated).
+    // Where the ties (±0.5 / ±1.5 / 2.5 / ±3.5) round to can be observed directly as quantized
+    // values.
     const values = [127, 0.5, 1.5, -0.5, -1.5, 2.5, 3.5, -3.5];
     const x = Float32Array.from(values);
     const gpu = await acquireGpu();
     try {
       const actual = await runQuantizeRows(gpu, x, 1, values.length);
-      assertEquals(actual.scale[0], 1, "s は 1.0 ちょうど（同点が格子の境界に乗る形）");
-      // 偶数丸め: 0.5→0 / 1.5→2 / -0.5→-0 / -1.5→-2 / 2.5→2 / 3.5→4 / -3.5→-4
+      assertEquals(
+        actual.scale[0],
+        1,
+        "s is exactly 1.0 (a form where the ties sit on the grid boundaries)",
+      );
+      // Round half to even: 0.5→0 / 1.5→2 / -0.5→-0 / -1.5→-2 / 2.5→2 / 3.5→4 / -3.5→-4
       assertEquals([...actual.q], [127, 0, 2, 0, -2, 2, 4, -4]);
-      // TS 参照（roundTiesToEven）と同じ列であることも同時に固定する
+      // Also pins that it is the same sequence as the TS reference (roundTiesToEven)
       assertEquals([...actual.q], [...quantizeRowsReference(x, 1, values.length).q]);
     } finally {
       gpu.destroy();
@@ -419,17 +442,24 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "quantize_rows: 小 D 変種は従来形と q / scale ともビット同一（幾何 4 通り × 縮退経路・実 GPU）",
+  "quantize_rows: the small-D variant is bit-identical to the original form in both q and scale (4 geometries × the reduced path, real GPU)",
   async () => {
-    // 幾何は dim から決まる: 128 → 8 行 × 32 レーン / 64 → 16 × 16 / 20 → 32 × 8 / 8 → 128 × 2。
-    // 行ごとに大きさを変える（全行同じ scale だと「別の行の amax を使う」誤りが値に出ない）。
-    // 行数は rowsPerGroup の倍数から外し、末尾の「行が無い組」の経路も踏む。
+    // The geometry follows from dim: 128 → 8 rows × 32 lanes / 64 → 16 × 16 / 20 → 32 × 8 /
+    // 8 → 128 × 2.
+    // Each row has a different magnitude (with the same scale in every row, the error "uses another
+    // row's amax" does not show in the values).
+    // The row count is not a multiple of rowsPerGroup, so the path of the trailing "group without
+    // rows" is also exercised.
     const gpu = await acquireGpu();
     try {
       for (const dim of [128, 64, 20, 8]) {
         const geometry = quantizeRowsGeometry(dim);
         assertEquals(geometry.lanesPerRow * geometry.rowsPerGroup, 256);
-        assertEquals(geometry.lanesPerRow >= dim / 4, true, `dim ${dim}: レーン幅が quad 数未満`);
+        assertEquals(
+          geometry.lanesPerRow >= dim / 4,
+          true,
+          `dim ${dim}: lane width below the quad count`,
+        );
         const rows = 1_003;
         const x = new Float32Array(rows * dim);
         for (let row = 0; row < rows; row += 1) {
@@ -438,13 +468,15 @@ test.skipIf(!GPU_AVAILABLE)(
           }
         }
         const baseline = await runQuantizeRows(gpu, x, rows, dim);
-        // 変種同士の突合は GPU 同士（同じ除算）なので同点の余裕は要らない。TS 参照との突合だけ
-        // 余裕がある形に限る（短い行は比が粗く、この列では dim 8 が境界近傍に乗る）。
+        // Comparing variants with each other is GPU against GPU (the same division), so no tie
+        // margin is needed. Only the comparison with the TS reference is limited to forms with a
+        // margin (short rows have coarse ratios, and with this sequence dim 8 sits near a
+        // boundary).
         if (quantizeRowsTieMargin(x, rows, dim) > TIE_MARGIN) {
           const reference = quantizeRowsReference(x, rows, dim);
-          assertEquals([...baseline.q], [...reference.q], `dim ${dim}: 従来形 q`);
+          assertEquals([...baseline.q], [...reference.q], `dim ${dim}: original-form q`);
         }
-        // 自然な本数と、縮退（2 workgroup で grid-stride を回す）の両方。
+        // Both the natural count and the reduced dispatch (grid-stride over 2 workgroups).
         for (const groups of [undefined, 2]) {
           const grouped = await runQuantizeRows(gpu, x, rows, dim, groups, geometry);
           const label = `dim ${dim} r${geometry.rowsPerGroup}w${geometry.lanesPerRow} groups ${groups}`;
@@ -452,7 +484,7 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             Array.from(new Uint32Array(grouped.scale.buffer)),
             Array.from(new Uint32Array(baseline.scale.buffer)),
-            `${label}: scale のビット列`,
+            `${label}: bits of the scale`,
           );
         }
       }
@@ -463,23 +495,25 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "quantize_rows が TS 参照と一致する（絶対値最大の厳密復元 / 全ゼロ行 / 行別 scale / 端数・実 GPU）",
+  "quantize_rows matches the TS reference (exact recovery of the absolute maximum / all-zero rows / per-row scales / remainders, real GPU)",
   async () => {
-    // dim は 4 の倍数だが **256（workgroup 幅）の倍数でも 16 の倍数でもない**形を選ぶ
-    // （1 スレッドが複数 quad を担当する経路と、担当が 0 個のスレッドが出る経路の両方を踏む）。
+    // dim is a multiple of 4 but **neither a multiple of 256 (the workgroup width) nor of 16**
+    // (exercises both the path where 1 thread handles several quads and the path with threads that
+    // handle none).
     const rows = 7;
     const dim = 20;
     const x = new Float32Array(rows * dim);
     for (let row = 0; row < rows; row += 1) {
       for (let i = 0; i < dim; i += 1) {
-        // 行ごとに大きさを変える（行別 scale の独立性 — 全行同じだと行の取り違えが値に出ない）
+        // Each row has a different magnitude (independence of the per-row scales — if all rows were
+        // the same, a row mix-up would not show in the values)
         x[row * dim + i] = row === 3 ? 0 : SIGNED(row * dim + i) * (1 + row * 3);
       }
     }
-    // atol=0 を主張してよいデータであることの門（WGSL の除算は 2.5 ULP まで許される）
+    // Checks that the data allows claiming atol=0 (WGSL division is allowed up to 2.5 ULP)
     assert(
       quantizeRowsTieMargin(x, rows, dim) > TIE_MARGIN,
-      `丸め境界からの余裕が ${quantizeRowsTieMargin(x, rows, dim)} しかない`,
+      `the margin from the rounding boundaries is only ${quantizeRowsTieMargin(x, rows, dim)}`,
     );
     const gpu = await acquireGpu();
     let actual: QuantizeResult;
@@ -491,12 +525,19 @@ test.skipIf(!GPU_AVAILABLE)(
     const expected = quantizeRowsReference(x, rows, dim);
     assertExact(actual.scale, expected.scale, "quantize_rows scale");
     assertExact(actual.q, expected.q, "quantize_rows q");
-    // 行別 scale の独立性（同じ値ばかりなら以降の検査が恒真になる）
-    assertEquals(new Set([...actual.scale]).size >= rows - 1, true, "行ごとに違う scale");
-    // 全ゼロ行は s = f32 tiny・q = 0（0 · tiny = 0 で厳密に復元される）
-    assertEquals(actual.scale[3], 1.1754943508222875e-38, "全ゼロ行の scale は f32 tiny");
-    for (let i = 0; i < dim; i += 1) assertEquals(actual.q[3 * dim + i], 0, `全ゼロ行の q[${i}]`);
-    // 絶対値最大の要素は ±127 へちょうど乗る（−128 を使わない規約の直接の帰結）
+    // Independence of the per-row scales (if they were all the same value, the checks below would
+    // be vacuous)
+    assertEquals(new Set([...actual.scale]).size >= rows - 1, true, "a different scale per row");
+    // An all-zero row has s = f32 tiny and q = 0 (0 · tiny = 0 recovers it exactly)
+    assertEquals(
+      actual.scale[3],
+      1.1754943508222875e-38,
+      "the scale of an all-zero row is f32 tiny",
+    );
+    for (let i = 0; i < dim; i += 1)
+      assertEquals(actual.q[3 * dim + i], 0, `q[${i}] of the all-zero row`);
+    // The element with the largest absolute value lands exactly on ±127 (a direct consequence of
+    // the rule not to use −128)
     for (let row = 0; row < rows; row += 1) {
       if (row === 3) continue;
       let amax = 0;
@@ -504,19 +545,20 @@ test.skipIf(!GPU_AVAILABLE)(
       let sawExtreme = false;
       for (let i = 0; i < dim; i += 1) {
         if (Math.abs(x[row * dim + i]) === amax) {
-          assertEquals(Math.abs(actual.q[row * dim + i]), 127, `行 ${row} の絶対値最大`);
+          assertEquals(Math.abs(actual.q[row * dim + i]), 127, `absolute maximum of row ${row}`);
           sawExtreme = true;
         }
       }
-      assert(sawExtreme, `行 ${row} に絶対値最大の要素が無い`);
+      assert(sawExtreme, `row ${row} has no element with the largest absolute value`);
     }
   },
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "quantize_rows は NaN / Inf を行 scale へ伝播する（素の max では消える・実 GPU）",
+  "quantize_rows propagates NaN / Inf to the row scale (a plain max would lose them, real GPU)",
   async () => {
-    // 行 0 = 通常 / 行 1 = 末尾に NaN / 行 2 = 中央に +Inf / 行 3 = 中央に −Inf
+    // Row 0 = normal / row 1 = NaN at the end / row 2 = +Inf in the middle / row 3 = −Inf in the
+    // middle
     const rows = 4;
     const dim = 8;
     const x = new Float32Array(rows * dim);
@@ -532,21 +574,23 @@ test.skipIf(!GPU_AVAILABLE)(
       gpu.destroy();
     }
     const expected = quantizeRowsReference(x, rows, dim);
-    // 非有限行も含めた全数突合（assertExact は参照が NaN の位置だけ「実測も NaN」で見る）
+    // Exhaustive comparison including the non-finite rows (assertExact only checks "measured is NaN
+    // too" where the reference is NaN)
     assertExact(actual.scale, expected.scale, "quantize_rows scale");
-    assertEquals(Number.isFinite(actual.scale[0]), true, "通常行の scale は有限");
-    // MUST: NaN は行 scale へ（素の max だと NaN が飲まれて有限の scale になる）
-    assertEquals(Number.isNaN(actual.scale[1]), true, "NaN 行の scale");
-    assertEquals(actual.scale[2], Number.POSITIVE_INFINITY, "+Inf 行の scale");
-    // |−Inf| = +Inf なので絶対値最大は +Inf（scale に符号は残らない）
-    assertEquals(actual.scale[3], Number.POSITIVE_INFINITY, "−Inf 行の scale");
-    // 通常行の量子化値は参照と一致（非有限行の q は契約の外 — ファイル冒頭）
-    assertExact(actual.q.slice(0, dim), expected.q.slice(0, dim), "quantize_rows q（通常行）");
+    assertEquals(Number.isFinite(actual.scale[0]), true, "the scale of the normal row is finite");
+    // MUST: NaN goes to the row scale (a plain max swallows the NaN and gives a finite scale)
+    assertEquals(Number.isNaN(actual.scale[1]), true, "the scale of the NaN row");
+    assertEquals(actual.scale[2], Number.POSITIVE_INFINITY, "the scale of the +Inf row");
+    // |−Inf| = +Inf, so the absolute maximum is +Inf (no sign remains in the scale)
+    assertEquals(actual.scale[3], Number.POSITIVE_INFINITY, "the scale of the −Inf row");
+    // The quantized values of the normal row match the reference (q of the non-finite rows is
+    // outside the contract — top of the file)
+    assertExact(actual.q.slice(0, dim), expected.q.slice(0, dim), "quantize_rows q (normal row)");
   },
 );
 
 // ---------------------------------------------------------------------------
-// Session 経路（linearCompute: "a8"）
+// Session path (linearCompute: "a8")
 // ---------------------------------------------------------------------------
 
 type LinearCase = {
@@ -554,11 +598,11 @@ type LinearCase = {
   readonly m: number;
   readonly n: number;
   readonly k: number;
-  /** 既定は SIGNED。NaN / ゼロ行のケースだけ差し替える。 */
+  /** SIGNED by default. Replaced only for the NaN / zero-row cases. */
   readonly x?: (index: number, m: number, k: number) => number;
 };
 
-/** `linear(x, w, b)` 1 本の宣言と供給（w は i8 + per-channel scale）。 */
+/** Declaration and supply of one `linear(x, w, b)` (w is i8 + per-channel scale). */
 const i8LinearParts = (
   m: number,
   n: number,
@@ -592,7 +636,8 @@ const i8LinearParts = (
       graph: GRAPH_NAME,
       initializer: "w",
       bytes: quantized.bytes,
-      // per-channel の groupSize は台帳（`codecs.ts`）から引く（行長 k・退化形 k = 0 は 1）。
+      // The per-channel groupSize is looked up in the ledger (`codecs.ts`) (row length k; 1 for the
+      // degenerate k = 0).
       encoding: {
         codec: "int8-sym",
         groupSize: perChannelGroupSize(k),
@@ -621,15 +666,16 @@ type PreparedLinear = {
 
 const prepareLinear = (testCase: LinearCase): PreparedLinear => {
   const { m, n, k } = testCase;
-  // 行（= 出力チャネル）ごとに大きさが違う重み。全行同じ scale だと軸の取り違えが値に出ない。
+  // Weights whose magnitude differs per row (= output channel). With the same scale in every row,
+  // an axis mix-up does not show in the values.
   const weight = fill([n, k], (i) => POSITIVE(i) * (1 + (Math.floor(i / k) % 7) * 0.25));
   const quantized = quantizeI8(weight.data, [n, k], 0);
   const bias = fill([n], SIGNED);
   const x = fill([m, k], (i) => (testCase.x ?? ((index) => SIGNED(index)))(i, m, k));
-  // atol=0 を主張してよいデータであることの門（ファイル冒頭の {@link SIGNED} の MUST）
+  // Checks that the data allows claiming atol=0 (the MUST of {@link SIGNED} at the top of the file)
   const margin = quantizeRowsTieMargin(x.data, m, k);
   if (!(margin > TIE_MARGIN)) {
-    throw new Error(`${testCase.name}: 丸め境界からの余裕が ${margin} しかない`);
+    throw new Error(`${testCase.name}: the margin from the rounding boundaries is only ${margin}`);
   }
   const expected = referenceLinearI8a8({
     x: x.data,
@@ -665,27 +711,29 @@ const runLinear = async (
 };
 
 /**
- * 形の踏み分け。
+ * How the shapes are split up.
  *
- * MUST: **v4 経路とスカラ経路を対で持つ**（書き出しのガードが変種ごとに別の式）。
- * MUST: **m / n をタイル辺 64 を跨がせる**（1 タイル未満に潰れるとガードが一度も偽にならない）。
- * MUST: **k % 16 != 0** を含む（K 端数の 0 埋めが効いていることの検出器。ただし ADR 0022 の
- * 検出限界①のとおり、A/B 片側だけの 0 埋め退行は相殺で見えない）。
+ * MUST: **keep the v4 path and the scalar path as a pair** (the write guard is a different
+ * expression per variant).
+ * MUST: **m / n cross the tile edge 64** (collapsed below 1 tile, the guard is never false).
+ * MUST: include **k % 16 != 0** (a detector that the zero padding of the K remainder works. As
+ * detection limit ① of ADR 0022 says, though, a regression that zero-pads only one of A/B cancels
+ * out and is not visible).
  */
 const LINEAR_CASES: readonly LinearCase[] = [
-  // v4（n % 4 == 0）/ m = 65 で行タイル 2 枚 / n = 68 で列タイル 2 枚（最終タイルの
-  // 有効 quad は 16 中 1）/ k = 20 は k4 = 5 で K タイル 2 枚（2 枚目は 4 パック中 1 パック）
+  // v4 (n % 4 == 0) / m = 65 gives 2 row tiles / n = 68 gives 2 column tiles (the last tile has
+  // 1 valid quad out of 16) / k = 20 is k4 = 5, 2 K tiles (the second holds 1 pack of 4)
   { name: "i8a8 v4 [65,20] × W[68,20]", m: 65, n: 68, k: 20 },
-  // スカラ（n % 4 != 0）
-  { name: "i8a8 スカラ [17,20] × W[19,20]", m: 17, n: 19, k: 20 },
-  // K タイルが 9 枚（k4 = 33）で最終タイルが 1 パック / n = 5 はスカラ / m = 70 で行タイル 2 枚
-  { name: "i8a8 スカラ 長 K [70,132] × W[5,132]", m: 70, n: 5, k: 132 },
-  // 1 タイルに収まる小さい形（ガードが全て真のまま通る経路）
-  { name: "i8a8 v4 小 [3,4] × W[8,4]", m: 3, n: 8, k: 4 },
+  // Scalar (n % 4 != 0)
+  { name: "i8a8 scalar [17,20] × W[19,20]", m: 17, n: 19, k: 20 },
+  // 9 K tiles (k4 = 33) with 1 pack in the last tile / n = 5 is scalar / m = 70 gives 2 row tiles
+  { name: "i8a8 scalar long K [70,132] × W[5,132]", m: 70, n: 5, k: 132 },
+  // A small shape that fits in 1 tile (the path where every guard stays true)
+  { name: "i8a8 v4 small [3,4] × W[8,4]", m: 3, n: 8, k: 4 },
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "linearCompute:'a8' の linear が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数・実 GPU）",
+  "linear with linearCompute:'a8' matches the TS reference with atol=0 (v4 / scalar / tile edges / K remainder, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -695,17 +743,17 @@ test.skipIf(!GPU_AVAILABLE)(
         const actual = await runLinear(gpu, prepared, { linearCompute: "a8" });
         assertEquals(actual.y.shape, [testCase.m, testCase.n], testCase.name);
         assertExact(actual.y.data, prepared.expected, testCase.name);
-        // 恒真化の門: 出力が定数なら「一致」は何も検証していない
-        assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: 出力が定数`);
-        // 実際に i8a8 経路を通っている（quantize_rows + i8a8 GEMM の 2 本）
-        assertEquals(actual.pipelineCount, 2, `${testCase.name}: パイプライン本数`);
+        // The check against a vacuous pass: with a constant output a "match" checks nothing
+        assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: constant output`);
+        // It really goes through the i8a8 path (2 pipelines: quantize_rows + i8a8 GEMM)
+        assertEquals(actual.pipelineCount, 2, `${testCase.name}: pipeline count`);
         assertEquals(
           actual.keys,
           [
             linearI8a8Key(linearI8a8UsesVec4(testCase.n), true, profile.i8a8.linear),
             quantizeRowsKey(quantizeRowsGeometry(testCase.k)),
           ].sort(),
-          `${testCase.name}: 走ったパイプラインキー`,
+          `${testCase.name}: pipeline keys that ran`,
         );
       }
     } finally {
@@ -715,9 +763,9 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "i8a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
+  "i8a8: a NaN row propagates across the whole row, and zero rows and negative values match exactly (real GPU)",
   async () => {
-    // 行 2 に NaN を 1 つ・行 5 を全ゼロ・残りは正負混在
+    // One NaN in row 2, row 5 all zeros, the rest mixed signs
     const nanRow = 2;
     const zeroRow = 5;
     const prepared = prepareLinear({
@@ -739,35 +787,37 @@ test.skipIf(!GPU_AVAILABLE)(
     } finally {
       gpu.destroy();
     }
-    assertExact(y.data, prepared.expected, "NaN / ゼロ行");
-    // NaN 行は**全列**が NaN（f32 経路と同じ粒度 — 縮約が行全体に掛かるため）
+    assertExact(y.data, prepared.expected, "NaN / zero rows");
+    // **Every column** of the NaN row is NaN (the same granularity as the f32 path — the reduction
+    // spans the whole row)
     for (let col = 0; col < 12; col += 1) {
-      assert(Number.isNaN(y.data[nanRow * 12 + col]), `NaN 行 col=${col}`);
+      assert(Number.isNaN(y.data[nanRow * 12 + col]), `NaN row col=${col}`);
     }
-    // 隣の行は無傷（伝播が行を跨いでいない）
+    // The next row is intact (the propagation does not cross rows)
     for (let col = 0; col < 12; col += 1) {
-      assert(Number.isFinite(y.data[(nanRow + 1) * 12 + col]), `隣接行 col=${col}`);
+      assert(Number.isFinite(y.data[(nanRow + 1) * 12 + col]), `adjacent row col=${col}`);
     }
-    // ゼロ行は bias そのもの（q = 0・s = tiny なので f32(0)·(tiny·ws) + bias = bias）
+    // A zero row is the bias itself (q = 0, s = tiny, so f32(0)·(tiny·ws) + bias = bias)
     for (let col = 0; col < 12; col += 1) {
       assertEquals(
         y.data[zeroRow * 12 + col],
         prepared.expected[zeroRow * 12 + col],
-        `ゼロ行 col=${col}`,
+        `zero row col=${col}`,
       );
     }
   },
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  "i8a8: the dot4I8Packed version and the emulated version match with atol=0 (the extension only affects speed, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
     try {
-      // 本機は packed_4x8_integer_dot_product を列挙するので**両変種とも実走できる**。
-      // この 1 本が「エミュは数値同一」という主張の linear 側の機械的検出器（設計 §4.4。
-      // 融合 attention の QK 側は tests/gpu_attention_pv_i8a8_test.ts が同じ形で持つ）。
+      // This machine lists packed_4x8_integer_dot_product, so **both variants can actually run**.
+      // This one test is the linear-side mechanical detector for the claim "the emulation is
+      // numerically identical" (design §4.4; the QK side of the fused attention has the same form
+      // in tests/gpu_attention_pv_i8a8_test.ts).
       const dots: readonly I8a8Dot[] = ["dp4a", "emu"];
       for (const testCase of LINEAR_CASES) {
         const prepared = prepareLinear(testCase);
@@ -781,12 +831,12 @@ test.skipIf(!GPU_AVAILABLE)(
               linearI8a8Key(linearI8a8UsesVec4(testCase.n), dot === "dp4a", profile.i8a8.linear),
             ),
             true,
-            `${testCase.name}: ${dot} のキー`,
+            `${testCase.name}: ${dot} key`,
           );
         }
-        assertExact(results["emu"].data, results["dp4a"].data, `${testCase.name}: dp4a vs エミュ`);
-        // どちらも TS 参照と一致する（両者が同じだけずれている形を塞ぐ）
-        assertExact(results["emu"].data, prepared.expected, `${testCase.name}: エミュ vs 参照`);
+        assertExact(results["emu"].data, results["dp4a"].data, `${testCase.name}: dp4a vs emu`);
+        // Both match the TS reference (blocks the case where both are off by the same amount)
+        assertExact(results["emu"].data, prepared.expected, `${testCase.name}: emu vs reference`);
       }
     } finally {
       gpu.destroy();
@@ -794,7 +844,9 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** `console.warn` を差し替えて `body` を走らせ、必ず元へ戻す（出た文言をそのまま返す）。 */
+/**
+ * Runs `body` with `console.warn` replaced and always restores it (returns the emitted text as is).
+ */
 const captureWarnings = async (body: () => Promise<void>): Promise<string[]> => {
   const original = console.warn;
   const warnings: string[] = [];
@@ -810,27 +862,30 @@ const captureWarnings = async (body: () => Promise<void>): Promise<string[]> => 
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "i8a8: dp4a の無い device で a8 を要求すると device ごとに 1 回だけ警告し、ある device では警告しない（実 GPU）",
+  "i8a8: requesting a8 on a device without dp4a warns exactly once per device, and does not warn on a device with it (real GPU)",
   async () => {
-    // ADR 0128 決定 5 — dp4a 非対応はフォールバックでも自動の兄弟プリセットでもなく、警告。
-    // 判定（src/runtime/a8-emulation-warning.ts）と「1 回」（GpuContext.warnOnce）の単体は
-    // tests/a8_emulation_warning_test.ts。ここは Session 構築の実走からその両方が出ることを見る。
+    // ADR 0128 decision 5 — missing dp4a support is neither a fallback nor an automatic sibling
+    // preset, but a warning. The unit tests of the decision (src/runtime/a8-emulation-warning.ts)
+    // and of "once" (GpuContext.warnOnce) are in tests/a8_emulation_warning_test.ts. This checks
+    // that both come out of a real Session build.
     const gpu = await acquireGpu();
     try {
-      const smallCase: LinearCase = { name: "a8 警告 [3,4] × W[8,4]", m: 3, n: 8, k: 4 };
+      const smallCase: LinearCase = { name: "a8 warning [3,4] × W[8,4]", m: 3, n: 8, k: 4 };
       const prepared = prepareLinear(smallCase);
-      // 本機は dp4a を列挙する（上の両変種の突合がその前提）— ある device では黙って通る。
-      assert(dp4aAvailable(gpu.wgslLanguageFeatures), "本機は dp4a を列挙する前提");
+      // This machine lists dp4a (the comparison of both variants above assumes it) — on a device
+      // with it, it passes silently.
+      assert(dp4aAvailable(gpu.wgslLanguageFeatures), "assumes this machine lists dp4a");
       const quiet = await captureWarnings(async () => {
         await runLinear(gpu, prepared, { linearCompute: "a8" });
       });
       assertEquals(
         quiet.filter((warning) => warning.includes("dp4a")),
         [],
-        "dp4a のある device では警告しない",
+        "no warning on a device with dp4a",
       );
-      // 同じ実物の device を「dp4a を列挙しない」GpuContext で包む — 変えるのは能力の面だけで、
-      // 構築は実際にエミュ版のカーネルで走る（警告の根拠と実走が一致する）。
+      // Wrap the same real device in a GpuContext that "does not list dp4a" — only the capability
+      // surface changes, and the build really runs with the emulated kernel (the reason for the
+      // warning and the actual run agree).
       const stripped = new GpuContext(gpu.device, gpu.adapterInfo, gpu.limits, new Set());
       const profile = deviceGeometryProfile(stripped);
       const warnings = await captureWarnings(async () => {
@@ -840,17 +895,18 @@ test.skipIf(!GPU_AVAILABLE)(
             linearI8a8Key(linearI8a8UsesVec4(smallCase.n), false, profile.i8a8.linear),
           ),
           true,
-          "エミュ版のキーで走る",
+          "runs with the emulated version's key",
         );
-        assertExact(first.y.data, prepared.expected, "エミュ vs 参照");
-        // 2 本目の a8 の Session は同じ device なので出ない・a8 を使わない Session も出ない
+        assertExact(first.y.data, prepared.expected, "emu vs reference");
+        // A second a8 Session on the same device does not warn, nor does a Session that does not
+        // use a8
         await runLinear(stripped, prepared, { linearCompute: "a8" });
         await runLinear(stripped, prepared, {});
       });
       assertEquals(
         warnings.length,
         1,
-        `警告は device ごとに 1 回（出たもの: ${JSON.stringify(warnings)}）`,
+        `one warning per device (emitted: ${JSON.stringify(warnings)})`,
       );
       assertStringIncludes(warnings[0] ?? "", 'linearCompute: "a8"');
       assertStringIncludes(warnings[0] ?? "", "pass quant explicitly");
@@ -861,36 +917,38 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "i8a8 は opt-in × i8 常駐 × k%4==0 のときだけ効く（既定は従来経路のまま・実 GPU）",
+  "i8a8 takes effect only with opt-in × i8 resident × k%4==0 (the default stays on the original path, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
     try {
-      // ① 既定（linearCompute 省略）は i8 資産でも従来の f32 経路（linear 1 本だけ）
+      // ① The default (linearCompute omitted) uses the original f32 path even with i8 assets (just
+      //   1 linear)
       const prepared = prepareLinear({ name: "default", m: 17, n: 19, k: 20 });
       const baseline = await runLinear(gpu, prepared, {});
-      assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
-      // 見たいのは「i8a8 ではなく f32 linear（wi8 格納）が 1 本だけ走った」こと。キーの
-      // 綴りそのものは tests/geometry_profile_test.ts が固定するので、ここは同じ形状
-      //（m=17 → 小 M のタイル幾何バケット / n=19 でスカラ変種）から引く。
+      assertEquals(baseline.pipelineCount, 1, "the default has 1 pipeline (no quantize_rows)");
+      // What to check is that "just 1 f32 linear (wi8 storage) ran, not i8a8". The spelling of
+      // the key itself is pinned by tests/geometry_profile_test.ts, so here it is looked up from
+      // the same shape (m=17 → the small-M tile geometry bucket / n=19 → the scalar variant).
       assertEquals(
         baseline.keys,
         [linearKey("i8", false, "f32", 17, undefined, gemmRowsGeometry(profile, 17))],
-        "既定のキー",
+        "default key",
       );
-      // 既定の値は w8（重みだけ量子化）なので、w8a8 の参照とは**一致しない**
-      // （一致してしまうなら活性量子化が効いていない）
+      // The default values are w8 (only the weights quantized), so they **do not match** the w8a8
+      // reference (if they did, the activation quantization would have no effect)
       const i8a8 = await runLinear(gpu, prepared, { linearCompute: "a8" });
       assertEquals(
         [...baseline.y.data].some((value, index) => value !== i8a8.y.data[index]),
         true,
-        "活性量子化が出力を変えていない（opt-in が効いていない）",
+        "activation quantization did not change the output (the opt-in has no effect)",
       );
 
-      // ② k % 4 != 0 は opt-in でも従来経路へ落ちる（i8 ペイロードの語境界条件）
+      // ② k % 4 != 0 falls to the original path even with opt-in (the word-boundary condition of
+      //   the i8 payload)
       const odd = prepareLinear({ name: "k=7", m: 5, n: 6, k: 7 });
       const oddRun = await runLinear(gpu, odd, { linearCompute: "a8" });
-      assertEquals(oddRun.pipelineCount, 1, "k % 4 != 0 は f32 経路");
+      assertEquals(oddRun.pipelineCount, 1, "k % 4 != 0 uses the f32 path");
     } finally {
       gpu.destroy();
     }
@@ -898,25 +956,29 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * K=0（in_features 0）の退化 shape。契約（src/ops.ts の linear）では有効な形だが、`k % 4 == 0`
- * を満たすので選択述語が `k > 0` を見ていないと i8a8 経路へ入り、① `quantize_rows` の
- * `dim >= 1` と衝突して **i8a8 固有の CodegenError** になる（量子化する活性がそもそも存在せず、
- * i8a8 の門として意味を持たない例外）。
+ * The degenerate K=0 shape (in_features 0). The contract (linear in src/ops.ts) allows it, but it
+ * satisfies `k % 4 == 0`, so if the selection predicate did not look at `k > 0` it would enter the
+ * i8a8 path and collide with `dim >= 1` of ① `quantize_rows`, giving **a CodegenError specific to
+ * i8a8** (there are no activations to quantize at all, so as an i8a8 check the exception means
+ * nothing).
  *
- * 固定するのは「**opt-in が K=0 の経路を変えない**」こと — 既定 session と**同じ**失敗で
- * 落ちる。K=0 自体は既定の f32 経路でも 0 バイト束縛の最小サイズ違反で落ちる（linearCompute
- * とは無関係の別要因）ので、ここは 2 経路の一致だけを見る。
+ * What is pinned is that "**opt-in does not change the K=0 path**" — it fails with **the same**
+ * failure as the default session. K=0 itself also fails on the default f32 path with a minimum-size
+ * violation of a 0-byte binding (a separate cause unrelated to linearCompute), so this only checks
+ * that the 2 paths agree.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "i8a8: K=0 の i8 常駐 linear は opt-in でも既定と同じ経路（i8a8 固有の失敗を出さない・実 GPU）",
+  "i8a8: a K=0 i8 resident linear takes the same path as the default even with opt-in (no i8a8-specific failure, real GPU)",
   async () => {
     const m = 3;
     const n = 8;
     const bias = fill([n], SIGNED);
-    // 重みは 0 要素（[n,0]）。scale は per-channel の形だけ保つ（縮約が空なので読まれない）。
+    // The weights have 0 elements ([n,0]). The scale only keeps its per-channel shape (the
+    // reduction is empty, so it is never read).
     const quantized = quantizeI8(new Float32Array(0), [n, 0], 0);
-    // NOTE: 0 要素の重みは `krm` では持てない（書き手が長さ 0 の block を作らない —
-    // container-v1 §4.1）。退化 shape の経路を踏むのが主題なので、供給はメモリ内容器で渡す。
+    // NOTE: a `krm` cannot hold a 0-element weight (the writer does not make a 0-length block —
+    // container-v1 §4.1). The subject is exercising the path of the degenerate shape, so the supply
+    // is passed as an in-memory container.
     const { declaration, tensors } = i8LinearParts(m, n, 0, quantized, bias);
     const model = memoryModel(declaration, tensors);
     const x = fill([m, 0], SIGNED);
@@ -932,13 +994,15 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const baseline = await runK0(gpu, {});
       const optIn = await runK0(gpu, { linearCompute: "a8" });
-      assertEquals(optIn.name, baseline.name, "K=0: opt-in で例外の種類が変わっている");
-      assertEquals(optIn.message, baseline.message, "K=0: opt-in で失敗の理由が変わっている");
-      // 恒真化の門: 述語が K=0 を拾っていたときに出る ① の門とは別物であること
-      assert(
-        !optIn.message.includes("quantize_rows"),
-        `K=0: i8a8 の ① へ入っている（${optIn.message}）`,
+      assertEquals(optIn.name, baseline.name, "K=0: opt-in changed the kind of exception");
+      assertEquals(
+        optIn.message,
+        baseline.message,
+        "K=0: opt-in changed the reason for the failure",
       );
+      // The check against a vacuous pass: it is not the ① check that fires when the predicate picks
+      // up K=0
+      assert(!optIn.message.includes("quantize_rows"), `K=0: entered ① of i8a8 (${optIn.message})`);
     } finally {
       gpu.destroy();
     }
@@ -946,9 +1010,10 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "i8a8: k が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  "i8a8: fail loudly when k exceeds the limit of the i32 reduction (2^17) (no silent wrap-around, real GPU)",
   async () => {
-    // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ k·127·128 は i32 に収まるが、門は安全側。
+    // Just outside the limit (2^17 + 4, a multiple of 4). |acc| ≤ k·127·128 fits in i32, but the
+    // limit errs on the safe side.
     const k = LINEAR_I8A8_MAX_K + 4;
     const prepared = prepareLinear({ name: "overflow gate", m: 1, n: 4, k });
     const gpu = await acquireGpu();
@@ -965,7 +1030,8 @@ test.skipIf(!GPU_AVAILABLE)(
       } finally {
         await session.dispose();
       }
-      // 既定の f32 経路では同じモデルが普通に走る（門が i8a8 経路だけのものであること）
+      // On the default f32 path the same model runs normally (the limit belongs only to the i8a8
+      // path)
       const baseline = await runLinear(gpu, prepared, {});
       assertEquals(baseline.y.shape, [1, 4]);
     } finally {
@@ -975,22 +1041,25 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// w4a8（i4 常駐の重み × per-token i8 活性 — perf-ledger Q-8）
+// w4a8 (i4 resident weights × per-token i8 activations — perf-ledger Q-8)
 // ---------------------------------------------------------------------------
 
 /**
- * この節が固定する数値契約は i8 変種と**同じ atol=0** で、成立の根拠だけが違う:
- * group の中は i32 の厳密内積・group 境界でだけ f32 へ 1 回 flush・最後に xs を 1 回。
- * したがって浮動小数の演算は出力 1 要素あたり `k/g + 1` 回に固定され、タイル分割・
- * 充填の担当・dp4a / エミュのどれを変えても値は 1 ビットも動かない。
+ * The numeric contract this section pins is **the same atol=0** as the i8 variant; only the basis
+ * differs: inside a group an exact i32 dot product, a single flush to f32 only at group boundaries,
+ * and xs applied once at the end.
+ * So the floating point operations are fixed at `k/g + 1` per output element, and whatever changes
+ * among the tile split, the fill assignment or dp4a / emu, the values do not move by a single bit.
  *
- * MUST: 期待値に **f32 i4 経路（fake-quant 重みの f32 GEMM）を使わない**。あちらは
- * 活性が f32 のままなので、一致してしまうなら活性量子化が効いていない — 恒真化そのもの。
- * 下の「既定経路と値が割れる」門がその裏取りになる。
- * MUST: 重みは**隣接要素の符号を交互**にする（nibble の上下を取り違えても対称パターンでは
- * 値が合う — ADR 0069 決定 4 ①。i4lanes の並びに対する唯一の値の側の検出器）。
- * MUST: 重みは **group ごとに振幅を変える**（全 group 同じ scale だと group 添字の
- * 取り違え〈行/group の入れ替え・shift 誤り〉が一切値に出ない）。
+ * MUST: do **not use the f32 i4 path (an f32 GEMM of the fake-quant weights)** for the expected
+ * values. Its activations stay f32, so if it matched, the activation quantization would have no
+ * effect — a vacuous pass by construction. The check "values differ from the default path" below
+ * backs this up.
+ * MUST: the weights **alternate the sign of adjacent elements** (a symmetric pattern matches even
+ * with the nibble halves swapped — ADR 0069 decision 4 ①; the only value-side detector for the
+ * i4lanes order).
+ * MUST: the weights **vary in amplitude per group** (with the same scale in every group, a mix-up
+ * of the group index [swapping row/group, a wrong shift] never shows in the values).
  */
 const groupVarying =
   (cols: number, groupSize: number) =>
@@ -1001,7 +1070,7 @@ const groupVarying =
     return base * (1 + group * 0.75 + (row % 5) * 0.25);
   };
 
-/** `linear(x, w, b)` 1 本のグラフ（w は i4 + group scale）。 */
+/** A graph with one `linear(x, w, b)` (w is i4 + group scale). */
 const i4LinearModel = (
   m: number,
   n: number,
@@ -1054,27 +1123,30 @@ type W4a8Case = {
 };
 
 /**
- * 形の踏み分け。
+ * How the shapes are split up.
  *
- * MUST: **v4 経路とスカラ経路を対で持つ**（書き出しのガードが変種ごとに別の式）。
- * MUST: **m / n をタイル辺（128 × 64）を跨がせる**（1 タイル未満に潰れるとガードが一度も
- * 偽にならない）。
- * MUST: **group が行内で 2 回以上変わる形**を含める（1 group / 行だと flush が 1 回きりに
- * なり、group 添字も畳み順も検証されない）。
- * MUST: **group = K タイル（g16）と 2 タイル / group（g32）の両方**を持つ（内側ループの
- * 上限が 1 のときだけ通る誤り〈gbase の掛け忘れ〉を塞ぐ）。
+ * MUST: **keep the v4 path and the scalar path as a pair** (the write guard is a different
+ * expression per variant).
+ * MUST: **m / n cross the tile edges (128 × 64)** (collapsed below 1 tile, the guard is never
+ * false).
+ * MUST: include **shapes where the group changes at least twice within a row** (with 1 group per
+ * row there is only one flush, and neither the group index nor the folding order is checked).
+ * MUST: have **both group = K tile (g16) and 2 tiles per group (g32)** (blocks an error that passes
+ * only when the inner loop's bound is 1 [forgetting to multiply by gbase]).
  */
 const W4A8_CASES: readonly W4a8Case[] = [
-  // v4 / m = 130 で行タイル 2 枚・n = 68 で列タイル 2 枚（最終タイルの有効 quad は 16 中 1）
-  // / k = 96 g32 = 行内 3 group・1 group が K タイル 2 枚
+  // v4 / m = 130 gives 2 row tiles, n = 68 gives 2 column tiles (the last tile has 1 valid quad out
+  // of 16)
+  // / k = 96 g32 = 3 groups per row, 1 group spans 2 K tiles
   { name: "w4a8 v4 [130,96] × W[68,96] g32", m: 130, n: 68, k: 96, groupSize: 32 },
-  // スカラ（n % 4 != 0）/ m = 129・n = 67 でどちらもタイル辺を跨ぐ / k = 48 g16 = 行内
-  // 3 group・**1 group がちょうど K タイル 1 枚**
-  { name: "w4a8 スカラ [129,48] × W[67,48] g16", m: 129, n: 67, k: 48, groupSize: 16 },
-  // 1 タイルに収まる小さい形（ガードが全て真のまま通る経路）・行内 1 group
-  { name: "w4a8 v4 小 [3,32] × W[8,32] g32", m: 3, n: 8, k: 32, groupSize: 32 },
-  // スカラ小 / k = 96 g32 = 行内 3 group（v4 の A と group 構成だけ揃えた対照）
-  { name: "w4a8 スカラ 小 [17,96] × W[19,96] g32", m: 17, n: 19, k: 96, groupSize: 32 },
+  // Scalar (n % 4 != 0) / m = 129 and n = 67 both cross the tile edges / k = 48 g16 = 3 groups per
+  // row, **1 group is exactly 1 K tile**
+  { name: "w4a8 scalar [129,48] × W[67,48] g16", m: 129, n: 67, k: 48, groupSize: 16 },
+  // A small shape that fits in 1 tile (the path where every guard stays true), 1 group per row
+  { name: "w4a8 v4 small [3,32] × W[8,32] g32", m: 3, n: 8, k: 32, groupSize: 32 },
+  // Small scalar / k = 96 g32 = 3 groups per row (a control with only the group layout matching the
+  // v4 A)
+  { name: "w4a8 scalar small [17,96] × W[19,96] g32", m: 17, n: 19, k: 96, groupSize: 32 },
 ];
 
 type PreparedW4a8 = {
@@ -1090,18 +1162,21 @@ const prepareW4a8 = (
   const { m, n, k, groupSize } = testCase;
   const weight = fill([n, k], groupVarying(k, groupSize));
   const quantized = quantizeI4(weight.data, [n, k], groupSize);
-  // 恒真化の門: 隣接要素の符号が交互でないと nibble の取り違えが値に出ない
+  // The check against a vacuous pass: unless adjacent elements alternate in sign, a nibble mix-up
+  // does not show in the values
   let alternating = 0;
   for (let i = 0; i + 1 < quantized.q.length; i += 1) {
     if (quantized.q[i] > 0 && quantized.q[i + 1] < 0) alternating += 1;
   }
   if (alternating * 4 < quantized.q.length) {
-    throw new Error(`${testCase.name}: 符号が交互になっている隣接対が ${alternating} 組しかない`);
+    throw new Error(`${testCase.name}: only ${alternating} adjacent pairs alternate in sign`);
   }
   const bias = fill([n], SIGNED);
   const x = fill([m, k], (index) => xValue(index, m, k));
-  // atol=0 を主張してよいデータであることの門（ファイル冒頭の {@link SIGNED} の MUST）。
-  // 非有限行・全ゼロ行は丸めが走らないので対象外へ置き換える（門を残したまま非有限を通す）。
+  // Checks that the data allows claiming atol=0 (the MUST of {@link SIGNED} at the top of the
+  // file).
+  // Non-finite and all-zero rows do not round, so they are replaced out of scope (non-finite values
+  // pass while the check stays).
   const gated = Float32Array.from(x.data);
   for (let row = 0; row < m; row += 1) {
     const slice = gated.subarray(row * k, row * k + k);
@@ -1113,7 +1188,7 @@ const prepareW4a8 = (
   }
   const margin = quantizeRowsTieMargin(gated, m, k);
   if (!(margin > TIE_MARGIN)) {
-    throw new Error(`${testCase.name}: 丸め境界からの余裕が ${margin} しかない`);
+    throw new Error(`${testCase.name}: the margin from the rounding boundaries is only ${margin}`);
   }
   const expected = referenceLinearW4a8({
     x: x.data,
@@ -1129,7 +1204,7 @@ const prepareW4a8 = (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "linearCompute:'a8' × i4 常駐（w4a8）が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / group 2 種・実 GPU）",
+  "linearCompute:'a8' × i4 resident (w4a8) matches the TS reference with atol=0 (v4 / scalar / tile edges / 2 group sizes, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -1139,10 +1214,10 @@ test.skipIf(!GPU_AVAILABLE)(
         const actual = await runLinear(gpu, prepared, { linearCompute: "a8" });
         assertEquals(actual.y.shape, [testCase.m, testCase.n], testCase.name);
         assertExact(actual.y.data, prepared.expected, testCase.name);
-        // 恒真化の門: 出力が定数なら「一致」は何も検証していない
-        assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: 出力が定数`);
-        // 実際に w4a8 経路を通っている（quantize_rows + w4a8 GEMM の 2 本）
-        assertEquals(actual.pipelineCount, 2, `${testCase.name}: パイプライン本数`);
+        // The check against a vacuous pass: with a constant output a "match" checks nothing
+        assert(new Set([...actual.y.data]).size > 1, `${testCase.name}: constant output`);
+        // It really goes through the w4a8 path (2 pipelines: quantize_rows + w4a8 GEMM)
+        assertEquals(actual.pipelineCount, 2, `${testCase.name}: pipeline count`);
         const key = linearI8a8Key(
           linearI8a8UsesVec4(testCase.n),
           true,
@@ -1153,10 +1228,14 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           actual.keys,
           [key, quantizeRowsKey(quantizeRowsGeometry(testCase.k))].sort(),
-          `${testCase.name}: 走ったパイプラインキー`,
+          `${testCase.name}: pipeline keys that ran`,
         );
-        // 診断で「i4 常駐 × その group 長」が読めること（ADR 0021）
-        assertEquals(key.endsWith(`:wi4g${testCase.groupSize}`), true, `${testCase.name}: 判別子`);
+        // The diagnostics show "i4 resident × its group length" (ADR 0021)
+        assertEquals(
+          key.endsWith(`:wi4g${testCase.groupSize}`),
+          true,
+          `${testCase.name}: discriminator`,
+        );
       }
     } finally {
       gpu.destroy();
@@ -1165,13 +1244,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "w4a8: NaN 行は行全体へ伝播し、ゼロ行と負値は厳密に一致する（実 GPU）",
+  "w4a8: a NaN row propagates across the whole row, and zero rows and negative values match exactly (real GPU)",
   async () => {
-    // 非有限の伝播は i8a8 と**同じ根拠に立たない** — w4a8 は `xs · wscale` の早期畳み込みを
-    // 使えず（wscale が group ごとに変わる）、`xs` を最後の fma 1 回へ回す。したがって
-    // `xs = ±Inf` かつ group 縮約が 0 の組で `fma(0, Inf, bias)` のような分岐が割れる余地があり、
-    // ファイル冒頭が全体の契約として書いている「NaN 行の伝播（設計の一部）」を新設変種でも
-    // 別に固定する。
+    // The propagation of non-finite values **does not rest on the same basis** as i8a8 — w4a8
+    // cannot fold `xs · wscale` early (wscale changes per group) and leaves `xs` for the single
+    // final fma.
+    // So where `xs = ±Inf` and a group reduction is 0, a branch like `fma(0, Inf, bias)` could
+    // diverge, and the "propagation of NaN rows (part of the design)" that the top of the file
+    // states as the overall contract is pinned separately for the new variant too.
     const testCase = W4A8_CASES[0];
     const { m, n } = testCase;
     const nanRow = 2;
@@ -1191,28 +1271,29 @@ test.skipIf(!GPU_AVAILABLE)(
       gpu.destroy();
     }
 
-    assertExact(y.data, prepared.expected, "w4a8 NaN / ゼロ行");
+    assertExact(y.data, prepared.expected, "w4a8 NaN / zero rows");
     for (let col = 0; col < n; col += 1) {
-      assert(Number.isNaN(y.data[nanRow * n + col]), `NaN 行 col=${col}`);
-      assert(Number.isFinite(y.data[(nanRow + 1) * n + col]), `隣接行 col=${col}`);
+      assert(Number.isNaN(y.data[nanRow * n + col]), `NaN row col=${col}`);
+      assert(Number.isFinite(y.data[(nanRow + 1) * n + col]), `adjacent row col=${col}`);
       assertEquals(
         y.data[zeroRow * n + col],
         prepared.expected[zeroRow * n + col],
-        `ゼロ行 col=${col}`,
+        `zero row col=${col}`,
       );
     }
-    // 恒真化の門: NaN 行・ゼロ行の外が定数なら「一致」は何も検証していない。
+    // The check against a vacuous pass: if everything outside the NaN and zero rows is constant, a
+    // "match" checks nothing.
     const others = [...y.data].filter((_value, index) => {
       const row = Math.floor(index / n);
       return row !== nanRow && row !== zeroRow;
     });
-    assert(new Set(others).size > 1, "NaN / ゼロ行の外が定数");
+    assert(new Set(others).size > 1, "constant outside the NaN / zero rows");
     assertEquals(y.shape, [m, n]);
   },
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "w4a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（i4 レーン展開は内積変種に依らない・実 GPU）",
+  "w4a8: the dot4I8Packed version and the emulated version match with atol=0 (the i4 lane expansion does not depend on the dot-product variant, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -1236,12 +1317,12 @@ test.skipIf(!GPU_AVAILABLE)(
               ),
             ),
             true,
-            `${testCase.name}: ${dot} のキー`,
+            `${testCase.name}: ${dot} key`,
           );
         }
-        assertExact(results["emu"].data, results["dp4a"].data, `${testCase.name}: dp4a vs エミュ`);
-        // どちらも TS 参照と一致する（両者が同じだけずれている形を塞ぐ）
-        assertExact(results["emu"].data, prepared.expected, `${testCase.name}: エミュ vs 参照`);
+        assertExact(results["emu"].data, results["dp4a"].data, `${testCase.name}: dp4a vs emu`);
+        // Both match the TS reference (blocks the case where both are off by the same amount)
+        assertExact(results["emu"].data, prepared.expected, `${testCase.name}: emu vs reference`);
       }
     } finally {
       gpu.destroy();
@@ -1250,16 +1331,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "w4a8 は opt-in のときだけ効き、既定の f32 i4 経路とは値が割れる（活性量子化の裏取り・実 GPU）",
+  "w4a8 takes effect only with opt-in, and its values differ from the default f32 i4 path (backing for the activation quantization, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
     try {
       const testCase = W4A8_CASES[3];
       const prepared = prepareW4a8(testCase);
-      // ① 既定（linearCompute 省略）は i4 資産でも従来の f32 計算経路（linear 1 本だけ）
+      // ① The default (linearCompute omitted) uses the original f32 compute path even with i4
+      //   assets (just 1 linear)
       const baseline = await runLinear(gpu, prepared, {});
-      assertEquals(baseline.pipelineCount, 1, "既定はパイプライン 1 本（quantize_rows が出ない）");
+      assertEquals(baseline.pipelineCount, 1, "the default has 1 pipeline (no quantize_rows)");
       assertEquals(
         baseline.keys,
         [
@@ -1272,15 +1354,16 @@ test.skipIf(!GPU_AVAILABLE)(
             gemmRowsGeometry(profile, testCase.m),
           ),
         ],
-        "既定のキー",
+        "default key",
       );
-      // MUST: 既定の値は活性 f32 のままなので w4a8 の参照とは**一致しない**。一致するなら
-      // 活性量子化が効いていない = 期待値に f32 i4 経路を使ったのと同じ恒真化。
+      // MUST: the default values keep f32 activations, so they **do not match** the w4a8 reference.
+      // If they did, the activation quantization would have no effect = the same vacuous pass as
+      // using the f32 i4 path for the expected values.
       const w4a8 = await runLinear(gpu, prepared, { linearCompute: "a8" });
       assertEquals(
         [...baseline.y.data].some((value, index) => value !== w4a8.y.data[index]),
         true,
-        "活性量子化が出力を変えていない（opt-in が効いていない）",
+        "activation quantization did not change the output (the opt-in has no effect)",
       );
     } finally {
       gpu.destroy();

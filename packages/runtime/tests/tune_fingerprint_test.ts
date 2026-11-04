@@ -54,7 +54,10 @@ import { candidatesFor, type CasePlan, casePlan } from "../src/tune/harness.ts";
 
 type Launch = ReturnType<CasePlan["launch"]>;
 
-/** FNV-1a 64 bit の素朴な実装（BigInt — 指紋の実装と独立のオラクル）。 */
+/**
+ * A naive FNV-1a 64-bit implementation (BigInt — an oracle independent of the fingerprint's
+ * implementation).
+ */
 const referenceFnv1a64 = (text: string): string => {
   let hash = 0xcbf29ce484222325n;
   for (const byte of new TextEncoder().encode(text)) {
@@ -64,13 +67,13 @@ const referenceFnv1a64 = (text: string): string => {
 };
 
 describe("fnv1a64Hex", () => {
-  it("FNV-1a 64 bit の公表値と一致する", () => {
+  it("matches the published FNV-1a 64-bit values", () => {
     assertEquals(fnv1a64Hex(""), "cbf29ce484222325");
     assertEquals(fnv1a64Hex("a"), "af63dc4c8601ec8c");
     assertEquals(fnv1a64Hex("foobar"), "85944171f73967e8");
   });
 
-  it("多バイト文字・長い文字列でも BigInt の素朴な実装と一致する（UTF-8 のバイト列のハッシュ）", () => {
+  it("matches the naive BigInt implementation for multi-byte characters and long strings too (a hash of the UTF-8 bytes)", () => {
     for (const text of [
       "幾何プロファイル",
       "\u0000￿\u{1f600}",
@@ -82,13 +85,16 @@ describe("fnv1a64Hex", () => {
   });
 });
 
-/** 欄 1 つの幾何を、同じ族の quick 候補のうち今の値と違う最初のものへ差し替える。 */
+/**
+ * Replaces the geometry of one field with the first quick candidate of the same family that differs
+ * from the current value.
+ */
 const another = <T extends GeometryCandidate["geometry"]>(
   current: T,
   pool: readonly { readonly geometry: T }[],
 ): T => {
   const found = pool.find(({ geometry }) => JSON.stringify(geometry) !== JSON.stringify(current));
-  if (found === undefined) throw new Error("差し替え先の候補が無い");
+  if (found === undefined) throw new Error("no candidate to replace it with");
   return found.geometry;
 };
 
@@ -142,8 +148,8 @@ const singleFieldVariants = (base: GeometryProfile): ReadonlyMap<string, Geometr
   return variants;
 };
 
-describe("geometryProfileKernelsId: カーネルの指紋", () => {
-  it("同じ表からは同じ値（16 進 16 桁）になり、複製や欄の並びに依らない", () => {
+describe("geometryProfileKernelsId: the kernel fingerprint", () => {
+  it("gives the same value (16 hex digits) for the same table, independent of copies and field order", () => {
     const value = geometryProfileKernelsId(APPLE_METAL_3);
     assertMatch(value, /^[0-9a-f]{16}$/);
     assertEquals(geometryProfileKernelsId(APPLE_METAL_3), value);
@@ -152,7 +158,7 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertEquals(geometryProfileKernelsId({ i8a8, conv2d, attention, gemmRows, id }), value);
   });
 
-  it("id・match・provenance は指紋に効かない（表の幾何だけが効く）", () => {
+  it("id, match and provenance do not affect the fingerprint (only the table's geometry does)", () => {
     const value = geometryProfileKernelsId(APPLE_METAL_3);
     const { match: _match, provenance: _provenance, ...bare } = APPLE_METAL_3;
     assertEquals(geometryProfileKernelsId({ ...bare, id: "other" }), value);
@@ -187,12 +193,14 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertEquals(values.size, 16);
   });
 
-  it("gemmRows の段の境界が違う表（既定の 3 段）も、runtime の選択関数でケースに幾何を当てて導ける", () => {
+  it("a table with different gemmRows segment boundaries (the default's 3 segments) is also derivable, assigning geometries to cases with the runtime's selection function", () => {
     const value = geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE);
     assertMatch(value, /^[0-9a-f]{16}$/);
-    // 既定の表は空の入力のハッシュではない（表と既定の両方のカーネルを数える）
+    // The default table is not the hash of an empty input (both the table's and the default's
+    // kernels are counted)
     assertNotEquals(value, fnv1a64Hex(""));
-    // 3 段の既定の表と、同じ幾何を 7 段に細分した表は、どのケースにも同じ幾何を当てるので同じ指紋
+    // The 3-segment default table and a table refining the same geometries into 7 segments assign
+    // the same geometry to every case, so they have the same fingerprint
     const refined: GeometryProfile = {
       ...DEFAULT_GEOMETRY_PROFILE,
       gemmRows: PROFILE_GEMM_ROWS_BOUNDS.map((maxRows) => ({
@@ -206,10 +214,11 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertEquals(geometryProfileKernelsId(refined), value);
   });
 
-  it("既定の幾何（case plan の defaultCandidate）が変わると値が変わる — 比の土台のカーネルも指紋に入る", () => {
+  it("changes when the default geometry (the case plan's defaultCandidate) changes — the kernels the ratios are based on are in the fingerprint too", () => {
     const base = profileKernelsId(APPLE_METAL_3, SWEEP_CASES, casePlan);
     assertEquals(base, geometryProfileKernelsId(APPLE_METAL_3));
-    // 1 ケースだけ、既定の幾何を別の候補にした case plan（既定の幾何を変えた runtime を模す）
+    // A case plan with the default geometry of one case replaced by another candidate (mimics a
+    // runtime whose default geometry changed)
     const target = SWEEP_CASES.find((sweepCase) => sweepCase.op === "linear");
     assert(target !== undefined);
     const shifted: CasePlanner = (sweepCase, limit, dp4a) => {
@@ -224,7 +233,7 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertNotEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, shifted), base);
   });
 
-  it("i8a8 のケースは dp4a の両方の変種を数える（どちらの WGSL が変わっても値が変わる）", () => {
+  it("i8a8 cases count both dp4a variants (the value changes when either WGSL changes)", () => {
     const base = profileKernelsId(APPLE_METAL_3, SWEEP_CASES, casePlan);
     for (const variant of [false, true]) {
       const marked: CasePlanner = (sweepCase, limit, dp4a) => {
@@ -291,9 +300,10 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     );
   });
 
-  it("dispatch の params だけ・workgroups だけが変わっても値が変わる（キーと WGSL が同じでも別のカーネル）", () => {
+  it("changes when only the dispatch params or only the workgroups change (a different kernel even with the same key and WGSL)", () => {
     const base = profileKernelsId(APPLE_METAL_3, SWEEP_CASES, casePlan);
-    // 全ケースの launch のうち 1 欄だけを差し替えた case plan（その欄だけが違う runtime を模す）
+    // A case plan with one field of every case's launch replaced (mimics a runtime that differs
+    // only in that field)
     const altered =
       (change: (launch: Launch) => Launch): CasePlanner =>
       (sweepCase, limit, dp4a) => {
@@ -315,7 +325,7 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertNotEquals(paramsValue, workgroupsValue);
   });
 
-  it("WGSL のコメントと空白だけが違う runtime では値が変わらない（トークンが同じなら同じカーネル — ADR 0117 追記 2026-10-19）", () => {
+  it("does not change for a runtime whose WGSL differs only in comments and whitespace (the same tokens are the same kernel — ADR 0117 addendum 2026-10-19)", () => {
     const base = profileKernelsId(APPLE_METAL_3, SWEEP_CASES, casePlan);
     const rewritten =
       (change: (wgsl: string) => string): CasePlanner =>
@@ -337,13 +347,14 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     assertEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, commented), base, "comments added");
     assertEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, stripped), base, "comments removed");
     assertEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, reindented), base, "whitespace");
-    // 1 トークンでも変われば別のカーネル
+    // A change of even one token is a different kernel
     const token = rewritten((wgsl) => `${wgsl}\nfn changed() {}`);
     assertNotEquals(profileKernelsId(APPLE_METAL_3, SWEEP_CASES, token), base);
   });
 
-  it("組めない dispatch（65535 を超える）は、ケース・表の欄・幾何と 65535 固定の理由を名指して投げる", () => {
-    // 門（assertGeometryProfile）は通るが、tileN 4 で conv2d 512² の N = 262144 が 65536 workgroup になる
+  it("throws on a dispatch that cannot be built (over 65535), naming the case, the table field, the geometry and why 65535 is fixed", () => {
+    // It passes the check (assertGeometryProfile), but with tileN 4 the N = 262144 of conv2d 512²
+    // becomes 65536 workgroups
     const narrow: GeometryProfile = {
       ...APPLE_METAL_3,
       id: "narrow",
@@ -362,10 +373,10 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
     }
   });
 
-  it("GPU も時刻も読まない（navigator.gpu・performance.now・Date.now が投げる環境でも同じ値）", () => {
+  it("reads neither the GPU nor the clock (the same value in an environment where navigator.gpu, performance.now and Date.now throw)", () => {
     const expected = geometryProfileKernelsId(APPLE_METAL_3);
     const forbidden = (what: string) => (): never => {
-      throw new Error(`${what} を読んだ`);
+      throw new Error(`read ${what}`);
     };
     // oxlint-disable-next-line typescript/unbound-method -- kept only to reassign in finally; never called
     const originalNow = performance.now;
@@ -386,13 +397,16 @@ describe("geometryProfileKernelsId: カーネルの指紋", () => {
   });
 });
 
-describe("candidateKernelsId: 測った候補のカーネルの指紋（記録の candidateKernels — ADR 0117 決定 8）", () => {
+describe("candidateKernelsId: the kernel fingerprint of the measured candidates (the record's candidateKernels — ADR 0117 decision 8)", () => {
   const caseOf = (op: SweepCase["op"]): SweepCase => {
     const found = SWEEP_CASES.find((sweepCase) => sweepCase.op === op);
     assert(found !== undefined, op);
     return found;
   };
-  /** ケースを候補の全幾何で測った行（書き手の行の形のうち指紋が読む欄）。 */
+  /**
+   * Rows measuring a case with every candidate geometry (the fields of the writer's row shape that
+   * the fingerprint reads).
+   */
   const rowsOf = (sweepCase: SweepCase, candidates: readonly GeometryCandidate[]): MeasuredRow[] =>
     candidates.map((candidate) => ({ caseId: sweepCase.id, geometryParams: candidate.geometry }));
   const LINEAR = caseOf("linear");
@@ -404,15 +418,16 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
   ];
   const ROWS = [...F32_ROWS, ...rowsOf(I8A8, quickI8a8Candidates())];
 
-  it("決定的で（16 進 16 桁）、書き手と読み手の入口は今の runtime の case plan で導いた値", () => {
+  it("is deterministic (16 hex digits), and the writer's and reader's entry points give the value derived with the current runtime's case plan", () => {
     const value = sweepCandidateKernelsId(ROWS, false);
     assertMatch(value, /^[0-9a-f]{16}$/);
     assertEquals(sweepCandidateKernelsId(structuredClone(ROWS), false), value);
     assertEquals(candidateKernelsId(ROWS, false, SWEEP_CASES, casePlan), value);
   });
 
-  it("既定を変えず候補の WGSL だけ変えた runtime では値が変わる（既定の指紋 defaultKernels は変わらない）", () => {
-    // 既定の幾何と違う幾何の dispatch の WGSL だけに 1 行足した case plan（候補のカーネルだけを直した runtime を模す）
+  it("changes for a runtime that changed only the candidates' WGSL and not the default (the default's fingerprint defaultKernels does not change)", () => {
+    // A case plan that adds one line only to the WGSL of dispatches whose geometry differs from the
+    // default (mimics a runtime that fixed only the candidates' kernels)
     const candidatesOnly: CasePlanner = (sweepCase, limit, dp4a) => {
       const plan = casePlan(sweepCase, limit, dp4a);
       const defaultGeometry = JSON.stringify(plan.defaultCandidate.geometry);
@@ -426,7 +441,8 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
         },
       };
     };
-    // 比の土台の指紋はこの変更を見ない（記録の照合が defaultKernels だけでは古い候補の実測が通る）
+    // The fingerprint of the ratios' basis does not see this change (if records were matched on
+    // defaultKernels alone, stale measurements of the candidates would pass)
     assertEquals(
       profileKernelsId(DEFAULT_GEOMETRY_PROFILE, SWEEP_CASES, candidatesOnly),
       geometryProfileKernelsId(DEFAULT_GEOMETRY_PROFILE),
@@ -437,7 +453,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
     );
   });
 
-  it("失敗した行は数えず（採用の材料にならない）、測った行が 1 本違えば値が変わる", () => {
+  it("does not count failed rows (they are not adoption inputs), and changes when one measured row differs", () => {
     const value = sweepCandidateKernelsId(ROWS, false);
     const failed: MeasuredRow = {
       caseId: LINEAR.id,
@@ -448,7 +464,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
     assertNotEquals(sweepCandidateKernelsId(ROWS.slice(1), false), value);
   });
 
-  it("i8a8 の行は記録の dp4a の変種で組み、f32 骨格の行は dp4a に依らない", () => {
+  it("builds i8a8 rows with the record's dp4a variant, while f32 skeleton rows do not depend on dp4a", () => {
     const i8a8Rows = rowsOf(I8A8, quickI8a8Candidates());
     assertNotEquals(
       sweepCandidateKernelsId(i8a8Rows, true),
@@ -457,7 +473,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
     assertEquals(sweepCandidateKernelsId(F32_ROWS, true), sweepCandidateKernelsId(F32_ROWS, false));
   });
 
-  it("今の runtime の形状表に無いケースの行は、ケースを名指して投げる", () => {
+  it("throws on a row of a case missing from the current runtime's shape table, naming the case", () => {
     assertThrows(
       () =>
         sweepCandidateKernelsId(
@@ -469,7 +485,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
     );
   });
 
-  it("全ケースを full の全候補で測った行からも導ける（65535 で組める — 書き手が掃引の後に投げない）", () => {
+  it("is also derivable from rows measuring every case with every full candidate (buildable within 65535 — the writer does not throw after the sweep)", () => {
     const rows = SWEEP_CASES.flatMap((sweepCase) =>
       rowsOf(sweepCase, [
         casePlan(sweepCase, 65535, false).defaultCandidate,
@@ -482,7 +498,7 @@ describe("candidateKernelsId: 測った候補のカーネルの指紋（記録�
   });
 });
 
-describe("埋め込みの表の provenance は今の runtime の値と一致する", () => {
+describe("the provenance of the built-in tables matches the current runtime's values", () => {
   // On failure: a GEMM kernel (key, params, WGSL tokens, dispatch count — comments and whitespace do
   // not count), the default geometry, the sweep cases or the gemmRows bounds changed. Re-derive every
   // embedded table with the current runtime (ADR 0117 decision 4: the regeneration makes the machine
@@ -493,42 +509,42 @@ describe("埋め込みの表の provenance は今の runtime の値と一致す�
   // that table needs a new sweep, which can re-pick other fields (the 2026-10-26 conv3d re-sweep also
   // moved i8a8.attentionQk — docs/research/2026-10-26-conv3d-geometry-sweep.md §4).
   for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-    it(`${profile.id}: provenance.kernels = 今の runtime の指紋・provenance.caseSet = 今のケース集合の版`, () => {
+    it(`${profile.id}: provenance.kernels = the current runtime's fingerprint, provenance.caseSet = the current case-set version`, () => {
       const provenance = profile.provenance;
       assert(
         provenance !== undefined,
-        `${profile.id}: 埋め込みの表は掃引から生成する（provenance が要る）`,
+        `${profile.id}: built-in tables are generated from a sweep (provenance is required)`,
       );
       assertEquals(
         provenance.kernels,
         geometryProfileKernelsId(profile),
-        `${profile.id}: カーネルの指紋が今の runtime と違う — 冒頭コメントのコマンドで再生成する`,
+        `${profile.id}: the kernel fingerprint differs from the current runtime's — regenerate with the command in the header comment`,
       );
       assertEquals(
         provenance.caseSet,
         sweepCaseSetId(),
-        `${profile.id}: ケース集合の版が今の runtime と違う — 冒頭コメントのコマンドで再生成する`,
+        `${profile.id}: the case-set version differs from the current runtime's — regenerate with the command in the header comment`,
       );
     });
   }
 });
 
-describe("sweepCaseSetId: ケース集合の版", () => {
-  it("決定的で（16 進 16 桁）、今のケースと境界から導いた値", () => {
+describe("sweepCaseSetId: the case-set version", () => {
+  it("is deterministic (16 hex digits), a value derived from the current cases and boundaries", () => {
     const value = sweepCaseSetId();
     assertMatch(value, /^[0-9a-f]{16}$/);
     assertEquals(sweepCaseSetId(), value);
     assertEquals(caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS), value);
   });
 
-  it("ケースを 1 本足す・dispatch を決める欄（shape・op・attr）を変える・境界を変えると値が変わる", () => {
+  it("changes when a case is added, a dispatch-deciding field (shape, op, attr) changes or a boundary changes", () => {
     const base = caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS);
     const [first] = SWEEP_CASES;
     assertNotEquals(
       caseSetId([...SWEEP_CASES, { ...first, id: `${first.id}-copy` }], PROFILE_GEMM_ROWS_BOUNDS),
       base,
     );
-    /** `at` 番目のケースだけを差し替えた版。 */
+    /** The version with only the case at index `at` replaced. */
     const replaced = (at: number, sweepCase: SweepCase): string =>
       caseSetId(SWEEP_CASES.with(at, sweepCase), PROFILE_GEMM_ROWS_BOUNDS);
     const indexOf = (op: SweepCase["op"]): number => {
@@ -559,25 +575,26 @@ describe("sweepCaseSetId: ケース集合の版", () => {
       assertNotEquals(replaced(conv3d, { ...conv3dCase, dims }), base, `dims.${field}`);
     }
     assertNotEquals(caseSetId(SWEEP_CASES, [16, 32, 64, 512, Number.POSITIVE_INFINITY]), base);
-    // 末尾の Infinity も値として数える（素の JSON.stringify は null に落とし、別の値と区別しない）
+    // The trailing Infinity counts as a value too (plain JSON.stringify drops it to null and does
+    // not tell it apart from other values)
     assertNotEquals(caseSetId(SWEEP_CASES, [...PROFILE_GEMM_ROWS_BOUNDS.slice(0, -1), 1024]), base);
   });
 
-  it("説明などの情報の欄（source・censusCount・mirrorOf）だけを変えても値は変わらない", () => {
+  it("does not change when only informational fields such as descriptions (source, censusCount, mirrorOf) change", () => {
     const base = caseSetId(SWEEP_CASES, PROFILE_GEMM_ROWS_BOUNDS);
     const described = SWEEP_CASES.map((sweepCase): SweepCase =>
       sweepCase.op === "matmul"
-        ? { ...sweepCase, source: `${sweepCase.source}（改）`, mirrorOf: "other" }
+        ? { ...sweepCase, source: `${sweepCase.source} (edited)`, mirrorOf: "other" }
         : {
             ...sweepCase,
-            source: `${sweepCase.source}（改）`,
+            source: `${sweepCase.source} (edited)`,
             censusCount: sweepCase.censusCount + 1,
           },
     );
     assertEquals(caseSetId(described, PROFILE_GEMM_ROWS_BOUNDS), base);
   });
 
-  it("分類の無い欄を持つケースは投げる（版に入れるかを決めていない欄を黙って落とさない）", () => {
+  it("throws on a case with an unclassified field (a field not yet decided for the version is not dropped silently)", () => {
     const [first] = SWEEP_CASES;
     const unknown = { ...first, note: "x" };
     assertThrows(
@@ -587,7 +604,7 @@ describe("sweepCaseSetId: ケース集合の版", () => {
     );
   });
 
-  it("ケースのキーの並びには依らない（正規の JSON）", () => {
+  it("does not depend on the order of a case's keys (canonical JSON)", () => {
     const reordered = SWEEP_CASES.map((sweepCase) =>
       Object.fromEntries(Object.entries(sweepCase).reverse()),
     );
@@ -595,8 +612,8 @@ describe("sweepCaseSetId: ケース集合の版", () => {
   });
 });
 
-describe("wgslTokenText: 指紋が数える WGSL", () => {
-  it("行コメント・入れ子のブロックコメントを落とし、空白の連なりを 1 つに畳む", () => {
+describe("wgslTokenText: the WGSL the fingerprint counts", () => {
+  it("drops line comments and nested block comments, and folds runs of whitespace into one", () => {
     assertEquals(
       wgslTokenText(
         "// head\nfn f() -> u32 { /* a /* nested */ b */ return 1u; } // tail\n\n  let x = 2u;",
@@ -605,7 +622,7 @@ describe("wgslTokenText: 指紋が数える WGSL", () => {
     );
   });
 
-  it("閉じないブロックコメントは末尾まで、コメントの外のトークンはそのまま", () => {
+  it("an unclosed block comment runs to the end, and tokens outside comments stay as they are", () => {
     assertEquals(wgslTokenText("let a = 1u; /* open"), "let a = 1u;");
     assertEquals(wgslTokenText("let url = 1u; // https://example"), "let url = 1u;");
     assertEquals(wgslTokenText("a/b // c\nd*e"), "a/b d*e");
@@ -613,7 +630,7 @@ describe("wgslTokenText: 指紋が数える WGSL", () => {
 });
 
 describe("canonicalJson", () => {
-  it("キーを並べ・空白を除き・undefined の欄を落とし・Infinity を 1e999 と書く", () => {
+  it("sorts keys, removes whitespace, drops undefined fields and writes Infinity as 1e999", () => {
     assertEquals(
       canonicalJson({ b: [1, Number.POSITIVE_INFINITY, "x"], a: { d: undefined, c: null } }),
       '{"a":{"c":null},"b":[1,1e999,"x"]}',

@@ -1,11 +1,15 @@
-// メモリ必要量 estimator（ADR 0070 決定 5）の実 GPU 突合（GPU に依らない門は estimate_test.ts）。
+// Real-GPU comparison of the memory-requirement estimator (ADR 0070 decision 5) (the GPU-independent
+// checks are in estimate_test.ts).
 //
-// 厳密一致を主張できるのは診断が実測している 2 カテゴリ（圧縮常駐・展開）と state 容量、
-// 融合が 1 本も掛からない states 形 attention の slot 表、行ブロック attention の窓だけの
-// slot 表、および融合 attention op 1 ノードだけの slot 表。行ブロック attention の窓は見積りが
-// 融合後の形で数えるので突合できる（ADR 0093 追記 2026-10-10）。融合 attention op のノード内一時
-// （S・行統計・i8a8 の量子化の一時）は見積りが実行と同じ純関数で数える（ADR 0124 決定 7）。それ以外の中間ピークは**近似**なので突合しない（他の融合が中間を消す — estimator
-// の unaccounted 欄が認めている差）。アダプタ無しは明示 SKIP。
+// Exact equality can be claimed only for the 2 categories the diagnostics measure (compressed
+// residency, expansion) and the state capacity, the slot table of a states-form attention to which no
+// fusion applies at all, the slot table of a row-block attention window alone, and the slot table of a
+// single fused attention op node. The row-block attention window can be compared because the estimate
+// counts it in its fused form (ADR 0093 addendum 2026-10-10). The fused attention op's in-node
+// temporaries (S, the row statistics, the i8a8 quantization temporaries) are counted by the estimate
+// with the same pure function as execution (ADR 0124 decision 7). Other intermediate peaks are
+// **approximations** and are not compared (other fusions remove intermediates — the difference the
+// estimator's unaccounted field admits). Without an adapter the tests SKIP explicitly.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -34,24 +38,27 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { quantizeI8 } from "./helpers/i8.ts";
 
 /**
- * S / 行統計の算式が recipe-builder と同じ導出元（`planStateAttention`）から出ていることの
- * 唯一の実測門。
+ * The only measured check that the formulas for S / the row statistics come from the same source
+ * (`planStateAttention`) as recipe-builder.
  *
- * このグラフは融合が 1 本も掛からない（states を触るノードは窓を掴まない — ADR 0067 決定 5b）
- * ので、`workspaceBytes` は slot 表の総バイト = `planBacking.residentBytes` と**厳密一致**する。
- * 算式そのものは両者が共有する（= ここでは割れない）が、共有関数へ**渡す材料**（`B·H`・窓・
- * 容量の出どころ）と、返ったバイト数を実行相が確保する位置・サイズクラス再利用の規則が
- * estimator の写しとずれれば、ここが例外なしで割れる。
+ * No fusion applies to this graph at all (nodes that touch states do not grab a window — ADR 0067
+ * decision 5b), so `workspaceBytes` **equals exactly** the slot table's total bytes =
+ * `planBacking.residentBytes`. Both share the formula itself (= it cannot split here), but if **the
+ * inputs passed** to the shared function (`B·H`, the window, where the capacity comes from) or the
+ * rules by which the execution phase places the returned bytes and reuses size classes drift from
+ * the estimator's copy, this splits without any exception.
  *
- * 呼ぶのは full / sliding の 2 変種（下の 2 本）— `colCap` は変種で式が分かれる唯一の欄なので、
- * 片方だけでは分岐のもう一方が無門のままになる。
+ * It is called for the 2 variants full / sliding (the 2 tests below) — `colCap` is the only field
+ * whose formula differs by variant, so with only one of them the other side of the branch would stay
+ * unchecked.
  *
- * `limitCap` を渡すと device の `maxStorageBufferBindingSize` を絞って**行ブロックを複数枚に
- * 割る**（estimator は `ROW_BLOCK_SPLIT` の受け口を持たないので、枚数を寄せる手は形と上限しか
- * 無い）。複数枚でだけ効く 2 つの規則 — ブロック跨ぎのプール再利用と、端数で 1 行狭い
- * ブロックが混ざったときのサイズクラス 2 種 — は、絞らない呼び方では 1 度も踏まれない。
- * MUST: 絞ったときは `expectedBlocks` を渡して枚数を先に固定する（1 枚に落ちた形で緑になると
- * 「複数枚での一致」を見たことにならない）。
+ * Passing `limitCap` restricts the device's `maxStorageBufferBindingSize` and **splits the rows into
+ * several blocks** (the estimator has no entry for `ROW_BLOCK_SPLIT`, so the only levers to steer the
+ * block count are the shape and the limit). The 2 rules that apply only with several blocks — pool
+ * reuse across blocks, and 2 size classes when a block one row narrower from the remainder is mixed
+ * in — are never exercised by a call without the restriction.
+ * MUST: when restricted, pass `expectedBlocks` to pin the block count first (going green on a shape
+ * that fell to 1 block would not count as seeing "agreement over several blocks").
  */
 const assertPlanBackingMatchesEstimate = async (variant: {
   readonly capacity: number;
@@ -71,10 +78,14 @@ const assertPlanBackingMatchesEstimate = async (variant: {
   try {
     const limit = gpu.limits.maxStorageBufferBindingSize;
     if (variant.limitCap !== undefined) {
-      assertEquals(limit, variant.limitCap, "requiredLimits が絞られていない（門が空振りする）");
+      assertEquals(
+        limit,
+        variant.limitCap,
+        "requiredLimits is not restricted (the check would be vacuous)",
+      );
     }
     if (variant.expectedBlocks !== undefined) {
-      // 実行と見積りが共有する純関数そのもので枚数を固定する（前提の可視化）。
+      // Pin the block count with the very pure function that execution and the estimate share (makes the premise visible).
       const blocks = planStateAttention(
         {
           batchHeads: heads,
@@ -84,7 +95,7 @@ const assertPlanBackingMatchesEstimate = async (variant: {
         },
         limit,
       ).blocks;
-      assertEquals(blocks.length, variant.expectedBlocks, "行ブロックの枚数");
+      assertEquals(blocks.length, variant.expectedBlocks, "number of row blocks");
     }
     const model = openGraph(stateAttentionGraph(variant.window, heads));
     const generation = { chunkLength, bindings: { C: variant.capacity } };
@@ -95,7 +106,7 @@ const assertPlanBackingMatchesEstimate = async (variant: {
     try {
       const context = await session.createGenerationContext(generation);
       try {
-        // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
+        // The slot backing is built on the second run with the same signature (the first run takes the arena path).
         for (let step = 0; step < 2; step += 1) {
           await session.run(
             {
@@ -120,22 +131,23 @@ const assertPlanBackingMatchesEstimate = async (variant: {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（full 変種・実 GPU）",
+  "the total intermediates of a states-form attention exactly match the execution plan's slot table (full variant, real GPU)",
   () => assertPlanBackingMatchesEstimate({ capacity: 16 }),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention の中間総量が実行計画の slot 表と厳密一致する（sliding 変種・実 GPU）",
+  "the total intermediates of a states-form attention exactly match the execution plan's slot table (sliding variant, real GPU)",
   () => assertPlanBackingMatchesEstimate({ capacity: 8, window: 8 }),
 );
 
 /**
- * 行ブロック**複数枚**での 2 実装一致。H=64 / Hkv=2 / D=8 / C=16 では S の 1 行が
- * 64·16·4 = 4096B なのに対し state スロットは 2·16·8·4 = 1024B なので、上限 8192B に絞ると
- * 「スロットは束縛できるが S 4 行は束縛できない」形になり、行ブロックが必ず割れる。
+ * Agreement of the 2 implementations with **several** row blocks. With H=64 / Hkv=2 / D=8 / C=16, one
+ * row of S is 64·16·4 = 4096B while a state slot is 2·16·8·4 = 1024B, so restricting the limit to
+ * 8192B gives the shape "the slots can be bound but 4 rows of S cannot", and the rows always split
+ * into blocks.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（full 変種・実 GPU）",
+  "the total intermediates of a states-form attention exactly match the slot table with several blocks too (full variant, real GPU)",
   () =>
     assertPlanBackingMatchesEstimate({
       capacity: 16,
@@ -147,52 +159,56 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention の中間総量が端数ブロックでも slot 表と厳密一致する（実 GPU）",
+  "the total intermediates of a states-form attention exactly match the slot table with a remainder block too (real GPU)",
   () =>
     assertPlanBackingMatchesEstimate({
       capacity: 16,
       heads: 64,
       chunkLength: 5,
-      // 出力 o [1,64,5,8] = 10240B が束縛上限に収まる最小の絞り（S は 1 行 4096B → 2 行 × 3 枚）
+      // The smallest restriction under which the output o [1,64,5,8] = 10240B fits the binding limit (S has 4096B per row -> 2 rows x 3 blocks)
       limitCap: 10240,
       expectedBlocks: 3,
     }),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention の中間総量が複数枚でも slot 表と厳密一致する（sliding 変種・実 GPU）",
+  "the total intermediates of a states-form attention exactly match the slot table with several blocks too (sliding variant, real GPU)",
   () =>
     assertPlanBackingMatchesEstimate({
       capacity: 16,
       heads: 64,
       window: 8,
       chunkLength: 4,
-      // 出力 o [1,64,4,8] = 8192B が束縛上限に収まる絞り（S は 1 行 64×11×4 = 2816B → 2 行 × 2 枚）
+      // A restriction under which the output o [1,64,4,8] = 8192B fits the binding limit (S has 64×11×4 = 2816B per row -> 2 rows x 2 blocks)
       limitCap: 8192,
       expectedBlocks: 2,
     }),
 );
 
 /**
- * 分解 attention の次元。スコアの 1 行 = `heads·keys·4` = 512B・全幅 = 32KiB で、q / kᵀ / v / y は
- * 各 4096B（下の絞りの全てで束縛上限に収まる — 割れるのはスコアの行ブロックだけ）。
+ * Dimensions of the decomposed attention. One row of scores = `heads·keys·4` = 512B, the full width
+ * = 32KiB, and q / kᵀ / v / y are 4096B each (within the binding limit under every restriction below
+ * — only the row blocks of the scores split).
  */
 const DECOMPOSED = { heads: 2, queries: 64, keys: 64, headDim: 8 } as const;
 
 /**
- * 行ブロック attention（ADR 0060）の窓の中間総量が実行計画の slot 表と厳密一致することの
- * 実測門（ADR 0093 追記 2026-10-10）。
+ * The measured check that the total intermediates of a row-block attention (ADR 0060) window exactly
+ * match the execution plan's slot table (ADR 0093 addendum 2026-10-10).
  *
- * 見積りは実行相と同じ融合計画（`planFusions`）を呼び、窓を融合後の確保プログラムへ置き換えて
- * 同じパッカーへ渡す。確保プログラムは recipe-builder の簿記の写し（出力の確保・一時の寿命・
- * WGSL の storage 宣言から採る読み書き・外部入力の解放）なので、写しが実行相とずれれば、ここが
- * 例外なしで割れる。グラフ出力 `y` 以外の値は全て窓の内側なので、slot 表は融合ステップ 1 つで
- * 決まる（窓の外の近似が混ざらない）。
+ * The estimate calls the same fusion plan (`planFusions`) as the execution phase, replaces the window
+ * with the fused allocation program and passes it to the same packer. The allocation program is a
+ * copy of recipe-builder's bookkeeping (the outputs' allocation, the temporaries' lifetimes, the reads
+ * and writes taken from the WGSL storage declarations, the release of external inputs), so if the copy
+ * drifts from the execution phase, this splits without any exception. Every value other than the
+ * graph output `y` is inside the window, so the slot table is decided by a single fused step (no
+ * approximation from outside the window mixes in).
  *
- * `limitCap` で束縛上限を絞り、行ブロックを 1 枚 / 複数枚 / 不揃いの枚数へ割る（1 枚ではブロック
- * 跨ぎの配り直しが、不揃いでは幅の違う一時のサイズクラス 2 種が踏まれない）。
- * MUST: 枚数は `expectedBlocks` で先に固定する（想定と違う枚数で緑になると、見たい形を見たことに
- * ならない）。
+ * `limitCap` restricts the binding limit and splits the rows into 1 / several / uneven blocks (with 1
+ * block the hand-out across blocks is not exercised; without uneven blocks the 2 size classes of
+ * temporaries with different widths are not).
+ * MUST: pin the block count first with `expectedBlocks` (going green with an unexpected block count
+ * would not count as seeing the intended shape).
  */
 const assertRowBlockAttentionMatchesEstimate = async (variant: {
   readonly limitCap?: number;
@@ -207,13 +223,17 @@ const assertRowBlockAttentionMatchesEstimate = async (variant: {
   try {
     const limit = gpu.limits.maxStorageBufferBindingSize;
     if (variant.limitCap !== undefined) {
-      assertEquals(limit, variant.limitCap, "requiredLimits が絞られていない（門が空振りする）");
+      assertEquals(
+        limit,
+        variant.limitCap,
+        "requiredLimits is not restricted (the check would be vacuous)",
+      );
     }
-    // 実行と見積りが共有する純関数そのもので枚数を固定する（前提の可視化）。
+    // Pin the block count with the very pure function that execution and the estimate share (makes the premise visible).
     assertEquals(
       planRowBlocks(queries, heads * keys * 4, limit).length,
       variant.expectedBlocks,
-      "行ブロックの枚数",
+      "number of row blocks",
     );
     const model = openGraph(decomposedAttentionGraph(DECOMPOSED));
     const { scenarios } = model.estimate({ maxStorageBufferBindingSize: limit });
@@ -223,7 +243,7 @@ const assertRowBlockAttentionMatchesEstimate = async (variant: {
     );
     const session = await model.createContainerSession(gpu);
     try {
-      // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
+      // The slot backing is built on the second run with the same signature (the first run takes the arena path).
       for (let step = 0; step < 2; step += 1) {
         await session.run({
           q: fill([heads, queries, headDim], (i) => ((i % 5) - 2) / 4),
@@ -242,36 +262,42 @@ const assertRowBlockAttentionMatchesEstimate = async (variant: {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロック attention の中間総量が 1 枚の形で slot 表と厳密一致する（実 GPU）",
+  "the total intermediates of a row-block attention exactly match the slot table with 1 block (real GPU)",
   () => assertRowBlockAttentionMatchesEstimate({ expectedBlocks: 1 }),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロック attention の中間総量が複数枚でも slot 表と厳密一致する（実 GPU）",
+  "the total intermediates of a row-block attention exactly match the slot table with several blocks too (real GPU)",
   () => assertRowBlockAttentionMatchesEstimate({ limitCap: 8192, expectedBlocks: 4 }),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロック attention の中間総量が不揃いの枚数でも slot 表と厳密一致する（実 GPU）",
+  "the total intermediates of a row-block attention exactly match the slot table with uneven blocks too (real GPU)",
   () => assertRowBlockAttentionMatchesEstimate({ limitCap: 6144, expectedBlocks: 6 }),
 );
 
 /**
- * 融合 attention op（states 欄なし — ADR 0023）1 ノードのグラフの形。DiT の self-attention を縮めた形で、
- * D % 4 == 0 かつ N % 4 == 0 なので a8 は ①③ とも i8a8・s16 も適格（量子化の一時と permute が全部出る）。
+ * The shape of a graph of one fused attention op node (no states field — ADR 0023). A shrunk DiT
+ * self-attention; D % 4 == 0 and N % 4 == 0, so with a8 both ①③ are i8a8 and s16 is eligible too
+ * (all the quantization temporaries and permutes appear).
  */
 const FUSED = { b: 1, h: 4, m: 64, n: 64, d: 128 } as const;
 
 /**
- * 融合 attention op のノード内一時を見積りが実行と同じに数えることの実測門（ADR 0124 決定 7）。
+ * The measured check that the estimate counts the fused attention op's in-node temporaries the same
+ * way as execution (ADR 0124 decision 7).
  *
- * グラフは attention 1 ノードだけ（他の融合も別名も成立しない — 上の states 形と同じ条件）なので、
- * `workspaceBytes` は slot 表の総バイト = `planBacking.residentBytes` と**厳密一致**する。見積りは
- * 実行（`buildAttention`）の確保と dispatch の並びを写すので、一時の寿命・読み書きの向き・量子化の
- * 一時の大きさのどれかが写しからずれれば、ここが例外なしで割れる。予算（`attentionRowBlockMaxBytes`）
- * を掛けた形では、枚数の導出も実行と同じであることを同時に見る。
- * MUST: 予算を掛けた形は枚数を先に固定する（`expectedBlocks` — 1 枚に落ちた形で緑になると「複数枚での
- * 一致」を見たことにならない）。枚数の観測は計測に依らない census（行窓の ①QK のキーの dispatch 本数）。
+ * The graph is a single attention node (no other fusion and no alias apply — the same condition as
+ * the states form above), so `workspaceBytes` **equals exactly** the slot table's total bytes =
+ * `planBacking.residentBytes`. The estimate copies the allocation and dispatch sequence of execution
+ * (`buildAttention`), so if any of the temporaries' lifetimes, the read / write directions or the size
+ * of the quantization temporaries drifts from the copy, this splits without any exception. The shapes
+ * under a budget (`attentionRowBlockMaxBytes`) also check that the block count is derived the same way
+ * as in execution.
+ * MUST: the shapes under a budget pin the block count first (`expectedBlocks` — going green on a shape
+ * that fell to 1 block would not count as seeing "agreement over several blocks"). The block count is
+ * observed by a census that does not depend on timing (the number of dispatches of the row window's
+ * ①QK key).
  */
 const assertFusedAttentionMatchesEstimate = async (variant: {
   readonly options: SessionOptions;
@@ -326,7 +352,7 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
           fill(shape, (i) => (index === 3 ? (i % 4 === 3 ? -1 : 0) : ((i % (5 + index)) - 2) / 4)),
         ]),
       );
-      // slot backing は同じ signature の 2 run 目で組まれる（1 run 目はアリーナ経路）。
+      // The slot backing is built on the second run with the same signature (the first run takes the arena path).
       for (let step = 0; step < 2; step += 1) await session.run(inputs);
       const diagnostics = session.diagnostics();
       const windowedQk = (diagnostics.lastRunPipelines ?? []).filter(
@@ -335,7 +361,7 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
       assertEquals(
         windowedQk.reduce((total, { dispatchCount }) => total + dispatchCount, 0),
         variant.expectedBlocks === 1 ? 0 : variant.expectedBlocks,
-        "行ブロックの枚数（1 枚は行窓を立てない）",
+        "number of row blocks (1 block sets up no row window)",
       );
       if (variant.expectedOnlineWindows !== undefined) {
         // The online route: one dispatch per row window, and none of the three-pass kernels.
@@ -361,12 +387,12 @@ const assertFusedAttentionMatchesEstimate = async (variant: {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "融合 attention op の中間総量が slot 表と厳密一致する（f32・予算なし・実 GPU）",
+  "the total intermediates of a fused attention op exactly match the slot table (f32, no budget, real GPU)",
   () => assertFusedAttentionMatchesEstimate({ options: {}, expectedBlocks: 1 }),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "融合 attention op の中間総量が予算で割った形でも slot 表と厳密一致する（f32 + mask・実 GPU）",
+  "the total intermediates of a fused attention op exactly match the slot table when split by a budget too (f32 + mask, real GPU)",
   () =>
     assertFusedAttentionMatchesEstimate({
       options: { attentionRowBlockMaxBytes: 16 * 1024 },
@@ -376,7 +402,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "融合 attention op の中間総量が a8 + s16 で予算で割った形でも slot 表と厳密一致する（実 GPU）",
+  "the total intermediates of a fused attention op exactly match the slot table with a8 + s16 split by a budget too (real GPU)",
   () =>
     assertFusedAttentionMatchesEstimate({
       options: {
@@ -566,15 +592,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 実 GPU 突合
+// Real-GPU comparison
 // ---------------------------------------------------------------------------
 
 /**
- * 3 つの欄が全て非 0 になるモデル — i8 の embedding 表（適格 = 圧縮のまま常駐）・f16 の
- * mul 被演算子（適格外 = f32 展開）・f32 の add 被演算子（非圧縮のまま常駐）。
+ * A model in which all 3 fields are non-zero — an i8 embedding table (eligible = stays resident
+ * compressed), an f16 mul operand (ineligible = expanded to f32) and an f32 add operand (stays
+ * resident uncompressed).
  *
- * 圧縮 / 展開の 2 欄は診断 `storage` と厳密一致を主張でき、f32 は診断に現れない
- * （`weights.uncompressedBytes` の欄を分けている理由そのもの）ので手計算定数と突合する。
+ * For the 2 fields compressed / expanded exact equality with the diagnostic `storage` can be claimed;
+ * f32 does not appear in the diagnostics (the very reason `weights.uncompressedBytes` is a separate
+ * field), so it is compared against a hand-computed constant.
  */
 const gpuWeightModel = (): PreparedModel => {
   const table = fill([5, 3], (i) => (i % 7) - 3);
@@ -608,7 +636,7 @@ const gpuWeightModel = (): PreparedModel => {
   return openGraph(graph, [
     weight("c", f32Bytes([1, 2, 3])),
     weight("g", f16Zeros(3), { codec: "f16" }),
-    // per-channel（行長 3・group 1 本）— scale のバイト列は v1 の `[5,1]` と同じ。
+    // per-channel (row length 3, 1 group) — the scale bytes are the same as v1's `[5,1]`.
     weight("w", quantized.bytes, {
       codec: "int8-sym",
       groupSize: 3,
@@ -618,7 +646,7 @@ const gpuWeightModel = (): PreparedModel => {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "estimator の重み・state が実測診断と厳密一致する（実 GPU）",
+  "the estimator's weights and state exactly match the measured diagnostics (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -631,7 +659,7 @@ test.skipIf(!GPU_AVAILABLE)(
         const { weights } = estimate.resident;
         assertEquals(weights.compressedBytes, storage.residentCompressedBytes);
         assertEquals(weights.expandedBytes, storage.hostExpandedBytes);
-        // f32 の c は診断に現れない（ADR 0006 の storage 診断は低精度格納だけ）— 手計算 3×4
+        // The f32 c does not appear in the diagnostics (ADR 0006's storage diagnostics cover only low-precision storage) — hand-computed 3×4
         assertEquals(weights.uncompressedBytes, 12);
       } finally {
         await session.dispose();
@@ -651,9 +679,10 @@ test.skipIf(!GPU_AVAILABLE)(
       } finally {
         await stateSession.dispose();
       }
-      // workspaceBytes は突合しない — 行ブロック attention 以外の融合が中間を消し、その融合の
-      // 一時は勘定に入らないので、実測（planBacking.residentBytes / lastRun.peakTransientBytes）とは原理的にずれる
-      // （estimator の unaccounted 欄が認めている差そのもの）。
+      // workspaceBytes is not compared — fusions other than row-block attention remove intermediates and
+      // those fusions' temporaries are not counted, so in principle it differs from the measurements
+      // (planBacking.residentBytes / lastRun.peakTransientBytes) (exactly the difference the estimator's
+      // unaccounted field admits).
     } finally {
       gpu.destroy();
     }

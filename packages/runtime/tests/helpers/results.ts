@@ -1,24 +1,28 @@
 /**
- * 検証結果の保存（`outputs/verify/<環境キー>/<日付>_<系列>/`）。
+ * Storage of verification results (`outputs/verify/<environment key>/<date>_<series>/`).
  *
- * 参照値（追跡が要る・環境ごとの行）と結果（追跡外・走らせるたびに増える）は性格が違うので
- * 席を分ける。ここは**消して安全**な側 — `rm -rf outputs/verify` で常に作り直せる
- * （docs/assets-layout.md の outputs 根と同じ流儀で、`bench`（ベンチ・評価）とは別の根）。
+ * Reference values (tracked, one row per environment) and results (untracked, growing with every
+ * run) are different in nature, so they live in different places. This is the **safe-to-delete**
+ * side — `rm -rf outputs/verify` can always be rebuilt (the same convention as the outputs root of
+ * docs/assets-layout.md, and a different root from `bench` (benchmarks and evaluation)).
  *
- * 置くのは 2 種類だけ:
+ * Only two kinds of things go here:
  *
- * - `results.json` — ケースごとの決着（一致 / 不一致 / 参照値を作った）と、それを採った環境・
- *   チェックアウト。席を作った時点で `cases` 空の「走行中」として先に書き、`record` のたびに
- *   丸ごと書き直す。記録に届く前に落ちた回でも、前回の走行の決着が居座ることはない
- *   （実物だけ今回のバイトに入れ替わった席に、前回の PASS が残るのが最悪の形）。
- * - 実物（PNG / WAV） — **成功・失敗を問わず毎回**。不一致のときだけ残す形だと、一致した
- *   ときの実物が手元に無く、次に割れたときの A/B が採れない。
+ * - `results.json` — the outcome of each case (match / mismatch / reference value written) and the
+ *   environment and checkout that produced it. It is written first as "running" with empty `cases`
+ *   when the directory is created, and rewritten whole on every `record`. Even a run that fails
+ *   before reaching a record never leaves the previous run's outcomes in place (the worst case is a
+ *   directory whose artifacts were replaced by this run's bytes while the previous PASS remains).
+ * - Artifacts (PNG / WAV) — **every time, success or failure**. Keeping them only on a mismatch
+ *   would leave no artifact of the matching run at hand, and no A/B the next time it breaks.
  *
- * 同じ日・同じ系列を 2 度走らせたら**最後の走行が残る**（日付までで席を分け、走行ごとには
- * 分けない — 分けると「最新はどれか」を人が数えることになる）。
+ * Running the same series twice on the same day **keeps the last run** (directories are split down
+ * to the date, not per run — splitting per run would leave a person counting which one is the
+ * latest).
  *
- * 席の日付は**UTC**（走行を始めた時刻の `toISOString()` の日付部）。ローカル日付とはずれる —
- * JST の機では 09:00 より前の走行が前日の席に入る。
+ * The directory's date is **UTC** (the date part of `toISOString()` at the time the run started).
+ * It can differ from the local date — on a JST machine, runs before 09:00 land in the previous
+ * day's directory.
  */
 
 import type { Tolerance } from "../../src/reference/allclose.ts";
@@ -29,120 +33,135 @@ import { ENVIRONMENT, type Environment } from "./environment.ts";
 
 const execFile = promisify(execFileCallback);
 
-/** 結果の根（`outputs/verify/`）。 */
+/** Root of the results (`outputs/verify/`). */
 const DEFAULT_ROOT = new URL("../../../../outputs/verify/", import.meta.url);
 
-/** リポジトリ根（`git` を回す作業ディレクトリ）。 */
+/** Repository root (the working directory `git` runs in). */
 const REPO_ROOT = new URL("../../../../", import.meta.url);
 
-/** ケース 1 件の決着。 */
+/** Outcome of one case. */
 export type ResultStatus = "pass" | "fail" | "written" | "rewritten";
 
 /**
- * 許容差判定の実測 1 本（golden 系列のケースが**出力ごとに**積む）。
+ * One measurement of a tolerance check (the cases of the golden series record one **per output**).
  *
- * 許容差の判定は落ちたときにしか数値を見せないので、**合格した回の差**はどこにも残らない。
- * 「この機でどれだけ差が出ているか」を毎回残しておくと、帯を緩めるかどうかの判断材料が
- * 割れる前から手元に揃う（帯そのものの値・判定・assert はこの記録とは無関係）。
+ * A tolerance check shows numbers only when it fails, so **the difference of a passing run** is
+ * kept nowhere. Keeping "how large the difference is on this machine" on every run means the
+ * material for deciding whether to loosen a band is at hand before anything breaks (the band's
+ * values, the check and the assert have nothing to do with this record).
  *
- * MUST: 派生値（帯に対する比など）は持たない — 導けるものは読む側（`tools/verify-diff`）が
- * 導く。2 か所に同じ数の別表現が乗ると、片方だけ直った形が作れてしまう。
- * NOTE: 非有限（NaN / ±Inf）は `JSON.stringify` が `null` にする（読む側は null を受ける）。
+ * MUST: no derived values (a ratio to the band and the like) — whatever can be derived is derived
+ * by the reader (`tools/verify-diff`). Two representations of the same number in two places would
+ * allow a state where only one of them was fixed.
+ * NOTE: non-finite values (NaN / ±Inf) become `null` through `JSON.stringify` (the reader accepts
+ * null).
  */
 export type Measurement = {
-  /** グラフの出力名。 */
+  /** Output name in the graph. */
   readonly output: string;
   readonly maxAbs: number;
   readonly maxRel: number;
-  /** 受理に使った帯。 */
+  /** The band used for acceptance. */
   readonly tolerance: Tolerance;
-  /** どの段で受理したか（fail のときは最後に測った段）。 */
+  /** The stage that accepted it (on fail, the last stage measured). */
   readonly stage: "karume" | "spec";
 };
 
 /**
- * 相対 RMS の帯（宣言であって環境キー別の行ではない）。自機 A/B 門（ADR 0110 決定 5）と、
- * DeBERTa w8a8 鏡像門の崩壊上限（ADR 0026 追記 2026-10-07）が使う。
+ * Band on relative RMS (a declaration, not a row per environment key). Used by the self A/B check
+ * (ADR 0110 decision 5) and by the collapse ceiling of the DeBERTa w8a8 mirror check (ADR 0026
+ * addendum 2026-10-07).
  */
 export type ComparisonBand = {
-  /** 帯を掛けた指標（今は相対 RMS だけ）。 */
+  /** The metric the band applies to (only relative RMS for now). */
   readonly metric: "relRms";
-  /** 下限。0 は床なし（鏡像門は崩壊上限だけを掛ける）。 */
+  /** Lower bound. 0 means no floor (the mirror check applies only the collapse ceiling). */
   readonly floor: number;
   readonly ceiling: number;
 };
 
 /**
- * 相対 RMS で比べた実測 1 本。自機 A/B 門（同じ機・同じ重みで `session` が空の参照席と、実用席の
- * 同じ観測点を比べた差）と、鏡像門の崩壊上限（torch 鏡像 golden と、実行した経路の同じ出力を比べた
- * 差）が積む。
+ * One measurement compared by relative RMS. Recorded by the self A/B check (the difference at the
+ * same observation point between the reference partner with an empty `session` and the practical
+ * preset, on the same machine with the same weights) and by the collapse ceiling of the mirror
+ * check (the difference between the torch mirror golden and the same output of the path that ran).
  *
- * {@link Measurement} と同じく、合格した回の差も残す（帯を導く材料は割れる前から要る）。
+ * As with {@link Measurement}, the difference of a passing run is kept too (the material for
+ * deriving a band is needed before anything breaks).
  *
- * MUST: 派生値（帯に対する比など）は持たない — {@link Measurement} の MUST と同じ理由。
- * NOTE: 非有限（NaN / ±Inf）は `JSON.stringify` が `null` にする（読む側は null を受ける）。
- * `band` が `undefined`（未導出・または記録だけの観測）なら欄ごと書かれない。
+ * MUST: no derived values (a ratio to the band and the like) — the same reason as the MUST of
+ * {@link Measurement}.
+ * NOTE: non-finite values (NaN / ±Inf) become `null` through `JSON.stringify` (the reader accepts
+ * null). When `band` is `undefined` (not yet derived, or an observation that is only recorded) the
+ * field is not written at all.
  */
 export type Comparison = {
-  /** 観測点（`step1-latent` / グラフの出力名など）。 */
+  /** Observation point (`step1-latent` / an output name in the graph and the like). */
   readonly output: string;
   /**
-   * 参照側。A/B 門なら参照席（`session` が空の quant 名）・鏡像門なら golden の系列名
-   * （`io-i8a8.<case>`）。
+   * The reference side. For the A/B check the reference partner (the quant name with an empty
+   * `session`); for the mirror check the golden's series name (`io-i8a8.<case>`).
    */
   readonly reference: string;
-  /** 実行側。A/B 門なら実用席（`session` を持つ quant 名）・鏡像門なら実行した経路（`a8`）。 */
+  /**
+   * The executed side. For the A/B check the practical preset (the quant name with a `session`);
+   * for the mirror check the path that ran (`a8`).
+   */
   readonly practical: string;
-  /** ‖p − r‖₂ / ‖r‖₂。 */
+  /** ‖p − r‖₂ / ‖r‖₂. */
   readonly relRms: number;
   readonly maxAbs: number;
-  /** 判定に使った帯。 */
+  /** The band used for the check. */
   readonly band: ComparisonBand | undefined;
 };
 
-/** `results.json` の `cases` に積む 1 件。 */
+/** One entry recorded in the `cases` of `results.json`. */
 export type ResultEntry = {
   readonly id: string;
   readonly status: ResultStatus;
-  /** 突き合わせた参照値（参照値を作った回は持たない）。 */
+  /** The reference value compared against (absent on a run that wrote the reference value). */
   readonly expected?: string;
-  /** 実測の sha256（sha を採らないケースは持たない）。 */
+  /** Measured sha256 (absent for cases that take no sha). */
   readonly actual?: string;
-  /** 実物のファイル名（{@link Results.dir} からの相対）。 */
+  /** File name of the artifact (relative to {@link Results.dir}). */
   readonly artifact?: string;
   /**
-   * ケース 1 件の所要時間。**計測範囲は系列ごとの実装に依る**（Session を 1 本だけ組んで
-   * 複数ケースを回す系列では、構築と解放はどのケースにも入らない）。系列をまたいだ時間の
-   * 比較には使わない — 同じ系列の走行どうしを見るための欄である。
+   * Elapsed time of one case. **What it covers depends on each series' implementation** (in a
+   * series that builds one Session and runs several cases, construction and release fall into no
+   * case). Not for comparing times across series — the field is for comparing runs of the same
+   * series.
    */
   readonly elapsedMs: number;
   readonly note?: string;
   /**
-   * 許容差判定の実測。{@link runRecordedCase} 経由のケースは常に持つ（本体が測る前に投げた回は
-   * 空配列）。欄ごと持たないのは {@link Results.record} を直に呼ぶケースだけ。
+   * Measurements of the tolerance checks. Cases run through {@link runRecordedCase} always have it
+   * (an empty array when the body threw before measuring). Only cases that call
+   * {@link Results.record} directly lack the field.
    */
   readonly measurements?: readonly Measurement[];
   /**
-   * 相対 RMS の実測（自機 A/B 門 — ADR 0110 決定 5・鏡像門の崩壊上限 — ADR 0026 追記 2026-10-07）。
-   * {@link runRecordedCase} 経由のケースは**積んだときだけ**持つ（積まないケースの決着の形は変えない）。
+   * Relative-RMS measurements (the self A/B check — ADR 0110 decision 5; the collapse ceiling of
+   * the mirror check — ADR 0026 addendum 2026-10-07). Cases run through {@link runRecordedCase}
+   * have it **only when they recorded some** (the outcome shape of cases that record none is
+   * unchanged).
    */
   readonly comparisons?: readonly Comparison[];
 };
 
-/** 系列 1 本ぶんの結果の置き場。 */
+/** Where the results of one series go. */
 export type Results = {
   readonly dir: URL;
-  /** 実物 1 件の置き場（ディレクトリは初回の呼びで作る）。 */
+  /** Location of one artifact (the directory is created on the first call). */
   artifact(name: string): URL;
-  /** 1 件を積んで `results.json` を書き直す。 */
+  /** Records one entry and rewrites `results.json`. */
   record(entry: ResultEntry): Promise<void>;
 };
 
 type Checkout = { readonly sha: string; readonly dirty: boolean };
 
 /**
- * `git` の出力 1 本。**`git` が無い環境では `undefined`**（結果は残す — チェックアウトが
- * 分からないことと、結果を取らないことは別）。NotFound 以外は伝播させる。
+ * One `git` output. **`undefined` where `git` is missing** (results are still kept — not knowing
+ * the checkout is a different thing from not keeping results). Anything but NotFound propagates.
  */
 const git = async (...args: string[]): Promise<string | undefined> => {
   try {
@@ -171,18 +190,18 @@ const readCheckout = async (): Promise<Checkout | undefined> => {
   return { sha: sha.trim(), dirty: status.trim() !== "" };
 };
 
-/** プロセスで 1 回だけ確定する（同じ走行の全ケースが同じ時刻・同じチェックアウトを名乗る）。 */
+/** Fixed once per process (every case of one run reports the same time and the same checkout). */
 const STARTED_AT = new Date().toISOString();
-/** 席の日付（UTC — モジュール doc）。 */
+/** Date of the directory (UTC — see the module doc). */
 const TODAY = STARTED_AT.slice(0, 10);
 const CHECKOUT: Checkout | undefined = await readCheckout();
 
 /**
- * 系列 1 本の結果の置き場を開く。
+ * Opens the results location of one series.
  *
- * MUST: 置き場の決定も作成も**使うときまで遅らせる** — このモジュールは GPU 無しの機でも
- * 読み込まれる（テストは ignore で SKIP される）ので、開いた時点で環境キーを要求すると
- * 「SKIP されるはずのファイル」がモジュール評価で落ちる。
+ * MUST: both choosing and creating the location are **deferred until use** — this module is loaded
+ * on machines without a GPU too (the tests SKIP through ignore), so requiring the environment key
+ * when opening would make "a file that should SKIP" fail during module evaluation.
  */
 export const openResults = (
   family: string,
@@ -196,8 +215,8 @@ export const openResults = (
     const { key } = environment;
     if (key === undefined) {
       throw new Error(
-        `この環境には環境キーが無い（GPU アダプタが取れていない）ため ${family} の結果を ` +
-          "どの席へ書くか決められない",
+        `this environment has no environment key (no GPU adapter was acquired), so the results of ${family} ` +
+          "have no directory to be written to",
       );
     }
     return new URL(`${key}/${TODAY}_${family}/`, root);
@@ -215,13 +234,15 @@ export const openResults = (
       undefined,
       2,
     )}\n`;
-  // 置き場は**使うときに**作る（資産が無くて全 SKIP の機に空ディレクトリを残さない）。
+  // The location is created **on use** (no empty directory is left on a machine where everything
+  // SKIPs for lack of assets).
   const ensureDir = (): URL => {
     const dir = directory();
     if (!created) {
       mkdirSync(dir, { recursive: true });
-      // 「走行中」を先に置く（`cases` 空・この走行の startedAt）。記録の前に例外で抜けても、
-      // 同じ席に居る前回の決着が今回の実物と組で読まれることが無くなる。
+      // Write "running" first (empty `cases`, this run's startedAt). Even if an exception exits
+      // before any record, the previous outcomes in the same directory are never read together with
+      // this run's artifacts.
       writeTextFileSync(new URL("results.json", dir), documentText());
       created = true;
     }
@@ -232,21 +253,24 @@ export const openResults = (
       return directory();
     },
     artifact: (name: string): URL => {
-      // file: URL ではバックスラッシュも区切りとして解決されるので `/` と同じに拒む。
+      // A file: URL resolves backslashes as separators too, so they are rejected like `/`.
       if (/[/\\]/.test(name)) {
         throw new Error(`実物の名前にディレクトリ区切りを含められない: '${name}'`);
       }
-      // `%` は解決時に復号される（`%2e%2e` は親ディレクトリ）ので、記録する名前と書く先がずれる。
-      // `?` と `#` も、その後ろがクエリ・フラグメントへ回ってパスから落ちるので同じくずれる
-      // （`a?b.wav` は `a` へ書かれる）。
+      // `%` is decoded during resolution (`%2e%2e` is the parent directory), so the recorded name
+      // and the written location would diverge. `?` and `#` diverge the same way, since what
+      // follows them moves into the query / fragment and drops out of the path (`a?b.wav` is
+      // written to `a`).
       if (name === "" || name === "." || name === ".." || /[%?#]/.test(name)) {
         throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
       }
       const dir = ensureDir();
       const resolved = new URL(name, dir);
-      // MUST: 解決の結果で確かめる（名前の綴りの検査は URL 解決の規則の写しで、漏れがありうる）。
+      // MUST: check the resolved result (a check of the name's spelling copies the URL resolution
+      // rules and can miss cases).
       const rest = resolved.href.startsWith(dir.href) ? resolved.href.slice(dir.href.length) : "";
-      // href の残りに `?` / `#` があれば、パスの外（クエリ・フラグメント）に名前の一部が乗っている。
+      // A `?` / `#` in the rest of the href means part of the name sits outside the path (in the
+      // query / fragment).
       if (rest === "" || /[/?#]/.test(rest)) {
         throw new Error(`実物の名前が席の直下の 1 ファイルを指していない: '${name}'`);
       }
@@ -261,40 +285,50 @@ export const openResults = (
 };
 
 /**
- * 失敗した回の決着を残す（**記録の失敗で元の検証例外を置き換えない**）。
+ * Keeps the outcome of a failed run (**a recording failure never replaces the original
+ * verification exception**).
  *
- * 呼ぶのは検証例外を掴んだ catch の中だけである。そこで {@link Results.record} を裸で待つと、
- * 席が作れない・書けないといった I/O 障害がそのまま伝播して、呼び手が抱えている元の例外
- * —— 何が壊れたのかを言う唯一の診断 —— が I/O 例外に置き換わる。記録できなかったことは
- * `console.error` で言い、元の例外は呼び手がそのまま投げる。
+ * It is called only inside a catch that holds a verification exception. Awaiting
+ * {@link Results.record} bare there would let an I/O failure (the directory cannot be created or
+ * written) propagate as is, replacing the caller's original exception — the only diagnostic that
+ * says what broke — with an I/O exception. The recording failure is reported through
+ * `console.error`, and the caller rethrows the original exception unchanged.
  *
- * NOTE: 成功側の `record` はこれを通さない（書けないなら fail loudly が筋で、消す診断も無い）。
+ * NOTE: the `record` of the success side does not go through this (if it cannot write, failing
+ * loudly is right, and there is no diagnostic to lose).
  */
 export const recordFailure = async (results: Results, entry: ResultEntry): Promise<void> => {
   try {
     await results.record(entry);
   } catch (cause) {
     console.error(
-      `[karume] ケース '${entry.id}' の決着を results.json へ記録できなかった: ` +
+      `[karume] could not record the outcome of case '${entry.id}' in results.json: ` +
         `${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
 };
 
-/** {@link runRecordedCase} の本体へ渡す、ケース 1 件ぶんの記録の口。 */
+/** The recording handle for one case, passed to the body of {@link runRecordedCase}. */
 export type RecordedCase = {
-  /** 出力ごとの実測（合格した回も残す — 判定には使わない）。本体が積み、決着に載る。 */
+  /**
+   * Measurements per output (kept on passing runs too — not used for the check). The body records
+   * them and they go into the outcome.
+   */
   readonly measurements: Measurement[];
-  /** 自機 A/B 門の実測（本体が積み、1 本以上あるときだけ決着に載る）。 */
+  /**
+   * Measurements of the self A/B check (the body records them; they go into the outcome only when
+   * there is at least one).
+   */
   readonly comparisons: Comparison[];
 };
 
 /**
- * 本体が例外なしに戻ったときの決着。戻り値を省いた本体は `pass`。
+ * The outcome when the body returns without an exception. A body that returns nothing is `pass`.
  *
- * `fail` を返すのは「全出力を測り終えてから落とす」ケース — 決着（note つき）を残したあとで
- * 呼び手が assert する。sha 門を兼ねるケースは参照値の決着（`written` / `rewritten` を含む）と
- * `expected` / `actual` / `artifact` を載せる（`reference.ts` の `referenceEntryFields` の写し）。
+ * `fail` is returned by cases that "fail after measuring every output" — the caller asserts after
+ * the outcome (with a note) is kept. Cases that double as the sha check carry the reference-value
+ * outcome (including `written` / `rewritten`) and `expected` / `actual` / `artifact` (a copy of
+ * `referenceEntryFields` in `reference.ts`).
  */
 export type CaseVerdict = {
   readonly status: ResultStatus;
@@ -304,32 +338,34 @@ export type CaseVerdict = {
   readonly note?: string;
 };
 
-/** {@link runRecordedCase} が記録するケースの名乗りと、失敗した回の扱い。 */
+/** The identity of a case {@link runRecordedCase} records, and how a failed run is handled. */
 export type RecordedCaseSpec = {
-  /** `results.json` の `cases[].id`。 */
+  /** `cases[].id` in `results.json`. */
   readonly id: string;
-  /** 投げた回の note（省けば note を持たない）。 */
+  /** Note of a run that threw (omitted = no note). */
   readonly failureNote?: (cause: unknown) => string;
   /**
-   * 本体が投げた回にだけ、記録の前に呼ぶ。複数ケースを 1 本のテストで回す系列が「この失敗は
-   * ケースの席に残った」を知る口 — 成功側の記録が書けずに投げた回は呼ばない（その回は
-   * ケースの決着が残っていない）。
+   * Called before recording, only when the body threw. The hook through which a series running
+   * several cases in one test learns "this failure was kept in the case's entry" — not called when
+   * the success-side record failed to write and threw (then no outcome of the case was kept).
    */
   readonly onFailure?: () => void;
 };
 
 /**
- * ケース 1 件を回し、決着を必ず `results.json` へ残す（実重み golden の各ケースの共通の枠）。
+ * Runs one case and always keeps its outcome in `results.json` (the shared frame of every case of
+ * the real-weight goldens).
  *
- * - 本体が戻った: その決着（既定 `pass`）を {@link Results.record} で積む。書けなければ
- *   fail loudly（{@link recordFailure} の NOTE と同じ理由）。
- * - 本体が投げた: `fail` を {@link recordFailure} で積んでから**同じ例外を投げ直す**。決着の
- *   無いまま抜けると、この席には同じ日の前回の走行の決着が居座る。
+ * - The body returned: its outcome (default `pass`) is recorded with {@link Results.record}. If it
+ *   cannot be written, it fails loudly (the same reason as the NOTE of {@link recordFailure}).
+ * - The body threw: `fail` is recorded with {@link recordFailure}, then **the same exception is
+ *   rethrown**. Exiting without an outcome would leave the outcome of the same day's previous run
+ *   in this directory.
  *
- * どちらの経路でも欄の並びは {@link ResultEntry} の宣言順（id / status / expected / actual /
- * artifact / elapsedMs / note / measurements / comparisons）で、所要時間は呼んだ時点から記録の
- * 直前までを測る。`expected` / `actual` / `artifact` は戻った決着が持つときだけ、`comparisons`
- * は本体が 1 本以上積んだときだけ載る。
+ * On both paths the fields follow the declaration order of {@link ResultEntry} (id / status /
+ * expected / actual / artifact / elapsedMs / note / measurements / comparisons), and the elapsed
+ * time runs from the call to just before recording. `expected` / `actual` / `artifact` appear only
+ * when the returned outcome has them, `comparisons` only when the body recorded at least one.
  */
 export const runRecordedCase = async (
   results: Results,

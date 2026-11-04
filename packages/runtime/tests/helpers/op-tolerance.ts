@@ -1,47 +1,57 @@
 /**
- * op 語彙掃引（gpu_ops_test.ts の checkAll）の **op 別 tolerance 表**。
+ * **Per-op tolerance table** of the op vocabulary sweep (checkAll in gpu_ops_test.ts).
  *
- * 正本 = [docs/research/2026-08-31-op-tolerance-measurement.md](../../../../docs/research/2026-08-31-op-tolerance-measurement.md)
- * §7（実 GPU 実測 + K 依存則 maxAbs ≈ C·eps·√K·max|期待| から導出・全帯とも実測の 4 倍以上の
- * マージンを消費率で機械確認済み）。旧 DEFAULT_TOLERANCE（atol 1e-5 / rtol 1e-3）は掃引の
- * 門としては最悪でも消費率 2.6e-2 しか使われておらず、退行を通す帯だった（同 §2.2）。
+ * Source of truth = [docs/research/2026-08-31-op-tolerance-measurement.md](../../../../docs/research/2026-08-31-op-tolerance-measurement.md)
+ * §7 (derived from real-GPU measurements + the K-dependence rule maxAbs ≈ C·eps·√K·max|expected|;
+ * every band was confirmed mechanically, by usage ratio, to keep at least 4× margin over the
+ * measurement). The old DEFAULT_TOLERANCE (atol 1e-5 / rtol 1e-3) used a usage ratio of only
+ * 2.6e-2 even at worst as the sweep's check, a band that let regressions through (same §2.2).
  *
- * MUST: **表に無い op は fail loudly**（既定帯へ落とさない）。新 op を足すときは実測して
- * 行を足す — 「黙って汎用帯で通る」形を塞ぐのがこの表の存在理由。ケース単位の例外は
- * `OpCase.tolerance` の上書きで持つ（悪条件入力用の逃げ道 — 表は変えない）。
+ * MUST: **an op missing from the table fails loudly** (it does not fall back to a default band).
+ * Adding a new op means measuring it and adding a row — closing off "silently passing with a
+ * generic band" is why this table exists. Per-case exceptions are an `OpCase.tolerance` override
+ * (the escape hatch for ill-conditioned inputs — the table stays unchanged).
  *
- * NOTE: 「厳密 (0, 0)」の op のうち GEMM / 縮約系は**このコーパスの入力が 2 進格子上にある**
- * ことに依存した厳密性（研究 §2 の格子論証 — IEEE-754 f32 準拠の実装なら成り立つ）。
- * 一般入力での帯は GEMM / 縮約クラスの値が正で、ビット同一門（gpu_ops_test.ts）が
- * この厳密性を別テストとして固定する。
+ * NOTE: among the "exact (0, 0)" ops, the GEMM / reduction ones are exact only because **the
+ * inputs of this corpus lie on a binary lattice** (the lattice argument of the research §2 — it
+ * holds for any implementation conforming to IEEE-754 f32). For general inputs the band of the
+ * GEMM / reduction class is authoritative, and the bit-identity check (gpu_ops_test.ts) pins this
+ * exactness as a separate test.
  */
 
 import type { Tolerance } from "../../src/reference/allclose.ts";
 
 const EXACT: Tolerance = { atol: 0, rtol: 0 };
-/** 除算のみの単発 op（実測 1 ULP・仕様 2.5 ULP の 6.4 倍）。 */
+/** Single division op (measured 1 ULP; 6.4× the spec's 2.5 ULP). */
 const ULP_DIV: Tolerance = { atol: 1e-7, rtol: 2e-6 };
-/** 超越関数の単発 op（実測 ≤13 ULP / 仕様 ≤12 ULP の 5 倍 + 絶対床）。 */
+/** Single transcendental op (measured ≤13 ULP / 5× the spec's ≤12 ULP + an absolute floor). */
 const TRANSCENDENTAL: Tolerance = { atol: 2e-6, rtol: 8e-6 };
-/** 超越を含む合成 op — 桁落ち位置（gelu 負側テール等）を絶対床で受ける（相対で切らない）。 */
+/**
+ * Composite ops containing transcendentals — cancellation points (the negative tail of gelu and the
+ * like) are covered by the absolute floor (not cut off by the relative term).
+ */
 const COMPOSITE: Tolerance = { atol: 4e-6, rtol: 8e-6 };
-/** softmax 族（実測 abs 6.0e-8 の 16 倍 — K 非依存を実測で確認済み）。 */
+/** The softmax family (16× the measured abs 6.0e-8 — K independence confirmed by measurement). */
 const SOFTMAX: Tolerance = { atol: 1e-6, rtol: 8e-6 };
-/** 4 タップ和（bilinear）。 */
+/** 4-tap sum (bilinear). */
 const SMALL_REDUCE: Tolerance = { atol: 4e-6, rtol: 4e-6 };
-/** 行縮約（K ≤ 16384 の √K 則から）。 */
+/** Row reductions (from the √K rule for K ≤ 16384). */
 const ROW_REDUCE: Tolerance = { atol: 4e-5, rtol: 4e-6 };
-/** attention（飽和 softmax ケースの abs 6.9e-6 の 6 倍。相対は発散するので絶対床が主）。 */
+/**
+ * attention (6× the abs 6.9e-6 of the saturated-softmax case; the relative term diverges, so the
+ * absolute floor dominates).
+ */
 const ATTENTION: Tolerance = { atol: 4e-5, rtol: 8e-6 };
 /**
- * GEMM / conv 族（コーパス最大 K=72 の則 4·eps·√K から。K がこれより桁で大きいケースを
- * 足すときは帯を再導出する）。量子化重み経路の GPU vs 参照突合（gpu_{f16,i8,i4}_weights /
- * skinny / gemv）もこのクラスを明示的に使う。
+ * The GEMM / conv family (from the rule 4·eps·√K at the corpus maximum K=72; re-derive the band
+ * when adding a case whose K is orders of magnitude larger). The GPU vs reference comparisons of
+ * the quantized-weight paths (gpu_{f16,i8,i4}_weights / skinny / gemv) also use this class
+ * explicitly.
  */
 export const GEMM_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 4e-6 };
 
 const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
-  // 厳密 — 値を作らない / 正しく丸められる単発演算（f32 出力のもの）
+  // Exact — ops that create no new values / correctly rounded single operations (f32 output)
   static_quantize: EXACT,
   neg: EXACT,
   abs: EXACT,
@@ -54,7 +64,7 @@ const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
   add: EXACT,
   sub: EXACT,
   mul: EXACT,
-  // 厳密 — データ移動のみ
+  // Exact — data movement only
   reshape: EXACT,
   permute: EXACT,
   expand: EXACT,
@@ -67,23 +77,24 @@ const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
   embedding: EXACT,
   masked_fill: EXACT,
   upsample2x: EXACT,
-  // 厳密 — 整数 / bool 出力（compareTensors の dtype 分岐でも EXACT になるが、表の全 op
-  // 網羅（fail loudly）を保つため行を持つ）
+  // Exact — integer / bool output (the dtype branch of compareTensors makes these EXACT anyway,
+  // but they keep rows so the table covers every op (fail loudly))
   bitwise_and: EXACT,
   bitwise_not: EXACT,
   ge: EXACT,
   ge_scalar: EXACT,
   gt_scalar: EXACT,
   le_scalar: EXACT,
-  // 厳密 — 選択 / 添字 / 逐次丸め一致（cumsum は参照が GPU の逐次丸めを鏡写し）
+  // Exact — selection / indices / matching sequential rounding (for cumsum the reference mirrors
+  // the GPU's sequential rounding)
   amax: EXACT,
   amin: EXACT,
   argmax: EXACT,
   topk: EXACT,
   cumsum: EXACT,
-  // ULP 級
+  // ULP level
   div: ULP_DIV,
-  // 超越（単発）
+  // Transcendental (single op)
   exp: TRANSCENDENTAL,
   log: TRANSCENDENTAL,
   log1p: TRANSCENDENTAL,
@@ -91,7 +102,7 @@ const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
   sin: TRANSCENDENTAL,
   tanh: TRANSCENDENTAL,
   sigmoid: TRANSCENDENTAL,
-  // 合成（桁落ち位置を絶対床で受ける）
+  // Composite (cancellation points covered by the absolute floor)
   gelu: COMPOSITE,
   gelu_tanh: COMPOSITE,
   silu: COMPOSITE,
@@ -102,7 +113,7 @@ const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
   gru_scan_reverse: COMPOSITE,
   softmax: SOFTMAX,
   safe_softmax: SOFTMAX,
-  // 縮約 / GEMM
+  // Reduction / GEMM
   upsample_bilinear2d: SMALL_REDUCE,
   sum: ROW_REDUCE,
   attention: ATTENTION,
@@ -116,25 +127,27 @@ const OP_TOLERANCE: Readonly<Record<string, Tolerance>> = {
 };
 
 /**
- * 掃引が使う op 別 tolerance。表に無い op は fail loudly（上の MUST）。
- * i32 / bool 出力は compareTensors が dtype で EXACT を選ぶので、ここは f32 出力の帯だけを持つ。
+ * Per-op tolerance used by the sweep. An op missing from the table fails loudly (the MUST above).
+ * For i32 / bool outputs compareTensors picks EXACT by dtype, so this holds only the f32 bands.
  */
 export const opTolerance = (op: string): Tolerance => {
   if (!Object.hasOwn(OP_TOLERANCE, op)) {
     throw new Error(
-      `op-tolerance: op '${op}' の tolerance が表に無い — 実測して行を足すこと` +
-        "（docs/research/2026-08-31-op-tolerance-measurement.md §7 の手順・既定帯へは落とさない）",
+      `op-tolerance: op '${op}' has no tolerance in the table — measure it and add a row` +
+        " (procedure in docs/research/2026-08-31-op-tolerance-measurement.md §7; there is no default band)",
     );
   }
   return OP_TOLERANCE[op];
 };
 
 /**
- * 現行コーパスで **GPU と f64 オラクルがビット同一**であることを固定する op 集合
- * （研究 §7.1 — 入力が 2 進格子上にあり中間和が f32 の厳密整数域に収まるため、IEEE-754 f32
- * 準拠のどの実装でも丸めが一度も起きない）。割れたら tolerance を緩める対象ではなく
- * 「ドライバが f32 未満で計算している / 生成 WGSL が別演算へ落ちた」のシグナル。
- * 特定ドライバで割れる場合は op 単位で門を外して理由を記録する（tanh 飽和カナリアと同じ運用）。
+ * The set of ops pinned to be **bit-identical between the GPU and the f64 oracle** on the current
+ * corpus (research §7.1 — the inputs lie on a binary lattice and the intermediate sums stay in the
+ * exact-integer range of f32, so no rounding ever happens in any IEEE-754 f32 conforming
+ * implementation). A mismatch is not a reason to loosen the tolerance but a signal that "the driver
+ * computes below f32 / the generated WGSL fell back to a different operation". If a particular
+ * driver breaks it, take that op out of the check and record the reason (the same practice as the
+ * tanh saturation canary).
  */
 export const BIT_IDENTICAL_OPS: ReadonlySet<string> = new Set([
   "matmul",

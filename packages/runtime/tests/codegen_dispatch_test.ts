@@ -7,43 +7,46 @@ import { GEMM_TILE, gemmTileN } from "../src/kernels/gemm-geometry.ts";
 
 const LIMIT = 65535;
 
-/** conv2d の implicit GEMM が n 方向に使う実タイル辺（m タイル 64 / 32 の変種で共通）。 */
+/**
+ * The actual tile edge conv2d's implicit GEMM uses along n (shared by the m-tile 64 / 32 variants).
+ */
 const CONV2D_N_TILE = gemmTileN(gemmMTileGeometry(GEMM_TILE));
 
-test("grid-stride カーネルは上限超過を縮退させる（カーネル側が残りを回す）", () => {
+test("grid-stride kernels clamp an over-limit count (the kernel loops over the rest)", () => {
   assertEquals(gridStrideWorkgroups(1024, 256, LIMIT), 4);
   assertEquals(gridStrideWorkgroups(1025, 256, LIMIT), 5);
   assertEquals(gridStrideWorkgroups(0, 256, LIMIT), 0);
-  // 16 head × 4096 token = 65536 行（実モデルで踏んだ形）
+  // 16 heads × 4096 tokens = 65536 rows (a shape hit by a real model)
   assertEquals(gridStrideWorkgroups(65536, 1, LIMIT), LIMIT);
   assertEquals(gridStrideWorkgroups(1_000_000_000, 256, LIMIT), LIMIT);
 });
 
-test("grid-stride は u32 のループ添字が末尾の加算で折り返す要素数を fail loudly にする", () => {
-  // カーネルは `i = i + stride`（stride = workgroup 数 × workgroup サイズ）を u32 で回して
-  // `i < n` を見るので、`n + stride > 2^32` だと末尾の加算が折り返してループが終わらない。
+test("grid-stride fails loudly on element counts where the u32 loop index wraps on the last add", () => {
+  // The kernel runs `i = i + stride` (stride = workgroup count × workgroup size) in u32 and tests
+  // `i < n`, so when `n + stride > 2^32` the last add wraps and the loop never ends.
   const stride = LIMIT * 256;
   const edge = 2 ** 32 - stride;
-  assertEquals(gridStrideWorkgroups(edge, 256, LIMIT), LIMIT, "n + stride = 2^32 は通る");
+  assertEquals(gridStrideWorkgroups(edge, 256, LIMIT), LIMIT, "n + stride = 2^32 passes");
   assertThrows(() => gridStrideWorkgroups(edge + 1, 256, LIMIT), DispatchLimitError, "2^32");
-  // 4294901760 + 65535·256 は u32 で 16711424 に折り返す（レビューの再現値）
+  // 4294901760 + 65535·256 wraps to 16711424 in u32 (the value from the review's reproduction)
   assertThrows(() => gridStrideWorkgroups(4294901760, 256, LIMIT), DispatchLimitError, "2^32");
-  // 行単位の grid-stride（workgroup サイズ 1 = 行を nwg.x ずつ送る形）も同じ条件
+  // Row-wise grid-stride (workgroup size 1 = rows advanced nwg.x at a time) has the same condition
   assertThrows(() => gridStrideWorkgroups(2 ** 32 - LIMIT + 1, 1, LIMIT), DispatchLimitError);
   assertEquals(gridStrideWorkgroups(2 ** 32 - LIMIT, 1, LIMIT), LIMIT);
 });
 
-test("タイル分割カーネルは上限超過を fail loudly にする（タイル欠落は沈黙誤値になる）", () => {
+test("tiled kernels fail loudly on an over-limit count (a missing tile is a silent wrong value)", () => {
   assertEquals(tiledWorkgroups(1024, 16, LIMIT, "matmul"), 64);
   assertEquals(tiledWorkgroups(1, 16, LIMIT, "matmul"), 1);
   assertEquals(tiledWorkgroups(0, 16, LIMIT, "matmul"), 0);
   assertThrows(() => tiledWorkgroups(LIMIT * 16 + 1, 16, LIMIT, "matmul"), DispatchLimitError);
-  // conv2d の implicit GEMM（ADR 0024）も同じカテゴリ。辺は**幾何から導く**ので、まず幾何が
-  // 動いていないことを期待値リテラルで固定してから、実モデル形の枚数を固定する。
-  assertEquals(CONV2D_N_TILE, 128, "n の辺が動いたら以下の枚数の前提が変わる");
-  // 2048px の VAE は n = Hout·Wout = 4,194,304（現行幾何では上限の内側に収まる）
+  // conv2d's implicit GEMM (ADR 0024) is in the same category. The edge is **derived from the
+  // geometry**, so first pin with a literal that the geometry has not moved, then pin the counts
+  // for real-model shapes.
+  assertEquals(CONV2D_N_TILE, 128, "if the n edge moves, the premise of the counts below changes");
+  // A 2048px VAE has n = Hout·Wout = 4,194,304 (inside the limit with the current geometry)
   assertEquals(tiledWorkgroups(2048 * 2048, CONV2D_N_TILE, LIMIT, "conv2d"), 32_768);
-  // 上限は 1 タイル超えただけで例外（沈黙誤値ではなく落ちることの固定）
+  // One tile over the limit throws (pins that it fails rather than giving a silent wrong value)
   assertEquals(tiledWorkgroups(LIMIT * CONV2D_N_TILE, CONV2D_N_TILE, LIMIT, "conv2d"), LIMIT);
   assertThrows(
     () => tiledWorkgroups(LIMIT * CONV2D_N_TILE + 1, CONV2D_N_TILE, LIMIT, "conv2d"),

@@ -39,7 +39,7 @@ import { PipelineCache } from "../src/gpu/pipeline-cache.ts";
 import { fakeDevice, fakeGpuContext, losableGpuContext } from "./helpers/fake-gpu.ts";
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 
-/** planRequiredLimits に渡す最小のダック型（GPUSupportedLimits の必要な面のみ）。 */
+/** The smallest duck type passed to planRequiredLimits (only the needed surface of GPUSupportedLimits). */
 const fakeAdapterLimits = (overrides: Partial<RequiredLimits> = {}): GPUSupportedLimits => {
   const base: RequiredLimits = {
     maxBufferSize: 1024,
@@ -57,7 +57,7 @@ const fakeAdapterLimits = (overrides: Partial<RequiredLimits> = {}): GPUSupporte
   return { ...base, ...overrides } as unknown as GPUSupportedLimits;
 };
 
-test("planRequiredLimits は maxStorageBufferBindingSize を maxBufferSize 以下に収める", () => {
+test("planRequiredLimits keeps maxStorageBufferBindingSize at or below maxBufferSize", () => {
   const planned = planRequiredLimits(
     fakeAdapterLimits({ maxBufferSize: 512, maxStorageBufferBindingSize: 4096 }),
   );
@@ -66,9 +66,10 @@ test("planRequiredLimits は maxStorageBufferBindingSize を maxBufferSize 以�
   assertEquals(planned.maxBufferSize, 512);
 });
 
-// LIMIT_CAPS（テスト専用の絞り）は「core 既定機の再現」に使う。maxBufferSize だけを絞った
-// caps で束縛上限が絞られないままだと、絞ったつもりの機が再現されず試験目的が黙って外れる。
-test("planRequiredLimits は caps が maxBufferSize だけを絞っても束縛上限を超えさせない", () => {
+// LIMIT_CAPS (a test-only restriction) is used to "reproduce a machine with core defaults". If caps
+// that restrict only maxBufferSize left the binding limit unrestricted, the intended machine would not
+// be reproduced and the test would silently miss its purpose.
+test("planRequiredLimits does not let the binding limit exceed maxBufferSize when caps restrict only maxBufferSize", () => {
   const adapter = fakeAdapterLimits({
     maxBufferSize: 256 * 1024 * 1024,
     maxStorageBufferBindingSize: 128 * 1024 * 1024,
@@ -80,10 +81,10 @@ test("planRequiredLimits は caps が maxBufferSize だけを絞っても束縛�
   assertEquals(
     planned.maxStorageBufferBindingSize,
     64 * 1024 * 1024,
-    "cap 後の maxBufferSize で clamp していない（束縛上限だけ絞られないまま残る）",
+    "not clamped by the capped maxBufferSize (only the binding limit stays unrestricted)",
   );
 
-  // 束縛上限側だけを絞る既存の使い方は 1 バイトも動かない（cap の適用順に依らない）。
+  // The existing use that restricts only the binding limit does not move by a single byte (independent of the order caps are applied in).
   const narrowBinding = planRequiredLimits(adapter, {
     maxStorageBufferBindingSize: 32 * 1024 * 1024,
   });
@@ -91,16 +92,24 @@ test("planRequiredLimits は caps が maxBufferSize だけを絞っても束縛�
   assertEquals(narrowBinding.maxStorageBufferBindingSize, 32 * 1024 * 1024);
 });
 
-test("planRequiredLimits は compute 系をアダプタ値まで引き上げる", () => {
+test("planRequiredLimits raises the compute limits to the adapter's values", () => {
   const planned = planRequiredLimits(fakeAdapterLimits());
 
-  assertEquals(planned.maxComputeInvocationsPerWorkgroup, 1024, "仕様既定値 256 に落とさない");
-  assertEquals(planned.maxComputeWorkgroupSizeX, 1024, "invocations とは別 limit として要求する");
+  assertEquals(
+    planned.maxComputeInvocationsPerWorkgroup,
+    1024,
+    "does not fall to the spec default 256",
+  );
+  assertEquals(
+    planned.maxComputeWorkgroupSizeX,
+    1024,
+    "requested as a limit separate from invocations",
+  );
   assertEquals(planned.maxComputeWorkgroupStorageSize, 32768);
   assertEquals(planned.maxComputeWorkgroupsPerDimension, 65535);
 });
 
-test("assertLimitsGranted は要求を下回る limit を fail loudly にする", () => {
+test("assertLimitsGranted fails loudly on a limit below the request", () => {
   const planned = planRequiredLimits(fakeAdapterLimits());
   const granted = fakeAdapterLimits({ maxComputeInvocationsPerWorkgroup: 256 });
 
@@ -113,14 +122,18 @@ test("assertLimitsGranted は要求を下回る limit を fail loudly にする"
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "acquireGpu は引き上げ済み limits の device を返す（実 GPU）",
+  "acquireGpu returns a device with the raised limits (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const key of REQUIRED_LIMIT_KEYS) {
-        assertGreaterOrEqual(gpu.device.limits[key], gpu.limits[key], `${key} が要求を下回る`);
+        assertGreaterOrEqual(
+          gpu.device.limits[key],
+          gpu.limits[key],
+          `${key} is below the request`,
+        );
       }
-      // 仕様既定値のままなら compute 系の引き上げが効いていない
+      // If it stays at the spec default, raising the compute limits had no effect
       assertGreaterOrEqual(gpu.limits.maxComputeInvocationsPerWorkgroup, 256);
       assertGreaterOrEqual(gpu.limits.maxComputeWorkgroupSizeX, 256);
       assert(gpu.limits.maxStorageBufferBindingSize <= gpu.limits.maxBufferSize);
@@ -131,11 +144,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "readAdapterLimits は acquireGpu が計画する limits と同じ値を返す（実 GPU）",
+  "readAdapterLimits returns the same values as the limits acquireGpu plans (real GPU)",
   async () => {
-    // 配布形の requiredLimits を重み DL 前に突き合わせる側（models の admission）は、この戻りと
-    // 取得後の `GpuContext.limits` を同じ物差しとして使う。式がずれると「DL 前は通ったのに
-    // 構築で落ちる」（または逆）が生まれる。
+    // The side that checks a distribution's requiredLimits before downloading the weights (admission in
+    // models) uses this return value and `GpuContext.limits` after acquisition as the same yardstick. If
+    // the formulas drifted apart, "passed before the download but fails at build" (or the reverse) would
+    // appear.
     const limits = await readAdapterLimits();
     const gpu = await acquireGpu();
     try {
@@ -185,8 +199,8 @@ const withoutNavigatorGpu = async (body: () => Promise<void>): Promise<void> => 
   }
 };
 
-describe("AcquireGpuOptions.gpu（WebGPU 実装の注入）", () => {
-  it("acquireGpu は渡された GPU からアダプタを取り、navigator.gpu を読まない", async () => {
+describe("AcquireGpuOptions.gpu (injecting a WebGPU implementation)", () => {
+  it("acquireGpu takes the adapter from the given GPU and does not read navigator.gpu", async () => {
     const fake = fakeGpu();
     await withoutNavigatorGpu(async () => {
       const gpu = await acquireGpu({ gpu: fake.gpu });
@@ -195,7 +209,7 @@ describe("AcquireGpuOptions.gpu（WebGPU 実装の注入）", () => {
     assertEquals(fake.requests(), 1);
   });
 
-  it("readAdapterLimits も同じ口を使う", async () => {
+  it("readAdapterLimits uses the same entry point", async () => {
     const fake = fakeGpu();
     await withoutNavigatorGpu(async () => {
       const limits = await readAdapterLimits({ gpu: fake.gpu });
@@ -204,7 +218,7 @@ describe("AcquireGpuOptions.gpu（WebGPU 実装の注入）", () => {
     assertEquals(fake.requests(), 1);
   });
 
-  it("渡さなければ navigator.gpu に戻る（無ければ GpuUnavailableError）", async () => {
+  it("without it, falls back to navigator.gpu (GpuUnavailableError if absent)", async () => {
     const original = Object.getOwnPropertyDescriptor(navigator, "gpu");
     Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
     try {
@@ -217,12 +231,15 @@ describe("AcquireGpuOptions.gpu（WebGPU 実装の注入）", () => {
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "acquireGpu は features / wgslLanguageFeatures を集合に正規化する（実 GPU）",
+  "acquireGpu normalizes features / wgslLanguageFeatures into sets (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       assert(gpu.features instanceof Set);
-      assert(gpu.wgslLanguageFeatures instanceof Set, "未実装環境では空集合に縮退する");
+      assert(
+        gpu.wgslLanguageFeatures instanceof Set,
+        "falls back to an empty set on implementations without it",
+      );
       for (const feature of gpu.features) {
         assertEquals(typeof feature, "string");
       }
@@ -232,15 +249,21 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// 「true × feature 不在」だけは実機で作れない（アダプタの feature は消せない）ため、
-// 判定を切り出した純関数で全 6 通りを固定する。ADR 0028。
-test("planShaderF16Feature は undefined を「要求しない」に倒し、必須指定の不足は fail loudly", () => {
+// Only "true x feature absent" cannot be produced on real hardware (an adapter's features cannot be
+// removed), so all 6 combinations are pinned on the pure function the decision was factored into.
+// ADR 0028.
+test("planShaderF16Feature treats undefined as 'do not request' and fails loudly when a required feature is missing", () => {
   const present = new Set(["shader-f16", "timestamp-query"]);
   const absent = new Set(["timestamp-query"]);
 
-  // MUST: gpuTiming の自動判定と**逆**。f16 計算は数値を変えるので、アダプタの能力で
-  // 有効・無効が決まると「機械を替えたら黙って出力が変わる」ことになる。
-  assertEquals(planShaderF16Feature(present, undefined), false, "既定は要求しない（auto 禁止）");
+  // MUST: the **opposite** of gpuTiming's automatic decision. f16 computation changes the numbers, so
+  // if the adapter's capabilities decided on or off, "changing the machine would silently change the
+  // output".
+  assertEquals(
+    planShaderF16Feature(present, undefined),
+    false,
+    "not requested by default (no auto)",
+  );
   assertEquals(planShaderF16Feature(absent, undefined), false);
   assertEquals(planShaderF16Feature(present, true), true);
   assertEquals(planShaderF16Feature(present, false), false);
@@ -251,15 +274,15 @@ test("planShaderF16Feature は undefined を「要求しない」に倒し、必
     GpuFeatureError,
     SHADER_F16_FEATURE,
   );
-  // 不足内容と回避策が読めること（環境で何が使えるか + 既定経路へ戻す手順）。
+  // The message must say what is missing and how to work around it (what the environment offers + how to return to the default path).
   assert(error.message.includes("timestamp-query"), error.message);
   assert(error.message.includes("f32"), error.message);
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "acquireGpu({shaderF16}) は feature を要求し、実走カナリアを通したときだけ有効になる（実 GPU）",
+  "acquireGpu({shaderF16}) requests the feature and enables it only when the runtime canary passes (real GPU)",
   async () => {
-    // ① 既定では要求しない（既存経路の device 能力面を 1 ビットも広げない）
+    // (1) Not requested by default (does not widen the device's capability surface of the existing path by a single bit)
     const plain = await acquireGpu();
     try {
       assertEquals(plain.shaderF16Enabled, false);
@@ -267,7 +290,7 @@ test.skipIf(!GPU_AVAILABLE)(
     } finally {
       plain.destroy();
     }
-    // ② false 指定は「持っていても要求しない」（意図の表明）
+    // (2) false means "do not request it even if available" (a statement of intent)
     const declined = await acquireGpu({ shaderF16: false });
     try {
       assertEquals(declined.shaderF16Enabled, false);
@@ -275,13 +298,13 @@ test.skipIf(!GPU_AVAILABLE)(
       declined.destroy();
     }
     if (!SHADER_F16_AVAILABLE) {
-      // ③' 列挙しないアダプタでは true が fail loudly になる（黙って f32 へ落ちない）
+      // (3') On an adapter that does not list it, true fails loudly (does not silently fall to f32)
       await assertRejects(() => acquireGpu({ shaderF16: true }), GpuFeatureError);
       return;
     }
-    // ③ true 指定は feature を載せ、**カナリアの実走**（実行時の値を f16 共有タイルへ通した
-    // RTNE の既知解）を通ったときだけ返る。列挙だけで返す実装なら denoland/deno#23125 の
-    // 沈黙全 0 を見逃す。
+    // (3) true adds the feature and returns only after **the canary actually runs** (a known answer of
+    // RTNE with runtime values passed through an f16 shared tile). An implementation that returns on
+    // enumeration alone would miss the silent all-zeros of denoland/deno#23125.
     const enabled = await acquireGpu({ shaderF16: true });
     try {
       assertEquals(enabled.shaderF16Enabled, true);
@@ -293,15 +316,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * カナリアが触る面（バッファ 2 本・パイプライン生成・1 dispatch・読み戻し）だけのフェイク
- * device。不一致経路と消失経路は実 GPU では作れない（前者は `denoland/deno#23125` の環境が、
- * 後者は実行中の TDR が要る）ので、この 2 つはここでしか固定できない。
+ * A fake device with only the surface the canary touches (2 buffers, pipeline creation, 1 dispatch,
+ * readback). The mismatch path and the loss path cannot be produced on a real GPU (the former needs
+ * the environment of `denoland/deno#23125`, the latter a TDR during execution), so these 2 can be
+ * pinned only here.
  */
 const canaryDevice = (
   parts: {
-    /** 読み戻しで観測させる f32 値。**未指定なら mapAsync は永久に解決しない**（作り物の窓）。 */
+    /** The f32 values observed by the readback. **If omitted, mapAsync never resolves** (an artificial window). */
     readonly mapped?: readonly number[];
-    /** true なら popErrorScope が解決しない（作り物の窓 — 下のテストのコメントを参照）。 */
+    /** If true, popErrorScope does not resolve (an artificial window — see the comment of the test below). */
     readonly hangValidation?: boolean;
     readonly lost?: Promise<GPUDeviceLostInfo>;
   } = {},
@@ -339,35 +363,40 @@ const canaryDevice = (
   } as unknown as GPUDevice;
 };
 
-/** カナリアの既知解（共有 f16 タイル往復の RTNE 合計 / 定数式の f16 セマンティクス）。 */
+/** The canary's known answer (the RTNE sum of a round trip through a shared f16 tile / f16 semantics of a constant expression). */
 const CANARY_SOLUTION = [4.0029296875, 1] as const;
 
-/** 決着済みの消失（`reason` はカナリアの分岐に使われないため固定値でよい）。 */
+/** A loss that has already settled (`reason` is not used by the canary's branches, so a fixed value will do). */
 const loss = (): Promise<GPUDeviceLostInfo> =>
   Promise.resolve(
-    platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }),
+    platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "loss caused by the test" }),
   );
 
 /**
- * マクロタスクで決着する消失。マイクロタスクだけで進む段（パイプライン生成の errorScope pop
- * 等）を必ず先に通し、競合点を「解決しない待ち」だけに固定する — 即決着の消失だと勝敗が
- * 各段の tick 数へ結合し、pop の本数が変わるだけでテストが割れる（2 スコープ化で実際に割れた）。
+ * A loss that settles in a macrotask. It makes the stages that advance by microtasks alone (the
+ * errorScope pop of pipeline creation, etc.) always pass first, and pins the point of contention to
+ * the "wait that never resolves" alone — with an immediately settled loss, who wins would be coupled
+ * to the tick count of each stage, and the test would break merely because the number of pops
+ * changed (it actually broke when the second scope was added).
  */
 const lossAfterMacrotask = (): Promise<GPUDeviceLostInfo> =>
   new Promise((resolve) =>
     setTimeout(
       () =>
         resolve(
-          platformObject<GPUDeviceLostInfo>({ reason: "destroyed", message: "テストによる消失" }),
+          platformObject<GPUDeviceLostInfo>({
+            reason: "destroyed",
+            message: "loss caused by the test",
+          }),
         ),
       0,
     ),
   );
 
-test("shader-f16 カナリアは既知解と一致したときだけ通る", async () => {
+test("the shader-f16 canary passes only when it matches the known answer", async () => {
   await assertShaderF16Executes(canaryDevice({ mapped: CANARY_SOLUTION }));
 
-  // denoland/deno#23125 の沈黙全 0 と、丸めが起きない実装（共有タイルの素通り）
+  // The silent all-zeros of denoland/deno#23125, and an implementation in which no rounding happens (the shared tile passes values through)
   for (const observed of [
     [0, 0],
     [4.00146484375, 1],
@@ -380,12 +409,13 @@ test("shader-f16 カナリアは既知解と一致したときだけ通る", asy
   }
 });
 
-test("shader-f16 カナリアは device 消失で待ち続けずに落ちる（acquireGpu をハングさせない）", async () => {
-  // このフェイク device は「解決しない待ち」を**作って**いる。実測（Deno + wgpu / NVIDIA・
-  // 2026-08-16）では destroy 由来の消失後も popErrorScope は null で resolve し mapAsync は
-  // reject するので、これは実挙動の再現ではなく「未検証の実装（実 TDR / ブラウザ）が解決を
-  // 返さなかった場合」の窓。競わせていない待ちが 1 つでも残っていると、その環境ではこの
-  // await が永久に返らず acquireGpu がハングする — それをここで固定する。
+test("the shader-f16 canary fails on device loss instead of waiting forever (does not hang acquireGpu)", async () => {
+  // This fake device **builds** "a wait that never resolves". In measurements (Deno + wgpu / NVIDIA,
+  // 2026-08-16), popErrorScope resolves with null and mapAsync rejects even after a loss caused by
+  // destroy, so this is not a reproduction of actual behaviour but the window of "an unverified
+  // implementation (a real TDR / a browser) that returned no resolution". If even one wait that is
+  // not raced remains, this await never returns in such an environment and acquireGpu hangs — this
+  // test pins that down.
   const readback = assertShaderF16Executes(canaryDevice({ lost: lossAfterMacrotask() }));
   const readbackError = await assertRejects(() => readback, GpuDeviceLostError);
   assert(readbackError.message.includes("readback"), readbackError.message);
@@ -397,8 +427,8 @@ test("shader-f16 カナリアは device 消失で待ち続けずに落ちる（a
   assert(validationError.message.includes("pipeline creation"), validationError.message);
 });
 
-test("readAdapterInfo は info を持たないアダプタでも安全な空値に正規化する", () => {
-  // 古い Chromium（requestAdapterInfo() 時代）は adapter.info を持たない。
+test("readAdapterInfo normalizes to safe empty values even for an adapter without info", () => {
+  // Old Chromium (the requestAdapterInfo() era) has no adapter.info.
   const empty = readAdapterInfo({});
   assertEquals(empty.vendor, "");
   assertEquals(empty.architecture, "");
@@ -410,13 +440,13 @@ test("readAdapterInfo は info を持たないアダプタでも安全な空値�
   assertEquals(readAdapterInfo({ info: present as GPUAdapterInfo }).vendor, "acme");
 });
 
-test("withScopeLock は errorScope 区間を device 単位で直列化する", async () => {
+test("withScopeLock serializes errorScope ranges per device", async () => {
   const gpu = fakeGpuContext(fakeDevice());
   const trace: string[] = [];
   let active = 0;
   let maxActive = 0;
 
-  /** `ticks` の差で「後発が先に決着しうる」形を作る（ロックが無ければ区間が重なる）。 */
+  /** Uses the difference in `ticks` to build a form in which "a later caller could settle first" (without the lock the ranges would overlap). */
   const body = (label: string, ticks: number) => async (): Promise<string> => {
     active += 1;
     maxActive = Math.max(maxActive, active);
@@ -433,23 +463,27 @@ test("withScopeLock は errorScope 区間を device 単位で直列化する", a
     gpu[RUNTIME_INTERNAL].withScopeLock(body("c", 3)),
   ]);
 
-  assertEquals(maxActive, 1, "2 つの区間が同時に走っていない");
+  assertEquals(maxActive, 1, "no 2 ranges run at the same time");
   assertEquals(trace, ["a:enter", "a:exit", "b:enter", "b:exit", "c:enter", "c:exit"]);
-  assertEquals(results, ["a", "b", "c"], "戻り値は各呼び出し自身の結果");
+  assertEquals(results, ["a", "b", "c"], "each return value is the result of that call itself");
 });
 
-test("withScopeLock は 1 本の区間の失敗を後続に伝播しない", async () => {
+test("withScopeLock does not propagate one range's failure to the ones after it", async () => {
   const gpu = fakeGpuContext(fakeDevice());
-  const failure = new Error("区間内の失敗");
+  const failure = new Error("failure inside the range");
 
   const failed = gpu[RUNTIME_INTERNAL].withScopeLock(() => Promise.reject(failure));
   const following = gpu[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("ok"));
 
   assertEquals(await assertRejects(() => failed), failure);
-  assertEquals(await following, "ok", "チェーンは決着だけを繋ぐので後続は巻き添えにならない");
+  assertEquals(
+    await following,
+    "ok",
+    "the chain links only settlements, so the following call is not caught up in it",
+  );
 });
 
-test("onLost は解除でき、購読時点で消失済みなら即時通知する", async () => {
+test("onLost can be unsubscribed, and notifies immediately if the device was already lost when subscribing", async () => {
   const { gpu, lose } = losableGpuContext();
   const seen: string[] = [];
 
@@ -459,39 +493,45 @@ test("onLost は解除でき、購読時点で消失済みなら即時通知す�
 
   lose();
   await gpu.device.lost;
-  assertEquals(seen, ["kept"], "解除した購読は呼ばれない");
+  assertEquals(seen, ["kept"], "an unsubscribed listener is not called");
 
-  // 消失後の購読は取りこぼさないよう即時（同期）に発火する
+  // A subscription after the loss fires immediately (synchronously) so that nothing is missed
   gpu.onLost(() => seen.push("late"));
   assertEquals(seen, ["kept", "late"]);
 });
 
-test("raceDeviceLost は消失を例外にし、決着時に購読を解除する", async () => {
+test("raceDeviceLost turns a loss into an exception and unsubscribes on settlement", async () => {
   const { gpu, lose } = losableGpuContext();
   assertEquals(gpu.pendingLostListeners, 0);
 
-  // work が先に決着すれば購読は残らない（flush / readback ごとに reaction が積み残ると、
-  // 長寿命 Session で単調増加するリークになる — 挙動には現れないので件数で固定する）
+  // If the work settles first, no subscription is left (if reactions piled up per flush / readback,
+  // a long-lived Session would leak monotonically — this does not show in behaviour, so it is pinned by
+  // the count)
   for (let i = 0; i < 3; i += 1) {
     assertEquals(await gpu[RUNTIME_INTERNAL].raceDeviceLost(Promise.resolve(7), "work"), 7);
   }
-  assertEquals(gpu.pendingLostListeners, 0, "決着した待機の購読は 1 本も残らない");
+  assertEquals(gpu.pendingLostListeners, 0, "a settled wait leaves not a single subscription");
 
-  // 解決しない待機は消失で例外になる（ハングにしない）
+  // A wait that never resolves becomes an exception on loss (not a hang)
   const hanging = gpu[RUNTIME_INTERNAL].raceDeviceLost(new Promise<void>(() => {}), "flush");
-  assertEquals(gpu.pendingLostListeners, 1, "待機中は購読が立っている（数えられている根拠）");
+  assertEquals(
+    gpu.pendingLostListeners,
+    1,
+    "a subscription stands while waiting (the evidence that it is counted)",
+  );
   lose();
   const error = await assertRejects(() => hanging, GpuDeviceLostError);
   assert(error.message.includes("flush"), error.message);
   assertEquals(gpu.pendingLostListeners, 0);
 });
 
-test("device 消失の例外はバックエンドが入れた reason / message を文言に載せる", async () => {
-  // 真因（Metal の counter sample buffer 確保失敗など）は `GPUDeviceLostInfo.message` にしか
-  // 残らない — 消失済み device のエラーは errorScope へ入らないので、ここで落とすと karume の
-  // どこにも真因が残らない（docs/limitations.md の Metal timestamp 節）。
-  // NOTE: `reason` は仕様上 "unknown" も取るが、Deno の型宣言は "destroyed" しか持たない。
-  // 検証の要点は message 側（真因文字列）なので、型が受ける値のまま組む。
+test("a device-loss exception carries the reason / message the backend set in its text", async () => {
+  // The real cause (such as Metal's failure to allocate a counter sample buffer) remains only in
+  // `GPUDeviceLostInfo.message` — errors of a lost device do not enter errorScope, so dropping it here
+  // would leave the real cause nowhere in karume (the Metal timestamp section of docs/limitations.md).
+  // NOTE: by the spec `reason` can also be "unknown", but Deno's type declarations have only
+  // "destroyed". The point of the check is the message side (the real-cause string), so it is built
+  // with a value the type accepts.
   const loss: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({
     reason: "destroyed",
     message: "Device::create_query_set: Not enough memory left.",
@@ -503,35 +543,41 @@ test("device 消失の例外はバックエンドが入れた reason / message �
   const raced = await assertRejects(() => hanging, GpuDeviceLostError);
   assert(
     raced.message.startsWith("The device was lost during flush (rebuild required)"),
-    `接頭は変えない: ${raced.message}`,
+    `the prefix does not change: ${raced.message}`,
   );
   assert(raced.message.includes("reason: destroyed"), raced.message);
   assert(raced.message.includes("Device::create_query_set"), raced.message);
 
-  // 同期判定（assertDeviceUsable）も同じ理由を運ぶ。フェイク device でも消失済みなら
-  // createBuffer へ届く前に落ちるので、実 GPU は要らない。
+  // The synchronous check (assertDeviceUsable) carries the same reason. Even a fake device, once lost,
+  // fails before reaching createBuffer, so no real GPU is needed.
   await gpu.device.lost;
   const gated = await assertRejects(() => gpu.createResident(16, "after-lost"), GpuDeviceLostError);
   assert(
     gated.message.startsWith("resident 'after-lost' allocation: device was lost"),
-    `接頭は変えない: ${gated.message}`,
+    `the prefix does not change: ${gated.message}`,
   );
   assert(gated.message.includes("Device::create_query_set"), gated.message);
 });
 
-test("消失通知は listener の例外で止まらず、その例外も握り潰さない", async () => {
-  const failure = new Error("user callback の失敗");
-  // 公開 onDeviceLost はコンストラクタが登録するため挿入順の先頭に来る。隔離が無いと、この
-  // throw で後続の内部購読（raceDeviceLost の待ち）へ通知が届かず、下の await が永久に返らずに
-  // テストがタイムアウトする — 消失がハングに化ける形そのもの。
+test("loss notification is not stopped by a listener's exception, and does not swallow that exception either", async () => {
+  const failure = new Error("failure of the user callback");
+  // The public onDeviceLost is registered by the constructor, so it comes first in insertion order.
+  // Without isolation, this throw would keep the notification from reaching the internal subscription
+  // after it (the wait of raceDeviceLost), the await below would never return and the test would time
+  // out — exactly the form in which a loss turns into a hang.
   const { gpu, lose } = losableGpuContext(() => {
     throw failure;
   });
   const hanging = gpu[RUNTIME_INTERNAL].raceDeviceLost(new Promise<void>(() => {}), "flush");
-  assertEquals(gpu.pendingLostListeners, 2, "公開通知と内部購読の 2 本が並んでいる");
+  assertEquals(
+    gpu.pendingLostListeners,
+    2,
+    "the public notification and the internal subscription are both lined up",
+  );
 
-  // 隔離した例外は捨てずに非同期へ逃がす（fail loudly は保つが消失の制御経路とは分離する）。
-  // Node ではプロセスの uncaughtException として観測する（test-support/process-events）。
+  // The isolated exception is not discarded but escapes asynchronously (keeps fail loudly, but
+  // separated from the loss's control path). On Node it is observed as the process's
+  // uncaughtException (test-support/process-events).
   const { reported: rethrown } = await captureUncaughtExceptions(async () => {
     lose();
     const error = await assertRejects(() => hanging, GpuDeviceLostError);
@@ -543,8 +589,9 @@ test("消失通知は listener の例外で止まらず、その例外も握り�
 });
 
 /**
- * popFailureScopes が触る面（popErrorScope）だけのフェイク device。`scopes` は pop の発行順
- * ＝ [validation, out-of-memory] に対応する（スタック先頭が validation）。
+ * A fake device with only the surface popFailureScopes touches (popErrorScope). `scopes`
+ * corresponds to the order the pops are issued = [validation, out-of-memory] (the top of the stack
+ * is validation).
  */
 const poppingDevice = (scopes: readonly (string | undefined)[]): GPUDevice => {
   const queue = [...scopes];
@@ -556,22 +603,27 @@ const poppingDevice = (scopes: readonly (string | undefined)[]): GPUDevice => {
   } as unknown as GPUDevice;
 };
 
-test("popFailureScopes は両スコープ捕捉時に OOM を返す（validation は派生）", async () => {
-  // 余力切れの createBuffer は無効バッファを返し、それを使う後続の操作が
-  // `Buffer with '' label is invalid` を validation に立てる。validation を先に返すと根因の
-  // OOM が捨てられ、破棄後使用と区別のつかない報告になる（実測事故の再発防止）。
+test("popFailureScopes returns the OOM when both scopes capture something (the validation is derived)", async () => {
+  // A createBuffer that runs out of room returns an invalid buffer, and a later operation that uses
+  // it raises `Buffer with '' label is invalid` in validation. Returning the validation first would
+  // discard the root-cause OOM and give a report indistinguishable from use after destroy (prevents a
+  // measured incident from recurring).
   const both = await popFailureScopes(
     poppingDevice(["Buffer with '' label is invalid", "not enough memory left"]),
-    "重みのアップロード",
+    "weight upload",
   );
-  assertInstanceOf(both, GpuOutOfMemoryError, "派生の validation でなく根因の OOM を返す");
-  assert(both.message.startsWith("重みのアップロード: "), both.message);
+  assertInstanceOf(
+    both,
+    GpuOutOfMemoryError,
+    "returns the root-cause OOM, not the derived validation",
+  );
+  assert(both.message.startsWith("weight upload: "), both.message);
   assert(both.message.includes("not enough memory left"), both.message);
 
-  // 純 validation（OOM スコープが空）の挙動は不変
+  // Pure validation (empty OOM scope) behaves as before
   const validationOnly = await popFailureScopes(
     poppingDevice(["Buffer with '' label has been destroyed", undefined]),
-    "run のエンコード",
+    "run encoding",
   );
   assertInstanceOf(validationOnly, GpuValidationError);
   assert(validationOnly.message.includes("has been destroyed"), validationOnly.message);
@@ -580,7 +632,7 @@ test("popFailureScopes は両スコープ捕捉時に OOM を返す（validation
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "並行する errorScope 区間で validation 失敗が正しい側に帰属する（実 GPU）",
+  "a validation failure in concurrent errorScope ranges is attributed to the right side (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -596,17 +648,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       );
 
       /**
-       * #runOnce と同型の区間（push → await を跨ぐエンコード → pop）。`ticks` の差で
-       * 「エラーを起こした側が先に pop する」非対称な重なりを作る。
+       * A range of the same shape as #runOnce (push -> encoding across an await -> pop). The
+       * difference in `ticks` builds an asymmetric overlap in which "the side that caused the error pops
+       * first".
        *
-       * ロックが無いとこの形は実測で誤帰属する（faulty=clean / innocent=ERROR）。pop は
-       * スタック先頭を無条件に取るため、faulty は後から積まれた innocent の空スコープを取り、
-       * innocent が faulty のエラーを拾う。
+       * Without the lock this shape is misattributed in measurements (faulty=clean / innocent=ERROR). pop
+       * takes the top of the stack unconditionally, so faulty takes the empty scope of innocent pushed
+       * after it, and innocent picks up faulty's error.
        */
       const scoped = (faulty: boolean, ticks: number): Promise<Error | undefined> =>
         gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
           pushFailureScopes(gpu.device);
-          // binding 0 が欠落した bindGroup は同期例外にならず errorScope にだけ現れる
+          // A bindGroup missing binding 0 raises no synchronous exception and shows up only in errorScope
           if (faulty) gpu.device.createBindGroup({ layout, entries: [] });
           for (let i = 0; i < ticks; i += 1) await Promise.resolve();
           return await popFailureScopes(gpu.device, faulty ? "faulty" : "innocent");
@@ -614,9 +667,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       const [faultyResult, innocentResult] = await Promise.all([scoped(true, 1), scoped(false, 8)]);
 
-      assertInstanceOf(faultyResult, GpuValidationError, "エラーを起こした側が捕捉する");
+      assertInstanceOf(
+        faultyResult,
+        GpuValidationError,
+        "the side that caused the error captures it",
+      );
       assert(faultyResult.message.startsWith("faulty:"), faultyResult.message);
-      assertEquals(innocentResult, undefined, "無関係な区間が巻き添えで落ちない");
+      assertEquals(
+        innocentResult,
+        undefined,
+        "an unrelated range does not fail as collateral damage",
+      );
     } finally {
       gpu.destroy();
     }
@@ -624,7 +685,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "GpuContext は device.lost を購読し、意図的な破棄と区別して記録する（実 GPU）",
+  "GpuContext subscribes to device.lost and records it as distinct from an intentional destroy (real GPU)",
   async () => {
     let notified = 0;
     const gpu = await acquireGpu({ onDeviceLost: () => (notified += 1) });
@@ -633,17 +694,17 @@ test.skipIf(!GPU_AVAILABLE)(
     assertEquals(gpu.destroyRequested, false);
 
     gpu.destroy();
-    // 内部購読はコンストラクタで登録済みなので、この await より先に走る
+    // The internal subscription was registered in the constructor, so it runs before this await
     const info = await gpu.device.lost;
 
     assertEquals(info.reason, "destroyed");
     assertEquals(gpu.destroyRequested, true);
     assertEquals(gpu.lost?.reason, "destroyed");
-    assertEquals(notified, 0, "意図的な破棄は消失通知の対象外");
+    assertEquals(notified, 0, "an intentional destroy is not a loss notification");
   },
 );
 
-test("subgroup32は明示要求と必要な全機能を要求し、既定では要求しない", () => {
+test("subgroup32 requests itself and every feature it needs only when requested explicitly, and not by default", () => {
   const present = new Set(["subgroups", "subgroup-size-control"]),
     language = new Set(["subgroup_id"]);
   assertEquals(planSubgroup32Features(present, language, undefined), []);
@@ -708,7 +769,7 @@ test("the subgroup lane-mapping probe is true only when every lane reports the l
   );
 });
 
-test("subgroup32カナリアは全レーンの既知解だけを受理し、消失で待ち続けない", async () => {
+test("the subgroup32 canary accepts only the known answer on every lane and does not wait forever on loss", async () => {
   await assertSubgroup32Executes(canaryDevice({ mapped: Array<number>(256).fill(32896) }));
   for (const mapped of [[], Array<number>(256).fill(0), [...Array<number>(255).fill(32896), 0]]) {
     await assertRejects(() => assertSubgroup32Executes(canaryDevice({ mapped })), GpuFeatureError);
@@ -726,10 +787,11 @@ test("subgroup32カナリアは全レーンの既知解だけを受理し、消�
   );
 });
 
-test("batch finish: errorScope の pop 待ちの間に消失した区間は成功で返さない", async () => {
-  // 読み戻しの無い finish は `onSubmittedWorkDone` だけを消失と競わせ、その後の pop 待ちは競わせない
-  // （消失後の pop は null で決着する — docs/research/2026-08-16-device-lost-wait-settlement.md）。
-  // 消失を跨いだ finish が成功で返ると「区間は無事に閉じた」と誤読されるので、pop の後に消失を見る。
+test("batch finish: a range whose device was lost while waiting for the errorScope pop does not return success", async () => {
+  // A finish without readback races only `onSubmittedWorkDone` against the loss and does not race the
+  // pop wait after it (a pop after the loss settles with null — docs/research/2026-08-16-device-lost-wait-settlement.md).
+  // A finish across a loss that returned success would be misread as "the range closed safely", so
+  // the loss is checked after the pop.
   const pops: PromiseWithResolvers<GPUError | null>[] = [];
   const { gpu, lose } = losableGpuContext(undefined, {
     popErrorScope: () => {
@@ -740,19 +802,20 @@ test("batch finish: errorScope の pop 待ちの間に消失した区間は成�
   });
   const batch = await gpu.beginBatch();
   const finished = batch.finish();
-  // pop が発行される（= フェンスを抜けた）まで待つ。
+  // Wait until the pop is issued (= the fence has been passed).
   while (pops.length < 2) await Promise.resolve();
   lose();
-  // 消失の記録（`device.lost` の then）が pop の決着より先に走る形を作る。
+  // Build the form in which recording the loss (the then of `device.lost`) runs before the pop settles.
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
   for (const pop of pops) pop.resolve(null);
   await assertRejects(() => finished, GpuDeviceLostError, "batch completion");
 });
 
-test("createResident: errorScope の pop 待ちの間に消失した device では成功で返さず、確保したバッファを破棄する", async () => {
-  // 入口の同期判定を通った後、pop を待つ間に消失すると pop は null で決着する
-  // （docs/research/2026-08-16-device-lost-wait-settlement.md）。ここで成功を返すと、使えない常駐
-  // テンソルが確保の成功として出回り、失敗地点が初回の write / read へずれる。
+test("createResident: on a device lost while waiting for the errorScope pop, does not return success and destroys the allocated buffer", async () => {
+  // After passing the synchronous check at the entry, a loss during the pop wait makes the pop settle
+  // with null (docs/research/2026-08-16-device-lost-wait-settlement.md). Returning success here would
+  // circulate an unusable resident tensor as a successful allocation, and the failure point would move
+  // to the first write / read.
   const pops: PromiseWithResolvers<GPUError | null>[] = [];
   let destroyed = 0;
   const { gpu, lose } = losableGpuContext(undefined, {
@@ -769,25 +832,26 @@ test("createResident: errorScope の pop 待ちの間に消失した device で�
       }) as unknown as GPUBuffer,
   });
   const created = gpu.createResident(16, "racing");
-  assertEquals(pops.length, 2, "確保の後に 2 本の pop が発行されている");
+  assertEquals(pops.length, 2, "2 pops are issued after the allocation");
   lose();
-  // 消失の記録（`device.lost` の then）が pop の決着より先に走る形を作る。
+  // Build the form in which recording the loss (the then of `device.lost`) runs before the pop settles.
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
   for (const pop of pops) pop.resolve(null);
   await assertRejects(() => created, GpuDeviceLostError, "resident 'racing' allocation");
-  assertEquals(destroyed, 1, "確保したバッファを破棄せずに捨てている");
+  assertEquals(destroyed, 1, "the allocated buffer is dropped without being destroyed");
 });
 
-test("beginBatch は破棄要求済み・消失済みの device で開かず、区間ロックも取らない", async () => {
-  // 開いてしまうと区間ロックを握ったまま enqueue を受理し続け、失敗が finish まで遅れる。
-  // `destroy()` はフラグを同期に立てるので、`device.lost` の reaction を待たずに落ちる。
+test("beginBatch does not open on a device whose destroy was requested or that was lost, and takes no range lock", async () => {
+  // If it opened, it would keep accepting enqueues while holding the range lock, and the failure would
+  // be delayed until finish. `destroy()` sets the flag synchronously, so it fails without waiting for
+  // the reaction of `device.lost`.
   const destroyed = fakeGpuContext(fakeDevice());
   destroyed.destroy();
   await assertRejects(() => destroyed.beginBatch(), GpuDeviceLostError, "batch start");
   assertEquals(
     await destroyed[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("next")),
     "next",
-    "拒否した beginBatch はロックを取っていない（後続区間が待たされない）",
+    "the rejected beginBatch took no lock (later ranges are not kept waiting)",
   );
 
   const { gpu, lose } = losableGpuContext();
@@ -796,9 +860,10 @@ test("beginBatch は破棄要求済み・消失済みの device で開かず、�
   await assertRejects(() => gpu.beginBatch(), GpuDeviceLostError, "batch start");
 });
 
-test("beginBatch: ロック待ちの間に消失した device では区間を開かず、ロックをすぐ返す", async () => {
-  // 呼んだ時点の同期判定は通るが、先行区間がロックを返すまで待つ間に消失した形。開いてしまうと
-  // 消失済み device の上で区間ロックを握り続け、利用者が finish するまで後続が待たされる。
+test("beginBatch: on a device lost while waiting for the lock, does not open the range and returns the lock at once", async () => {
+  // The synchronous check at call time passes, but the device is lost while waiting for an earlier
+  // range to return the lock. If it opened, it would keep holding the range lock on a lost device, and
+  // later ranges would wait until the caller finishes.
   const { gpu, lose } = losableGpuContext();
   const first = await gpu.beginBatch();
   const second = gpu.beginBatch();
@@ -809,6 +874,6 @@ test("beginBatch: ロック待ちの間に消失した device では区間を開
   assertEquals(
     await gpu[RUNTIME_INTERNAL].withScopeLock(() => Promise.resolve("next")),
     "next",
-    "拒否した beginBatch がロックを握ったまま（後続区間が待たされる）",
+    "the rejected beginBatch still holds the lock (later ranges are kept waiting)",
   );
 });

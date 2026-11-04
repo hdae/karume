@@ -9,10 +9,11 @@ import {
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { GEMM_TOLERANCE } from "./helpers/op-tolerance.ts";
 
-// 大語彙形で選ばれるWGSLはNを焼かない。端の列・先読み語の端を小さい形で検査し、
-// 実形262144×1536はChrome実重み比較とGemmaの既存logits/golden門で検証する。
+// The WGSL chosen for the large-vocabulary shape does not bake N. The edge columns and the edge of
+// the prefetched words are checked at a small shape; the real shape 262144×1536 is verified by the
+// Chrome real-weight comparison and Gemma's existing logits / golden checks.
 test.skipIf(!GPU_AVAILABLE)(
-  "INT8のc16変種はc32とビット一致し、列と先読みの端を正しく書く（実GPU）",
+  "the INT8 c16 variant is bit-identical to c32 and writes the column and prefetch edges correctly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const device = gpu.device;

@@ -1,6 +1,7 @@
 /**
- * コンテナ形式（`krm` / `krg`）の読み手 — ヘッダ・2 文書 descriptor・block 取得・`krg` 抽出・合流層。
- * docs/container-v1.md の規則を「正常系から 1 点だけ壊す」形で固定する。
+ * The reader of the container format (`krm` / `krg`) — header, the two descriptor documents, block
+ * reads, `krg` extraction and the merge layer. Pins the rules of docs/container-v1.md in the form
+ * "break exactly one point of a valid case".
  */
 
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -34,10 +35,10 @@ import {
 } from "./helpers/container-write.ts";
 
 // ---------------------------------------------------------------------------
-// 合成モデル
+// Synthetic model
 // ---------------------------------------------------------------------------
 
-/** 決定的な疑似乱数バイト列（seed から xorshift32）。 */
+/** Deterministic pseudo-random bytes (xorshift32 from seed). */
 const bytesOf = (length: number, seed: number): Uint8Array<ArrayBuffer> => {
   const out = new Uint8Array(new ArrayBuffer(length));
   let state = seed >>> 0 || 1;
@@ -58,7 +59,7 @@ type InitializerSpec = {
   readonly shared?: true;
 };
 
-/** initializer ごとに 1 ノードで消費する最小の IR v2 グラフ。 */
+/** The smallest IR v2 graph that consumes each initializer in one node. */
 const declaration = (initializers: Readonly<Record<string, InitializerSpec>>): IrDeclaration => {
   const names = Object.keys(initializers);
   return parseIrDeclaration(
@@ -117,7 +118,8 @@ const syntheticModel = (): ModelInput => ({
       bytes: bytesOf(64 * F32, 11),
       encoding: { codec: "f32" },
     },
-    // 長さが 4 の倍数でない const（末尾の詰め物を書き手が焼くことの確認）。
+    // A const whose length is not a multiple of 4 (checks that the writer bakes the trailing
+    // padding).
     {
       graph: "voice",
       initializer: "const.window",
@@ -133,7 +135,8 @@ const syntheticModel = (): ModelInput => ({
       encoding: { codec: "f16" },
     },
     {
-      // i4 + companion scale（規則③で同一 part に置かれる）。行長 64 / group 32 = 2 group。
+      // i4 + companion scale (placed in the same part by rule 3). Row length 64 / group 32 = 2
+      // groups.
       graph: "text_encoder",
       initializer: "proj.weight",
       bytes: bytesOf((12 * 64) / 2, 22),
@@ -144,7 +147,7 @@ const syntheticModel = (): ModelInput => ({
       },
     },
     {
-      // block 上限（テストでは 512 B）を超えるので piece 分割される。
+      // Exceeds the block limit (512 B in the tests), so it is split into pieces.
       graph: "front",
       initializer: "big.weight",
       bytes: bytesOf(32 * 32, 24),
@@ -154,7 +157,7 @@ const syntheticModel = (): ModelInput => ({
         scale: { bytes: bytesOf(32 * F32, 25), dtype: "f32" },
       },
     },
-    // 長さが 4 の倍数でない f16（末尾の詰め物）。
+    // An f16 whose length is not a multiple of 4 (trailing padding).
     {
       graph: "front",
       initializer: "front.bias",
@@ -162,7 +165,7 @@ const syntheticModel = (): ModelInput => ({
       encoding: { codec: "f16" },
     },
     {
-      // conv_transpose1d 形（rowAxis 1 の per-channel scale）。
+      // conv_transpose1d shape (per-channel scale on rowAxis 1).
       graph: "voice",
       initializer: "conv.weight",
       bytes: bytesOf(4 * 3 * 8, 27),
@@ -210,8 +213,9 @@ const rejectsModel = (
 const anyOf = (value: unknown): any => value;
 
 /**
- * 書き手が焼いた正しい `krm` の model 記述だけを書き換え、part 0 を組み直して読み手へ通す。
- * 書き手の検査を経ずに読み手（目次 → 合流層）の規則を撃つための経路。
+ * Rewrites only the model descriptor of a valid `krm` baked by the writer, rebuilds part 0 and
+ * passes it to the reader. A path for hitting the reader's rules (index → merge layer) without
+ * going through the writer's checks.
  */
 const openWithModelDescriptor = async (
   written: WrittenContainer,
@@ -236,11 +240,11 @@ const openWithModelDescriptor = async (
 };
 
 // ---------------------------------------------------------------------------
-// ヘッダ
+// Header
 // ---------------------------------------------------------------------------
 
 describe("container header", () => {
-  it("krm / krg を往復し、種別は magic だけが持つ", () => {
+  it("round-trips krm / krg, and only the magic carries the kind", () => {
     const model = readHeader(
       writeHeader({
         kind: "model",
@@ -266,7 +270,7 @@ describe("container header", () => {
     assertEquals(graph.kind, "graph");
   });
 
-  it("未知の magic・未対応の版・種別と長さの矛盾・上限超過を拒否する", () => {
+  it("rejects an unknown magic, an unsupported version, a kind that contradicts the lengths, and exceeded limits", () => {
     const bytes = writeHeader({
       kind: "model",
       version: 1,
@@ -327,7 +331,7 @@ describe("container header", () => {
     );
   });
 
-  it("単一形の part offset は 64 B 整列し、長さ 0 の part には詰め物を挟まない", () => {
+  it("part offsets of the single form are 64 B aligned, and no padding is inserted for a zero-length part", () => {
     assertEquals(derivePartOffsets(100, [0, 30]), { offsets: [0, 100, 128], totalLength: 158 });
     assertEquals(derivePartOffsets(64, [10, 0]), { offsets: [0, 64, 74], totalLength: 74 });
     assertEquals(derivePartOffsets(1, [1]).offsets[1] % BLOCK_START_ALIGN, 0);
@@ -335,11 +339,11 @@ describe("container header", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 書く → 読む
+// Write → read
 // ---------------------------------------------------------------------------
 
 describe("container round trip", () => {
-  it("単一形を開くと全 block が sha256 検証つきで戻り、合流層が供給計画を出す", async () => {
+  it("opening the single form returns every block with its sha256 verified, and the merge layer derives the supply plan", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const opened = await openContainer({ kind: "bytes", bytes: written.single });
     assertEquals(opened.header.kind, "model");
@@ -347,13 +351,13 @@ describe("container round trip", () => {
 
     const supplies = opened.graphs.front.supplies;
     const big = supplies.get("big.weight");
-    if (big === undefined) throw new Error("big.weight の供給が無い");
-    // 32 行 × 32 B = 1024 B > block 上限 512 B → piece 分割される。
+    if (big === undefined) throw new Error("no supply for big.weight");
+    // 32 rows × 32 B = 1024 B > block limit 512 B → split into pieces.
     assertEquals(big.blocks.length > 1, true);
     assertEquals(big.blocks[0].rows[0], 0);
     assertEquals(big.blocks[big.blocks.length - 1].rows[1], 32);
     assertEquals(big.scale?.part, big.blocks[0].part);
-    // piece 列の block を読んで連結すると元の payload が戻る。
+    // Reading and concatenating the blocks of the piece list gives back the original payload.
     const joined = new Uint8Array(1024);
     let cursor = 0;
     for (const block of big.blocks) {
@@ -363,7 +367,8 @@ describe("container round trip", () => {
     }
     assertEquals(joined, bytesOf(32 * 32, 24));
 
-    // 長さが 4 の倍数でない f16 は詰め物込みで宣言され、payload 長は宣言 shape から決まる。
+    // An f16 whose length is not a multiple of 4 is declared with its padding, and the payload
+    // length is determined by the declared shape.
     const bias = supplies.get("front.bias");
     assertEquals(bias?.blocks[0].length, 132);
     assertEquals(bias?.blocks[0].payloadBytes, 130);
@@ -372,22 +377,22 @@ describe("container round trip", () => {
       new Uint8Array([0, 0]),
     );
 
-    // const 領域は part 1・origin は const。
+    // The const region is part 1, and its origin is const.
     const rope = supplies.get("const.rope");
     assertEquals(rope?.origin, "const");
     assertEquals(rope?.blocks[0].part, 1);
     assertEquals(await opened.readBlock(rope!.blocks[0].id), bytesOf(64 * F32, 11));
 
-    // shared 宣言は供給計画を持たない。
+    // A shared declaration has no supply plan.
     assertEquals(opened.graphs.text_encoder.supplies.has("model.lm_head.weight"), false);
-    // 専用 part の資産は単独で 1 part を占める。
+    // An asset in a dedicated part occupies one part by itself.
     const ple = opened.model?.assets["ple_table"];
     const pleBlock = opened.model?.blocks.find((block) => block.id === ple?.block);
     assertEquals(opened.model?.blocks.filter((block) => block.part === pleBlock?.part).length, 1);
     assertEquals(opened.model?.codecs, ["f16", "int4-sym-g", "int8-sym"]);
   });
 
-  it("分割形と単一形は descriptor も block もバイト単位に同一", async () => {
+  it("split form and single form are byte-identical in both descriptors and blocks", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const single = await openContainer({ kind: "bytes", bytes: written.single });
     const split = await openContainer({ kind: "parts", parts: written.parts });
@@ -399,7 +404,7 @@ describe("container round trip", () => {
     assertEquals(await split.extractGraph(), await single.extractGraph());
   });
 
-  it("krm から抜いた krg は直接書いた krg とバイト同一で、krg として開ける", async () => {
+  it("a krg extracted from a krm is byte-identical to a directly written krg and opens as a krg", async () => {
     const input = syntheticModel();
     const written = await writeModelContainer(input, OPTIONS);
     const direct = await writeGraphContainer(input, OPTIONS);
@@ -410,14 +415,15 @@ describe("container round trip", () => {
     assertEquals(graphOnly.header.kind, "graph");
     assertEquals(graphOnly.model, undefined);
     assertEquals(graphOnly.graph, opened.graph);
-    // krg でも const 領域の block は読める（グラフ記述が const の束縛表を持つ — §9）。
+    // Blocks of the const region are readable from a krg too (the graph descriptor carries the
+    // const binding table — §9).
     const rope = graphOnly.graphs.front.supplies.get("const.rope");
     assertEquals(await graphOnly.readBlock(rope!.blocks[0].id), bytesOf(64 * F32, 11));
-    // 重みは供給計画を持たない（要求は宣言 shape から導く）。
+    // Weights have no supply plan (the requirement is derived from the declared shape).
     assertEquals(graphOnly.graphs.front.supplies.has("big.weight"), false);
   });
 
-  it("const 領域が空でも krg 抽出が成り立つ（長さ 0 の part に詰め物を挟まない）", async () => {
+  it("krg extraction works even when the const region is empty (no padding for a zero-length part)", async () => {
     const model: ModelInput = {
       ...syntheticModel(),
       consts: [],
@@ -440,7 +446,7 @@ describe("container round trip", () => {
     assertEquals(await opened.extractGraph(), (await writeGraphContainer(model, OPTIONS)).bytes);
   });
 
-  it("外側の期待 hash は 2 文書を parse する前に検証する", async () => {
+  it("the outer expected hash is verified before the two documents are parsed", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const expect = {
       graph: {
@@ -467,7 +473,7 @@ describe("container round trip", () => {
     );
   });
 
-  it("krm に graph だけの期待値を渡すと、モデル記述を未検証のまま開かない", async () => {
+  it("passing a krm only the graph's expected value does not open it with an unverified model descriptor", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const graphOnly = {
       graph: {
@@ -482,11 +488,11 @@ describe("container round trip", () => {
     );
   });
 
-  it("block の 1 バイト改ざんは sha256 が、const 領域の改ざんは krg 抽出が捕まえる", async () => {
+  it("sha256 catches a one-byte tampering of a block, and krg extraction catches tampering of the const region", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const parts = written.parts.map((part) => part.slice());
     const weight = written.model.blocks.find((block) => block.role === "weight");
-    if (weight === undefined) throw new Error("weight block が無い");
+    if (weight === undefined) throw new Error("no weight block");
     parts[weight.part][weight.offset + 3] ^= 0x80;
     const opened = await openContainer({ kind: "parts", parts });
     await assertRejects(
@@ -499,9 +505,10 @@ describe("container round trip", () => {
     await assertRejects(() => again.extractGraph(), ContainerFormatError, "const region sha256");
   });
 
-  it("krg 抽出は krm からだけ — krg 入力は const 領域の完全性を照合できないので抽出しない", async () => {
-    // krg には const 領域全体の hash を持つ文書が無い（モデル記述の parts[0] は krm だけ — §9）。
-    // 改ざんした krg を抽出できてしまうと、壊れたバイト列が正規の krg の顔で出ていく。
+  it("krg extraction only from a krm — a krg input cannot be checked for the integrity of its const region, so it is not extracted", async () => {
+    // A krg has no document carrying the hash of the whole const region (parts[0] of the model
+    // descriptor exists only in a krm — §9). If a tampered krg could be extracted, corrupted bytes
+    // would go out looking like a legitimate krg.
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const tampered = written.graphContainer.slice();
     tampered[tampered.byteLength - 1] ^= 0x01;
@@ -510,7 +517,7 @@ describe("container round trip", () => {
     await assertRejects(() => opened.extractGraph(), ContainerFormatError, "only from a krm");
   });
 
-  it("krm からの krg 抽出は取得元が const 領域を短く返したら落ちる（hash より先に長さを照合する）", async () => {
+  it("krg extraction from a krm fails when the source returns a short const region (the length is checked before the hash)", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const parts = written.parts;
     const source: BlockSource = {
@@ -530,14 +537,15 @@ describe("container round trip", () => {
     );
   });
 
-  it("検証済みを名乗る取得元では block の sha256 を掛けず、名乗らない取得元では掛ける", async () => {
-    // 取得層がファイル全体を検証した経路（hub の HF 取得元）は cold の 2 重 digest と warm の digest を
-    // 避けるために verified を名乗る（ADR 0109 決定 7）。観測は「改ざんが素通りするか」で行う —
-    // digest の回数そのものは外から数えられない。
+  it("a source that claims to be verified skips the block sha256, and a source that does not claim it gets the check", async () => {
+    // A path where the fetch layer verified the whole file (hub's HF source) claims verified to
+    // avoid the double digest when cold and the digest when warm (ADR 0109 decision 7). The
+    // observation is "does tampering slip through" — the number of digests itself cannot be
+    // counted from outside.
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const parts = written.parts.map((part) => part.slice());
     const weight = written.model.blocks.find((block) => block.role === "weight");
-    if (weight === undefined) throw new Error("weight block が無い");
+    if (weight === undefined) throw new Error("no weight block");
     parts[weight.part][weight.offset + 3] ^= 0x80;
     const sourceOf = (verified: boolean): BlockSource => ({
       partCount: parts.length,
@@ -559,12 +567,12 @@ describe("container round trip", () => {
     );
   });
 
-  it("資産の読み口は区間だけを返し、未検証の取得元では block を 1 度検証してから切る", async () => {
+  it("the asset reader returns only the range, and with an unverified source verifies the block once before slicing", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const parts = written.parts.map((part) => part.slice());
     const ple = written.model.assets["ple_table"];
     const pleBlock = written.model.blocks.find((block) => block.id === ple.block);
-    if (pleBlock === undefined) throw new Error("ple_table の block が無い");
+    if (pleBlock === undefined) throw new Error("no block for ple_table");
     const reads: number[] = [];
     const sourceOf = (verified: boolean): BlockSource => ({
       partCount: parts.length,
@@ -576,7 +584,7 @@ describe("container round trip", () => {
       },
     });
 
-    // 検証済み: 区間の長さだけを取りに行く（block 全体 400 B は読まない）。
+    // Verified: fetches only the length of the range (does not read the whole 400 B block).
     const trusted = await openContainer({ kind: "source", source: sourceOf(true) });
     const reader = trusted.asset("ple_table");
     assertEquals(reader.role, "ple-table");
@@ -585,7 +593,8 @@ describe("container round trip", () => {
     assertEquals(await reader.read(16, 8), bytesOf(400, 32).subarray(16, 24));
     assertEquals(reads, [8]);
 
-    // 未検証: 初回に block 全体を 1 度取って検証し、2 度目は取りに行かない。
+    // Unverified: fetches the whole block once on first use to verify it, and does not fetch it the
+    // second time.
     const untrusted = await openContainer({ kind: "source", source: sourceOf(false) });
     const cached = untrusted.asset("ple_table");
     reads.length = 0;
@@ -593,7 +602,8 @@ describe("container round trip", () => {
     assertEquals(await cached.read(396, 4), bytesOf(400, 32).subarray(396, 400));
     assertEquals(reads, [pleBlock.length]);
 
-    // 改ざんは未検証の取得元でだけ捕まる（検証済みは取得層が保証する側）。
+    // Tampering is caught only with an unverified source (with a verified one, the fetch layer is
+    // the side that guarantees it).
     parts[pleBlock.part][pleBlock.offset + 5] ^= 0x40;
     const tampered = await openContainer({ kind: "source", source: sourceOf(false) });
     await assertRejects(
@@ -602,17 +612,18 @@ describe("container round trip", () => {
       "sha256 differs from the declared value",
     );
 
-    // 範囲外・未宣言・krg は fail loudly。
+    // Out of range, undeclared and krg fail loudly.
     await assertRejects(() => reader.read(398, 4), ContainerFormatError, "runs past");
     assertThrows(() => trusted.asset("nope"), ContainerFormatError, "Undeclared asset");
     const graphOnly = await openContainer({ kind: "bytes", bytes: written.graphContainer });
     assertThrows(() => graphOnly.asset("ple_table"), ContainerFormatError, "Undeclared asset");
   });
 
-  it("資産の読み口は区間が安全整数でなければ落ち、検証済みの取得元が短く返しても落ちる", async () => {
+  it("the asset reader fails when the range is not a safe integer, and also when a verified source returns short", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const parts = written.parts.map((part) => part.slice());
-    // 開く（ヘッダ・descriptor の読み）までは正しく返し、開いた後の取得だけを短くする。
+    // Return correct data up to opening (header and descriptor reads) and make only the reads after
+    // opening short.
     let shortBy = 0;
     const sourceOf = (verified: boolean): BlockSource => ({
       partCount: parts.length,
@@ -622,7 +633,8 @@ describe("container round trip", () => {
         Promise.resolve(parts[part].subarray(offset, offset + length - shortBy)),
     });
 
-    // NaN は範囲比較を全て素通りし、未検証の取得元では subarray が黙って 0 バイトを返していた。
+    // NaN slips through every range comparison, and with an unverified source subarray used to
+    // silently return 0 bytes.
     for (const verified of [true, false]) {
       const reader = (await openContainer({ kind: "source", source: sourceOf(verified) })).asset(
         "ple_table",
@@ -640,7 +652,8 @@ describe("container round trip", () => {
       );
     }
 
-    // 検証済みの取得元は block 全体を読まない経路なので、戻りの長さを要求と突き合わせる。
+    // A verified source takes the path that does not read the whole block, so the returned length
+    // is checked against the request.
     const short = await openContainer({ kind: "source", source: sourceOf(true) });
     shortBy = 1;
     await assertRejects(
@@ -650,7 +663,7 @@ describe("container round trip", () => {
     );
   });
 
-  it("分割形の part 本数と長さは宣言と一致しなければならない", async () => {
+  it("the part count and lengths of the split form must match the declaration", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     await assertRejects(
       () => openContainer({ kind: "parts", parts: written.parts.slice(0, -1) }),
@@ -676,9 +689,10 @@ describe("container round trip", () => {
     );
   });
 
-  it("krg の const.length が part 長の天井を超えるなら、part 1 を読む前に開く時点で落ちる", async () => {
-    // krg の part 1 の寸法はグラフ記述の const.length しか持たない（§2.1）。天井（§10 — part 0 / 1
-    // を含む全 part）を記述の検査で掛けないと、読み口が同じ長さを申告すれば巨大な一括読みに届く。
+  it("if a krg's const.length exceeds the part-length ceiling, it fails at open, before part 1 is read", async () => {
+    // The size of a krg's part 1 is known only from the graph descriptor's const.length (§2.1).
+    // Without applying the ceiling (§10 — every part, part 0 / 1 included) in the descriptor
+    // check, a reader declaring the same length would reach a huge single read.
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const huge = PART_MAX_BYTES + 1;
     const graphBytes = mutateJson(written.graphDescriptorBytes, (doc) => {
@@ -713,11 +727,11 @@ describe("container round trip", () => {
 });
 
 // ---------------------------------------------------------------------------
-// descriptor の宣言検査
+// Declaration checks of the descriptors
 // ---------------------------------------------------------------------------
 
 describe("container descriptor", () => {
-  it("正準直列化した 2 文書は parse → serialize で同じバイト列に戻る", async () => {
+  it("the two canonically serialized documents return to the same bytes through parse → serialize", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const { serializeGraphDescriptor, serializeModelDescriptor } =
       await import("../src/format/container/descriptor.ts");
@@ -731,11 +745,11 @@ describe("container descriptor", () => {
     );
   });
 
-  it("台帳に無い codec・台帳と食い違う packing・未知キーを拒否する", async () => {
+  it("rejects a codec missing from the ledger, a packing that disagrees with the ledger, and unknown keys", async () => {
     const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     const supply = (doc: Record<string, unknown>) => anyOf(doc).binding.text_encoder["proj.weight"];
     rejectsModel(
-      "未知 codec",
+      "unknown codec",
       bytes,
       (doc) => {
         supply(doc).encoding.codec = "int3-sym";
@@ -743,7 +757,7 @@ describe("container descriptor", () => {
       "is not in the ledger",
     );
     rejectsModel(
-      "packing 不一致",
+      "packing mismatch",
       bytes,
       (doc) => {
         supply(doc).encoding.packing.blockElements = 4;
@@ -751,7 +765,7 @@ describe("container descriptor", () => {
       "a different version of the ledger",
     );
     rejectsModel(
-      "未知キー",
+      "unknown key",
       bytes,
       (doc) => {
         supply(doc).encoding.bits = 4;
@@ -759,7 +773,7 @@ describe("container descriptor", () => {
       "unknown key",
     );
     rejectsModel(
-      "資産の論理長と block 長の不整合",
+      "asset logical length inconsistent with block length",
       bytes,
       (doc) => {
         anyOf(doc).assets.style_vectors.length = 296;
@@ -767,7 +781,7 @@ describe("container descriptor", () => {
       "differs from block",
     );
     rejectsModel(
-      "非量子化に groupSize",
+      "groupSize on a non-quantized supply",
       bytes,
       (doc) => {
         anyOf(doc).binding.text_encoder["enc.weight"].encoding.groupSize = 32;
@@ -775,7 +789,7 @@ describe("container descriptor", () => {
       "is not quantized, so it cannot be written",
     );
     rejectsModel(
-      "量子化に scale 無し",
+      "quantized supply without scale",
       bytes,
       (doc) => {
         delete supply(doc).encoding.scale;
@@ -783,7 +797,7 @@ describe("container descriptor", () => {
       "is quantized, so it is required",
     );
     rejectsModel(
-      "codecs の集合が束縛表と違う",
+      "codecs set differs from the binding table",
       bytes,
       (doc) => {
         anyOf(doc).codecs = ["f16"];
@@ -803,12 +817,13 @@ describe("container descriptor", () => {
     );
   });
 
-  it("scale の dtype が受理集合の外なら落ちる（f16 のビット列を f32 として読まない）", async () => {
-    // 読み手は scale を宣言された dtype で読むので、受理集合（初版は f32 だけ）を見ていないと
-    // f16 の列を f32 として読む沈黙誤値になる。値域の門はここでしか撃たれない。
+  it("fails when the scale dtype is outside the accepted set (f16 bits are not read as f32)", async () => {
+    // The reader reads scale with its declared dtype, so without checking the accepted set (only
+    // f32 in the first version) it would read an f16 list as f32, a silent wrong value. This is the
+    // only place the value-range check is hit.
     const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     rejectsModel(
-      "scale.dtype が受理集合の外",
+      "scale.dtype outside the accepted set",
       bytes,
       (doc) => {
         anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.dtype = "f16";
@@ -817,12 +832,13 @@ describe("container descriptor", () => {
     );
   });
 
-  it("束縛表が実在しない block を指せば落ちる（規則⑤ の逆向き — 参照先が無い）", async () => {
-    // 余剰 block（どこからも参照されない）は規則⑤ が拒否する。その逆向き、束縛の側が
-    // 目次に無い id を名乗る形もここで塞ぐ（読み手が block を取りに行く前に落ちる）。
+  it("fails when the binding table points at a block that does not exist (the reverse of rule 5 — the target is missing)", async () => {
+    // A surplus block (referenced from nowhere) is rejected by rule 5. The reverse form, where the
+    // binding side names an id that is not in the index, is blocked here too (it fails before the
+    // reader goes to fetch the block).
     const { modelDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     rejectsModel(
-      "実体が未宣言の block",
+      "data block undeclared",
       bytes,
       (doc) => {
         anyOf(doc).binding.front["front.bias"].block = "absent";
@@ -830,7 +846,7 @@ describe("container descriptor", () => {
       "is not in the index",
     );
     rejectsModel(
-      "scale が未宣言の block",
+      "scale block undeclared",
       bytes,
       (doc) => {
         anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block = "absent";
@@ -839,7 +855,7 @@ describe("container descriptor", () => {
     );
   });
 
-  it("溢れて Infinity になる数・深すぎる入れ子・__proto__ を拒否する", async () => {
+  it("rejects numbers that overflow to Infinity, nesting that is too deep, and __proto__", async () => {
     const { graphDescriptorBytes: bytes } = await writeModelContainer(syntheticModel(), OPTIONS);
     const text = new TextDecoder().decode(bytes);
     const overflow = new TextEncoder().encode(
@@ -854,12 +870,12 @@ describe("container descriptor", () => {
     assertThrows(() => parseGraphDescriptor(proto), ContainerFormatError, "__proto__");
   });
 
-  it("規則①〜⑤: 二重束縛・余剰 block・piece の穴・role の取り違え・scale の別 part を拒否する", async () => {
+  it("rules 1–5: rejects double binding, a surplus block, a hole in the pieces, a mixed-up role, and scale in another part", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const bytes = written.modelDescriptorBytes;
     const bigSupply = (doc: Record<string, unknown>) => anyOf(doc).binding.front["big.weight"];
     rejectsModel(
-      "二重束縛（規則①）",
+      "double binding (rule 1)",
       bytes,
       (doc) => {
         anyOf(doc).binding.front["front.bias"].block = bigSupply(doc).pieces[0].block;
@@ -867,7 +883,7 @@ describe("container descriptor", () => {
       "bound twice",
     );
     rejectsModel(
-      "余剰 block（規則⑤）",
+      "surplus block (rule 5)",
       bytes,
       (doc) => {
         delete anyOf(doc).assets["style_vectors"];
@@ -875,7 +891,7 @@ describe("container descriptor", () => {
       "is not referenced",
     );
     rejectsModel(
-      "piece の穴（規則④）",
+      "hole in the pieces (rule 4)",
       bytes,
       (doc) => {
         bigSupply(doc).pieces[1].rows[0] += 1;
@@ -883,7 +899,7 @@ describe("container descriptor", () => {
       "does not continue from",
     );
     rejectsModel(
-      "piece 1 本",
+      "a single piece",
       bytes,
       (doc) => {
         bigSupply(doc).pieces = [bigSupply(doc).pieces[0]];
@@ -891,7 +907,7 @@ describe("container descriptor", () => {
       "2 or more",
     );
     rejectsModel(
-      "block と pieces の両方",
+      "both block and pieces",
       bytes,
       (doc) => {
         bigSupply(doc).block = "w0001";
@@ -899,7 +915,7 @@ describe("container descriptor", () => {
       "exactly one of",
     );
     rejectsModel(
-      "role の取り違え",
+      "mixed-up role",
       bytes,
       (doc) => {
         const scaleId = anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block;
@@ -908,7 +924,7 @@ describe("container descriptor", () => {
       "has role",
     );
     rejectsModel(
-      "scale が別 part（規則③）",
+      "scale in another part (rule 3)",
       bytes,
       (doc) => {
         const scaleId = anyOf(doc).binding.text_encoder["proj.weight"].encoding.scale.block;
@@ -923,7 +939,7 @@ describe("container descriptor", () => {
       "same part MUST",
     );
     rejectsModel(
-      "offset の整列",
+      "offset alignment",
       bytes,
       (doc) => {
         anyOf(doc).blocks[0].offset += 4;
@@ -931,7 +947,7 @@ describe("container descriptor", () => {
       "is not a multiple of",
     );
     rejectsModel(
-      "parts の添字",
+      "parts index",
       bytes,
       (doc) => {
         anyOf(doc).parts[0].index = 0;
@@ -939,7 +955,7 @@ describe("container descriptor", () => {
       "index is not 1",
     );
     rejectsModel(
-      "part 1 への block",
+      "block in part 1",
       bytes,
       (doc) => {
         anyOf(doc).blocks[0].part = 1;
@@ -948,14 +964,14 @@ describe("container descriptor", () => {
     );
   });
 
-  it("束縛表のキー集合は shared でも const でもない initializer の集合と完全一致する（規則⑤）", async () => {
+  it("the key set of the binding table equals exactly the set of initializers that are neither shared nor const (rule 5)", async () => {
     const written = await writeModelContainer(syntheticModel(), OPTIONS);
     const withBinding = (mutate: (doc: Record<string, unknown>) => void): Promise<void> =>
       openWithModelDescriptor(written, mutate);
     await assertRejects(
       () =>
         withBinding((doc) => {
-          // shared 宣言を束縛表に載せる（余剰）。
+          // Put a shared declaration into the binding table (surplus).
           anyOf(doc).binding.text_encoder["model.lm_head.weight"] =
             anyOf(doc).binding.text_encoder["enc.weight"];
           delete anyOf(doc).binding.text_encoder["enc.weight"];
@@ -965,10 +981,11 @@ describe("container descriptor", () => {
     );
   });
 
-  it("piece の part が添字順に非減少でない容器は開く時点で落とす（規則④）", async () => {
-    // block 上限と part 長を 512 B にして、2 piece を part 2 / part 3 に 1 本ずつ置かせる。
-    // 2 block の所在（part）だけを入れ替えると、目次の構造（重なり・part 長）は正しいまま
-    // piece 1 が piece 2 より後の part に来る。門が無いと開けてしまい、構築が内部簿記の破れで落ちる。
+  it("a container whose piece parts are not non-decreasing in index order fails at open (rule 4)", async () => {
+    // With the block limit and part length at 512 B, the 2 pieces are placed one each in part 2 /
+    // part 3. Swapping only where the 2 blocks live (their parts) keeps the index structure
+    // (overlaps, part lengths) valid while piece 1 lands in a later part than piece 2. Without the
+    // check it would open, and the build would fail on broken internal bookkeeping.
     const written = await writeModelContainer(
       {
         graphs: { g: declaration({ "tall.weight": { shape: [32, 8] } }) },
@@ -990,7 +1007,8 @@ describe("container descriptor", () => {
       anyOf(doc).binding.g["tall.weight"].pieces;
     const blockOf = (doc: Record<string, unknown>, id: string): { part: number } =>
       anyOf(doc).blocks.find((block: { id: string }) => block.id === id);
-    // 前提: 書き手は piece を part 昇順に置いている（入れ替えが意味を持つ形）。
+    // Precondition: the writer places pieces in ascending part order (a form where the swap means
+    // something).
     const original = JSON.parse(new TextDecoder().decode(written.modelDescriptorBytes));
     assertEquals(
       pieces(original).map((piece) => blockOf(original, piece.block).part),
@@ -1009,7 +1027,7 @@ describe("container descriptor", () => {
     );
   });
 
-  it("テスト用の書き手の門: payload 長が宣言 shape と合わない入力は書く前に落とす", async () => {
+  it("the test writer's check: an input whose payload length does not match the declared shape fails before writing", async () => {
     const base = syntheticModel();
     await assertRejects(
       () =>
@@ -1027,16 +1045,18 @@ describe("container descriptor", () => {
     );
   });
 
-  it("合流層: payload 長・piece の被覆・rowAxis と piece・group の刻み・scale 長を宣言 shape と突き合わせる", async () => {
+  it("merge layer: checks payload length, piece coverage, rowAxis with pieces, group step and scale length against the declared shape", async () => {
     const base = syntheticModel();
     const rewrite = async (mutate: (input: ModelInput) => ModelInput): Promise<unknown> => {
       const written = await writeModelContainer(mutate(base), OPTIONS);
       return openContainer({ kind: "parts", parts: written.parts });
     };
-    // block 長が宣言 shape の payload 長と合わない krm（書き手の門を経ない改ざん）を読み手が落とす。
-    // front.bias（f16 [65] = 130 B・block 132 B）と conv.weight（int8 [4,3,8] = 96 B）の block を
-    // 入れ替える — 二重束縛（規則①）を避け、どちらも part 3 なので scale の同一 part（規則③）も
-    // 崩さない。グラフは宣言順（front → voice）に合流するので front.bias が先に撃たれる。
+    // The reader rejects a krm whose block length does not match the payload length of the
+    // declared shape (tampering that bypasses the writer's check). It swaps the blocks of
+    // front.bias (f16 [65] = 130 B, block 132 B) and conv.weight (int8 [4,3,8] = 96 B) — this
+    // avoids double binding (rule 1), and both are in part 3 so the same-part rule for scale
+    // (rule 3) holds too. The graphs merge in declaration order (front → voice), so front.bias is
+    // hit first.
     const written = await writeModelContainer(base, OPTIONS);
     await assertRejects(
       () =>
@@ -1048,7 +1068,7 @@ describe("container descriptor", () => {
       ContainerFormatError,
       "initializer 'front.bias': block 'w0009' length 96 is not payload 130 bytes + padding",
     );
-    // rowAxis 1 の initializer を piece 分割させる（block 上限を 1 行分より小さく）。
+    // Make an initializer with rowAxis 1 split into pieces (block limit smaller than one row).
     await assertRejects(
       () =>
         writeModelContainer(
@@ -1064,7 +1084,7 @@ describe("container descriptor", () => {
       ContainerFormatError,
       "cannot be split into pieces",
     );
-    // per-channel codec の groupSize が行長と違う。
+    // A per-channel codec whose groupSize differs from the row length.
     await assertRejects(
       () =>
         rewrite((input) => ({
@@ -1078,7 +1098,7 @@ describe("container descriptor", () => {
       ContainerFormatError,
       "equal the row length 32",
     );
-    // group codec の groupSize が 2 冪 ≥ 16 でない / 行長を割らない。
+    // A group codec whose groupSize is not a power of two ≥ 16 / does not divide the row length.
     await assertRejects(
       () =>
         rewrite((input) => ({
@@ -1092,7 +1112,7 @@ describe("container descriptor", () => {
       ContainerFormatError,
       "power of two",
     );
-    // scale の長さが `rows × groups × 4` と合わない。
+    // The scale length does not match `rows × groups × 4`.
     await assertRejects(
       () =>
         rewrite((input) => ({
@@ -1109,7 +1129,7 @@ describe("container descriptor", () => {
       ContainerFormatError,
       "scale",
     );
-    // 意味論 i32 に f16 は組めない。
+    // f16 cannot be paired with the semantic type i32.
     await assertRejects(
       () =>
         writeModelContainer(
@@ -1134,8 +1154,9 @@ describe("container descriptor", () => {
     );
   });
 
-  it("合流層: rowAxis 1 は int8-sym だけ — 両軸の長さが等しい i4 の形でも openContainer で落ちる", async () => {
-    // [32,32]・group 16 は軸 0 と読んでも軸 1 と読んでも scale が [32,2] で、長さの突合は区別しない。
+  it("merge layer: rowAxis 1 is int8-sym only — even an i4 shape with equal lengths on both axes fails in openContainer", async () => {
+    // [32,32] with group 16 gives a [32,2] scale whether read along axis 0 or axis 1, so the length
+    // match cannot tell them apart.
     const written = await writeModelContainer(
       {
         graphs: { g: declaration({ "square.weight": { shape: [32, 32] } }) },
@@ -1163,7 +1184,7 @@ describe("container descriptor", () => {
       ContainerFormatError,
       "rowAxis of codec 'int4-sym-g' must be 0 only (declared 1",
     );
-    // 対照: 同じ容器の i8 conv_transpose1d 形（rowAxis 1）は受理される。
+    // Control: the i8 conv_transpose1d shape (rowAxis 1) in the same container is accepted.
     const opened = await openContainer({
       kind: "parts",
       parts: (await writeModelContainer(syntheticModel(), OPTIONS)).parts,
@@ -1171,9 +1192,10 @@ describe("container descriptor", () => {
     assertEquals(opened.graphs["voice"].supplies.get("conv.weight")?.encoding.rowAxis, 1);
   });
 
-  it("Object.prototype の名前（constructor / toString）を宣言の外から引き当てない", async () => {
-    // IR の器は null プロトタイプなので initializer 名 toString は正当に宣言できる。素の {} を
-    // 名前で引くと Object.prototype の関数が「在る」ことになり、不足の列挙漏れや TypeError に化ける。
+  it("does not resolve Object.prototype names (constructor / toString) from outside the declarations", async () => {
+    // IR containers use null prototypes, so an initializer named toString can be declared
+    // legitimately. Looking up a plain {} by name would make Object.prototype's functions "exist",
+    // turning into a missed entry in the list of missing supplies or a TypeError.
     const input: ModelInput = {
       graphs: { g: declaration({ toString: { shape: [4, 4] }, a: { shape: [4, 4] } }) },
       consts: [],
@@ -1189,7 +1211,8 @@ describe("container descriptor", () => {
     const written = await writeModelContainer(input, OPTIONS);
     const graph = parseGraphDescriptor(written.graphDescriptorBytes);
 
-    // 束縛表から toString を外す（block は別名へ付け替えて参照を保つ）→ 不足として列挙される。
+    // Remove toString from the binding table (the block is reattached under another name to keep
+    // the reference) → it is listed as missing.
     const moved = parseModelDescriptor(
       mutateJson(written.modelDescriptorBytes, (doc) => {
         const supplies = anyOf(doc).binding.g;
@@ -1203,7 +1226,8 @@ describe("container descriptor", () => {
       "missing [toString] / surplus [ghost]",
     );
 
-    // 合流層も束縛表の toString を Object.prototype の関数と取り違えない。
+    // The merge layer does not mistake the binding table's toString for Object.prototype's function
+    // either.
     assertThrows(
       () =>
         bindDeclarations({
@@ -1211,14 +1235,14 @@ describe("container descriptor", () => {
           constants: [],
           binding: { g: {} },
           locate: () => {
-            throw new Error("block を引く前に落ちるはず");
+            throw new Error("should fail before fetching a block");
           },
         }),
       ContainerFormatError,
       "no supply in the binding table",
     );
 
-    // const 束縛のグラフ名 constructor は未宣言のグラフ。
+    // A const binding with graph name constructor is an undeclared graph.
     const withConst = await writeModelContainer(syntheticModel(), OPTIONS);
     assertThrows(
       () =>
@@ -1231,7 +1255,7 @@ describe("container descriptor", () => {
       "undeclared graph 'constructor'",
     );
 
-    // 資産名 constructor は未宣言の資産。
+    // An asset named constructor is an undeclared asset.
     const opened = await openContainer({ kind: "parts", parts: written.parts });
     assertThrows(() => opened.asset("constructor"), ContainerFormatError, "Undeclared asset");
   });

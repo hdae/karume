@@ -19,10 +19,11 @@ const parseMutated = (mutate: (graph: DeclarationJson) => void): IrDeclaration =
 };
 
 /**
- * 検証規則ごとに「正常系から 1 点だけ壊す」ことで、規則が実際に効いていることを見る。
+ * Checks that each validation rule actually works by "breaking exactly one point of a valid case".
  *
- * MUST: 期待文言（その規則に固有の診断）まで見る — `IrError` の型だけでは、狙った規則が死んでも
- * 同じ入力が別の規則で落ちれば緑のままになる。
+ * MUST: check the expected message too (the diagnostic specific to that rule) — with the `IrError`
+ * type alone, the test would stay green after the targeted rule died if the same input failed on
+ * another rule.
  */
 const assertRejects = (
   hint: string,
@@ -32,9 +33,10 @@ const assertRejects = (
   assertThrows(() => parseMutated(mutate), IrError, expected, hint);
 };
 
-// IR v2 の宣言は**計算契約**だけを持つ（格納は容器の束縛表 — docs/ir-v2.md）。initializer 名が
-// そのまま実体の鍵なので、v1 にあった「実体のテンソルキーへの改名」はもう起きない。
-test("parseIrDeclaration: 最小の正常系グラフを受理する", () => {
+// An IR v2 declaration carries only the **computation contract** (storage is the container's
+// binding table — docs/ir-v2.md). The initializer name is itself the key to the data, so v1's
+// "renaming to the data's tensor key" no longer happens.
+test("parseIrDeclaration: accepts the smallest valid graph", () => {
   const graph = parseIrDeclaration(JSON.stringify(baseDeclaration()));
   assertEquals(graph.format, "karume-ir");
   assertEquals(graph.version, 2);
@@ -53,16 +55,16 @@ test("parseIrDeclaration: 最小の正常系グラフを受理する", () => {
   assertEquals(graph.values["h"], { dtype: "f32", shape: ["T", 3] });
 });
 
-test("parseIrDeclaration: format / version の固定値", () => {
-  assertRejects("format 不一致", "graph.format is not 'karume-ir'", (g) => {
+test("parseIrDeclaration: fixed values of format / version", () => {
+  assertRejects("format mismatch", "graph.format is not 'karume-ir'", (g) => {
     g.format = "karume";
   });
-  assertRejects("version 不一致", "graph.version is not 2", (g) => {
+  assertRejects("version mismatch", "graph.version is not 2", (g) => {
     g.version = 1;
   });
 });
 
-test("parseIrDeclaration: トップレベルのキー集合", () => {
+test("parseIrDeclaration: the top-level key set", () => {
   assertThrows(
     () => parseIrDeclaration(JSON.stringify({ ...baseDeclaration(), extra: 1 })),
     IrError,
@@ -77,27 +79,31 @@ test("parseIrDeclaration: トップレベルのキー集合", () => {
   );
 });
 
-test("parseIrDeclaration: requires.ops は使用 op 集合と一致する", () => {
-  assertRejects("宣言漏れ", "undeclared [add]", (g) => {
+test("parseIrDeclaration: requires.ops equals the set of ops used", () => {
+  assertRejects("missing declaration", "undeclared [add]", (g) => {
     g.requires.ops = ["matmul"];
   });
-  assertRejects("余剰", "surplus [gelu]", (g) => {
+  assertRejects("surplus", "surplus [gelu]", (g) => {
     g.requires.ops = ["matmul", "add", "gelu"];
   });
-  assertRejects("重複", "graph.requires.ops: 'add' is duplicated", (g) => {
+  assertRejects("duplicate", "graph.requires.ops: 'add' is duplicated", (g) => {
     g.requires.ops = ["matmul", "add", "add"];
   });
 });
 
-test("parseIrDeclaration: SSA 単一代入", () => {
-  assertRejects("ノード出力の二重定義", "graph.nodes[1] (add): value 'h' is defined twice", (g) => {
-    g.nodes[1].outs = ["h"];
-  });
-  assertRejects("入力名の重複", "graph.inputs: value 'x' is defined twice", (g) => {
+test("parseIrDeclaration: SSA single assignment", () => {
+  assertRejects(
+    "node output defined twice",
+    "graph.nodes[1] (add): value 'h' is defined twice",
+    (g) => {
+      g.nodes[1].outs = ["h"];
+    },
+  );
+  assertRejects("duplicate input name", "graph.inputs: value 'x' is defined twice", (g) => {
     g.inputs.push({ name: "x", dtype: "f32", shape: ["T", 4] });
   });
   assertRejects(
-    "initializer と入力の衝突",
+    "initializer collides with an input",
     "graph.initializers: value 'x' is defined twice",
     (g) => {
       g.initializers["x"] = {};
@@ -106,59 +112,63 @@ test("parseIrDeclaration: SSA 単一代入", () => {
   );
 });
 
-test("parseIrDeclaration: トポロジカル順（前方参照拒否）", () => {
+test("parseIrDeclaration: topological order (forward references rejected)", () => {
   assertRejects(
-    "ノード順の逆転",
+    "nodes out of order",
     "graph.nodes[0] (add): input 'h' is undefined (forward reference",
     (g) => {
       g.nodes.reverse();
     },
   );
-  assertRejects("未定義の ins", "input 'unknown' is undefined", (g) => {
+  assertRejects("undefined ins", "input 'unknown' is undefined", (g) => {
     g.nodes[0].ins = ["x", "unknown"];
   });
-  assertRejects("未定義の outputs", "graph.outputs: 'z' is undefined", (g) => {
+  assertRejects("undefined outputs", "graph.outputs: 'z' is undefined", (g) => {
     g.outputs = ["z"];
   });
-  assertRejects("outputs の重複", "graph.outputs: 'y' is duplicated", (g) => {
+  assertRejects("duplicate outputs", "graph.outputs: 'y' is duplicated", (g) => {
     g.outputs = ["y", "y"];
   });
 });
 
-test("parseIrDeclaration: 宣言の完全性", () => {
+test("parseIrDeclaration: completeness of the declaration", () => {
   assertRejects(
-    "ノード出力が values に無い",
+    "node output missing from values",
     "no dtype/shape declaration for node output 'y'",
     (g) => {
       delete g.values["y"];
     },
   );
   assertRejects(
-    "initializer が values に無い",
+    "initializer missing from values",
     "graph.initializers['w']: no dtype/shape declaration in values",
     (g) => {
       delete g.values["w"];
     },
   );
-  assertRejects("入力の二重宣言", "inputs are declared in inputs[] (double declaration)", (g) => {
-    g.values["x"] = { dtype: "f32", shape: ["T", 4] };
-  });
   assertRejects(
-    "孤立した values 宣言",
+    "input declared twice",
+    "inputs are declared in inputs[] (double declaration)",
+    (g) => {
+      g.values["x"] = { dtype: "f32", shape: ["T", 4] };
+    },
+  );
+  assertRejects(
+    "orphan values declaration",
     "graph.values['ghost']: declaration not defined by any node",
     (g) => {
       g.values["ghost"] = { dtype: "f32", shape: [1] };
     },
   );
   assertRejects(
-    "initializer の記号次元",
+    "symbolic dimension in an initializer",
     "symbolic dimensions cannot be used in an initializer shape",
     (g) => {
       g.values["w"] = { dtype: "f32", shape: ["T", 3] };
     },
   );
   assertRejects(
-    "initializer の意味論 dtype が bool",
+    "initializer with semantic dtype bool",
     "initializer semantic dtype 'bool' is outside the vocabulary",
     (g) => {
       g.values["w"] = { dtype: "bool", shape: [4, 3] };
@@ -167,12 +177,14 @@ test("parseIrDeclaration: 宣言の完全性", () => {
 });
 
 /**
- * IR v2 の initializer 宣言に書けるのは `shared` だけ（実体との対応は容器の束縛表が
- * `(グラフ名, initializer 名)` で持つ — docs/ir-v2.md）。旧配布形の `tensor` / `storage` を
- * そのまま書いた形は未知のキーとして落ちる。
+ * The only thing an IR v2 initializer declaration may contain is `shared` (the mapping to the data
+ * is held by the container's binding table, keyed by `(graph name, initializer name)` —
+ * docs/ir-v2.md). Writing the old distribution's `tensor` / `storage` as is fails as an unknown
+ * key.
  */
-test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ", () => {
-  // 実体を持つ宣言は空オブジェクト、借り物は `{ shared: true }` の 2 形きり。
+test("parseIrDeclaration: the key set of an initializer declaration is `shared` only", () => {
+  // Only two forms: an empty object for a declaration with data, `{ shared: true }` for a borrowed
+  // one.
   assertEquals(parseMutated(() => {}).initializers["w"], { shared: false });
   const borrowed = parseMutated((g) => {
     g.initializers["w"] = { shared: true };
@@ -189,7 +201,8 @@ test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ",
       `unknown key '${key}'`,
     );
   }
-  // MUST: `false` は欄の不存在と同じ宣言なので綴れない（正準直列化が 1 つに決まらない）。
+  // MUST: `false` is the same declaration as an absent field, so it cannot be spelled (canonical
+  // serialization would not be unique).
   assertThrows(
     () =>
       parseMutated((g) => {
@@ -201,11 +214,11 @@ test("parseIrDeclaration: initializer 宣言のキー集合は `shared` だけ",
 });
 
 /**
- * 意味論 dtype と格納（codec）の交差（i32 は生の int32 1 通りのみ — ADR 0010）は**合流層**
- * （`format/container/bind.ts` の `allowedLayouts`）の担当になった。宣言だけを見るこの層では
- * `values` の意味論 dtype が i32 でも f32 でも受理する。
+ * The intersection of semantic dtype and storage (codec) (i32 is raw int32 only — ADR 0010) became
+ * the job of the **merge layer** (`allowedLayouts` in `format/container/bind.ts`). This layer,
+ * which looks only at the declaration, accepts a `values` semantic dtype of i32 or f32 alike.
  */
-test("parseIrDeclaration: 意味論 i32 の initializer を宣言として受理する", () => {
+test("parseIrDeclaration: accepts an initializer with semantic i32 as a declaration", () => {
   const graph = parseMutated((g) => {
     g.values["w"] = { dtype: "i32", shape: [4, 3] };
   });
@@ -213,77 +226,83 @@ test("parseIrDeclaration: 意味論 i32 の initializer を宣言として受理
   assertEquals(graph.initializers["w"], { shared: false });
 });
 
-test("parseIrDeclaration: dtype 語彙", () => {
+test("parseIrDeclaration: dtype vocabulary", () => {
   assertRejects(
-    "意味論 dtype に f16",
+    "f16 as a semantic dtype",
     "graph.values['h'].dtype: semantic dtype 'f16' is outside the vocabulary",
     (g) => {
       g.values["h"].dtype = "f16";
     },
   );
   assertRejects(
-    "意味論 dtype に i64",
+    "i64 as a semantic dtype",
     "graph.inputs[0].dtype: semantic dtype 'i64' is outside the vocabulary",
     (g) => {
       g.inputs[0].dtype = "i64";
     },
   );
 });
-test("parseIrDeclaration: シンボルの宣言と束縛可能性", () => {
-  assertRejects("未宣言シンボルの使用", "symbol 'S' is not declared in graph.symbols", (g) => {
-    g.inputs[0].shape = ["S", 4];
-  });
+test("parseIrDeclaration: symbol declarations and bindability", () => {
   assertRejects(
-    "入力 shape の次元位置に一度も現れない",
+    "use of an undeclared symbol",
+    "symbol 'S' is not declared in graph.symbols",
+    (g) => {
+      g.inputs[0].shape = ["S", 4];
+    },
+  );
+  assertRejects(
+    "never appears at a dimension position of an input shape",
     "'T' does not appear at a dimension position of an input shape / states shape",
     (g) => {
       g.inputs[0].shape = [8, 4];
     },
   );
-  assertRejects("symbols の重複", "graph.symbols: 'T' is duplicated", (g) => {
+  assertRejects("duplicate symbols", "graph.symbols: 'T' is duplicated", (g) => {
     g.symbols = ["T", "T"];
   });
-  assertRejects("シンボル名が不正", "invalid symbol name '2T'", (g) => {
+  assertRejects("invalid symbol name", "invalid symbol name '2T'", (g) => {
     g.symbols = ["T", "2T"];
   });
-  // 派生形だけの入力は**受理する**（実寸から解が一意 — ADR 0057）。母音検出 CRNN は
-  // 先頭 conv の stride 2 のせいで `2T` でしか長さ軸を宣言できない。
+  // An input with only a derived form is **accepted** (the solution from the actual size is
+  // unique — ADR 0057). The vowel-detection CRNN can declare its length axis only as `2T` because
+  // of the stride 2 of its first conv.
   const derived = parseMutated((g) => {
     g.inputs[0].shape = ["2T", 4];
   });
   assertEquals(derived.inputs[0].shape, ["2T", 4]);
 });
 
-test("parseIrDeclaration: shape 要素", () => {
+test("parseIrDeclaration: shape elements", () => {
   assertRejects(
-    "非正準な次元式",
+    "non-canonical dimension expression",
     "dimension expression '1T' does not match the canonical grammar",
     (g) => {
       g.inputs[0].shape = ["1T", 4];
     },
   );
-  assertRejects("負の次元", "dimension -3 is not a non-negative integer", (g) => {
+  assertRejects("negative dimension", "dimension -3 is not a non-negative integer", (g) => {
     g.values["b"].shape = [-3];
   });
-  assertRejects("小数の次元", "dimension 1.5 is not a non-negative integer", (g) => {
+  assertRejects("fractional dimension", "dimension 1.5 is not a non-negative integer", (g) => {
     g.values["b"].shape = [1.5];
   });
   const boolDim = JSON.stringify(baseDeclaration()).replace('"shape":[3]', '"shape":[true]');
   assertThrows(() => parseIrDeclaration(boolDim), IrError, "neither a number nor a string");
 });
 
-test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否する", () => {
-  // JSON.parse は穴を作らないが、ホストが組む宣言（new Array(n) や delete）は作れる。map / some /
-  // reduce は穴を飛ばすので、次元の欠けた宣言が検査を素通りして先で undefined の次元になる。
+test("parseIrDeclarationValue: rejects holes in host arrays with their path", () => {
+  // JSON.parse does not create holes, but declarations built by the host (new Array(n) or delete)
+  // can. map / some / reduce skip holes, so a declaration with a missing dimension would slip
+  // through the checks and become an undefined dimension further on.
   const holeAt = (index: number, length: number): number[] => {
     const shape = new Array<number>(length);
     for (let i = 0; i < length; i += 1) if (i !== index) shape[i] = 4;
     return shape;
   };
   for (const [hint, index] of [
-    ["先頭", 0],
-    ["途中", 1],
-    ["末尾", 2],
+    ["first", 0],
+    ["middle", 1],
+    ["last", 2],
   ] as const) {
     const graph = baseDeclaration();
     graph.values["w"].shape = holeAt(index, 3);
@@ -306,15 +325,15 @@ test("parseIrDeclarationValue: ホストの配列の穴を path つきで拒否�
   );
 });
 
-test("parseIrDeclaration: ノードの構造", () => {
-  assertRejects("attrs がオブジェクトでない", "graph.nodes[0].attrs: is not an object", (g) => {
+test("parseIrDeclaration: node structure", () => {
+  assertRejects("attrs is not an object", "graph.nodes[0].attrs: is not an object", (g) => {
     g.nodes[0].attrs = 5;
   });
-  assertRejects("op が空文字列", "graph.nodes[0].op: is not a non-empty string", (g) => {
+  assertRejects("op is an empty string", "graph.nodes[0].op: is not a non-empty string", (g) => {
     g.nodes[0].op = "";
   });
   assertRejects(
-    "outs の要素が空文字列",
+    "an outs element is an empty string",
     "graph.nodes[0].outs[0]: is not a non-empty string",
     (g) => {
       g.nodes[0].outs = [""];
@@ -322,18 +341,21 @@ test("parseIrDeclaration: ノードの構造", () => {
   );
 });
 
-// ADR 0067 決定 5: `outs` の本数に意味を与えるのは**契約層**（0 本を許すのは契約が effect を
-// 宣言する op だけ）。パーサは本数を見ない — ここで見るのは「見ていないこと」そのもので、
-// 非 effect op の `outs: []` が落ちるのは**別の規則**（出力の宣言が孤立する）による。
-test("parseIrDeclaration: outs の本数はパーサの担当ではない", () => {
-  // 出力宣言ごと消せばパーサは通る（本数の執行は tests/ops_conformance_test.ts が固定する）
+// ADR 0067 decision 5: the number of `outs` is given meaning by the **contract layer** (zero is
+// allowed only for ops whose contract declares an effect). The parser does not look at the count —
+// what this checks is that very "not looking", and `outs: []` on a non-effect op fails through
+// **another rule** (the output declaration becomes an orphan).
+test("parseIrDeclaration: the number of outs is not the parser's job", () => {
+  // Removing the output declaration too lets it through the parser (the count is enforced and
+  // pinned by tests/ops_conformance_test.ts)
   const graph = parseMutated((g) => {
     g.nodes[1].outs = [];
     delete g.values["y"];
     g.outputs = ["h"];
   });
   assertEquals(graph.nodes[1].outs, []);
-  // 宣言だけ残せば「孤立した values 宣言」で落ちる（出力数違反としてではない）
+  // Keeping only the declaration fails as an "orphan values declaration" (not as a wrong output
+  // count)
   assertThrows(
     () =>
       parseMutated((g) => {
@@ -345,13 +367,14 @@ test("parseIrDeclaration: outs の本数はパーサの担当ではない", () =
   );
 });
 
-// "__proto__" を名前に持つグラフ。フィクスチャは生の JSON 文字列から組む MUST — JS の
-// オブジェクトリテラルに `"__proto__":` を書くと own key ではなく [[Prototype]] 指定になり、
-// JSON.parse が作る own property と別物になってテストが検査対象を外す。
+// A graph with "__proto__" as a name. The fixture MUST be built from a raw JSON string — writing
+// `"__proto__":` in a JS object literal sets [[Prototype]] instead of an own key, which differs
+// from the own property JSON.parse creates, and the test would miss its target.
 //
-// initializer 名がそのまま実体の鍵なので改名は起きないが、合流（`mergedGraph`）は initializer を
-// 格納確定後の**新しい器へ詰め直す**ので、宣言側の器（パーサ）と合流後の器の**両方**が
-// null プロトタイプでないと own property が黙って消える。
+// The initializer name is itself the key to the data, so no renaming happens, but the merge
+// (`mergedGraph`) **repacks the initializers into a new container** after storage is settled, so
+// **both** the declaration-side container (the parser) and the merged container must have a null
+// prototype, or the own property silently disappears.
 const protoNameGraph = `{
   "format": "karume-ir",
   "version": 2,
@@ -367,23 +390,23 @@ const protoNameGraph = `{
   "nodes": [{ "op": "matmul", "ins": ["x", "__proto__"], "outs": ["y"], "attrs": {} }]
 }`;
 
-test("parseIrDeclaration: '__proto__' という名前の宣言を own property として保全する", () => {
+test("parseIrDeclaration: keeps a declaration named '__proto__' as an own property", () => {
   const graph = parseIrDeclaration(protoNameGraph);
 
-  // 実行系によっては `o["__proto__"] = v` でも own property が作られるため、hasOwn だけでは
-  // 素の `{}` への退行を検出できない。器が null プロトタイプであること（＝ 受理集合に
-  // エンジン差を持ち込まないこと）を併せて固定する。
+  // Some engines create an own property even with `o["__proto__"] = v`, so hasOwn alone cannot
+  // detect a regression to a plain `{}`. It also pins that the container has a null prototype
+  // (= no engine differences enter the accepted set).
   assertEquals(Object.getPrototypeOf(graph.values), null);
   assertEquals(Object.getPrototypeOf(graph.initializers), null);
   assertEquals(Object.hasOwn(graph.values, "__proto__"), true);
   assertEquals(Object.hasOwn(graph.initializers, "__proto__"), true);
   assertEquals(graph.values["__proto__"], { dtype: "f32", shape: [4, 3] });
   assertEquals(graph.initializers["__proto__"], { shared: false });
-  // 宣言検査を素通りしたのではなく、ノードからの参照込みで通っていること。
+  // It did not just slip past the declaration check; it passes including the references from nodes.
   assertEquals(graph.nodes[0].ins, ["x", "__proto__"]);
 });
 
-test("parseIrDeclaration: '__proto__' という名前でも孤立宣言は黙って消えず拒否される", () => {
+test("parseIrDeclaration: an orphan declaration named '__proto__' is rejected, not silently dropped", () => {
   const orphan = `{
     "format": "karume-ir",
     "version": 2,
@@ -403,25 +426,27 @@ test("parseIrDeclaration: '__proto__' という名前でも孤立宣言は黙っ
   assertThrows(() => parseIrDeclaration(orphan), IrError, "declaration not defined by any node");
 });
 
-// ADR 0066 決定 2: 生成 1 本ぶんの可変 state を置く名前付きスロット。参照側の欄（ADR 0067 の
-// states 欄 / state_append）が入ったので、**宣言だけのグラフは参照完全性で落ちる** —
-// 宣言そのものを見るテストは withStateReaders で参照側を用意する。
-test("parseIrDeclaration: states 節を持たないグラフは空のスロット集合になる", () => {
+// ADR 0066 decision 2: named slots that hold the mutable state of one generation. Now that the
+// referencing fields exist (ADR 0067's states field / state_append), **a graph with declarations
+// only fails reference completeness** — tests that look at the declaration itself set up the
+// referencing side with withStateReaders.
+test("parseIrDeclaration: a graph without a states section has an empty slot set", () => {
   const graph = parseIrDeclaration(JSON.stringify(baseDeclaration()));
 
   assertEquals(Object.keys(graph.states), []);
-  // 名前がパース入力由来の器は null プロトタイプ（values / initializers と同じ MUST）。
+  // A container whose names come from the parse input has a null prototype (the same MUST as
+  // values / initializers).
   assertEquals(Object.getPrototypeOf(graph.states), null);
 });
 
-test("parseIrDeclaration: state スロットの宣言を受理する", () => {
+test("parseIrDeclaration: accepts state slot declarations", () => {
   const empty = parseMutated((g) => {
     g.states = {};
   });
   assertEquals(Object.keys(empty.states), []);
 
-  // 容量の違うスロットが混在する形（sliding 層 / full 層は別スロット — 層 × 均一 KV の
-  // 前提を作らない）。
+  // A mix of slots with different capacities (sliding layers / full layers are separate slots —
+  // no assumption of layers × uniform KV).
   const slots = parseMutated((g) => {
     g.states = {
       "layer0.k": { dtype: "f32", shape: [1, 2, 512, 128] },
@@ -438,15 +463,16 @@ test("parseIrDeclaration: state スロットの宣言を受理する", () => {
   });
   assertEquals(slots.states["layer1.k"].shape, [1, 2, 131072, 128]);
 
-  // 記号次元は Session の symbols で解決する（入力にも現れる記号なので、束縛点は従来どおり
-  // 入力 shape の次元位置 — states 専用記号は別テストが持つ）。
+  // Symbolic dimensions are resolved by the Session's symbols (the symbol also appears in an input,
+  // so the binding point is an input shape's dimension position as before — states-only symbols
+  // have their own test).
   const symbolic = parseMutated((g) => {
     g.states = { cache: { dtype: "f32", shape: ["T", 4] } };
     withStateReaders(g);
   });
   assertEquals(symbolic.states["cache"].shape, ["T", 4]);
 
-  // rank 1..4 の両端（容量軸 1 本だけの汎用スロットも valid）。
+  // Both ends of rank 1..4 (a generic slot with a single capacity axis is valid too).
   const ranks = parseMutated((g) => {
     g.states = {
       flat: { dtype: "f32", shape: [8] },
@@ -459,8 +485,9 @@ test("parseIrDeclaration: state スロットの宣言を受理する", () => {
 });
 
 /**
- * states 節だけを差し替えて拒否を見る。**診断文言まで見る MUST** — 節そのものが未対応へ退行すると
- * 「未知のキー 'states'」で落ちるので、`IrError` だけの検査では規則が効いている証拠にならない。
+ * Replaces only the states section and checks the rejection. **The diagnostic text MUST be
+ * checked too** — if the section itself regressed to unsupported, it would fail with "unknown key
+ * 'states'", so a check on `IrError` alone would not prove that the rule works.
  */
 const assertStatesReject = (states: unknown, includes: string): void => {
   assertThrows(
@@ -473,15 +500,16 @@ const assertStatesReject = (states: unknown, includes: string): void => {
   );
 };
 
-test("parseIrDeclaration: state スロットの dtype は f32 のみ", () => {
-  // f16 は席の予約だけ（ADR 0066 追記 5）— 「語彙外」ではなく「未対応」として落ちる。
+test("parseIrDeclaration: state slot dtype is f32 only", () => {
+  // f16 only has its place reserved (ADR 0066 addendum 5) — it fails as "not supported", not as
+  // "outside the vocabulary".
   assertStatesReject({ cache: { dtype: "f16", shape: [4] } }, "is not supported");
   for (const dtype of ["i32", "bool", "bf16", "i8"]) {
     assertStatesReject({ cache: { dtype, shape: [4] } }, "is outside the vocabulary (f32)");
   }
 });
 
-test("parseIrDeclaration: state スロットの shape は容量込みの具体形", () => {
+test("parseIrDeclaration: a state slot shape is a concrete shape including capacity", () => {
   assertStatesReject({ cache: { dtype: "f32", shape: [1, 1, 1, 1, 1] } }, "rank 5 is outside 1..4");
   assertStatesReject({ cache: { dtype: "f32", shape: [] } }, "rank 0 is outside 1..4");
   assertStatesReject({ cache: { dtype: "f32", shape: [1, 0, 4] } }, "is not a positive integer");
@@ -491,8 +519,8 @@ test("parseIrDeclaration: state スロットの shape は容量込みの具体�
 });
 
 /**
- * 次元 1 個だけを**生の JSON テキスト**で差し込む（`JSON.stringify` は `1.0` を `1` に畳むので、
- * 整数値 float の受理はオブジェクト経由では観測できない）。
+ * Injects exactly one dimension as **raw JSON text** (`JSON.stringify` folds `1.0` into `1`, so
+ * accepting integral floats cannot be observed through objects).
  */
 const parseRawDim = (
   raw: string,
@@ -503,11 +531,12 @@ const parseRawDim = (
   return parseIrDeclaration(JSON.stringify(graph).replaceAll('"__DIM__"', raw));
 };
 
-// JSON の `4.0` / `4e0` は JSON.parse が単一の number にするので整数として通る。Python 側
-// （tools/exporter/src/karume/verify.py の _parse_shape）は int / float が別型なので、この形が
-// **両側で同じ受理集合**であることを固定しないと「ランタイムは読めるが exporter の検証が落ちる」
-// 乖離になる（鏡像は tools/exporter/tests/test_verify.py の TestIntegralFloatDimensions）。
-test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数は拒否する", () => {
+// JSON `4.0` / `4e0` become a single number in JSON.parse, so they pass as integers. On the Python
+// side (_parse_shape in tools/exporter/src/karume/verify.py) int and float are separate types, so
+// unless this form is pinned as **the same accepted set on both sides** it would drift into "the
+// runtime can read it but the exporter's validation fails" (the mirror is
+// TestIntegralFloatDimensions in tools/exporter/tests/test_verify.py).
+test("parseIrDeclaration: accepts integral float dimensions in JSON and rejects non-integers", () => {
   for (const raw of ["4.0", "4e0", "0.4e1"]) {
     const values = parseRawDim(raw, (g, dim) => {
       g.values["w"].shape = [dim];
@@ -538,7 +567,7 @@ test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数
       "is not a non-negative integer",
     );
   }
-  // safe range 超過は Python 側（> 2^53−1）と同じ点で落ちる。
+  // Exceeding the safe range fails at the same point as on the Python side (> 2^53−1).
   assertThrows(
     () =>
       parseRawDim("1e300", (g, dim) => {
@@ -550,15 +579,17 @@ test("parseIrDeclaration: JSON の整数値 float 次元を受理し、非整数
 });
 
 /**
- * 空の値名 / initializer 名は states のスロット名と同じ理由で拒否する（参照側の欄 —
- * inputs[].name / ins / outs / outputs — はどれも空でない文字列だけを受理するので、通すと
- * 「宣言はできるが原理的に参照できない」declaration になる）。
+ * Empty value / initializer names are rejected for the same reason as states slot names (the
+ * referencing fields — inputs[].name / ins / outs / outputs — all accept only non-empty strings, so
+ * letting them through would make a declaration that "can be declared but can never be
+ * referenced").
  *
- * MUST: 空名 value **単独**なら孤立宣言検査が塞ぐが、空名 initializer と**対で**書かれると
- * 定義集合に入って孤立宣言検査も逆参照検査も満たす — 参照不能な実テンソル 1 本が配布形に
- * 居座る。この組が門の唯一の検出対象。
+ * MUST: an empty-named value **alone** is blocked by the orphan-declaration check, but written **as
+ * a pair** with an empty-named initializer it enters the defined set and satisfies both the
+ * orphan-declaration check and the reverse-reference check — one unreferenceable real tensor would
+ * sit in the distribution. That pair is the only thing this check detects.
  */
-test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する", () => {
+test("parseIrDeclaration: rejects empty value / initializer names", () => {
   assertThrows(
     () =>
       parseMutated((g) => {
@@ -568,7 +599,8 @@ test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する
     IrError,
     "value name in graph.values: is not a non-empty string",
   );
-  // initializer 側だけが空の形も落ちる（名前検査は宣言の両側に掛かる）
+  // The form where only the initializer side is empty fails too (the name check applies to both
+  // sides of the declaration)
   assertThrows(
     () =>
       parseMutated((g) => {
@@ -577,8 +609,9 @@ test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する
     IrError,
     "initializer name in graph.initializers: is not a non-empty string",
   );
-  // 対: 名前が空でなければ同じ組は受理される（= 落としているのは空名だけで、宣言完全性の
-  // 2 検査はどちらもこの組を通す — それがこの門が要る理由そのもの）
+  // Counterpart: with a non-empty name the same pair is accepted (= only the empty name is
+  // rejected, and both declaration-completeness checks pass this pair — which is exactly why this
+  // check is needed)
   const graph = parseMutated((g) => {
     g.values["ghost"] = { dtype: "f32", shape: [4, 3] };
     g.initializers["ghost"] = {};
@@ -586,23 +619,25 @@ test("parseIrDeclaration: 値名 / initializer 名の空文字列を拒否する
   assertEquals(graph.initializers["ghost"], { shared: false });
 });
 
-test("parseIrDeclaration: states の構造", () => {
+test("parseIrDeclaration: states structure", () => {
   assertStatesReject([], "graph.states: is not an object");
   assertStatesReject({ cache: 4 }, "graph.states['cache']: is not an object");
   assertStatesReject({ cache: { dtype: "f32", shape: 4 } }, "shape: is not an array");
   assertStatesReject({ cache: { shape: [4] } }, "required key 'dtype' is missing");
   assertStatesReject({ cache: { dtype: "f32", shape: [4], window: 512 } }, "unknown key 'window'");
-  // 空のスロット名は参照側の欄（ADR 0067）が受理しない = 参照できない宣言になる。
+  // An empty slot name is not accepted by the referencing fields (ADR 0067) = a declaration that
+  // cannot be referenced.
   assertStatesReject(
     { "": { dtype: "f32", shape: [4] } },
     "slot name in graph.states: is not a non-empty string",
   );
 });
 
-// スロット名は値名前空間と別（ins / outs で参照されない）だが、同名は「スロット名の欄に値名を
-// 書いた / その逆」を検出できなくするだけなので拒否する。
-test("parseIrDeclaration: state スロット名は値名と衝突できない", () => {
-  // 入力 / initializer / 中間値 / グラフ出力の 4 役すべて。
+// Slot names are a separate namespace from value names (not referenced by ins / outs), but a shared
+// name would only make "a value name written in a slot-name field / or the reverse" undetectable,
+// so it is rejected.
+test("parseIrDeclaration: a state slot name cannot collide with a value name", () => {
+  // All four roles: input / initializer / intermediate value / graph output.
   for (const name of ["x", "w", "h", "y"]) {
     assertStatesReject(
       { [name]: { dtype: "f32", shape: [4] } },
@@ -611,7 +646,7 @@ test("parseIrDeclaration: state スロット名は値名と衝突できない", 
   }
 });
 
-test("parseIrDeclaration: '__proto__' という名前の state スロットを own property として保全する", () => {
+test("parseIrDeclaration: keeps a state slot named '__proto__' as an own property", () => {
   const graph = parseIrDeclaration(`{
     "format": "karume-ir",
     "version": 2,
@@ -640,17 +675,20 @@ test("parseIrDeclaration: '__proto__' という名前の state スロットを o
   assertEquals(Object.getPrototypeOf(graph.states), null);
   assertEquals(Object.hasOwn(graph.states, "__proto__"), true);
   assertEquals(graph.states["__proto__"], { dtype: "f32", shape: [4], external: false });
-  // 参照側の欄も同じ理由で null プロトタイプ（素の `{}` では代入が [[Prototype]] 設定に
-  // 化けて欄が黙って消え、参照完全性検査も契約のキー集合検査も素通りする形が作れる）。
+  // The referencing fields have a null prototype for the same reason (with a plain `{}` the
+  // assignment would turn into setting [[Prototype]], the field would silently vanish, and a form
+  // that slips past both the reference-completeness check and the contract's key-set check could be
+  // built).
   const referring = graph.nodes[1].states;
   assertEquals(Object.getPrototypeOf(referring), null);
   assertEquals(referring["slot"], "__proto__");
 });
 
 /**
- * state を読む層（states 形 attention）と書く層（`state_append`）が 1 本ずつ並んだ最小形
- * （ADR 0067 決定 4 / 5・発行順は決定 5b の「読者 → append」）。**パーサ層の**テストなので
- * shape も契約も見られない — ここで固定するのは欄の構造と参照の完全性だけ。
+ * The smallest form with one layer that reads state (states-form attention) and one that writes it
+ * (`state_append`) (ADR 0067 decisions 4 / 5; emission order is decision 5b's "readers → append").
+ * This is a **parser-layer** test, so shapes and contracts cannot be checked — what is pinned here
+ * is only the field structure and reference completeness.
  */
 const statefulGraph = (): DeclarationJson => {
   const graph = baseDeclaration();
@@ -680,26 +718,28 @@ const parseStateful = (mutate: (graph: DeclarationJson) => void = () => {}): IrD
   return parseIrDeclaration(JSON.stringify(graph));
 };
 
-// ADR 0067 決定 4: ノードは `ins` / `outs` と**別の欄**でスロットを名前参照する。
-test("parseIrDeclaration: ノードの states 欄を読む", () => {
+// ADR 0067 decision 4: a node refers to slots by name in a field **separate** from `ins` / `outs`.
+test("parseIrDeclaration: reads a node's states field", () => {
   const graph = parseStateful();
 
   assertEquals(
     graph.nodes.map((node) => node.op),
     ["matmul", "add", "attention", "state_append", "state_append"],
   );
-  // 欄を持たないノードは空表（常在欄 — 消費側が `?? {}` を書かずに済む）
+  // A node without the field gets an empty table (an always-present field — consumers need not
+  // write `?? {}`)
   assertEquals(Object.keys(graph.nodes[0].states), []);
   assertEquals(Object.entries(graph.nodes[2].states), [
     ["k", "kv.k"],
     ["v", "kv.v"],
   ]);
   assertEquals(graph.nodes[3].states["slot"], "kv.k");
-  // 0 出力ノードはパーサを通る（本数の執行点は契約層 — ADR 0067 決定 5）
+  // A zero-output node passes the parser (the count is enforced in the contract layer — ADR 0067
+  // decision 5)
   assertEquals(graph.nodes[3].outs, []);
 });
 
-test("parseIrDeclaration: states 欄は宣言済みスロットしか参照できない", () => {
+test("parseIrDeclaration: the states field can refer only to declared slots", () => {
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -708,7 +748,8 @@ test("parseIrDeclaration: states 欄は宣言済みスロットしか参照で�
     IrError,
     "state slot 'kv.missing' is not declared in graph.states",
   );
-  // 値名を書いた取り違え（スロット名前空間と値名前空間は別 — 値名は参照できない）
+  // The mix-up of writing a value name (the slot namespace and the value namespace are separate —
+  // value names cannot be referenced)
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -719,7 +760,7 @@ test("parseIrDeclaration: states 欄は宣言済みスロットしか参照で�
   );
 });
 
-test("parseIrDeclaration: 誰も参照しない state スロットを拒否する", () => {
+test("parseIrDeclaration: rejects a state slot that nobody references", () => {
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -728,8 +769,8 @@ test("parseIrDeclaration: 誰も参照しない state スロットを拒否す�
     IrError,
     "graph.states['kv.orphan']: declaration not referenced by any node",
   );
-  // 参照が 1 本でもあれば足りる（読者だけ / 書き手だけの層はどちらも実在する —
-  // KV 共有層は append を持たない）
+  // A single reference is enough (layers with only a reader or only a writer both exist — KV-shared
+  // layers have no append)
   const readerOnly = parseStateful((g) => {
     g.nodes.splice(3, 2);
     g.requires.ops = ["matmul", "add", "attention"];
@@ -737,7 +778,7 @@ test("parseIrDeclaration: 誰も参照しない state スロットを拒否す�
   assertEquals(Object.keys(readerOnly.states), ["kv.k", "kv.v"]);
 });
 
-test("parseIrDeclaration: states 欄の構造", () => {
+test("parseIrDeclaration: states field structure", () => {
   const reject = (states: unknown, includes: string): void => {
     assertThrows(
       () =>
@@ -754,9 +795,11 @@ test("parseIrDeclaration: states 欄の構造", () => {
   reject({ "": "kv.k" }, "graph.nodes[3].states key: is not a non-empty string");
 });
 
-// ADR 0066 追記 7: 束縛点は 2 つ（入力 shape / states shape）だが、**効く範囲は非対称**。
-test("parseIrDeclaration: states 専用記号は宣言できるが値 shape には現れない", () => {
-  // 容量記号 C は入力のどこにも現れない（context 生成時に決まる）— それでも宣言できる
+// ADR 0066 addendum 7: there are two binding points (input shapes / states shapes), but **their
+// reach is asymmetric**.
+test("parseIrDeclaration: states-only symbols can be declared but do not appear in value shapes", () => {
+  // The capacity symbol C appears nowhere in the inputs (it is decided when the context is
+  // created) — it can still be declared
   const graph = parseStateful((g) => {
     g.symbols.push("C");
     g.states!["kv.k"].shape = [1, 2, "C", 8];
@@ -764,8 +807,8 @@ test("parseIrDeclaration: states 専用記号は宣言できるが値 shape に�
   });
   assertEquals(graph.states["kv.k"].shape, [1, 2, "C", 8]);
 
-  // 値 shape に現れたら fail loudly（通常値の解決に効くのは入力由来の束縛だけなので、
-  // 実行時に必ず束縛不能になる — 宣言の時点で落とす）
+  // Appearing in a value shape fails loudly (only bindings from inputs resolve ordinary values, so
+  // it would always be unbindable at run time — it fails at declaration time)
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -778,7 +821,7 @@ test("parseIrDeclaration: states 専用記号は宣言できるが値 shape に�
     "states-only symbol 'C' appears in a value shape",
   );
 
-  // 入力にも states にも現れない記号は従来どおり束縛が取れない
+  // A symbol that appears in neither inputs nor states cannot be bound, as before
   assertThrows(
     () =>
       parseStateful((g) => {
@@ -788,7 +831,8 @@ test("parseIrDeclaration: states 専用記号は宣言できるが値 shape に�
     "'C' does not appear at a dimension position of an input shape / states shape",
   );
 
-  // 入力**と** states の両方に現れる記号は「states 専用」ではない（値 shape に現れてよい）
+  // A symbol that appears in **both** inputs and states is not "states-only" (it may appear in
+  // value shapes)
   const shared = parseStateful((g) => {
     g.states!["kv.k"].shape = [1, 2, "T", 8];
     g.states!["kv.v"].shape = [1, 2, "T", 8];
@@ -796,15 +840,15 @@ test("parseIrDeclaration: states 専用記号は宣言できるが値 shape に�
   assertEquals(shared.values["att"].shape, ["T", 3]);
 });
 
-test("parseIrDeclaration: JSON の受理集合", () => {
+test("parseIrDeclaration: the JSON accepted set", () => {
   assertThrows(() => parseIrDeclaration("{"), IrError, "Cannot parse");
   assertThrows(
     () => parseIrDeclaration('{"format":"karume-ir","version":NaN}'),
     IrError,
     "Cannot parse",
   );
-  // 1e999 は構文としては有効だが Infinity へ丸まる — 受理集合をブラウザ JSON.parse に
-  // 揃える契約のため拒否する。
+  // 1e999 is valid syntax but rounds to Infinity — it is rejected under the contract that aligns
+  // the accepted set with the browser's JSON.parse.
   const infinite = JSON.stringify(baseDeclaration()).replace('"shape":[4,3]', '"shape":[4,1e999]');
   assertThrows(() => parseIrDeclaration(infinite), IrError, "finite");
 });

@@ -72,7 +72,7 @@ const open = async (window?: number) => {
 const test = (name: string, fn: () => Promise<void>): void =>
   vitestTest.skipIf(!GPU_AVAILABLE)(name, fn);
 for (const window of [undefined, 4]) {
-  test(`batch generation: ${window === undefined ? "full" : "sliding"}のprefillとdecodeが通常runとu32一致する`, async () => {
+  test(`batch generation: ${window === undefined ? "full" : "sliding"} prefill and decode match a plain run as u32`, async () => {
     const { gpu, session } = await open(window),
       a = await session.createGenerationContext({ chunkLength: 4 }),
       b = await session.createGenerationContext({ chunkLength: 4 });
@@ -139,7 +139,7 @@ for (const window of [undefined, 4]) {
   });
 }
 
-test("batch generation: 発行時snapshotを保ち同じcontextの並行run・rewind・disposeを拒否する", async () => {
+test("batch generation: keeps the snapshot taken at issue and rejects a concurrent run, rewind or dispose of the same context", async () => {
   const { gpu, session } = await open(),
     a = await session.createGenerationContext({ chunkLength: 4 }),
     b = await session.createGenerationContext({ chunkLength: 4 }),
@@ -175,7 +175,7 @@ test("batch generation: 発行時snapshotを保ち同じcontextの並行run・re
   }
 });
 
-test("batch generation: deferredはバッチ成功後にだけcommitできる", async () => {
+test("batch generation: deferred can be committed only after the batch succeeds", async () => {
   const { gpu, session } = await open(4),
     context = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(64);
@@ -203,7 +203,7 @@ test("batch generation: deferredはバッチ成功後にだけcommitできる", 
   }
 });
 
-test("batch generation: state書き込み前の入力失敗ならcontextを再利用できる", async () => {
+test("batch generation: an input failure before the state write leaves the context reusable", async () => {
   const { gpu, session } = await open(),
     context = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16);
@@ -227,7 +227,7 @@ test("batch generation: state書き込み前の入力失敗ならcontextを再�
   }
 });
 
-test("batch generation: 後続Session失敗は書き込み済みcontextをpoisonする", async () => {
+test("batch generation: a later Session's failure poisons the context already written", async () => {
   const { gpu, session } = await open(),
     context = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16);
@@ -258,7 +258,7 @@ test("batch generation: 後続Session失敗は書き込み済みcontextをpoison
   }
 });
 
-test("batch generation: 相乗りした別Sessionの決着前disposeは拒否され、contextをpoisonしない", async () => {
+test("batch generation: disposing another Session that rides along before it settles is rejected and does not poison the context", async () => {
   const { gpu, session } = await open(),
     context = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16);
@@ -279,8 +279,9 @@ test("batch generation: 相乗りした別Sessionの決着前disposeは拒否さ
       { batch },
     );
     await read.admitted;
-    // 通すと決着時の copy が破棄済みの slot backing を写し元に積み、区間全体が validation で
-    // 落ちて context まで poison される（ADR 0066: 後続Sessionの失敗は区間全体の失敗）。
+    // Letting it through would make the settling copy take the disposed slot backing as its source; the
+    // whole range would then fail validation and poison the context too (ADR 0066: a later Session's
+    // failure is a failure of the whole range).
     await assertRejects(() => reader.dispose(), Error, "enqueueRead readback");
     await batch.finishAndRead({ o: sink });
     assertEquals(Array.from((await read.outputs).y.data), [-1, -2, -3, -4]);
@@ -297,7 +298,7 @@ test("batch generation: 相乗りした別Sessionの決着前disposeは拒否さ
 });
 
 for (const fault of ["compile", "map"] as const) {
-  test(`batch generation: ${fault}失敗時のstateと予約を保つ`, async () => {
+  test(`batch generation: keeps the state and the reservation when ${fault} fails`, async () => {
     const { gpu, session } = await open(),
       context = await session.createGenerationContext({ chunkLength: 4 }),
       sink = await gpu.createResident(16);
@@ -343,7 +344,7 @@ for (const fault of ["compile", "map"] as const) {
   });
 }
 
-test("batch generation: 2つ目の確定が失敗しても全contextをpoisonして予約を返す", async () => {
+test("batch generation: when the second commit fails, poisons every context and returns the reservations", async () => {
   const { gpu, session } = await open(),
     a = await session.createGenerationContext({ chunkLength: 4 }),
     b = await session.createGenerationContext({ chunkLength: 4 }),
@@ -375,7 +376,7 @@ test("batch generation: 2つ目の確定が失敗しても全contextをpoisonし
   }
 });
 
-test("batch generation: 不正commitは予約前に拒否し同じbatchで回復できる", async () => {
+test("batch generation: rejects an invalid commit before reserving and recovers in the same batch", async () => {
   const { gpu, session } = await open(4),
     context = await session.createGenerationContext({ chunkLength: 4 });
   try {
@@ -397,7 +398,7 @@ test("batch generation: 不正commitは予約前に拒否し同じbatchで回復
       }),
     );
     assertEquals(context.pastLength, 0);
-    // slidingは履歴0でもrewind不可。予約の返却は直後の正当なenqueueで検証する。
+    // sliding cannot rewind even with an empty history. The returned reservation is checked by the valid enqueue right after.
     await session.enqueue(inputs(1, 0), { batch, generation: { context, queryLength: 1 } });
     await batch.finish();
     assertEquals(context.pastLength, 1);
@@ -408,7 +409,7 @@ test("batch generation: 不正commitは予約前に拒否し同じbatchで回復
   }
 });
 
-test("batch generation: 借り手は貸し手の予約も終端まで保ち論理長を進めない", async () => {
+test("batch generation: the borrower holds the lender's reservation to the end too and does not advance the logical length", async () => {
   const { gpu, session } = await open(4);
   const lender = await session.createGenerationContext({ chunkLength: 4 });
   const g = graph(4);
@@ -473,7 +474,7 @@ test("batch generation: 借り手は貸し手の予約も終端まで保ち論�
   }
 });
 
-test("batch generation: 不正contextを拒否して常駐出力の使用予約を残さない", async () => {
+test("batch generation: rejects an invalid context and leaves no use reservation of the resident outputs", async () => {
   const { gpu, session } = await open(),
     context = await session.createGenerationContext({ chunkLength: 4 }),
     sink = await gpu.createResident(16),
@@ -504,14 +505,14 @@ test("batch generation: 不正contextを拒否して常駐出力の使用予約�
   }
 });
 
-test("batch generation: enqueueRead は決着でだけ論理長を進め、出力を run と u32 一致で返す", async () => {
+test("batch generation: enqueueRead advances the logical length only at settlement and returns outputs that match run as u32", async () => {
   const { gpu, session } = await open(),
     a = await session.createGenerationContext({ chunkLength: 4 }),
     b = await session.createGenerationContext({ chunkLength: 4 });
   const u32 = (data: Float32Array): number[] =>
     Array.from(new Uint32Array(data.buffer, data.byteOffset, data.length));
   try {
-    // prefill は通常 run で揃え、decode を enqueueRead（b）と run（a）で突き合わせる。
+    // Prefill is aligned with plain runs; decode compares enqueueRead (b) with run (a).
     await session.run(inputs(4, 0), {}, { context: a, queryLength: 3 });
     await session.run(inputs(4, 0), {}, { context: b, queryLength: 3 });
     let past = 3;
@@ -523,7 +524,7 @@ test("batch generation: enqueueRead は決着でだけ論理長を進め、出�
       try {
         const read = session.enqueueRead(x, { batch, generation: { context: b, queryLength: 1 } });
         await read.admitted;
-        assertEquals(b.pastLength, past, "決着前に論理長が進んだ");
+        assertEquals(b.pastLength, past, "the logical length advanced before settlement");
         await batch.finish();
         past += 1;
         assertEquals(b.pastLength, past);

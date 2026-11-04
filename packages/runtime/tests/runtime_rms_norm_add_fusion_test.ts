@@ -25,8 +25,8 @@ const fuse = (options: RmsNormAddGraphOptions = {}, enabled?: boolean, subgroup 
   });
 };
 
-describe("RMS→addの任意融合", () => {
-  it("省略・falseでは参照経路を維持する", () => {
+describe("opt-in RMS → add fusion", () => {
+  it("keeps the reference path when omitted or false", () => {
     for (const enabled of [undefined, false]) {
       const plan = fuse({}, enabled);
       assertEquals(plan.counts.rmsNormAdd, 0);
@@ -36,13 +36,13 @@ describe("RMS→addの任意融合", () => {
       );
     }
   });
-  it("両入力順と実測した幅を受理し、外部入力の延べ参照を保持する", () => {
+  it("accepts both input orders and the measured widths, and keeps the total reference count of external inputs", () => {
     for (const dim of [256, 1536, 2560]) {
       for (const normFirst of [false, true]) {
         const plan = fuse({ dim, normFirst }, true),
           step = plan.steps[0];
         assertEquals(plan.counts.rmsNormAdd, 1);
-        if (step.kind !== "fused") throw Error("融合されていない");
+        if (step.kind !== "fused") throw Error("not fused");
         assertEquals(step.binds, ["x", "w", "r"]);
         assertEquals(step.ins, ["x", "w", "r"]);
         assertEquals(step.outputName, "y");
@@ -50,15 +50,15 @@ describe("RMS→addの任意融合", () => {
           step.dispatches[0].key,
           rmsNormAddKey(normFirst ? "norm-residual" : "residual-norm", dim),
         );
-        assertEquals(step.dispatches[0].params[3], 0, "丸め用XORのuniformは0");
+        assertEquals(step.dispatches[0].params[3], 0, "the rounding XOR uniform is 0");
       }
     }
   });
-  it("subgroup32は融合の適格条件を保ち、両加算順を別キーへ選ぶ", () => {
+  it("subgroup32 keeps the fusion's eligibility conditions and picks separate keys for the two addition orders", () => {
     for (const normFirst of [false, true]) {
       const plan = fuse({ normFirst }, true, true),
         step = plan.steps[0];
-      if (step.kind !== "fused") throw Error("融合されていない");
+      if (step.kind !== "fused") throw Error("not fused");
       assertEquals(
         step.dispatches[0].key,
         rmsNormSubgroupKey(normFirst ? "norm-residual" : "residual-norm"),
@@ -67,7 +67,7 @@ describe("RMS→addの任意融合", () => {
       assertEquals(fuse({ normFirst }, false, true).counts.rmsNormAdd, 0);
     }
   });
-  it("公開・共有・非隣接・broadcast・重複binding・未検収幅は融合しない", () => {
+  it("does not fuse a public or shared norm output, non-adjacent nodes, a broadcast, a duplicate binding or an unvalidated width", () => {
     for (const options of [
       { normOutput: true },
       { extraNormConsumer: true },

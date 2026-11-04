@@ -1,10 +1,11 @@
 /**
- * golden の `io.safetensors` を公開 `Tensor` として読むための共有ヘルパ。
+ * Shared helper that reads a golden's `io.safetensors` as public `Tensor`s.
  *
- * tiny golden（tests/e2e_golden_test.ts）と実重み DeBERTa（tests/e2e_deberta_test.ts）の
- * 2 経路が同じ格納規約を読む。**規約は 1 箇所にしか置かない** — 2 箇所に写すと、片方だけ
- * 直したときに「片方の経路では通り、もう片方ではビット列を再解釈して通ってしまう」形で
- * 静かに食い違う。命名規約の正本は tools/exporter/README.md「golden レイアウト」。
+ * Two paths read the same storage convention: the tiny goldens (tests/e2e_golden_test.ts) and the
+ * real-weight DeBERTa (tests/e2e_deberta_test.ts). **The convention lives in one place only** —
+ * with two copies, fixing just one of them makes them drift apart silently: one path passes, and
+ * the other passes by reinterpreting the bits. The naming convention's source of truth is
+ * tools/exporter/README.md "Golden layout".
  */
 
 import { assertEquals } from "@std/assert";
@@ -17,8 +18,8 @@ import type {
 } from "../../src/format/safetensors.ts";
 
 /**
- * 意味論 dtype → golden io の格納 dtype。エクスポータは境界で i64 → I32・bool → U32
- * （u32 の 0/1）へ正規化して書く（ADR 0009 / tools/exporter README）。
+ * Semantic dtype → storage dtype of the golden io. The exporter normalizes at the boundary and
+ * writes i64 → I32 and bool → U32 (u32 0/1) (ADR 0009 / tools/exporter README).
  */
 export const IO_ENCODING: Readonly<Record<IrDtype, SafetensorsDtype>> = {
   f32: "F32",
@@ -27,12 +28,12 @@ export const IO_ENCODING: Readonly<Record<IrDtype, SafetensorsDtype>> = {
 };
 
 /**
- * io.safetensors のテンソルを宣言 dtype の view で取る（コピーしない）。
- * MUST: 格納 dtype が宣言と食い違ったら落とす — 要素は全型 4 バイトなので、黙って
- * 読み替えるとビット列の再解釈が「通ってしまう」。
+ * Takes a tensor of io.safetensors as a view of the declared dtype (no copy).
+ * MUST: fail when the storage dtype disagrees with the declaration — every element type is 4
+ * bytes, so a silent reread would let a reinterpretation of the bits "pass".
  */
 export const ioTensor = (file: SafetensorsFile, view: TensorView, dtype: IrDtype): Tensor => {
-  assertEquals(view.dtype, IO_ENCODING[dtype], `golden テンソル '${view.name}' の dtype`);
+  assertEquals(view.dtype, IO_ENCODING[dtype], `dtype of golden tensor '${view.name}'`);
   const count = view.byteLength / 4;
   switch (dtype) {
     case "f32":

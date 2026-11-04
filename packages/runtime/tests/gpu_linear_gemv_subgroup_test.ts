@@ -9,8 +9,8 @@ import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
 import { checkGemvSubgroupCensus } from "./helpers/gemv-subgroup-census.ts";
 import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 
-describe.skipIf(!GPU_AVAILABLE)("並列GEMV subgroup32の明示指定", () => {
-  it("不正な値・必要なdevice機能の不足を重み転送前に拒否する", async () => {
+describe.skipIf(!GPU_AVAILABLE)("explicitly selecting the parallel GEMV subgroup32", () => {
+  it("rejects invalid values and missing device features before the weights are uploaded", async () => {
     const gpu = await acquireGpu();
     const opened = await openModelBytes(rmsNormAddGraph(), []);
     try {
@@ -27,7 +27,7 @@ describe.skipIf(!GPU_AVAILABLE)("並列GEMV subgroup32の明示指定", () => {
       gpu.destroy();
     }
   });
-  describe("対応実装ではCPU参照・parallel一致・行数・適用箇所を検査する", () => {
+  describe("on a supporting implementation, checks the CPU reference, parity with parallel, the row counts and where it applies", () => {
     let supported = false;
     beforeAll(async () => {
       const adapter = await navigator.gpu.requestAdapter();
@@ -38,7 +38,7 @@ describe.skipIf(!GPU_AVAILABLE)("並列GEMV subgroup32の明示指定", () => {
         features.has("subgroup-size-control") &&
         new Set(host.wgslLanguageFeatures).has("subgroup_id");
     });
-    it("subgroups実走（Deno未対応なら明示SKIP、Chromeは別途同じ検査を実行）", async (context) => {
+    it("runs with subgroups (explicit SKIP where Deno lacks support; Chrome runs the same checks separately)", async (context) => {
       // Adapter features are only known at run time, so the skip is decided here.
       context.skip(!supported, "subgroups / subgroup-size-control / subgroup_id unsupported");
       const gpu = await acquireGpu({ subgroups: true });

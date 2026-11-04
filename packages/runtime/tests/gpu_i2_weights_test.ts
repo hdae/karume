@@ -1,4 +1,5 @@
-// INT2 の packed 実行・CPU展開・借用を、同じ復元値の f32 経路と突き合わせる。
+// Compares INT2's packed execution, CPU expansion and borrowing against the f32 path with the same
+// decoded values.
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import type { OpenedContainer } from "../src/format/container/open.ts";
@@ -51,7 +52,10 @@ const linearDeclaration = (m: number, n: number, k: number, expanded = false): D
   },
   nodes: [{ op: "linear", ins: ["x", "w", "b"], outs: ["y"], attrs: {} }],
 });
-/** 宣言 + 復元値から供給を組む（`int2-off` は per-channel なので groupSize = 行長 k）。 */
+/**
+ * Builds the supply from the declaration + decoded values (`int2-off` is per-channel, so groupSize
+ * = row length k).
+ */
 const weightTensors = (
   declaration: DeclarationJson,
   n: number,
@@ -104,7 +108,7 @@ const bits = (tensor: Tensor): Uint32Array<ArrayBuffer> =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.byteLength / 4);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "INT2 linear は GEMV・行ブロック・prefill GEMM・端列で f32 展開とビット一致する",
+  "INT2 linear matches the f32 expansion bit for bit in GEMV, row blocks, prefill GEMM and edge columns",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -167,7 +171,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "INT2 embedding は全2bit位置を復元し同じ表を linear へ借用できる",
+  "INT2 embedding decodes every 2-bit position and can lend the same table to linear",
   async () => {
     const gpu = await acquireGpu();
     const n = 7,
@@ -231,7 +235,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
-  "INT2 の一般消費はCPUで展開し非対応の計算指定を拒否する",
+  "general INT2 consumers expand on the CPU, and unsupported compute options are rejected",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     const n = 4,
@@ -277,7 +281,7 @@ test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "INT2 の行分割ロードは全量ロードと一致する（packed / CPU展開）",
+  "a row-split INT2 load matches a full load (packed / CPU expansion)",
   async () => {
     const gpu = await acquireGpu();
     const n = 7,
@@ -286,12 +290,12 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       for (const expanded of [false, true]) {
         const graph = linearDeclaration(1, n, k, expanded);
-        // block 上限を 1 行（16 B）の 4 倍まで下げて、書き手に w を piece へ割らせる。
+        // Lower the block limit to 4 times one row (16 B) so the writer splits w into pieces.
         const split = await openLinear(graph, n, k, "i2", w, { blockBytes: 64 });
         assertEquals(
           split.graphs[GRAPH_NAME].supplies.get("w")?.blocks.length,
           2,
-          "piece 分割が起きていない（検出器が空回りする）",
+          "no piece split happened (the detector would spin idle)",
         );
         const full = await createSessionFromContainer(
           gpu,
@@ -321,11 +325,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "INT2 行ブロックは長い縮約と端の行でも M=1 の積和とビット一致する",
+  "INT2 row blocks match the M=1 multiply-accumulate bit for bit even with long reductions and edge rows",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // r1 / r2 / r4、語の先読みと残り、長い K を跨ぐ。scale と bias は2冪に限定しない。
+      // Crosses r1 / r2 / r4, word prefetch and the remainder, and long K. scale and bias are not
+      // limited to powers of 2.
       for (const [m, n, k] of [
         [3, 68, 320],
         [3, 8192, 320],

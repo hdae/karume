@@ -1,27 +1,34 @@
-// states 形 attention + `state_append` の**実行統合**門（波 D-3 — ADR 0066 / 0067）。
+// **Execution integration** checks of the states-form attention + `state_append` (phase D-3 —
+// ADR 0066 / 0067).
 //
-// カーネル単体の格子は gpu_state_attention_test.ts（直接 dispatch）が持つ。こちらが見るのは
-// 「Session.run に GenerationContext を渡した 1 step が、CPU 参照を**鎖にした**オラクルと一致
-// し続けるか」— つまり実行結線（レシピ / 束縛 / 論理長の搬送 / 進行）そのもの:
+// The kernel-level grid lives in gpu_state_attention_test.ts (direct dispatch). This file looks at
+// "does one step of Session.run with a GenerationContext keep matching an oracle that **chains**
+// the CPU reference" — that is, the execution wiring itself (recipe / bindings / carrying the
+// logical length / advancing):
 //
-//   ① 複数 step の parity（prefill → decode ×n・pastLength の進行・2 step 目以降のキャッシュ）
-//   ② sliding の ring 跨ぎ / ③GQA（r=2）と census / ④rewind の可否 / ⑤full 容量の run 前検査
-//   ⑥queryLength の 3 拒否 / ⑦計画鍵に context が載らないこと / ⑧stateless 実行の拒否
-//   ⑨state を submit した run の失敗が context を poison すること
+//   ① multi-step parity (prefill → decode ×n, pastLength advancing, the cache from the 2nd step on)
+//   ② crossing the sliding ring / ③ GQA (r=2) and the census / ④ whether rewind is allowed /
+//   ⑤ the pre-run check of full capacity / ⑥ the 3 rejections of queryLength / ⑦ the context not
+//   being part of the plan key / ⑧ rejection of stateless execution
+//   ⑨ a failure of a run that submitted state poisons the context
 //
-// 波 D-4（ADR 0066 決定 5 の焼き込み単位の分離）で足したのは次の 4 本:
+// Phase D-4 (separating the baking units, ADR 0066 decision 5) added these 4:
 //
-//   ⑩ 切替 A/B（再導出ゼロ + backing 再構築ゼロ + 焼き直しは context ごと 1 度 + 取り違えゼロ）
-//   ⑪ backing が退役して作り直されたときの復帰（世代識別子で焼き直す）— ADR 0095（予算つきの
-//      複数保持）で 3 本になった: 予算 0 は切替のたびに作り直して焼き直す / 予算内で保持した形の
-//      往復は焼き直しを増やさない / 退役（予算超過）した形は束ごと捨てられ、戻った run で 1 回
-//      だけ焼き直す
-//   ⑫ 故障注入（context 側の束を取り違えると parity が落ちる = ⑩ が空振りでない証明）
-//   ⑬ ①の backed 移行（3 run 目以降は slot backing で走り、移行点で値が変わらない）
+//   ⑩ switching A/B (zero re-derivations + zero backing rebuilds + one re-bake per context + zero
+//      mix-ups)
+//   ⑪ recovery when a backing is retired and rebuilt (re-baked by its generation identifier) —
+//      became 3 tests with ADR 0095 (multiple retained, with a budget): budget 0 rebuilds and
+//      re-bakes at every switch / a round trip between shapes retained within the budget adds no
+//      re-bakes / a shape that was retired (over budget) is dropped with its bundle and re-baked
+//      once by the run that comes back to it
+//   ⑫ fault injection (mixing up the context-side bundle breaks parity = proof that ⑩ does not
+//      miss)
+//   ⑬ the backed transition of ① (from the 3rd run on it runs on the slot backing, and the values
+//      do not change at the transition)
 //
-// MUST: オラクルは**ホスト側でスロットを持ち回る**（`referenceStateAppend` の戻りを次 step の
-// `referenceStateAttention` へ食わせる）。1 step だけの突合では「append が書いた行を次の step が
-// 過去として読む」という結線そのものが検証されない。
+// MUST: the oracle **carries the slots around on the host** (the result of `referenceStateAppend`
+// feeds the next step's `referenceStateAttention`). Comparing a single step would not check the
+// wiring itself: "the next step reads the rows append wrote as its past".
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
@@ -56,41 +63,47 @@ import { injectOutOfMemory } from "./helpers/oom-injection.ts";
 import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./helpers/pipeline-census.ts";
 
 /**
- * 突合の許容誤差。根拠は gpu_state_attention_test.ts の `STATE_TOLERANCE` と同じ
- * （参照は f64 積算・GPU は f32 逐次累積で、差は `D` と `live` に比例する）。
+ * The comparison tolerance. Same grounds as `STATE_TOLERANCE` in gpu_state_attention_test.ts
+ * (the reference accumulates in f64, the GPU sequentially in f32, and the difference is
+ * proportional to `D` and `live`).
  *
- * MUST: `rtol = 0`。states 形は**厳密 0 が正解の要素**（空行・述語外の寄与）を正規に含むので、
- * 相対項は 0 近傍で効かず、大きい要素の誤りを隠す側にだけ働く。
+ * MUST: `rtol = 0`. The states form legitimately contains **elements whose correct value is exactly
+ * 0** (empty rows, contributions outside the predicate), so a relative term does nothing near 0 and
+ * only serves to hide errors in large elements.
  */
 const STATE_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
-/** 決定的な入力列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic input sequences (no random numbers — a failure would not reproduce). */
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.23;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
 
-/** 1 モデルぶんの形（`B = 1` 固定 — batch 軸は ADR 0066 決定 8 のスコープ外）。 */
+/**
+ * The shape of one model (`B = 1` fixed — the batch axis is out of scope per ADR 0066 decision
+ * 8).
+ */
 type StateModel = {
   readonly heads: number;
   readonly kvHeads: number;
   readonly depth: number;
   /**
-   * スロットの行容量。記号 `"C"`（states 専用記号）にすると `createGenerationContext(bindings)`
-   * だけが決める。記号 `"M"` は**入力 shape にも現れる記号**で、束縛点が 2 つある形になる
-   * （ADR 0066 追記 7 — 2 つの束縛点が割れていないことを実行時に照合する）。
+   * The slot's row capacity. With the symbol `"C"` (a states-only symbol) only
+   * `createGenerationContext(bindings)` decides it. The symbol `"M"` **also appears in an input
+   * shape**, which gives two binding points (ADR 0066 addendum 7 — at run time it is checked that
+   * the two binding points agree).
    */
   readonly capacity: number | "C" | "M";
-  /** `W`（省略 = 全 context）。 */
+  /** `W` (absent = the whole context). */
   readonly window?: number;
 };
 
 /**
- * states 形 1 層ぶんのグラフ（attention 1 本 + `state_append` 2 本 — ADR 0067 決定 5b の
- * 発行規約どおり「全読者 → 書き」の順）。
+ * The graph of one states-form layer (one attention + two `state_append`s — in the order "all
+ * readers → writers", following the issue convention of ADR 0067 decision 5b).
  *
- * `M`（物理 chunk 行数）は**記号**にしてある。prefill（M=4）と decode（M=1）は宣言 shape が
- * 違う別の計画で、1 つの Session / 1 つの context がその 2 本を跨ぐのが ADR 0066 決定 4 の
- * 実行形そのもの。
+ * `M` (the physical chunk rows) is a **symbol**. Prefill (M=4) and decode (M=1) are different plans
+ * with different declared shapes, and one Session / one context spanning both is exactly the
+ * execution shape of ADR 0066 decision 4.
  */
 const stateGraph = (model: StateModel): DeclarationJson => {
   const { heads, kvHeads, depth, capacity, window } = model;
@@ -145,7 +158,7 @@ const stateSession = async (
     options,
   );
 
-/** 1 step ぶんの入力（`M` 行ぶん — 有効なのは先頭 `queryLength` 行）。 */
+/** The inputs of one step (`M` rows — only the first `queryLength` rows are valid). */
 type StepInputs = {
   readonly q: Float32Array<ArrayBuffer>;
   readonly k: Float32Array<ArrayBuffer>;
@@ -153,8 +166,9 @@ type StepInputs = {
 };
 
 /**
- * step ごとの入力。`salt` を step で変えることで「前 step の入力を読み直している」実装が
- * 値で落ちるようにする（同じ入力を配ると鎖の誤りが自己相殺しうる）。
+ * Per-step inputs. Changing `salt` per step makes an implementation that "rereads the previous
+ * step's inputs" fail on the values (with identical inputs, a chain error could cancel itself
+ * out).
  */
 const stepInputs = (model: StateModel, chunkRows: number, salt: number): StepInputs => ({
   q: seeded(model.heads * chunkRows * model.depth, (i) => QUERY(i + salt)),
@@ -168,14 +182,14 @@ const tensor = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Tens
   data,
 });
 
-/** ホスト側のスロット内容と論理長（GPU 側 context の鏡）。 */
+/** The host-side slot contents and logical length (the mirror of the GPU-side context). */
 type Oracle = {
   past: number;
   slotK: Float32Array<ArrayBuffer>;
   slotV: Float32Array<ArrayBuffer>;
 };
 
-/** 生成直後の context は**ゼロ初期化されたスロット**を持つ（WebGPU のバッファ契約）。 */
+/** A freshly created context has **zero-initialized slots** (WebGPU's buffer contract). */
 const newOracle = (model: StateModel, capacity: number): Oracle => ({
   past: 0,
   slotK: new Float32Array(model.kvHeads * capacity * model.depth),
@@ -183,13 +197,13 @@ const newOracle = (model: StateModel, capacity: number): Oracle => ({
 });
 
 const asF32 = (data: Float32Array | Int32Array | Uint32Array): Float32Array<ArrayBuffer> => {
-  if (!(data instanceof Float32Array)) throw new Error("参照の戻りが f32 でない");
+  if (!(data instanceof Float32Array)) throw new Error("the reference did not return f32");
   return data as Float32Array<ArrayBuffer>;
 };
 
 /**
- * オラクルを 1 step 進める（**読んでから書く** — ノード配列順そのもの）。返すのは今 step の
- * 期待出力 `[1,H,M,D]`。
+ * Advances the oracle by one step (**read, then write** — exactly the node array order). Returns
+ * this step's expected output `[1,H,M,D]`.
  */
 const advanceOracle = (
   model: StateModel,
@@ -226,7 +240,7 @@ const advanceOracle = (
   return asF32(expected.data);
 };
 
-/** GPU 側の 1 step（`run` の第 3 引数が generation 面）。 */
+/** One GPU-side step (the 3rd argument of `run` is the generation surface). */
 const runStep = async (
   session: Session,
   context: GenerationContext,
@@ -250,7 +264,7 @@ const runStep = async (
   return out.data as Float32Array<ArrayBuffer>;
 };
 
-/** 1 step 走らせてオラクルと突き合わせる（両側を 1 本にまとめた検査点）。 */
+/** Runs one step and compares it with the oracle (one check point that combines both sides). */
 const assertStep = async (
   session: Session,
   context: GenerationContext,
@@ -266,11 +280,12 @@ const assertStep = async (
   const inputs = stepInputs(model, chunkRows, salt);
   const actual = await runStep(session, context, model, inputs, chunkRows, query, bindings);
   const expected = advanceOracle(model, capacity, state, inputs, chunkRows, query);
-  // MUST: 期待値が自明でないことを毎回見る（両側が全 0 なら突合は恒真になる — states 形は
-  // 空行の厳密 0 が正規に出るので、この確認が無いと「何も計算していない」実装が緑で通る）。
+  // MUST: check every time that the expected values are not trivial (if both sides are all 0 the
+  // comparison is a tautology — the states form legitimately produces exact 0 for empty rows, so
+  // without this check an implementation that "computes nothing" would pass green).
   assert(
     expected.some((value) => Math.abs(value) > 1e-3),
-    `${label}: 期待出力が自明（全 ~0）`,
+    `${label}: the expected output is trivial (all ~0)`,
   );
   const report = compareTensors(
     { dtype: "f32", data: actual },
@@ -278,56 +293,66 @@ const assertStep = async (
     STATE_TOLERANCE,
   );
   assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
-  assertEquals(context.pastLength, state.past, `${label}: pastLength がオラクルとずれた`);
+  assertEquals(context.pastLength, state.past, `${label}: pastLength drifted from the oracle`);
 };
 
 const FULL: StateModel = { heads: 4, kvHeads: 4, depth: 4, capacity: 8 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "prefill → decode の鎖が CPU 参照と一致し、2 step 目以降はレシピがキャッシュに当たる",
+  "the prefill → decode chain matches the CPU reference, and from the 2nd step on the recipe hits the cache",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
     const state = newOracle(FULL, 8);
     try {
-      // prefill（M=4 / Q=4）。1 本目は導出が走る。
+      // Prefill (M=4 / Q=4). The first run derives the plan.
       await assertStep(session, context, FULL, 8, state, 4, 4, 0, "prefill");
-      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "prefill は導出 run");
+      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "prefill is a deriving run");
       assertEquals(context.pastLength, 4);
 
-      // decode（M=1 / Q=1）。M が変わるので 1 本目は別の計画 = ミス。
+      // Decode (M=1 / Q=1). M changes, so the first one is a different plan = a miss.
       await assertStep(session, context, FULL, 8, state, 1, 1, 11, "decode 1");
-      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "M が変われば別鍵");
-      // 2 本目の decode は**同じ鍵**に当たる（ADR 0066 受入条件③の「レシピ再導出ゼロ」）。
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        false,
+        "a different M is a different key",
+      );
+      // The 2nd decode hits **the same key** ("zero recipe re-derivations" of ADR 0066
+      // acceptance criterion ③).
       await assertStep(session, context, FULL, 8, state, 1, 1, 23, "decode 2");
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         true,
-        "同一 context・同一 M の 2 本目がキャッシュに当たっていない",
+        "the 2nd run with the same context and the same M did not hit the cache",
       );
       await assertStep(session, context, FULL, 8, state, 1, 1, 37, "decode 3");
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
-      assertEquals(context.pastLength, 7, "論理長は 4 → 5 → 6 → 7 と run の成功でだけ進む");
+      assertEquals(
+        context.pastLength,
+        7,
+        "the logical length goes 4 → 5 → 6 → 7, advancing only on successful runs",
+      );
 
-      // 波 D-4: generation run も slot backing に載る（ADR 0066 決定 5 の分離焼き込み）。載るのは
-      // **Session 所有の実体を束ねる dispatch だけ**で、state を束ねる位置は context 側が焼く。
-      // decode 2 / 3 はその backed 経路で走っており、**アリーナ → backed の移行点で値が変わらない**
-      // ことは上の各 step の突合そのものが押さえている。
+      // Phase D-4: generation runs also go on the slot backing (the separated baking of ADR 0066
+      // decision 5). What goes on it is **only the dispatches that bind Session-owned buffers**;
+      // the positions that bind state are baked by the context side. Decode 2 / 3 ran on that
+      // backed path, and **the values not changing at the arena → backed transition** is covered
+      // by the per-step comparisons above themselves.
       const diagnostics = session.diagnostics();
       assertEquals(
         diagnostics.planBacking.buildCount,
         1,
-        "同一鍵の連続 decode で backing を作り直している（切替スラッシング）",
+        "consecutive decodes with the same key rebuild the backing (switch thrashing)",
       );
       assert(
         diagnostics.planBacking.residentBytes > 0,
-        "generation run が backed 経路に載っていない（slot が常駐していない）",
+        "the generation run is not on the backed path (the slot is not resident)",
       );
       assertEquals(
         diagnostics.stateBacking.rebindCount,
         1,
-        "同一 (context, backing) の連続 run で context 側 bind group を焼き直している",
+        "consecutive runs with the same (context, backing) re-bake the context-side bind groups",
       );
     } finally {
       await context.dispose();
@@ -338,18 +363,18 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "pad 行（queryLength < M）は KV に書かれず、次 step の過去にも現れない（実 GPU）",
+  "pad rows (queryLength < M) are not written to the KV and do not appear in the next step's past (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
     const state = newOracle(FULL, 8);
     try {
-      // M=4 の chunk で Q=2 だけ有効。pad 2 行を書く実装は、次 step の past が 2 行ぶん
-      // ずれる（オラクルは Q 行しか書かない）ので下の突合が落ちる。
-      await assertStep(session, context, FULL, 8, state, 4, 2, 5, "pad つき prefill");
+      // A chunk of M=4 with only Q=2 valid. An implementation that writes the 2 pad rows shifts the
+      // next step's past by 2 rows (the oracle writes only Q rows), so the comparisons below fail.
+      await assertStep(session, context, FULL, 8, state, 4, 2, 5, "prefill with pad");
       assertEquals(context.pastLength, 2);
-      await assertStep(session, context, FULL, 8, state, 4, 3, 41, "pad つき 2 本目");
+      await assertStep(session, context, FULL, 8, state, 4, 3, 41, "2nd with pad");
       assertEquals(context.pastLength, 5);
       await assertStep(session, context, FULL, 8, state, 1, 1, 59, "decode");
       assertEquals(context.pastLength, 6);
@@ -364,14 +389,15 @@ test.skipIf(!GPU_AVAILABLE)(
 const SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 4, window: 4 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "sliding は ring の wrap を跨いでも CPU 参照と一致する（実 GPU）",
+  "sliding matches the CPU reference across the ring's wrap (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SLIDING);
     const context = await session.createGenerationContext({ chunkLength: 3 });
     const state = newOracle(SLIDING, 4);
     try {
-      // prefill 3 行 → decode ×5。容量 4 の ring は past=4 で一周し、以後は毎 step 上書き。
+      // Prefill 3 rows → decode ×5. The capacity-4 ring wraps at past=4 and is overwritten every
+      // step after that.
       await assertStep(session, context, SLIDING, 4, state, 3, 3, 3, "prefill");
       for (let step = 0; step < 5; step += 1) {
         await assertStep(
@@ -386,7 +412,11 @@ test.skipIf(!GPU_AVAILABLE)(
           `decode ${step} (past=${state.past})`,
         );
       }
-      assertEquals(context.pastLength, 8, "容量 4 の ring でも論理長は進み続ける");
+      assertEquals(
+        context.pastLength,
+        8,
+        "the logical length keeps advancing even with a capacity-4 ring",
+      );
     } finally {
       await context.dispose();
       await session.dispose();
@@ -396,21 +426,28 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 投機デコードの verify 形（sliding の余裕 + deferred commit）
+// The verify shape of speculative decoding (sliding slack + deferred commit)
 // ---------------------------------------------------------------------------
 
 /**
- * 余裕の行数（sliding スロットの `capacity − window`）。`Q` 行を論理長より先に書いて `a` 行だけ
- * 受理する形が成立する条件は `C ≥ W + Q`（棄却行 `P+i` が潰す論理列 `P+i−C` が、確定後の読者の
- * 窓の下端より必ず小さい — 下端が最も低いのは借り手 = readonly 読者の `P+a−W`）。したがって
- * 余裕 8 が支える `Q` の上限は 8。
+ * The slack rows (`capacity − window` of a sliding slot). Writing `Q` rows ahead of the logical
+ * length and accepting only `a` of them works when `C ≥ W + Q` (the logical position `P+i−C` that a
+ * rejected row `P+i` overwrites is always below the lower edge of any reader's window after the
+ * commit — the lowest edge is the borrower's = the readonly reader's `P+a−W`). So a slack of 8
+ * supports `Q` up to 8.
  */
 const VERIFY_SLACK = 8;
 const VERIFY_WINDOW = 8;
 const VERIFY_QUERY = VERIFY_SLACK;
-/** 受理行数（残り 5 行は棄却 = 物理 ring に書かれたまま論理長に載らない）。 */
+/**
+ * The accepted rows (the other 5 are rejected = written to the physical ring but not part of the
+ * logical length).
+ */
 const VERIFY_COMMIT = 3;
-/** verify 形の前に積む past（`P > W` — 窓の下限述語が効いている状態から始める）。 */
+/**
+ * The past built up before the verify shape (`P > W` — start with the window's lower-bound
+ * predicate in effect).
+ */
 const VERIFY_PREFILL = 12;
 
 const verifyModel = (capacity: number): StateModel => ({
@@ -421,7 +458,7 @@ const verifyModel = (capacity: number): StateModel => ({
   window: VERIFY_WINDOW,
 });
 
-/** `[1, planes, M, D]` の 1 行を `[1, planes, 1, D]` として切り出す。 */
+/** Cuts one row of `[1, planes, M, D]` out as `[1, planes, 1, D]`. */
 const takeRow = (
   data: Float32Array<ArrayBuffer>,
   planes: number,
@@ -442,11 +479,12 @@ const bitsOfF32 = (data: Float32Array<ArrayBuffer>): Uint32Array =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
 /**
- * 「`Q` 行を deferred で書いて `a` 行だけ commit した context」の次 step の出力を返す。
+ * Returns the next step's output for "a context that wrote `Q` rows deferred and committed only
+ * `a`".
  *
- * 参照側（`speculate = false`）は同じ token 列を **1 行ずつ通常 run** で流す（= 投機を使わない
- * 生成そのもの）。両者がビット同一なら、棄却された 5 行の書き込みが live な過去 KV を 1 語も
- * 壊していないことになる。
+ * The reference side (`speculate = false`) feeds the same tokens **one row at a time in normal
+ * runs** (= plain generation without speculation). If the two are bit-identical, the writes of the
+ * 5 rejected rows did not corrupt a single word of the live past KV.
  */
 const runVerifyChain = async (
   gpu: GpuContext,
@@ -460,11 +498,12 @@ const runVerifyChain = async (
     chunkBuckets: [VERIFY_QUERY],
   });
   try {
-    // ① 共通の prefill（P = 12 > W = 8）
+    // ① The shared prefill (P = 12 > W = 8)
     const prefill = stepInputs(model, 16, 5);
     await runStep(session, context, model, prefill, 16, VERIFY_PREFILL);
 
-    // ② draft 9 行ぶんの入力（両側で**同じ値**を使う — 参照側は先頭 3 行を 1 行ずつ流す）
+    // ② Inputs for the 9 draft rows (both sides use **the same values** — the reference side feeds
+    // the first 3 rows one at a time)
     const draft = stepInputs(model, VERIFY_QUERY, 41);
     if (speculate) {
       const outputs = await session.run(
@@ -480,7 +519,7 @@ const runVerifyChain = async (
       assertEquals(
         context.pendingCommit,
         { pastLength: VERIFY_PREFILL, queryLength: VERIFY_QUERY },
-        "deferred run が保留を作っていない",
+        "the deferred run did not create a pending commit",
       );
       context.commit(VERIFY_COMMIT);
     } else {
@@ -499,9 +538,13 @@ const runVerifyChain = async (
         );
       }
     }
-    assertEquals(context.pastLength, VERIFY_PREFILL + VERIFY_COMMIT, "論理長が受理行数と合わない");
+    assertEquals(
+      context.pastLength,
+      VERIFY_PREFILL + VERIFY_COMMIT,
+      "the logical length does not match the accepted rows",
+    );
 
-    // ③ 受理後の 1 step（ここで読む過去 KV に棄却行が混ざっていないか）
+    // ③ One step after the acceptance (does the past KV read here contain rejected rows)
     const next = stepInputs(model, 1, 97);
     return await runStep(session, context, model, next, 1, 1);
   } finally {
@@ -511,7 +554,7 @@ const runVerifyChain = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "deferred commit + sliding の余裕: 棄却行は次 step の出力を 1 語も動かさない（実 GPU）",
+  "deferred commit + sliding slack: rejected rows do not move a single word of the next step's output (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -521,13 +564,15 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         [...bitsOfF32(speculative)],
         [...bitsOfF32(sequential)],
-        "余裕つきの投機 + commit が 1 行ずつの生成とビット同一でない",
+        "speculation with slack + commit is not bit-identical to row-by-row generation",
       );
 
-      // 余裕を 0（capacity = window）に戻すと、棄却行が live 窓の中の論理列を潰す（例外も NaN も
-      // 出ない沈黙破壊）。その形は run 発行の同期区間で落ちる — deferred run の queryLength は
-      // 「余裕」まで（`GenerationContext.slidingSlack` の門）。潰れる値そのものは公開面から
-      // 到達できないので、ここで見るのは「守りが効いていること」= 発行が拒否されること。
+      // With the slack back at 0 (capacity = window), rejected rows overwrite logical positions
+      // inside the live window (silent corruption with no exception and no NaN). That shape fails
+      // in the synchronous section of the run's issue — a deferred run's queryLength is limited to
+      // the "slack" (the check in `GenerationContext.slidingSlack`). The overwritten values
+      // themselves are not reachable from the public surface, so what is checked here is "the
+      // guard works" = the issue is rejected.
       const noSlack = await assertRejects(
         () => runVerifyChain(gpu, VERIFY_WINDOW, true),
         ExecutionError,
@@ -540,9 +585,9 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 借り手（drafter 相当）: 貸し手と**同名**の external スロットを readonly attention 1 本が
- * 読むだけのグラフ（ADR 0096 段 2 §2.1）。書き手（`state_append`）を持たないので、論理長を
- * 進めるのも確定させるのも貸し手の側。
+ * The borrower (the drafter's role): a graph in which one readonly attention only reads external
+ * slots with **the same names** as the lender's (ADR 0096 step 2 §2.1). It has no writer
+ * (`state_append`), so advancing and committing the logical length are both the lender's job.
  */
 const verifyBorrowerGraph = (capacity: number): DeclarationJson => {
   const model = verifyModel(capacity);
@@ -572,14 +617,16 @@ const verifyBorrowerGraph = (capacity: number): DeclarationJson => {
 };
 
 /**
- * 「`Q = 余裕` 行を deferred で書いて `m` 行だけ commit した貸し手」を、**借り手**（readonly
- * 読者）が 1 回読んだ出力を返す。参照側（`speculate = false`）は同じ token 列の先頭 `m` 行を
- * 1 行ずつ通常 run で流す（= 棄却行を 1 語も書かなかった走行）。
+ * Returns the output of one read by the **borrower** (a readonly reader) of "a lender that wrote
+ * `Q = slack` rows deferred and committed only `m`". The reference side (`speculate = false`) feeds
+ * the first `m` rows of the same tokens one row at a time in normal runs (= a run that never wrote
+ * a single word of the rejected rows).
  *
- * `runVerifyChain` との違いは読者の種類だけ。states 形の読者は今 step の ins のぶん窓の下端が
- * 1 列高い（`P+m−(W−1)`）のに対し、借り手の readonly 読者は `P+m−W` まで下がる（
- * `src/kernels/state-attention.ts` の readonly 節 `column_base = P − min(P, W)`）。門を
- * `Q ≤ slack + 1` から `Q ≤ slack` へ締めた根拠はこの 1 列で、それを踏むのはこちらの形だけ。
+ * The only difference from `runVerifyChain` is the kind of reader. A states-form reader's window
+ * has its lower edge one position higher because of this step's ins (`P+m−(W−1)`), while the
+ * borrower's readonly reader goes down to `P+m−W` (the readonly section of
+ * `src/kernels/state-attention.ts`, `column_base = P − min(P, W)`). That one position is why the
+ * check was tightened from `Q ≤ slack + 1` to `Q ≤ slack`, and only this shape reaches it.
  */
 const runBorrowedVerifyChain = async (
   gpu: GpuContext,
@@ -603,10 +650,11 @@ const runBorrowedVerifyChain = async (
     borrow: lenderContext,
   });
   try {
-    // ① 共通の prefill（P = 12 > W = 8）
+    // ① The shared prefill (P = 12 > W = 8)
     await runStep(lender, lenderContext, model, stepInputs(model, 16, 5), 16, VERIFY_PREFILL);
 
-    // ② draft 8 行ぶんの入力（両側で**同じ値**を使う — 参照側は先頭 m 行を 1 行ずつ流す）
+    // ② Inputs for the 8 draft rows (both sides use **the same values** — the reference side feeds
+    // the first m rows one at a time)
     const draft = stepInputs(model, VERIFY_QUERY, 41);
     if (speculate) {
       await lender.run(
@@ -638,10 +686,10 @@ const runBorrowedVerifyChain = async (
     assertEquals(
       lenderContext.pastLength,
       VERIFY_PREFILL + commitRows,
-      "論理長が受理行数と合わない",
+      "the logical length does not match the accepted rows",
     );
 
-    // ③ 借り手の 1 run（`[P−W, P)` を読む — 棄却行が混ざっていないか）
+    // ③ One borrower run (reads `[P−W, P)` — does it contain rejected rows)
     const outputs = await borrower.run(
       {
         q: tensor(
@@ -655,7 +703,7 @@ const runBorrowedVerifyChain = async (
     assertEquals(
       borrowed.pastLength,
       VERIFY_PREFILL + commitRows,
-      "借り手が写した P が貸し手とずれた",
+      "the P the borrower copied drifted from the lender's",
     );
     return outputs["o"].data as Float32Array<ArrayBuffer>;
   } finally {
@@ -667,27 +715,30 @@ const runBorrowedVerifyChain = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "deferred commit + 借り手の readonly 窓: 棄却行は drafter が読む列を 1 語も動かさない（実 GPU）",
+  "deferred commit + the borrower's readonly window: rejected rows do not move a single word of what the drafter reads (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // `m = 0`（全棄却 = 例外復旧の `commit(0)`）が最悪ケース。C = 16 / W = 8 / P = 12 で
-      // 棄却行 j = 0..7 が潰す物理 row は 12,13,14,15,0,1,2,3、借り手が読む列 `[4,12)` の
-      // 物理 row は 4..11 で、**ちょうど 1 行だけ空いている**（`Q` を 9 に緩めると 9 本目の
-      // 論理列 20 が物理 row 4 = 借り手の窓の下端を潰す）。この形が緑であることが、締めた門
-      // `Q ≤ slidingSlack` の安全性そのもの。`m = VERIFY_COMMIT` は受理行が混じる側の対照。
+      // `m = 0` (everything rejected = the exception recovery's `commit(0)`) is the worst case.
+      // With C = 16 / W = 8 / P = 12 the physical rows overwritten by rejected rows j = 0..7 are
+      // 12,13,14,15,0,1,2,3, and the positions the borrower reads, `[4,12)`, are physical rows
+      // 4..11: **exactly one row is free** (loosening `Q` to 9 would make the 9th, logical position
+      // 20, overwrite physical row 4 = the lower edge of the borrower's window). This shape being
+      // green is the safety of the tightened check `Q ≤ slidingSlack` itself. `m = VERIFY_COMMIT`
+      // is the control in which accepted rows are mixed in.
       for (const commitRows of [0, VERIFY_COMMIT]) {
         const speculative = await runBorrowedVerifyChain(gpu, true, commitRows);
         const sequential = await runBorrowedVerifyChain(gpu, false, commitRows);
-        // MUST: 期待値が自明でない（両側が全 0 なら突合は恒真）。
+        // MUST: the expected values are not trivial (if both sides are all 0 the comparison is a
+        // tautology).
         assert(
           speculative.some((value) => Math.abs(value) > 1e-3),
-          `commit(${commitRows}): 借り手の出力が自明（全 ~0）`,
+          `commit(${commitRows}): the borrower's output is trivial (all ~0)`,
         );
         assertEquals(
           [...bitsOfF32(speculative)],
           [...bitsOfF32(sequential)],
-          `commit(${commitRows}): 棄却行が借り手の読む列を壊した`,
+          `commit(${commitRows}): rejected rows corrupted what the borrower reads`,
         );
       }
     } finally {
@@ -698,31 +749,35 @@ test.skipIf(!GPU_AVAILABLE)(
 
 const GQA: StateModel = { heads: 4, kvHeads: 2, depth: 4, capacity: 8 };
 
-test.skipIf(!GPU_AVAILABLE)("GQA（r=2）の states 形が CPU 参照と一致する（実 GPU）", async () => {
-  const gpu = await acquireGpu();
-  const session = await stateSession(gpu, GQA);
-  const context = await session.createGenerationContext({ chunkLength: 4 });
-  const state = newOracle(GQA, 8);
-  try {
-    await assertStep(session, context, GQA, 8, state, 4, 4, 2, "prefill");
-    await assertStep(session, context, GQA, 8, state, 1, 1, 17, "decode 1");
-    await assertStep(session, context, GQA, 8, state, 1, 1, 29, "decode 2");
-    assertEquals(context.pastLength, 6);
-  } finally {
-    await context.dispose();
-    await session.dispose();
-    gpu.destroy();
-  }
-});
+test.skipIf(!GPU_AVAILABLE)(
+  "the states form with GQA (r=2) matches the CPU reference (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    const session = await stateSession(gpu, GQA);
+    const context = await session.createGenerationContext({ chunkLength: 4 });
+    const state = newOracle(GQA, 8);
+    try {
+      await assertStep(session, context, GQA, 8, state, 4, 4, 2, "prefill");
+      await assertStep(session, context, GQA, 8, state, 1, 1, 17, "decode 1");
+      await assertStep(session, context, GQA, 8, state, 1, 1, 29, "decode 2");
+      assertEquals(context.pastLength, 6);
+    } finally {
+      await context.dispose();
+      await session.dispose();
+      gpu.destroy();
+    }
+  },
+);
 
 /**
- * **census**（ADR 0058 決定 4）— GQA 変種のキーが**実際に走った**ことを見る。
+ * **Census** (ADR 0058 decision 4) — checks that the GQA variant keys **actually ran**.
  *
- * MUST: 源は計測に依らない `lastRunPipelines`。空の census は無条件に FAIL にする
- * （`entries` が空なら素通り、にすると全ケースが無検査のまま緑になる — `requireCensus`）。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing. An empty census is an
+ * unconditional FAIL (letting empty `entries` pass would leave every case green and unchecked —
+ * `requireCensus`).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention の dispatch は変種キーどおりに走る（census・実 GPU）",
+  "the states-form attention dispatches run as their variant keys say (census, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -738,17 +793,17 @@ test.skipIf(!GPU_AVAILABLE)(
           const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map(
             (row) => row.key,
           );
-          assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
+          assert(keys.length > 0, `${label}: the breakdown is empty (the key check would miss)`);
           assertEquals(
             keys.includes(stateQkKey(sliding, model.heads !== model.kvHeads)),
             true,
-            `${label}: 期待した ①QK の変種キーが出ていない（${keys.join(" / ")}）`,
+            `${label}: the expected ①QK variant key is missing (${keys.join(" / ")})`,
           );
-          // 別族であることの裏 — 融合 attention のキーは 1 本も出ない。
+          // The other side of being a separate family — not a single fused-attention key appears.
           assertEquals(
             keys.filter((key) => key.startsWith("attention_qk")),
             [],
-            `${label}: 融合 attention のキーが混ざっている`,
+            `${label}: fused-attention keys are mixed in`,
           );
         } finally {
           await context.dispose();
@@ -762,36 +817,42 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **census**（ADR 0058 決定 4 ③）— `stateAttentionReduce: "parallel"` を指定したとき、①' と ③'
- * のキー（`:par`）が**期待した計画で実際に走り**、対の逐次キーが 1 本も出ないことを見る。逆に
- * 既定では ① ③ だけが出る（opt-in が黙って既定へ落ちる / 既定が黙って変種へ上がる、の両方向を
- * 塞ぐ）。
+ * **Census** (ADR 0058 decision 4 ③) — with `stateAttentionReduce: "parallel"`, checks that the
+ * ①' and ③' keys (`:par`) **actually run in the expected plans** and that not one of their
+ * sequential counterparts appears. Conversely, the default produces only ① ③ (closing both
+ * directions: the opt-in silently falling back to the default / the default silently moving up to
+ * the variant).
  *
- * MUST: 2 段を**両方**見る（席は 1 つで 2 段を一緒に切り替えるので、片方だけの検査だと
- * 「①' が結線から落ちて ① が走っている」が素通りする — 値は帯の内側なので数値門も鳴らない）。
- * MUST: **①' だけは席に適用条件が掛かる**（`M ≤ 8` = decode と投機の verify）。この表は M=1 / M=2 で
- * 「①' + ③'」を見て、適用外（M=9 → ① + ③'）は下の 3 経路の census が持つ（この模型の full スロットは
- * 容量 8 で M=9 を載せられない）。③' は M に依らない（適用条件と実測は src/kernels/state-attention.ts の
- * `stateQkParallelEligible`）。門を条件式から独立させるため、期待は行ごとに `qkParallel` の
- * 真偽で直書きする（判定を輸入すると実装と一緒に間違える）。
+ * MUST: check **both** stages (one option switches the two stages together, so checking only one
+ * would let "①' dropped out of the wiring and ① is running" through — the values stay inside the
+ * band, so the numeric checks would not fire either).
+ * MUST: **only ①' has an applicability condition on the option** (`M ≤ 8` = decode and the
+ * speculative verify). This table checks "①' + ③'" at M=1 / M=2; the non-applicable case (M=9 →
+ * ① + ③') is held by the census of the 3 paths below (this model's full slot has capacity 8 and
+ * cannot take M=9). ③' does not depend on M (the applicability condition and the measurements are
+ * in `stateQkParallelEligible` of src/kernels/state-attention.ts). To keep the check independent
+ * of the condition, the expectation is written per row as a `qkParallel` boolean (importing the
+ * decision would let the test be wrong together with the implementation).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention ①QK / ③PV の縮約形は席と計画の M どおりに走る（census・実 GPU）",
+  "the reduction forms of the states-form attention ①QK / ③PV run as the option and the plan's M say (census, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const [label, model, sliding, reduce, chunkRows, qkParallel, pvParallel] of [
         ["full r=2 parallel decode M=1", GQA, false, "parallel", 1, true, true],
-        // M=2（投機の verify 相当・M ≤ 8）は ①' も ③' も上がる
+        // M=2 (the speculative verify's shape, M ≤ 8) moves up both ①' and ③'
         ["full r=2 parallel verify M=2", GQA, false, "parallel", 2, true, true],
         ["sliding r=1 parallel decode M=1", SLIDING, true, "parallel", 1, true, true],
         ["sliding r=1 parallel verify M=2", SLIDING, true, "parallel", 2, true, true],
-        // 席が既定なら M=1 でも上がらない（適用条件だけを見て席を無視する実装を落とす）
+        // With the option at its default, not even M=1 moves up (catches an implementation that
+        // looks only at the applicability condition and ignores the option)
         ["full r=2 sequential decode M=1", GQA, false, "sequential", 1, false, false],
         ["full r=2 sequential prefill M=2", GQA, false, "sequential", 2, false, false],
       ] as const) {
         const session = await stateSession(gpu, model, { stateAttentionReduce: reduce });
-        // chunkLength は行の M そのもの（M=1 の decode 形も M=9 の prefill 形も同じ context 契約の内側）。
+        // chunkLength is the row's M itself (both the M=1 decode shape and the M=9 prefill shape
+        // are inside the same context contract).
         const context = await session.createGenerationContext({
           chunkLength: Math.max(chunkRows, 2),
         });
@@ -807,7 +868,7 @@ test.skipIf(!GPU_AVAILABLE)(
           const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map(
             (row) => row.key,
           );
-          assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
+          assert(keys.length > 0, `${label}: the breakdown is empty (the key check would miss)`);
           const gqa = model.heads !== model.kvHeads;
           for (const [stage, expected, other] of [
             [
@@ -824,14 +885,14 @@ test.skipIf(!GPU_AVAILABLE)(
             assertEquals(
               keys.includes(expected),
               true,
-              `${label}: 期待した ${stage} のキーが出ていない（${keys.join(" / ")}）`,
+              `${label}: the expected ${stage} key is missing (${keys.join(" / ")})`,
             );
             assertEquals(
               keys.includes(other),
               false,
-              `${label}: 席と計画から期待されない ${stage} のキーが混ざっている（${keys.join(
+              `${label}: a ${stage} key the option and the plan do not lead to is mixed in (${keys.join(
                 " / ",
-              )}）`,
+              )})`,
             );
           }
         } finally {
@@ -933,42 +994,51 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** ①ₜ / ③ₜ（`M ≥ 16` で選ぶ行タイル共有経路）を踏ませるための形（`M = 16` が入る容量）。 */
+/**
+ * A shape that reaches ①ₜ / ③ₜ (the row-tile-sharing paths selected at `M ≥ 16`) (capacity for
+ * `M = 16`).
+ */
 const TILED: StateModel = { heads: 4, kvHeads: 2, depth: 4, capacity: 64 };
 
 const TILED_SLIDING: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 16, window: 16 };
 
 /**
- * **census**（ADR 0058 決定 4 ③ のタイル経路版 — perf-ledger K-13）— ①QK と ③PV の
- * **3 経路ずつ**が計画の `M` と席どおりに走ることを見る。
+ * **Census** (the tiled-path version of ADR 0058 decision 4 ③ — perf-ledger K-13) — checks that
+ * **the 3 paths each** of ①QK and ③PV run as the plan's `M` and the option say.
  *
- * ①ₜ / ③ₜ（K / V の行タイル共有）は **① / ③ とビット同一**なので**席に依らない既定経路**で、
- * `M ≥ 16` の計画だけが選ぶ（適用条件は src/kernels/state-attention.ts の
- * `stateQkTiledEligible` / `statePvTiledEligible`）。したがって期待は「M ≥ 16 → タイル経路
- * （席が `"parallel"` でも変わらない）・M < 16 → 席どおり」。**①' だけは席の中でさらに M ≤ 8 に
- * 限られる**ので、`M = 9` の parallel は「①QK は逐次・③PV は ③'」という**段で違う**行になる。
+ * ①ₜ / ③ₜ (sharing row tiles of K / V) are **bit-identical to ① / ③**, so they are **default paths
+ * that do not depend on the option**, selected only by plans with `M ≥ 16` (the applicability
+ * conditions are `stateQkTiledEligible` / `statePvTiledEligible` in
+ * src/kernels/state-attention.ts). So the expectation is "M ≥ 16 → the tiled path (unchanged even
+ * with the option at `"parallel"`), M < 16 → as the option says". **Only ①' is further limited to
+ * M ≤ 8 within the option**, so the parallel row at `M = 9` **differs per stage**: "①QK
+ * sequential, ③PV ③'".
  *
- * MUST: 3 経路を**全て**見る（期待した 1 本が出ていることと、残り 2 本が 1 本も出ていないことの
- * 両方）。片側だけだと「タイル経路が結線から落ちて参照経路が走っている」が素通りする —
- * ①ₜ / ③ₜ は参照経路と値が 1 ビットも違わないので、数値門は原理的に鳴らない。
- * MUST: 期待は行ごとに**段ごとに**直書きする（判定を輸入すると実装と一緒に間違える）。
+ * MUST: check **all** 3 paths (both that the expected one appears and that neither of the other two
+ * appears at all). Checking only one side would let "the tiled path dropped out of the wiring and
+ * the reference path is running" through — ①ₜ / ③ₜ do not differ from the reference paths by a
+ * single bit, so the numeric checks cannot fire in principle.
+ * MUST: write the expectation per row **and per stage** (importing the decision would let the test
+ * be wrong together with the implementation).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 attention ①QK / ③PV の 3 経路は計画の M と席どおりに走る（census・実 GPU）",
+  "the 3 paths of the states-form attention ①QK / ③PV run as the plan's M and the option say (census, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const [label, model, sliding, reduce, chunkRows, qkExpected, pvExpected] of [
         ["full r=2 prefill M=16", TILED, false, "sequential", 16, "tiled", "tiled"],
-        // 席はタイル経路を動かさない（ビット同一なので既定経路 — 席で切り替える対象ではない）
+        // The option does not move the tiled paths (bit-identical, so they are default paths — not
+        // something the option switches)
         ["full r=2 parallel prefill M=16", TILED, false, "parallel", 16, "tiled", "tiled"],
         ["sliding r=1 prefill M=16", TILED_SLIDING, true, "sequential", 16, "tiled", "tiled"],
-        // M=2 はどちらのタイル経路も適用外で ①'（M ≤ 8）も ③' も席どおり上がる
+        // At M=2 neither tiled path applies, and both ①' (M ≤ 8) and ③' move up as the option says
         ["full r=2 parallel M=2", TILED, false, "parallel", 2, "parallel", "parallel"],
-        // M=9 は ①' の適用外（M ≤ 8 の外・タイル経路の手前）なので ①QK は逐次のまま、
-        // ③PV だけが席どおり ③' へ上がる（段で適用範囲が違うことの直接の観測点）
+        // M=9 is outside ①' (beyond M ≤ 8, below the tiled path), so ①QK stays sequential and only
+        // ③PV moves up to ③' as the option says (the direct observation point of the stages
+        // having different applicability ranges)
         ["full r=2 parallel M=9", TILED, false, "parallel", 9, "sequential", "parallel"],
-        // M=1 も適用外。席どおりに 2 段とも分かれる
+        // M=1 is not applicable either. Both stages split as the option says
         ["full r=2 decode M=1", TILED, false, "sequential", 1, "sequential", "sequential"],
         ["full r=2 parallel decode M=1", TILED, false, "parallel", 1, "parallel", "parallel"],
       ] as const) {
@@ -986,7 +1056,7 @@ test.skipIf(!GPU_AVAILABLE)(
           const keys = requireCensus(session.diagnostics().lastRunPipelines, label).map(
             (row) => row.key,
           );
-          assert(keys.length > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
+          assert(keys.length > 0, `${label}: the breakdown is empty (the key check would miss)`);
           const gqa = model.heads !== model.kvHeads;
           const shown = keys.join(" / ");
           for (const [stage, expected, routes] of [
@@ -1013,7 +1083,7 @@ test.skipIf(!GPU_AVAILABLE)(
               assertEquals(
                 keys.includes(key),
                 route === expected,
-                `${label}: ${stage} の ${route} 経路キー ${key} の有無が期待と違う（走った内訳: ${shown}）`,
+                `${label}: presence of the ${stage} ${route} path key ${key} differs from the expectation (breakdown of the run: ${shown})`,
               );
             }
           }
@@ -1029,7 +1099,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "rewind は full のみの context で効き、sliding を含む context では全拒否（実 GPU）",
+  "rewind works on a context with only full slots and is rejected outright on a context with any sliding slot (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const full = await stateSession(gpu, FULL);
@@ -1039,17 +1109,17 @@ test.skipIf(!GPU_AVAILABLE)(
     const state = newOracle(FULL, 8);
     try {
       await assertStep(full, context, FULL, 8, state, 4, 4, 0, "prefill");
-      await assertStep(full, context, FULL, 8, state, 1, 1, 101, "decode（捨てる）");
+      await assertStep(full, context, FULL, 8, state, 1, 1, 101, "decode (discarded)");
       assertEquals(context.pastLength, 5);
 
-      // 巻き戻し: 論理位置 4 へ戻し、別の入力で同じ位置を上書きする。
+      // Rewind: go back to logical position 4 and overwrite the same position with other inputs.
       context.rewind(4);
       state.past = 4;
       assertEquals(context.pastLength, 4);
-      await assertStep(full, context, FULL, 8, state, 1, 1, 211, "rewind 後の decode");
-      assertEquals(context.pastLength, 5, "巻き戻した位置から進み直す");
+      await assertStep(full, context, FULL, 8, state, 1, 1, 211, "decode after rewind");
+      assertEquals(context.pastLength, 5, "it advances again from the rewound position");
 
-      // sliding を 1 本でも含む context は位置指定 rewind を全拒否（ADR 0066 追記 2）。
+      // A context with even one sliding slot rejects every positional rewind (ADR 0066 addendum 2).
       const rejected = assertThrows(() => slidingContext.rewind(0), ExecutionError);
       assert(rejected.message.includes("sliding"), rejected.message);
       assert(rejected.message.includes("kslot"), rejected.message);
@@ -1064,16 +1134,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **進行中 run のリース**（波 D-7）。
+ * **The lease of a run in progress** (phase D-7).
  *
- * run は頭で捕捉した `pastLength` で uniform を書き・dispatch 数を算出し・成功時にその値を
- * 基準に進める。途中で `rewind` が論理長を動かすと「GPU が読んだ P」と「進行の基準にした P」が
- * 分裂し、例外も NaN も出ないまま KV の論理位置だけがずれる。リースは `Session.run` の
- * **同期区間**で立つので、`run()` を await しない並びでも捕まえられる（本体でリースを取ると
- * マイクロタスク 1 段のぶんだけ窓が開く）。
+ * A run writes the uniform with the `pastLength` it captured at its start, computes the dispatch
+ * counts from it, and on success advances from that value. If `rewind` moved the logical length
+ * midway, "the P the GPU read" and "the P the advance was based on" would split, and only the KV's
+ * logical positions would drift, with no exception and no NaN. The lease is taken in the
+ * **synchronous section** of `Session.run`, so it catches even a sequence that does not await
+ * `run()` (taking the lease in the body would open a window of one microtask).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "進行中の generation run がある間の rewind は fail loudly（実 GPU）",
+  "rewind while a generation run is in progress fails loudly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
@@ -1084,13 +1155,14 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertStep(session, context, FULL, 8, state, 1, 1, 17, "decode 2");
       assertEquals(context.pastLength, 2);
 
-      // **await しない**まま rewind を撃つ（本体でリースを取る実装ではここが素通りする）。
+      // Fire rewind **without awaiting** (an implementation that takes the lease in the body lets
+      // this through).
       const inputs = stepInputs(FULL, 1, 29);
       const running = runStep(session, context, FULL, inputs, 1, 1);
       const rejected = assertThrows(() => context.rewind(0), ExecutionError);
       assert(rejected.message.includes("a generation run is in progress"), rejected.message);
 
-      // run 自体は無傷（rewind の拒否が run を巻き添えにしない）。
+      // The run itself is unharmed (the rejected rewind does not take the run down with it).
       const actual = await running;
       const expected = advanceOracle(FULL, 8, state, inputs, 1, 1);
       const report = compareTensors(
@@ -1098,10 +1170,11 @@ test.skipIf(!GPU_AVAILABLE)(
         { dtype: "f32", data: expected },
         STATE_TOLERANCE,
       );
-      assertEquals(report.pass, true, `リース中の run: ${formatAllclose(report)}`);
+      assertEquals(report.pass, true, `run under lease: ${formatAllclose(report)}`);
       assertEquals(context.pastLength, 3);
 
-      // 対照: 決着後の rewind は通る（リースがちゃんと返っている = 永久拒否になっていない）。
+      // Control: a rewind after settlement passes (the lease was really returned = it is not a
+      // permanent rejection).
       context.rewind(1);
       assertEquals(context.pastLength, 1);
     } finally {
@@ -1113,15 +1186,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **dispose の 2 段化**（波 D-7）。
+ * **Two-stage dispose** (phase D-7).
  *
- * 同期に立つのは 1 段目（新規受付の終了）だけで、内部面の遮断は Session チェーンに積んだ破棄
- * 本体が走る 2 段目。破棄本体は先行 run の**後**に走るので、`run(); context.dispose();` の
- * 非 await 並びは Session の `run(); session.dispose();` と同じ意味論になる（受理済み run は
- * 完走し、その後で実体が返る）。1 段で閉じる実装ではここで run が「dispose 済み」で落ちる。
+ * Only the first stage (no new admissions) takes effect synchronously; cutting off the internal
+ * surface is the second stage, in which the dispose body queued on the Session chain runs. The
+ * dispose body runs **after** the preceding runs, so the non-awaited sequence `run();
+ * context.dispose();` has the same semantics as the Session's `run(); session.dispose();` (an
+ * admitted run completes, and then the buffers are released). An implementation that closes in
+ * one stage fails the run here with "disposed".
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "dispose は新規受付だけを同期に閉じ、受理済み run は完走する（実 GPU）",
+  "dispose closes only new admissions synchronously, and an admitted run completes (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
@@ -1132,7 +1207,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertStep(session, context, FULL, 8, state, 1, 1, 11, "decode 2");
       assertEquals(context.pastLength, 2);
 
-      // **await しない**まま dispose。受理済み run は past=2 の形で最後まで走り切る。
+      // dispose **without awaiting**. The admitted run runs to the end with past=2.
       const inputs = stepInputs(FULL, 1, 23);
       const running = runStep(session, context, FULL, inputs, 1, 1);
       const disposing = context.dispose();
@@ -1143,12 +1218,13 @@ test.skipIf(!GPU_AVAILABLE)(
         { dtype: "f32", data: expected },
         STATE_TOLERANCE,
       );
-      assertEquals(report.pass, true, `dispose と並んだ run: ${formatAllclose(report)}`);
+      assertEquals(report.pass, true, `run alongside dispose: ${formatAllclose(report)}`);
       await disposing;
 
-      // 1 段目の効き: 利用者面は dispose の**呼び出し時点**から閉じている。
+      // The first stage's effect: the user surface is closed from **the moment dispose is called**.
       assertThrows(() => context.pastLength, ExecutionError, "disposed");
-      // 新規 run は admission で拒否（チェーンへ積む前 = 同期区間の判定）。
+      // A new run is rejected at admission (before it is queued on the chain = decided in the
+      // synchronous section).
       const rejected = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 41), 1, 1),
         ExecutionError,
@@ -1162,15 +1238,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 行ブロックの**強制分割 parity**（ADR 0067 決定 7 / ADR 0060 と同じ流儀）。
+ * **Forced-split parity** of the row blocks (ADR 0067 decision 7 / the same approach as ADR 0060).
  *
- * 既定の枚数は device の `maxStorageBufferBindingSize` から静的に決まるので、上限に余裕のある
- * 機では常に 1 枚 = 複数ブロックの経路（ブロック跨ぎの row_offset・ブロックごとの一時）が
- * 1 度も走らない。`ROW_BLOCK_SPLIT` はその経路を実機で回すための唯一の手段で、値は
- * **ビット単位で同一**でなければならない（畳んでいるのは中間の実体化幅だけ）。
+ * The default block count is decided statically from the device's
+ * `maxStorageBufferBindingSize`, so on a machine with a roomy limit it is always 1 = the
+ * multi-block path (row_offset across blocks, per-block temporaries) never runs.
+ * `ROW_BLOCK_SPLIT` is the only way to run that path on real hardware, and the values MUST be
+ * **bit-identical** (only the width of the intermediate materialization is folded).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロックを強制分割しても出力はビット同一（states 形・実 GPU）",
+  "forcing a row-block split keeps the output bit-identical (states form, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const single = await stateSession(gpu, FULL);
@@ -1187,7 +1264,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           Array.from(new Uint32Array(many.buffer, many.byteOffset, many.length)),
           Array.from(new Uint32Array(one.buffer, one.byteOffset, one.length)),
-          "2 枚に割った実行が 1 枚実行とビット単位で一致しない",
+          "the run split into 2 blocks does not match the 1-block run bit for bit",
         );
       } finally {
         for (const context of contexts) await context.dispose();
@@ -1201,19 +1278,22 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 予算 `attentionRowBlockMaxBytes`（ADR 0124）で割った states 形も、1 枚実行と**ビット単位で一致**する。
+ * The states form split by the budget `attentionRowBlockMaxBytes` (ADR 0124) also **matches the
+ * 1-block run bit for bit**.
  *
- * FULL（B·H = 4・容量 8）の prefill（M = 4）は 1 行のスコア 4×8×4 = 128 B。予算 256 B は 1 枚 2 行で
- * 2 枚になる（予算なしは束縛上限に余裕があり 1 枚）。states 形は数値変種と組めない（下のテスト）ので、
- * f32 だけで足りる。
- * MUST: 恒真化しないこと。①QK の dispatch 本数（= 枚数）が 2 で予算なしの 1 と違うことと、中間の
- * ピークが厳密に小さいことを同時に見る（予算が導出相に届かないまま同じ経路を 2 回撃つ形を緑にしない）。
+ * FULL's prefill (B·H = 4, capacity 8, M = 4) has 4×8×4 = 128 B of scores per row. A 256 B budget
+ * gives 2 rows per block, so 2 blocks (without a budget the binding limit has room, so 1 block).
+ * The states form cannot be combined with numeric variants (the test below), so f32 alone is
+ * enough.
+ * MUST: not tautological. Check at the same time that the ①QK dispatch count (= the block count) is
+ * 2, unlike the 1 without a budget, and that the intermediate peak is strictly smaller (do not let
+ * "the budget never reaches the derivation phase and the same path is fired twice" go green).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "予算で割った states 形は 1 枚実行とビット同一で、枚数が増えピークが縮む（実 GPU）",
+  "the budget-split states form is bit-identical to the 1-block run, with more blocks and a smaller peak (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // 2 本目の構築が投げても 1 本目と gpu を破棄する（Session ごとに try を張る）。
+    // Even if building the 2nd throws, the 1st and the gpu are destroyed (one try per Session).
     try {
       const single = await stateSession(gpu, FULL);
       try {
@@ -1230,23 +1310,29 @@ test.skipIf(!GPU_AVAILABLE)(
             assertEquals(
               Array.from(new Uint32Array(many.buffer, many.byteOffset, many.length)),
               Array.from(new Uint32Array(one.buffer, one.byteOffset, one.length)),
-              "予算で 2 枚に割った実行が 1 枚実行とビット単位で一致しない",
+              "the run split into 2 blocks by the budget does not match the 1-block run bit for bit",
             );
-            assert(new Set(one).size > 1, "出力が定数（ビット一致が恒真になっている）");
+            assert(
+              new Set(one).size > 1,
+              "the output is constant (the bit comparison is a tautology)",
+            );
             const qkKey = stateQkKey(false, false);
             const blocksOf = (session: Session): number =>
               countDispatches(
-                requireCensus(session.diagnostics().lastRunPipelines, "states 形"),
+                requireCensus(session.diagnostics().lastRunPipelines, "states form"),
                 qkKey,
               );
-            assertEquals(blocksOf(single), 1, "予算なしの枚数");
-            assertEquals(blocksOf(budgeted), 2, "予算つきの枚数");
+            assertEquals(blocksOf(single), 1, "block count without a budget");
+            assertEquals(blocksOf(budgeted), 2, "block count with the budget");
             const peakOf = (session: Session): number =>
               session.diagnostics().lastRun?.peakTransientBytes ?? 0;
-            assert(peakOf(single) > 0, "中間ピークが 0（観測点が空振りしている）");
+            assert(
+              peakOf(single) > 0,
+              "the intermediate peak is 0 (the observation point would miss)",
+            );
             assert(
               peakOf(budgeted) < peakOf(single),
-              `中間ピーク ${peakOf(budgeted)}B が予算なしの ${peakOf(single)}B から縮んでいない`,
+              `the intermediate peak ${peakOf(budgeted)}B did not shrink from ${peakOf(single)}B without a budget`,
             );
           } finally {
             for (const context of contexts) await context.dispose();
@@ -1264,14 +1350,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 数値変種（`attentionCompute` / `attentionScoreStorage`）× states 形は **fail loudly**
- * （ADR 0058 決定 3 —「未実装の組は縮退でなく fail loudly」）。
+ * Numeric variants (`attentionCompute` / `attentionScoreStorage`) × the states form **fail loudly**
+ * (ADR 0058 decision 3 — "an unimplemented combination fails loudly instead of degrading").
  *
- * MUST: 黙って f32 経路で走らせない。opt-in を指定したのに効かない状態は、値も診断も変わらない
- * まま「速くなっていない」だけで残る。
+ * MUST: do not run the f32 path silently. An opt-in that was requested but has no effect would
+ * stay with unchanged values and diagnostics, merely "not faster".
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形は f32 以外の数値変種と組めない（縮退でなく fail loudly・実 GPU）",
+  "the states form cannot be combined with numeric variants other than f32 (fails loudly instead of degrading, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cases: readonly (readonly [string, SessionOptions, string])[] = [
@@ -1288,7 +1374,7 @@ test.skipIf(!GPU_AVAILABLE)(
             ExecutionError,
           );
           assert(error.message.includes(needle), `${label}: ${error.message}`);
-          assertEquals(context.pastLength, 0, `${label}: 拒否された run は進めない`);
+          assertEquals(context.pastLength, 0, `${label}: a rejected run does not advance`);
         } finally {
           await context.dispose();
           await session.dispose();
@@ -1303,7 +1389,7 @@ test.skipIf(!GPU_AVAILABLE)(
 const SMALL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 6 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "full スロットの容量超過はエンコード前に落ち、context を汚染しない（実 GPU）",
+  "exceeding a full slot's capacity fails before encoding and does not taint the context (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SMALL);
@@ -1313,18 +1399,23 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertStep(session, context, SMALL, 6, state, 4, 4, 0, "prefill");
       assertEquals(context.pastLength, 4);
 
-      // 4 + 4 > 6。dispatch を 1 本も積まずに落ちる。
+      // 4 + 4 > 6. It fails without queuing a single dispatch.
       const inputs = stepInputs(SMALL, 4, 13);
       const error = await assertRejects(
         () => runStep(session, context, SMALL, inputs, 4, 4),
         ExecutionError,
       );
       assert(error.message.includes("full slot"), error.message);
-      // MUST: 汚染していない（poison していれば pastLength の読みが落ちる）。
-      assertEquals(context.pastLength, 4, "拒否された run は論理長も汚染も動かさない");
+      // MUST: not tainted (if it were poisoned, reading pastLength would fail).
+      assertEquals(
+        context.pastLength,
+        4,
+        "a rejected run changes neither the logical length nor the taint",
+      );
 
-      // 容量に収まる次の run は通る（拒否が context を壊していないことの裏）。
-      await assertStep(session, context, SMALL, 6, state, 4, 2, 31, "収まる run");
+      // The next run that fits the capacity passes (the other side of the rejection not breaking
+      // the context).
+      await assertStep(session, context, SMALL, 6, state, 4, 2, 31, "run that fits");
       assertEquals(context.pastLength, 6);
     } finally {
       await context.dispose();
@@ -1335,49 +1426,53 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 実行形の門（ADR 0066 決定 4 — 固定長 chunk / decode の 2 本だけ）。
+ * The check of the execution forms (ADR 0066 decision 4 — only the fixed-length chunk and decode).
  *
- * `M ∈ 許可集合`（この context は `chunkBuckets` を宣言していないので `{chunkLength, 1}`）を
- * 実行時に課すようになった（波 D-7）ので、`queryLength` の上限は
- * `Q ≤ M` の 1 本に**畳まれている**: `M = chunkLength` なら `Q ≤ M` が `Q ≤ chunkLength` を
- * 含意し、`M = 1` なら `Q = 1` を含意する。つまり `Session.run` 経由で `Q > chunkLength` だけを
- * 単独で踏む形は**構造的に作れない**（作るには M ∉ 許可集合が要り、それは先に落ちる）。
- * `GenerationContext` 側の `queryLength ≤ chunkLength` 検査は内部面の防波堤として残っており、
- * 直接駆動する門は tests/gpu_generation_context_test.ts が持つ（二重簿記にしない）。
+ * `M ∈ the allowed set` (this context declares no `chunkBuckets`, so `{chunkLength, 1}`) is now
+ * enforced at run time (phase D-7), so the upper bound of `queryLength` is **folded into** the
+ * single `Q ≤ M`: with `M = chunkLength`, `Q ≤ M` implies `Q ≤ chunkLength`, and with `M = 1` it
+ * implies `Q = 1`. So a shape that reaches only `Q > chunkLength` through `Session.run` **cannot be
+ * built structurally** (it would need M ∉ the allowed set, which fails first). The
+ * `queryLength ≤ chunkLength` check on the `GenerationContext` side stays as a backstop of the
+ * internal surface, and the check that drives it directly lives in
+ * tests/gpu_generation_context_test.ts (no double bookkeeping).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "実行形は固定長 chunk と decode の 2 本だけ・queryLength は M / 正整数で拒否（実 GPU）",
+  "the only execution forms are the fixed-length chunk and decode, and queryLength is rejected by M / as a positive integer (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
-    // chunkLength=2 に対し M=2（prefill 形）と M=1（decode 形）の 2 本だけが通る。
+    // With chunkLength=2 only M=2 (the prefill form) and M=1 (the decode form) pass.
     const context = await session.createGenerationContext({ chunkLength: 2 });
     try {
-      // ① Q > M（decode 形の宣言 shape の外 — 導出相が集めた chunkRows が見る）
+      // ① Q > M (outside the decode form's declared shape — seen by the chunkRows the derivation
+      // phase collected)
       const overRows = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
         ExecutionError,
       );
       assert(overRows.message.includes("physical chunk row count"), overRows.message);
 
-      // ② Q > M（prefill 形 — chunkLength の上限もこの 1 本に畳まれている）
+      // ② Q > M (the prefill form — the chunkLength bound is folded into this one too)
       const overChunk = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 2, 0), 2, 3),
         ExecutionError,
       );
       assert(overChunk.message.includes("physical chunk row count"), overChunk.message);
 
-      // ③ Q = 0（「何も進めない run」— 進行と物理内容の対応が観測できなくなる）
+      // ③ Q = 0 ("a run that advances nothing" — the correspondence between progress and the
+      // physical contents could no longer be observed)
       const zero = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 2, 0), 2, 0),
         ExecutionError,
       );
       assert(zero.message.includes("queryLength"), zero.message);
 
-      // ④ M ∉ 許可集合（この context は chunkBuckets を宣言していないので {1, chunkLength}）:
-      //    任意の M を通すと M の種類ぶん別鍵の計画が増え、PreparedPlan の LRU を汚して
-      //    decode のホットパスが静かに再導出へ落ちる（ADR 0066 決定 4 の「PreparedPlan は
-      //    2 本が定常」— 追記〈バケット〉が広げるのは「宣言した本数だけ」）。
+      // ④ M ∉ the allowed set (this context declares no chunkBuckets, so {1, chunkLength}):
+      //    letting any M through would add a plan with a different key per distinct M, pollute the
+      //    PreparedPlan LRU, and silently drop the decode hot path into re-derivation (ADR 0066
+      //    decision 4, "two PreparedPlans in the steady state" — the addendum on buckets widens it
+      //    only "by the declared number").
       for (const chunkRows of [3, 4]) {
         const wrongForm = await assertRejects(
           () => runStep(session, context, FULL, stepInputs(FULL, chunkRows, 0), chunkRows, 1),
@@ -1386,12 +1481,13 @@ test.skipIf(!GPU_AVAILABLE)(
         assert(wrongForm.message.includes("fixed chunk contract"), wrongForm.message);
       }
 
-      assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
+      assertEquals(context.pastLength, 0, "a rejected run advances nothing");
 
-      // 対照: 2 本の実行形はそのまま通る（門が「何でも赤くする」形になっていない裏）。
+      // Control: the two execution forms pass as is (the other side of the check not "turning
+      // everything red").
       const state = newOracle(FULL, 8);
-      await assertStep(session, context, FULL, 8, state, 2, 2, 71, "prefill 形（M=chunkLength）");
-      await assertStep(session, context, FULL, 8, state, 1, 1, 83, "decode 形（M=1）");
+      await assertStep(session, context, FULL, 8, state, 2, 2, 71, "prefill form (M=chunkLength)");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 83, "decode form (M=1)");
       assertEquals(context.pastLength, 3);
     } finally {
       await context.dispose();
@@ -1401,9 +1497,12 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 新規の拒否形の追加検査（chunkLength=4 に M=2 / M=3 — decode 形の 1 とも一致しない）。 */
+/**
+ * Extra check of the new rejection shapes (M=2 / M=3 with chunkLength=4 — matching neither the
+ * decode form's 1).
+ */
 test.skipIf(!GPU_AVAILABLE)(
-  "chunkLength と 1 のどちらでもない M は fail loudly（実 GPU）",
+  "an M that is neither chunkLength nor 1 fails loudly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
@@ -1415,10 +1514,11 @@ test.skipIf(!GPU_AVAILABLE)(
           ExecutionError,
         );
         assert(error.message.includes(`physical chunk row count ${chunkRows}`), error.message);
-        // 診断は許可集合を列挙する（バケット宣言が無いので prefill 形は chunkLength の 1 本）。
+        // The diagnosis lists the allowed set (no buckets are declared, so the prefill form is the
+        // one chunkLength).
         assert(error.message.includes("prefill form's {4}"), error.message);
       }
-      assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
+      assertEquals(context.pastLength, 0, "a rejected run advances nothing");
     } finally {
       await context.dispose();
       await session.dispose();
@@ -1428,20 +1528,23 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * run 前検査（`assertGenerationRun`）は導出相の後に居るので、ミス run はそこで落ちるまでに計画と
- * params を載せている。これはホスト側の失敗で、errorScope は何も捕捉していない — 作れた計画と
- * params は有効なので外さない。外すと同じ失敗のたびに再導出して params を新しく確保し、キャッシュ
- * から外すだけで `dispose` まで積もる（ADR 0095 追記 2026-10-10「GPU 側の失敗で、その実行単位が
- * 足した params と計画を巻き戻す」）。errorScope の pop より前に落ちる run なので、「捨てる scope の
- * 中身を見ずに外す側へ倒す」形もこの門で赤くなる。
+ * The pre-run check (`assertGenerationRun`) comes after the derivation phase, so a miss run has
+ * already loaded its plan and params by the time it fails there. That is a host-side failure and
+ * the errorScope caught nothing — the plan and params that were built are valid, so they are not
+ * removed. Removing them would re-derive and allocate fresh params on every repetition of the same
+ * failure, and since they would only be dropped from the cache they would pile up until `dispose`
+ * (the ADR 0095 addendum of 2026-10-10, "a GPU-side failure rolls back the params and plan that
+ * execution unit added"). The run fails before the errorScope pop, so this check also turns red on
+ * the shape that "removes without looking at what the discarded scope holds".
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "ミス run が run 前検査で落ちても計画と params は残り、繰り返しても params を新しく確保しない（実 GPU）",
+  "when a miss run fails the pre-run check its plan and params stay, and repeating it allocates no new params (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 2 });
-    // decode 形（M=1）に queryLength 2 — 導出の後の run 前検査で「物理 chunk 行数」を超えて落ちる。
+    // queryLength 2 on the decode form (M=1) — fails the pre-run check after the derivation for
+    // exceeding the "physical chunk row count".
     const failOnce = async (): Promise<void> => {
       const error = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
@@ -1455,24 +1558,24 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         false,
-        "1 回目の run が導出していない（門が空振る）",
+        "the 1st run did not derive (the check would miss)",
       );
       const derived = session.diagnostics().weights.allocCount;
-      assert(derived > initial, "1 回目の run が params を載せていない（門が空振る）");
+      assert(derived > initial, "the 1st run did not load params (the check would miss)");
 
       await failOnce();
       await failOnce();
       assertEquals(
         session.diagnostics().weights.allocCount,
         derived,
-        "同じホスト側の失敗のたびに params を新しく確保している",
+        "fresh params are allocated on every repetition of the same host-side failure",
       );
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         true,
-        "ホスト側の失敗で、作れた計画を捨てている",
+        "a host-side failure discards the plan that was built",
       );
-      assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
+      assertEquals(context.pastLength, 0, "a rejected run advances nothing");
     } finally {
       await context.dispose();
       await session.dispose();
@@ -1482,20 +1585,23 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 上の門の対。pop より前に落ちる run でも、捨てる errorScope が GPU 側の失敗（params の確保の
- * 非致命 OOM）を捕捉していれば、その run が足した計画と params は外す。残すと、次の run が
- * 無効なバッファを直参照する計画に当たり続ける。本体の例外はホスト側の失敗のままで、捕捉した
- * OOM には差し替わらない。注入は out-of-memory スコープの pop だけを差し替える
- * （`helpers/oom-injection.ts`）ので、run 前検査で落ちた run の後始末の pop に当たる。
+ * The counterpart of the check above. Even for a run that fails before the pop, if the discarded
+ * errorScope caught a GPU-side failure (a non-fatal OOM while allocating params), the plan and
+ * params that run added are removed. Keeping them would make the next runs keep hitting a plan that
+ * refers directly to invalid buffers. The body's exception stays the host-side failure; it is not
+ * replaced by the caught OOM. The injection replaces only the pop of the out-of-memory scope
+ * (`helpers/oom-injection.ts`), so it hits the cleanup pop of the run that failed the pre-run
+ * check.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "ミス run が run 前検査で落ちても、捨てた errorScope が非致命 OOM を捕捉していれば計画と params を外し、次の run で作り直す（注入・実 GPU）",
+  "when a miss run fails the pre-run check but the discarded errorScope caught a non-fatal OOM, its plan and params are removed and rebuilt by the next run (injection, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 2 });
     const oom = injectOutOfMemory(gpu.device);
-    // decode 形（M=1）に queryLength 2 — 導出の後の run 前検査で「物理 chunk 行数」を超えて落ちる。
+    // queryLength 2 on the decode form (M=1) — fails the pre-run check after the derivation for
+    // exceeding the "physical chunk row count".
     const failOnce = async (): Promise<void> => {
       const error = await assertRejects(
         () => runStep(session, context, FULL, stepInputs(FULL, 1, 0), 1, 2),
@@ -1506,11 +1612,15 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       oom.arm();
       await failOnce();
-      assertEquals(oom.fired(), 1, "注入が run の後始末の pop に当たっていない（門が空振る）");
+      assertEquals(
+        oom.fired(),
+        1,
+        "the injection did not hit the run's cleanup pop (the check would miss)",
+      );
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         false,
-        "1 回目の run が導出していない（門が空振る）",
+        "the 1st run did not derive (the check would miss)",
       );
       const derived = session.diagnostics().weights.allocCount;
 
@@ -1518,13 +1628,13 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         false,
-        "捨てた errorScope が OOM を捕捉した run の計画が残っている",
+        "the plan of a run whose discarded errorScope caught an OOM remains",
       );
       assert(
         session.diagnostics().weights.allocCount > derived,
-        "捨てた errorScope が OOM を捕捉した run の params をキャッシュから再利用している",
+        "the params of a run whose discarded errorScope caught an OOM are reused from the cache",
       );
-      assertEquals(context.pastLength, 0, "拒否された run は 1 つも進めない");
+      assertEquals(context.pastLength, 0, "a rejected run advances nothing");
     } finally {
       oom.restore();
       await context.dispose();
@@ -1535,11 +1645,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 有効行 `query` 行ぶんの値を物理 `rows` 行の `[1, planes, rows, depth]` へ 0 詰めで並べる
- * （pad 領域の入力値は 0 埋め MUST — ADR 0066 追記 6）。
+ * Lays out `query` valid rows into `[1, planes, rows, depth]` of `rows` physical rows, padded with
+ * 0 (the input values of the pad region MUST be 0 — ADR 0066 addendum 6).
  *
- * バケット形（M=4）と prefill 形（M=8）で**同じ有効行**を渡すのに要る。`stepInputs` の平坦列は
- * M ごとに行の切れ目が変わるので、そのまま両方へ渡すと別の値を比べることになる。
+ * Needed to pass **the same valid rows** to the bucket form (M=4) and the prefill form (M=8). The
+ * flat sequence of `stepInputs` has its row breaks at different places per M, so passing it to
+ * both as is would compare different values.
  */
 const scatterRows = (
   planes: number,
@@ -1556,7 +1667,10 @@ const scatterRows = (
   return out as Float32Array<ArrayBuffer>;
 };
 
-/** `[1, planes, rows, depth]` の先頭 `query` 行だけを取り出す（pad 行を落とした比較用）。 */
+/**
+ * Takes only the first `query` rows of `[1, planes, rows, depth]` (for comparisons with the pad
+ * rows dropped).
+ */
 const takeRows = (
   planes: number,
   rows: number,
@@ -1572,7 +1686,7 @@ const takeRows = (
   return out as Float32Array<ArrayBuffer>;
 };
 
-/** 同じ有効行を持つ M 行ぶんの入力（`stepInputs` の `salt` 規則をそのまま使う）。 */
+/** Inputs of M rows with the same valid rows (using the `salt` rule of `stepInputs` as is). */
 const bucketInputs = (
   model: StateModel,
   chunkRows: number,
@@ -1603,39 +1717,40 @@ const bucketInputs = (
 });
 
 /**
- * chunkBuckets が許す追加の prefill 形（ADR 0066 追記〈バケット〉）。
+ * The extra prefill forms chunkBuckets allows (the ADR 0066 addendum on buckets).
  *
- * 見るのは 3 つ: ①バケット行が通る ②同じ行数がバケット無しの context では落ちる（許可が
- * バケット由来であることの裏）③バケット形の**有効行の出力が prefill 形（M=chunkLength）と
- * 一致する** — 短い chunk を pad 無しで回すのはこの一致が成り立つ限りでの高速化なので、
- * 一致が崩れたら「速いが違う値」になる（例外も警告も出ない）。
+ * Three things are checked: ① the bucket rows pass ② the same row count fails on a context without
+ * buckets (the other side of the permission coming from the buckets) ③ **the valid rows' output of
+ * the bucket form matches the prefill form (M=chunkLength)** — running a short chunk without pad is
+ * a speedup only as long as this match holds, so if it broke the result would be "fast but
+ * different values" (with no exception and no warning).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "chunkBuckets の物理行数は通り、有効行の出力は M=chunkLength と一致する（実 GPU）",
+  "the physical row counts of chunkBuckets pass, and the output of the valid rows matches M=chunkLength (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
-    // chunkLength=8 / バケット [4]。許可集合は {1, 4, 8}。
+    // chunkLength=8 / buckets [4]. The allowed set is {1, 4, 8}.
     const bucketed = await session.createGenerationContext({ chunkLength: 8, chunkBuckets: [4] });
     const plain = await session.createGenerationContext({ chunkLength: 8 });
     try {
-      // ② 集合の隙間（3）は落ちる。
+      // ② A gap in the set (3) fails.
       const gap = await assertRejects(
         () => runStep(session, bucketed, FULL, stepInputs(FULL, 3, 0), 3, 3),
         ExecutionError,
       );
       assert(gap.message.includes("prefill form's {4, 8}"), gap.message);
 
-      // ② 同じ M=4 が、バケットを宣言していない context では落ちる。
+      // ② The same M=4 fails on a context that declares no buckets.
       const withoutBuckets = await assertRejects(
         () => runStep(session, plain, FULL, bucketInputs(FULL, 4, 3, 0), 4, 3),
         ExecutionError,
       );
       assert(withoutBuckets.message.includes("prefill form's {8}"), withoutBuckets.message);
-      assertEquals(bucketed.pastLength, 0, "拒否された run は 1 つも進めない");
+      assertEquals(bucketed.pastLength, 0, "a rejected run advances nothing");
       assertEquals(plain.pastLength, 0);
 
-      // ① / ③ 同じ有効行 3 行を M=4（バケット）と M=8（prefill 形）で回す。
+      // ① / ③ Run the same 3 valid rows at M=4 (bucket) and M=8 (prefill form).
       const QUERY_ROWS = 3;
       const bucketState = newOracle(FULL, 8);
       const plainState = newOracle(FULL, 8);
@@ -1647,16 +1762,17 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(bucketed.pastLength, QUERY_ROWS);
       assertEquals(plain.pastLength, QUERY_ROWS);
 
-      // 両方とも CPU 参照と一致する（片側だけ見ると「同じように壊れた」形を見逃す）。
+      // Both match the CPU reference (looking at only one side would miss "both broke the same
+      // way").
       for (const [label, state, inputs, actual, chunkRows] of [
-        ["バケット形（M=4）", bucketState, bucketIn, bucketOut, 4],
-        ["prefill 形（M=8）", plainState, plainIn, plainOut, 8],
+        ["bucket form (M=4)", bucketState, bucketIn, bucketOut, 4],
+        ["prefill form (M=8)", plainState, plainIn, plainOut, 8],
       ] as const) {
         const expected = advanceOracle(FULL, 8, state, inputs, chunkRows, QUERY_ROWS);
         const valid = takeRows(FULL.heads, chunkRows, FULL.depth, QUERY_ROWS, expected);
         assert(
           valid.some((value) => Math.abs(value) > 1e-3),
-          `${label}: 期待出力が自明（全 ~0）`,
+          `${label}: the expected output is trivial (all ~0)`,
         );
         const report = compareTensors(
           { dtype: "f32", data: actual },
@@ -1666,16 +1782,20 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
       }
 
-      // ③ 有効行そのものの突合（pad 行を落として直接比べる）。
+      // ③ Compare the valid rows themselves (pad rows dropped, compared directly).
       const report = compareTensors(
         { dtype: "f32", data: takeRows(FULL.heads, 4, FULL.depth, QUERY_ROWS, bucketOut) },
         { dtype: "f32", data: takeRows(FULL.heads, 8, FULL.depth, QUERY_ROWS, plainOut) },
         STATE_TOLERANCE,
       );
-      assertEquals(report.pass, true, `バケット形と prefill 形の有効行: ${formatAllclose(report)}`);
+      assertEquals(
+        report.pass,
+        true,
+        `valid rows of the bucket and prefill forms: ${formatAllclose(report)}`,
+      );
 
-      // decode 形（M=1）はバケットを宣言しても従来どおり通る。
-      await assertStep(session, bucketed, FULL, 8, bucketState, 1, 1, 37, "decode 形（M=1）");
+      // The decode form (M=1) passes as before even with buckets declared.
+      await assertStep(session, bucketed, FULL, 8, bucketState, 1, 1, 37, "decode form (M=1)");
     } finally {
       await bucketed.dispose();
       await plain.dispose();
@@ -1688,7 +1808,7 @@ test.skipIf(!GPU_AVAILABLE)(
 const SYMBOLIC: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "C" };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "計画鍵は容量で決まり、context の識別子では決まらない（実 GPU）",
+  "the plan key is decided by the capacity, not by the context's identity (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SYMBOLIC);
@@ -1697,44 +1817,54 @@ test.skipIf(!GPU_AVAILABLE)(
     const wider = await session.createGenerationContext({ chunkLength: 1, bindings: { C: 12 } });
     const inputs = stepInputs(SYMBOLIC, 1, 0);
     try {
-      // MUST: 容量記号 `C` は run の bindings に**要らない**（束縛点は createGenerationContext
-      // だけ — ADR 0066 追記 7 の効く範囲の分担。渡させると context との二重簿記になる）。
+      // MUST: the capacity symbol `C` is **not needed** in the run's bindings (the only binding
+      // point is createGenerationContext — the division of scope of ADR 0066 addendum 7. Requiring
+      // it would mean double bookkeeping with the context).
       await runStep(session, first, SYMBOLIC, inputs, 1, 1);
-      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "1 本目は導出 run");
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        false,
+        "the first is a deriving run",
+      );
 
-      // MUST: **別 context・同じ容量**は同じ鍵（context の識別子が鍵に載っていればここで
-      // 再導出が起き、decode のホットパスが毎シーケンス全滅する — ADR 0066 決定 5）。
+      // MUST: **another context with the same capacity** has the same key (if the context's
+      // identity were part of the key, a re-derivation would happen here and the decode hot path
+      // would be wiped out for every sequence — ADR 0066 decision 5).
       await runStep(session, second, SYMBOLIC, inputs, 1, 1);
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         true,
-        "同容量の別 context が別鍵になっている",
+        "another context with the same capacity got a different key",
       );
-      // ヒット run なので slot backing が立つ（generation run も backed — 波 D-4）。
+      // A hit run, so the slot backing is built (generation runs are backed too — phase D-4).
       assertEquals(session.diagnostics().planBacking.buildCount, 1);
-      assertEquals(session.diagnostics().stateBacking.rebindCount, 1, "second が 1 度焼く");
+      assertEquals(session.diagnostics().stateBacking.rebindCount, 1, "second bakes once");
 
-      // 容量が違えば別鍵（レシピは容量を params と S の確保サイズへ焼き込む）。
+      // A different capacity is a different key (the recipe bakes the capacity into the params and
+      // the allocation size of S).
       await runStep(session, wider, SYMBOLIC, inputs, 1, 1);
       assertEquals(
         session.diagnostics().lastRunPrepared?.hit,
         false,
-        "容量の違う context が同じレシピを使い回している",
+        "a context with a different capacity reuses the same recipe",
       );
-      // MUST: ミス run は backing を作らない（単発 run に slot メモリを払わせない門）ので、
-      // 容量の違う context を挟んでも活性 backing は据え置き = 焼き直しも起きない。
-      assertEquals(session.diagnostics().planBacking.buildCount, 1, "ミス run が backing を作った");
+      // MUST: a miss run builds no backing (the check that one-off runs do not pay for slot
+      // memory), so a context with a different capacity in between leaves the active backing in
+      // place = no re-bake either.
+      assertEquals(session.diagnostics().planBacking.buildCount, 1, "a miss run built a backing");
       assertEquals(session.diagnostics().stateBacking.rebindCount, 1);
 
-      // 戻ると最初の鍵にまた当たる（LRU に両方載っている）。
+      // Going back hits the first key again (both are in the LRU).
       await runStep(session, first, SYMBOLIC, inputs, 1, 1);
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
-      // backing は同じ実体のまま（世代識別子が動かない）で、焼くのは first のぶん 1 度だけ。
+      // The backing stays the same object (its generation identifier does not move), and the only
+      // bake is the one for first.
       assertEquals(session.diagnostics().planBacking.buildCount, 1);
-      assertEquals(session.diagnostics().stateBacking.rebindCount, 2, "first が 1 度焼く");
+      assertEquals(session.diagnostics().stateBacking.rebindCount, 2, "first bakes once");
 
-      // states 専用記号を run の bindings に書いた形は fail loudly（黙って受けて鍵だけ割れる
-      // 形にしない — 同じ計画が別鍵で重複導出される沈黙劣化）。
+      // Writing a states-only symbol into the run's bindings fails loudly (not accepted silently
+      // with only the key splitting — a silent degradation in which the same plan is derived twice
+      // under different keys).
       const rejected = await assertRejects(
         () => runStep(session, first, SYMBOLIC, inputs, 1, 1, { C: 8 }),
         ExecutionError,
@@ -1749,22 +1879,24 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **両方に現れる記号**の照合（ADR 0066 追記 7 の「効く範囲の分担」の実行時執行）。
+ * The check of **symbols that appear in both places** (the run-time enforcement of "the division of
+ * scope" in ADR 0066 addendum 7).
  *
- * スロット容量に入力と同じ記号 `M` を使うと、束縛点が 2 つになる: 入力 shape（run —
- * `bindSymbols`）と `spec.bindings`（context）。割れたまま走ると「確保容量は 4・計画と dispatch は
- * 3」のような分裂が例外も警告も無く成立するので、エンコード前に落とす。
+ * Using the same symbol `M` for the slot capacity as for the inputs gives two binding points: the
+ * input shape (run — `bindSymbols`) and `spec.bindings` (context). Running with them in
+ * disagreement would quietly establish a split such as "allocated capacity 4, plan and dispatch
+ * 3" with no exception and no warning, so it fails before encoding.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states と入力の両方に現れる記号は 2 つの束縛点で一致しないと fail loudly（実 GPU）",
+  "a symbol that appears in both the states and the inputs fails loudly when its two binding points disagree (real GPU)",
   async () => {
     const shared: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "M" };
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, shared);
-    // 容量 M=4 で確保した context（chunkLength も 4 = prefill 形の M）。
+    // A context allocated with capacity M=4 (chunkLength is also 4 = the prefill form's M).
     const context = await session.createGenerationContext({ chunkLength: 4, bindings: { M: 4 } });
     try {
-      // 割れた形: run の入力 shape が M=3 を解決する（context は 4 で確保済み）。
+      // The split shape: the run's input shape resolves M=3 (the context was allocated with 4).
       const split = await assertRejects(
         () => runStep(session, context, shared, stepInputs(shared, 3, 0), 3, 3),
         ExecutionError,
@@ -1772,11 +1904,11 @@ test.skipIf(!GPU_AVAILABLE)(
       assert(split.message.includes("Symbol 'M'"), split.message);
       assert(split.message.includes("4"), split.message);
       assert(split.message.includes("3"), split.message);
-      assertEquals(context.pastLength, 0, "拒否された run は進めない");
+      assertEquals(context.pastLength, 0, "a rejected run does not advance");
 
-      // 対照: 一致していれば通る（門が「常に赤い」形になっていない裏）。
+      // Control: it passes when they agree (the other side of the check not being "always red").
       const state = newOracle(shared, 4);
-      await assertStep(session, context, shared, 4, state, 4, 4, 13, "M=4 で一致");
+      await assertStep(session, context, shared, 4, state, 4, 4, 13, "agrees at M=4");
       assertEquals(context.pastLength, 4);
     } finally {
       await context.dispose();
@@ -1787,13 +1919,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "state 参照グラフを generation 無しで run すると fail loudly（実 GPU）",
+  "running a state-referencing graph without generation fails loudly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     try {
       const inputs = stepInputs(FULL, 1, 0);
-      // 落ちるのは shape 計算層（スロットの解決済み shape が無い run はそこまで進めない）。
+      // It fails in the shape computation layer (a run without the slots' resolved shapes cannot
+      // get past it).
       const error = await assertRejects(
         () =>
           session.run({
@@ -1812,30 +1945,33 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 内部面（論理長の進行を直に駆動する / 焼き込み束を覗く）。**故障注入と前提づくり専用**で、
- * 通常の結線は全て `Session.run` 越しに見る。
+ * The internal surface (drives the logical length's advance directly / peeks at the baked
+ * bundles). **Only for fault injection and setting up preconditions**; all regular wiring is
+ * checked through `Session.run`.
  */
 const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
 
 /**
- * poison の結線（ADR 0066 追記 3）。
+ * The poison wiring (ADR 0066 addendum 3).
  *
- * 決定的な失敗注入として、**論理長を u32 上限まで進めてから** state を書く decode 形の run を
- * 1 本通す。dispatch は全て成功して submit されるが、成功後の `advance` が u32 の上限で落ちるので、
- * 「state を submit した run が例外で終わる」形になる — スナップショット比較が働けば context は
- * poison され、働かなければ「物理 ring だけ進んだ context」が正常値を返し続ける。
+ * As a deterministic failure injection, **after advancing the logical length to the u32 limit**,
+ * one decode-form run that writes state goes through. Every dispatch succeeds and is submitted, but
+ * the `advance` after success fails at the u32 limit, giving the shape "a run that submitted state
+ * ends in an exception" — if the snapshot comparison works, the context is poisoned; if not, "a
+ * context whose physical ring alone advanced" keeps returning normal-looking values.
  *
- * NOTE: 走らせるのは **M=1 の decode 形**（固定 chunk 契約で `M ∈ {chunkLength, 1}` — 大きな
- * `chunkLength` は「手動 advance の 1 回で u32 上限まで飛ばす」ために要るだけ）。
- * NOTE: これが踏むのは判定の結線であって、GPU 側の失敗（device 消失・validation）そのものでは
- * ない。そちらの注入面は波 C の保留（L8 fake device）待ち。
+ * NOTE: what runs is **the decode form with M=1** (the fixed-chunk contract has
+ * `M ∈ {chunkLength, 1}` — the large `chunkLength` is only needed to "jump to the u32 limit with
+ * one manual advance").
+ * NOTE: this reaches the wiring of the decision, not a GPU-side failure itself (device loss,
+ * validation). Injection for that is waiting on what phase C deferred (L8 fake device).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "state を submit した run の失敗は context を poison する（実 GPU）",
+  "a failure of a run that submitted state poisons the context (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // sliding にするのは full 容量の run 前検査（past + query ≤ C）を避けるため — ring は
-    // 論理長がいくつでも回る。
+    // Sliding is used to avoid the full-capacity pre-run check (past + query ≤ C) — a ring keeps
+    // going at any logical length.
     const session = await stateSession(gpu, SLIDING);
     const context = await session.createGenerationContext({ chunkLength: 0xffffffff });
     try {
@@ -1849,12 +1985,13 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assert(error.message.includes("the u32 limit"), error.message);
 
-      // MUST: 以後の全操作が拒否される（読みも含む — 物理 ring は書かれてしまっている）。
+      // MUST: every later operation is rejected (reads included — the physical ring has already
+      // been written).
       const poisoned = assertThrows(() => context.pastLength, ExecutionError);
       assert(poisoned.message.includes("poisoned"), poisoned.message);
       assert(
         poisoned.message.includes("A run that submitted state-changing dispatches failed"),
-        `真因が残っていない: ${poisoned.message}`,
+        `the real cause is not kept: ${poisoned.message}`,
       );
     } finally {
       await context.dispose();
@@ -1865,17 +2002,19 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **切替 A/B**（ADR 0066 受入条件③の完成形 — 決定 5 の焼き込み単位の分離）。
+ * **Switching A/B** (the complete form of ADR 0066 acceptance criterion ③ — decision 5's separation
+ * of the baking units).
  *
- * 同じ Session・同じ容量の context 2 本を交互に decode する。分離が効いていれば同時に 3 つが
- * 成り立つ: ①レシピ再導出ゼロ（鍵に context が載らない）②backing 再構築ゼロ（Session 所有の
- * 焼き込みは context に依らない）③stale 読みゼロ（state を束ねる bind group は context ごと）。
+ * Two contexts of the same Session and the same capacity decode alternately. If the separation
+ * works, three things hold at once: ① zero recipe re-derivations (the context is not part of the
+ * key) ② zero backing rebuilds (the Session-owned baking does not depend on the context) ③ zero
+ * stale reads (the bind groups that bind state are per context).
  *
- * MUST: 入力の salt を context ごとに変える — KV の取り違えは例外を出さず**値にしか出ない**ので、
- * 同じ入力を配ると鎖の誤りが自己相殺しうる。
+ * MUST: change the input salt per context — a KV mix-up raises no exception and **shows only in the
+ * values**, so with identical inputs a chain error could cancel itself out.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "context を交互に切り替えても再導出・backing 再構築ゼロで KV を取り違えない（実 GPU）",
+  "switching contexts alternately causes zero re-derivations and zero backing rebuilds and never mixes up the KV (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
@@ -1884,22 +2023,26 @@ test.skipIf(!GPU_AVAILABLE)(
     const stateA = newOracle(FULL, 8);
     const stateB = newOracle(FULL, 8);
     try {
-      // 導出が走るのは M=1 の 1 本目だけ。以後は全て同じ鍵に当たる。
-      await assertStep(session, a, FULL, 8, stateA, 1, 1, 0, "A 初回");
-      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "1 本目は導出 run");
+      // The derivation runs only for the first M=1 run. Everything after that hits the same key.
+      await assertStep(session, a, FULL, 8, stateA, 1, 1, 0, "A first");
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        false,
+        "the first is a deriving run",
+      );
 
       for (let step = 0; step < 3; step += 1) {
         await assertStep(session, b, FULL, 8, stateB, 1, 1, 301 + step * 7, `B decode ${step}`);
         assertEquals(
           session.diagnostics().lastRunPrepared?.hit,
           true,
-          `B decode ${step}: context 切替で再導出が起きた（鍵に context が載っている）`,
+          `B decode ${step}: switching the context caused a re-derivation (the context is part of the key)`,
         );
         await assertStep(session, a, FULL, 8, stateA, 1, 1, 401 + step * 7, `A decode ${step}`);
         assertEquals(
           session.diagnostics().lastRunPrepared?.hit,
           true,
-          `A decode ${step}: context 切替で再導出が起きた`,
+          `A decode ${step}: switching the context caused a re-derivation`,
         );
       }
 
@@ -1907,14 +2050,15 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         diagnostics.planBacking.buildCount,
         1,
-        "context 切替が slot backing を作り直している（決定 5 が避けた全再構築スラッシング）",
+        "switching contexts rebuilds the slot backing (the full-rebuild thrashing decision 5 avoided)",
       );
-      // 焼き直しは **context ごとに 1 度**きり。束が有効なのは backing 実体に対してなので、
-      // 切替では無効にならない（切替のたびに増える形は run 数に比例する再構築の入り口）。
+      // Re-baking happens **once per context** only. A bundle is valid for a backing object, so
+      // switching does not invalidate it (growing at every switch would open the way to rebuilds
+      // proportional to the number of runs).
       assertEquals(
         diagnostics.stateBacking.rebindCount,
         2,
-        "context 側 bind group の焼き直しが context ごと 1 度で収まっていない",
+        "re-baking the context-side bind groups does not stay at once per context",
       );
       assertEquals(diagnostics.stateBacking.contextCount, 2);
       assertEquals(a.pastLength, 4);
@@ -1928,28 +2072,30 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * backing が**退役して作り直された**後の復帰（ADR 0066 決定 5 の世代識別子）。
+ * Recovery after a backing was **retired and rebuilt** (the generation identifier of ADR 0066
+ * decision 5).
  *
- * M=4（prefill 形）と M=1（decode 形）は別鍵で、予算 0 の Session では 1 本の slot backing を
- * 奪い合う（従来の容量 1 — ADR 0095 決定 1）。退役した backing の slot / 入力バッファは run の
- * 後始末で `destroy()` されるため、context 側が古い束を掴んだまま回れば**破棄済みバッファを
- * 束ねた dispatch** になる（値か例外のどちらかで必ず壊れる）。焼き直しが backing の再構築に
- * 追随していることを、値の正しさと回数の両方で押さえる。
+ * M=4 (prefill form) and M=1 (decode form) are different keys, and in a Session with budget 0 they
+ * compete for one slot backing (the former capacity of 1 — ADR 0095 decision 1). The slot / input
+ * buffers of a retired backing are `destroy()`ed in the run's cleanup, so a context side that kept
+ * an old bundle would issue **dispatches that bind destroyed buffers** (always broken, either in
+ * the values or with an exception). That re-baking follows the backing's rebuilds is pinned by both
+ * the correctness of the values and the counts.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "予算 0 では切替のたびに backing を作り直し、context 側も焼き直す（実 GPU）",
+  "with budget 0 every switch rebuilds the backing and the context side re-bakes too (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL, { planBackingBudgetBytes: 0 });
     const context = await session.createGenerationContext({ chunkLength: 4 });
     const state = newOracle(FULL, 8);
     try {
-      // 2 つの鍵をそれぞれ導出させる（ここまでは全てミス run = backing 不使用）。
-      await assertStep(session, context, FULL, 8, state, 4, 1, 0, "M=4 初回（導出）");
-      await assertStep(session, context, FULL, 8, state, 1, 1, 11, "M=1 初回（導出）");
-      assertEquals(session.diagnostics().planBacking.buildCount, 0, "ミス run が backing を作った");
+      // Derive each of the two keys (up to here every run is a miss = no backing used).
+      await assertStep(session, context, FULL, 8, state, 4, 1, 0, "M=4 first (derive)");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 11, "M=1 first (derive)");
+      assertEquals(session.diagnostics().planBacking.buildCount, 0, "a miss run built a backing");
 
-      /** 各 run 決着時の `[backing 構築回数, 焼き直し回数]`。 */
+      /** `[backing builds, re-bakes]` when each run settles. */
       const builds: [number, number][] = [];
       for (const [rows, salt] of [
         [1, 23],
@@ -1957,14 +2103,19 @@ test.skipIf(!GPU_AVAILABLE)(
         [1, 43],
         [4, 53],
       ] as const) {
-        await assertStep(session, context, FULL, 8, state, rows, 1, salt, `M=${rows} へ切替`);
-        assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
+        await assertStep(session, context, FULL, 8, state, rows, 1, salt, `switch to M=${rows}`);
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          "the recipe is not re-derived",
+        );
         const diagnostics = session.diagnostics();
         builds.push([diagnostics.planBacking.buildCount, diagnostics.stateBacking.rebindCount]);
       }
-      // 予算 0 では鍵が変わるたびに退役 → 再構築なので、context 側も毎 run 焼き直す。
-      // MUST: 焼き直し回数が backing の構築回数に追随すること — 追随しないなら、退役した
-      // backing のバッファを束ねた束が使い回されている。
+      // With budget 0 every key change retires → rebuilds, so the context side re-bakes on every
+      // run too.
+      // MUST: the re-bake count follows the backing build count — if it does not, a bundle that
+      // binds a retired backing's buffers is being reused.
       assertEquals(
         builds,
         [
@@ -1973,12 +2124,12 @@ test.skipIf(!GPU_AVAILABLE)(
           [3, 3],
           [4, 4],
         ],
-        "backing の再構築に context 側の焼き直しが追随していない",
+        "the context side's re-bakes do not follow the backing rebuilds",
       );
       assertEquals(
         session.diagnostics().planBacking.retainedCount,
         1,
-        "予算 0 で 2 本以上保持した",
+        "more than one retained with budget 0",
       );
       assertEquals(context.pastLength, 6);
     } finally {
@@ -1990,22 +2141,24 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 予算内で**保持した形**の間の行き来では焼き直しが増えない（ADR 0095 決定 3）。
+ * Going back and forth between **shapes retained** within the budget adds no re-bakes (ADR 0095
+ * decision 3).
  *
- * 束の寿命は (context, backing 実体) の組のままで、保持中の backing ごとに 1 束持つ。上の
- * 予算 0 の門と同じ往復を既定予算で回して、`rebindCount` が形ごとの初回 1 回ずつで止まること
- * を見る（生成 1 ターンの prefill ⇄ decode の切替で毎回焼き直す形が、この波で消えた点）。
+ * A bundle's lifetime is still the (context, backing object) pair, with one bundle per retained
+ * backing. The same round trips as the budget-0 check above run with the default budget, and the
+ * test checks that `rebindCount` stops at one initial bake per shape (re-baking at every
+ * prefill ⇄ decode switch within one generation turn is what this phase removed).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "予算内で保持した 2 形の往復は焼き直しを増やさない（既定予算・実 GPU）",
+  "round trips between 2 shapes retained within the budget add no re-bakes (default budget, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
     const context = await session.createGenerationContext({ chunkLength: 4 });
     const state = newOracle(FULL, 8);
     try {
-      await assertStep(session, context, FULL, 8, state, 4, 1, 0, "M=4 初回（導出）");
-      await assertStep(session, context, FULL, 8, state, 1, 1, 11, "M=1 初回（導出）");
+      await assertStep(session, context, FULL, 8, state, 4, 1, 0, "M=4 first (derive)");
+      await assertStep(session, context, FULL, 8, state, 1, 1, 11, "M=1 first (derive)");
 
       const builds: [number, number][] = [];
       for (const [rows, salt] of [
@@ -2016,14 +2169,18 @@ test.skipIf(!GPU_AVAILABLE)(
         [1, 61],
         [4, 71],
       ] as const) {
-        await assertStep(session, context, FULL, 8, state, rows, 1, salt, `M=${rows} へ切替`);
-        assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
+        await assertStep(session, context, FULL, 8, state, rows, 1, salt, `switch to M=${rows}`);
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          "the recipe is not re-derived",
+        );
         const diagnostics = session.diagnostics();
         builds.push([diagnostics.planBacking.buildCount, diagnostics.stateBacking.rebindCount]);
       }
-      // 3 往復しても構築は形ごとに 1 回・焼き直しも形ごとに 1 回で止まる。値の正しさは
-      // 各 step の突合（`assertStep`）が持つので、「焼き直さないまま別の形の実体を束ねている」
-      // 形はここが緑でも値で落ちる。
+      // Even after 3 round trips, builds stop at one per shape and re-bakes at one per shape. The
+      // correctness of the values is held by each step's comparison (`assertStep`), so "binding
+      // another shape's buffers without re-baking" fails on the values even if this is green.
       assertEquals(
         builds,
         [
@@ -2034,9 +2191,13 @@ test.skipIf(!GPU_AVAILABLE)(
           [2, 2],
           [2, 2],
         ],
-        "保持した形の往復で backing の作り直し / 焼き直しが起きている",
+        "round trips between retained shapes rebuild the backing / re-bake",
       );
-      assertEquals(session.diagnostics().planBacking.retainedCount, 2, "2 形が保持されていない");
+      assertEquals(
+        session.diagnostics().planBacking.retainedCount,
+        2,
+        "the 2 shapes are not retained",
+      );
       assertEquals(context.pastLength, 8);
     } finally {
       await context.dispose();
@@ -2046,18 +2207,22 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** backing 1 本ぶんの実測（領域 = `residentBytes` / 所有する入力バッファ = `inputBytes`）。 */
+/**
+ * The measurements of one backing (region = `residentBytes` / owned input buffers =
+ * `inputBytes`).
+ */
 type Measured = { readonly residentBytes: number; readonly inputBytes: number };
 
 /**
- * 予算が勘定する量（`#evictBackingsFor` と同じ算式 — 領域と所有入力バッファの両方）。
- * 領域だけで組むと、入力バッファのぶんだけ実際の勘定が予算を上回り、「予算ちょうど」の
- * つもりの Session が最初から超過側（= 常に全退役）で回る。
+ * The amount the budget accounts for (the same formula as `#evictBackingsFor` — both the region
+ * and the owned input buffers). Building it from the region alone would put the real accounting
+ * above the budget by the input buffers, and a Session meant to be "exactly at budget" would run
+ * over budget from the start (= always retiring everything).
  */
 const accountedBytes = (measured: readonly Measured[]): number =>
   measured.reduce((total, one) => total + one.residentBytes + one.inputBytes, 0);
 
-/** 保持集合が `retained` のときの診断（**全欄** — 部分一致に逃げない）。 */
+/** The diagnostics when the retained set is `retained` (**every field** — no partial match). */
 const expectStats = (retained: readonly Measured[], buildCount: number): PlanBackingStats => ({
   residentBytes: retained.reduce((total, one) => total + one.residentBytes, 0),
   inputBytes: retained.reduce((total, one) => total + one.inputBytes, 0),
@@ -2066,9 +2231,10 @@ const expectStats = (retained: readonly Measured[], buildCount: number): PlanBac
 });
 
 /**
- * 形（M=`rows`）1 本ぶんの slot backing のバイト数を、**その形だけを回した別 Session** で
- * 測る（予算の門をこの実測から組むのは `gpu_plan_backing_test.ts` の同名 helper と同じ理由 —
- * 定数で書くと slot 表の詰め方が変わったときに「予算ちょうど」の意味が黙ってずれる）。
+ * Measures the slot backing bytes of one shape (M=`rows`) with **a separate Session that runs only
+ * that shape** (the budget checks are built from this measurement for the same reason as the helper
+ * of the same name in `gpu_plan_backing_test.ts` — with a constant, "exactly at budget" would
+ * silently shift its meaning when the slot table's packing changes).
  */
 const stateBackingBytes = async (
   gpu: GpuContext,
@@ -2080,14 +2246,22 @@ const stateBackingBytes = async (
   const context = await session.createGenerationContext(spec);
   try {
     const inputs = stepInputs(model, rows, 0);
-    // 1 run 目 = ミス（導出）/ 2 run 目 = ヒット（backing の構築）。
+    // 1st run = miss (derive) / 2nd run = hit (build the backing).
     await runStep(session, context, model, inputs, rows, 1);
     await runStep(session, context, model, inputs, rows, 1);
     const stats = session.diagnostics().planBacking;
-    assertEquals(stats.retainedCount, 1, `M=${rows} を 1 形だけ回した Session の保持が 1 本でない`);
-    assert(stats.residentBytes > 0, `M=${rows} の backing が 0 バイト（門が空振る）`);
-    // q / k / v は常駐でない `Tensor` なので、そのバッファは backing 所有 = 予算の勘定に入る。
-    assert(stats.inputBytes > 0, `M=${rows} の所有入力バッファが 0 バイト（予算が勘定していない）`);
+    assertEquals(
+      stats.retainedCount,
+      1,
+      `a Session that ran only the M=${rows} shape does not retain exactly one`,
+    );
+    assert(stats.residentBytes > 0, `the M=${rows} backing is 0 bytes (the check would miss)`);
+    // q / k / v are non-resident `Tensor`s, so their buffers are owned by the backing = counted in
+    // the budget.
+    assert(
+      stats.inputBytes > 0,
+      `the owned input buffers of M=${rows} are 0 bytes (the budget does not account for them)`,
+    );
     return { residentBytes: stats.residentBytes, inputBytes: stats.inputBytes };
   } finally {
     await context.dispose();
@@ -2095,35 +2269,44 @@ const stateBackingBytes = async (
   }
 };
 
-/** 予算の門で使う形（capacity は往復 10 step ぶんの論理長を飲む余裕を取る）。 */
+/**
+ * The shape used by the budget checks (the capacity leaves room for the logical length of 10
+ * round-trip steps).
+ */
 const BUDGET_MODEL: StateModel = { heads: 4, kvHeads: 4, depth: 4, capacity: 32 };
-/** M ∈ {1, 2, 4} の 3 形を 1 つの context から出す指定（バケットは ADR 0066 追記〈バケット〉）。 */
+/**
+ * The spec that issues the 3 shapes M ∈ {1, 2, 4} from one context (buckets: the ADR 0066
+ * addendum on buckets).
+ */
 const BUDGET_SPEC = { chunkLength: 4, chunkBuckets: [2] } as const;
 
 /**
- * **退役 → 再構築で焼き直しが 1 回増える**（= 退役と同時に束を捨てている — ADR 0095 決定 3 の MUST）。
+ * **Retire → rebuild adds exactly one re-bake** (= the bundle is dropped together with the
+ * retirement — the MUST of ADR 0095 decision 3).
  *
- * 予算を 2 形（M=4 + M=1）ちょうどに絞り、3 形目（M=2）を入れて最古の M=4 を 1 本だけ
- * 退役させる。見るのは 2 つ:
- * ①退役した backing の世代の束が context から**消えている**（`bakedGroups` が undefined）—
- * 捨てないと、破棄済みバッファを束ねた group が context の参照ぶんだけ生き残る ②戻った run が
- * 焼き直しを 1 回増やす。保持したままの形の束は残っている（①が「全部捨てる」ではないことの対）。
+ * The budget is narrowed to exactly 2 shapes (M=4 + M=1), and a 3rd shape (M=2) retires just the
+ * oldest, M=4. Two things are checked:
+ * ① the bundle of the retired backing's generation is **gone** from the context (`bakedGroups` is
+ * undefined) — not dropping it would keep groups that bind destroyed buffers alive as long as the
+ * context refers to them ② the run that comes back adds one re-bake. The bundles of the shapes
+ * still retained remain (the counterpart showing ① is not "drop everything").
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "退役した backing の束は捨てられ、戻った run で 1 回だけ焼き直す（実 GPU）",
+  "the bundle of a retired backing is dropped, and the run that comes back re-bakes exactly once (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const wide = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 4);
     const decode = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 1);
     const mid = await stateBackingBytes(gpu, BUDGET_MODEL, BUDGET_SPEC, 2);
-    // 予算 = M=4 + M=1 に対し、最古（M=4）を 1 本退役させれば M=2 が必ず収まる条件
-    // （`M=1 + M=2 ≤ M=4 + M=1` ⟺ `M=2 ≤ M=4`）。崩れると退役が 2 本に及んで、見ているのが
-    // 「最古 1 本の退役」ではなくなる。比べるのは予算が勘定する量（領域 + 所有入力）。
+    // With budget = M=4 + M=1, the condition for M=2 to always fit after retiring the oldest
+    // (M=4) is `M=1 + M=2 ≤ M=4 + M=1` ⟺ `M=2 ≤ M=4`. If it broke, two would be retired and the
+    // test would no longer be looking at "retiring the single oldest". What is compared is the
+    // amount the budget accounts for (region + owned inputs).
     assert(
       accountedBytes([mid]) <= accountedBytes([wide]),
-      `M=2 の実測 ${JSON.stringify(mid)} が M=4 の ${JSON.stringify(
+      `the measurement of M=2 ${JSON.stringify(mid)} is not at most M=4's ${JSON.stringify(
         wide,
-      )} 以下でない（門が空振る）`,
+      )} (the check would miss)`,
     );
 
     const session = await stateSession(gpu, BUDGET_MODEL, {
@@ -2132,7 +2315,10 @@ test.skipIf(!GPU_AVAILABLE)(
     const context = await session.createGenerationContext(BUDGET_SPEC);
     const state = newOracle(BUDGET_MODEL, BUDGET_MODEL.capacity as number);
     const capacity = BUDGET_MODEL.capacity as number;
-    /** 焼いた束の世代識別子（`#generationGroups` が預ける token を順に拾う）。 */
+    /**
+     * The generation identifiers of the baked bundles (collects, in order, the tokens
+     * `#generationGroups` hands over).
+     */
     const tokens: number[] = [];
     const inner = internals(context);
     // oxlint-disable-next-line typescript/unbound-method -- internals are arrow-function properties (no `this`)
@@ -2142,7 +2328,8 @@ test.skipIf(!GPU_AVAILABLE)(
       setBaked(token, groups);
     };
     try {
-      // M=4 と M=1 を 2 本ずつ回して両方を保持させる（1 本目は導出 = backing 不使用）。
+      // Run M=4 and M=1 twice each so both are retained (the first is a derivation = no backing
+      // used).
       for (const [rows, salt] of [
         [4, 0],
         [4, 7],
@@ -2164,48 +2351,76 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         session.diagnostics().planBacking,
         expectStats([wide, decode], 2),
-        "予算ちょうどの 2 形が保持されていない",
+        "the 2 shapes exactly at budget are not retained",
       );
-      assertEquals(tokens.length, 2, "焼き直しが形ごとに 1 回で収まっていない");
+      assertEquals(tokens.length, 2, "re-bakes do not stay at one per shape");
       const [wideToken, decodeToken] = tokens;
 
-      // M=1 を触り直しても焼き直しは増えない（束が生きている）。LRU の順は [M=4, M=1] のまま。
-      await assertStep(session, context, BUDGET_MODEL, capacity, state, 1, 1, 23, "M=1 触り直し");
-      assertEquals(session.diagnostics().stateBacking.rebindCount, 2, "保持中の形を焼き直した");
+      // Touching M=1 again adds no re-bake (the bundle is alive). The LRU order stays [M=4, M=1].
+      await assertStep(
+        session,
+        context,
+        BUDGET_MODEL,
+        capacity,
+        state,
+        1,
+        1,
+        23,
+        "M=1 touched again",
+      );
+      assertEquals(
+        session.diagnostics().stateBacking.rebindCount,
+        2,
+        "a retained shape was re-baked",
+      );
 
-      // 3 形目（M=2 のバケット形）。予算ちょうどなので最古の M=4 が 1 本だけ退役する。
+      // The 3rd shape (the M=2 bucket form). The budget is exact, so only the oldest, M=4, is
+      // retired.
       for (const salt of [29, 31]) {
         await assertStep(session, context, BUDGET_MODEL, capacity, state, 2, 1, salt, "M=2");
       }
       assertEquals(
         session.diagnostics().planBacking,
         expectStats([decode, mid], 3),
-        "退役したのが最古（M=4）1 本ではない",
+        "what was retired is not just the oldest (M=4)",
       );
-      // 3 形目そのものの焼き込みが 1 回（保持中の M=1 は焼き直さない）。
+      // The 3rd shape itself is baked once (the retained M=1 is not re-baked).
       assertEquals(
         session.diagnostics().stateBacking.rebindCount,
         3,
-        "3 形目の焼き込みが 1 回でない",
+        "the 3rd shape was not baked exactly once",
       );
-      // ① 退役した世代の束は context から消えている（捨てなければ実体の寿命が延びる）。
+      // ① The bundle of the retired generation is gone from the context (not dropping it would
+      // extend the buffers' lifetime).
       assertEquals(
         inner.bakedGroups(wideToken),
         undefined,
-        "退役した backing の束が context に残っている（破棄済みバッファを束ねた group が生き残る）",
+        "the bundle of the retired backing remains in the context (groups that bind destroyed buffers survive)",
       );
       assert(
         inner.bakedGroups(decodeToken) !== undefined,
-        "保持中の backing の束まで捨てている（往復のたびに焼き直す形へ戻る）",
+        "the bundles of retained backings are dropped too (back to re-baking on every round trip)",
       );
 
-      // ② 戻った run は作り直し + 焼き直しをちょうど 1 回ずつ増やす。
-      await assertStep(session, context, BUDGET_MODEL, capacity, state, 4, 1, 37, "M=4 へ復帰");
-      assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "レシピは再導出しない");
-      assertEquals(session.diagnostics().planBacking.buildCount, 4, "退役した形を作り直していない");
-      assertEquals(session.diagnostics().stateBacking.rebindCount, 4, "復帰で焼き直していない");
+      // ② The run that comes back adds exactly one rebuild + one re-bake.
+      await assertStep(session, context, BUDGET_MODEL, capacity, state, 4, 1, 37, "back to M=4");
+      assertEquals(
+        session.diagnostics().lastRunPrepared?.hit,
+        true,
+        "the recipe is not re-derived",
+      );
+      assertEquals(
+        session.diagnostics().planBacking.buildCount,
+        4,
+        "the retired shape was not rebuilt",
+      );
+      assertEquals(
+        session.diagnostics().stateBacking.rebindCount,
+        4,
+        "coming back did not re-bake",
+      );
       assertEquals(tokens.length, 4);
-      assert(tokens[3] !== wideToken, "作り直した backing が同じ世代識別子を名乗っている");
+      assert(tokens[3] !== wideToken, "the rebuilt backing claims the same generation identifier");
     } finally {
       inner.setBakedGroups = setBaked;
       await context.dispose();
@@ -2216,15 +2431,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **故障注入** — 切替 A/B（上）が空振りでないことの実証。
+ * **Fault injection** — the proof that switching A/B (above) does not miss.
  *
- * context B の焼き込み束を **A のもの**で差し替える = state を含む bind group を context 跨ぎで
- * 共有した実装（波 D-3 の DECIDED が名指ししていた「前の context の KV を束ねたまま回る」形）を
- * 再現する。A / B は同容量なのでバッファの大きさは 1 バイトも違わず、**validation は通って値だけが
- * 静かに変わる** — この突合が落ちなければ、切替 A/B の parity は何も守っていない。
+ * Context B's baked bundle is replaced with **A's** = it reproduces an implementation that shares
+ * the bind groups containing state across contexts (the shape phase D-3's DECIDED named: "keeps
+ * running with the previous context's KV bound"). A / B have the same capacity, so the buffer
+ * sizes do not differ by a single byte, and **validation passes while only the values quietly
+ * change** — if this comparison did not fail, the parity of switching A/B would protect nothing.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "context 側の束を取り違えると出力が前の context の KV を読む（故障注入・実 GPU）",
+  "mixing up the context-side bundle makes the output read the previous context's KV (fault injection, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, FULL);
@@ -2233,8 +2449,8 @@ test.skipIf(!GPU_AVAILABLE)(
     const stateA = newOracle(FULL, 8);
     const stateB = newOracle(FULL, 8);
     try {
-      // 焼き込みが起きるのはヒット run からなので、A を backed まで温めてから束を横取りする。
-      await assertStep(session, a, FULL, 8, stateA, 1, 1, 0, "A 初回（導出）");
+      // Baking starts from hit runs, so warm A up to backed before intercepting its bundle.
+      await assertStep(session, a, FULL, 8, stateA, 1, 1, 0, "A first (derive)");
       const internalsA = internals(a);
       // oxlint-disable-next-line typescript/unbound-method -- internals are arrow-function properties (no `this`)
       const setBaked = internalsA.setBakedGroups;
@@ -2244,9 +2460,13 @@ test.skipIf(!GPU_AVAILABLE)(
         setBaked(token, groups);
       };
       await assertStep(session, a, FULL, 8, stateA, 1, 1, 13, "A backed");
-      assert(stolen !== undefined, "A の context 側 bind group が焼かれていない（注入が空振り）");
+      assert(
+        stolen !== undefined,
+        "A's context-side bind groups were not baked (the injection would miss)",
+      );
 
-      // 注入: B は自分の束の代わりに A の束（A の KV スロットと A の論理長 uniform）を使う。
+      // Injection: B uses A's bundle (A's KV slots and A's logical-length uniform) instead of its
+      // own.
       internals(b).bakedGroups = () => stolen;
       const inputs = stepInputs(FULL, 1, 77);
       const actual = await runStep(session, b, FULL, inputs, 1, 1);
@@ -2259,7 +2479,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         report.pass,
         false,
-        "A の束で走った B の run が B のオラクルと一致した（切替 A/B の突合が空振りしている）",
+        "B's run with A's bundle matched B's oracle (the comparison of switching A/B misses)",
       );
     } finally {
       for (const context of [a, b]) await context.dispose();
@@ -2270,22 +2490,23 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 席 `"parallel"`（①' の D 並列縮約 + ③' の KV 並列縮約）を **`Session.run` 経由で値まで**
- * 見る門。
+ * The check that looks at the option `"parallel"` (①''s D-parallel reduction + ③''s KV-parallel
+ * reduction) **down to the values through `Session.run`**.
  *
- * 現状 runtime の検証は「直接 dispatch の帯」（tests/gpu_state_attention_parallel_test.ts）と
- * 「executor 経由のキー検査」（上の census — `runStep` の戻りを捨てている）に割れており、
- * **その間**（レシピが ①' / ③' 用の workgroup 数・束縛・S / stats の確保を正しく組むか）は
- * 資産つきの models e2e にしか落ちていない（ミラー無しの環境では明示 SKIP される）。ここは
- * その隙間を資産なしで塞ぐ。
+ * The runtime's checks are currently split between "the band of direct dispatch"
+ * (tests/gpu_state_attention_parallel_test.ts) and "the key check through the executor" (the census
+ * above — it discards what `runStep` returns), and **what lies between them** (whether the recipe
+ * correctly builds the workgroup counts, bindings and S / stats allocations for ①' / ③') is covered
+ * only by the asset-backed models e2e (explicitly SKIPped in environments without the mirrors).
+ * This closes that gap without assets.
  *
- * MUST: ビット同一は要求しない（参照経路と ①' / ③' は縮約順が違う — 形が小さいと差が出ない
- * だけで、
- * 一致を契約にすると別の主張になる）。見るのは「オラクルと帯で一致」と「席をまたいでも
- * 同じ帯に収まる」の 2 点。
+ * MUST: bit identity is not required (the reference path and ①' / ③' reduce in a different order —
+ * small shapes just happen to show no difference,
+ * and making a match the contract would be a different claim). Two things are checked: "matches
+ * the oracle within the band" and "stays in the same band across the options".
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "stateAttentionReduce:'parallel' は Session.run 経由でも参照鎖と一致する（実 GPU）",
+  "stateAttentionReduce:'parallel' matches the reference chain through Session.run too (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const parallel = await stateSession(gpu, GQA, { stateAttentionReduce: "parallel" });
@@ -2294,7 +2515,7 @@ test.skipIf(!GPU_AVAILABLE)(
     const sequentialContext = await sequential.createGenerationContext({ chunkLength: 4 });
     const state = newOracle(GQA, 8);
     try {
-      // prefill（M=4 / Q=4）→ decode ×3（M=1 / Q=1）。salt は step ごとに変える
+      // Prefill (M=4 / Q=4) → decode ×3 (M=1 / Q=1). The salt changes per step
       for (const [chunkRows, query, salt, label] of [
         [4, 4, 2, "prefill"],
         [1, 1, 17, "decode 1"],
@@ -2312,31 +2533,32 @@ test.skipIf(!GPU_AVAILABLE)(
           query,
         );
         const expected = advanceOracle(GQA, 8, state, inputs, chunkRows, query);
-        // 恒真化の門: 期待出力が自明でない（両側が全 0 なら突合は何も見ていない）
+        // The anti-tautology check: the expected output is not trivial (if both sides are all 0
+        // the comparison sees nothing)
         assert(
           expected.some((value) => Math.abs(value) > 1e-3),
-          `${label}: 期待出力が自明（全 ~0）`,
+          `${label}: the expected output is trivial (all ~0)`,
         );
-        // ① ③' が参照鎖と一致する
+        // ① ③' matches the reference chain
         const against = compareTensors(
           { dtype: "f32", data: actual },
           { dtype: "f32", data: expected },
           STATE_TOLERANCE,
         );
         assertEquals(against.pass, true, `${label} parallel: ${formatAllclose(against)}`);
-        // ② ③' と ③ が同じ帯に収まる（席の違いが値へ漏れない）
+        // ② ③' and ③ stay in the same band (the option's difference does not leak into the values)
         const cross = compareTensors(
           { dtype: "f32", data: actual },
           { dtype: "f32", data: baseline },
           STATE_TOLERANCE,
         );
         assertEquals(cross.pass, true, `${label} parallel vs sequential: ${formatAllclose(cross)}`);
-        // ③ 論理長の進行は席に依らない
-        assertEquals(parallelContext.pastLength, state.past, `${label}: parallel の pastLength`);
+        // ③ The logical length's advance does not depend on the option
+        assertEquals(parallelContext.pastLength, state.past, `${label}: pastLength of parallel`);
         assertEquals(
           sequentialContext.pastLength,
           state.past,
-          `${label}: sequential の pastLength`,
+          `${label}: pastLength of sequential`,
         );
       }
     } finally {
@@ -2349,7 +2571,10 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 融合の適用・非適用が分かれる形（`chunkRows <= 8` かつ `colCap <= 1024` が適用条件）。 */
+/**
+ * Shapes on both sides of the fusion's applicability (the condition is `chunkRows <= 8` and
+ * `colCap <= 1024`).
+ */
 const FUSION_CASES = [
   [1, 64, undefined, true],
   [8, 39, 31, true],
@@ -2359,13 +2584,15 @@ const FUSION_CASES = [
 ] as const;
 
 /**
- * 席 `"parallel-fused"`（② と ③' の融合）を `Session.run` 経由で見る門の 1 本目 = 値。
+ * The first of the checks that look at the option `"parallel-fused"` (fusing ② and ③') through
+ * `Session.run` = the values.
  *
- * NOTE: 数値一致とキー確認は別テストに割ってある（キー確認は下）。キー確認の源は計測に依らない
- * census（`lastRunPipelines`）なので、どちらも計測の無い device で走る。
+ * NOTE: the numeric match and the key check are split into separate tests (the key check is
+ * below). The key check's source is the census (`lastRunPipelines`), which does not depend on
+ * timing, so both run on a device without timing.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "parallel-fused は state 更新後も parallel と u32 一致する（実 GPU）",
+  "parallel-fused matches parallel as u32 even after state updates (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -2412,51 +2639,56 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 2 本目 = キー。適用形では融合キーが 1 本だけ立ち、非適用形では従来の ② / ③' が立つ。
+ * The second = the keys. Applicable shapes show exactly one fused key; non-applicable shapes show
+ * the usual ② / ③'.
  *
- * NOTE: 融合の採否はレシピ構築時に `chunkRows` と `colCap` だけで決まるので、1 step 走らせれば
- * 立つキーは出揃う（値の進行は上のテストが見る）。
+ * NOTE: whether the fusion applies is decided when the recipe is built, from `chunkRows` and
+ * `colCap` alone, so one step is enough for all keys to appear (the advance of the values is
+ * checked by the test above).
  */
-test.skipIf(!GPU_AVAILABLE)("parallel-fused は適用形だけstats/PVをまとめる（実 GPU）", async () => {
-  const gpu = await acquireGpu();
-  try {
-    for (const [chunkRows, capacity, window, expectedFusion] of FUSION_CASES) {
-      const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
-      const session = await stateSession(gpu, model, {
-        stateAttentionReduce: "parallel-fused",
-      });
-      const context = await session.createGenerationContext({ chunkLength: chunkRows });
-      try {
-        await runStep(
-          session,
-          context,
-          model,
-          stepInputs(model, chunkRows, 13),
-          chunkRows,
-          chunkRows,
-        );
-        const entries = requireCensus(
-          session.diagnostics().lastRunPipelines,
-          `M=${chunkRows} cap=${capacity}`,
-        );
-        assertEquals(
-          countDispatches(entries, SEAT_SIGNATURES.stateAttentionReduce["parallel-fused"]) > 0,
-          expectedFusion,
-        );
-        assertEquals(
-          entries.some((e) => e.key.startsWith("attention_state_stats:")),
-          !expectedFusion,
-        );
-        assertEquals(
-          entries.some((e) => e.key.startsWith("attention_state_pv:")),
-          !expectedFusion,
-        );
-      } finally {
-        await context.dispose();
-        await session.dispose();
+test.skipIf(!GPU_AVAILABLE)(
+  "parallel-fused merges stats/PV only for applicable shapes (real GPU)",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const [chunkRows, capacity, window, expectedFusion] of FUSION_CASES) {
+        const model: StateModel = { heads: 4, kvHeads: 1, depth: 17, capacity, window };
+        const session = await stateSession(gpu, model, {
+          stateAttentionReduce: "parallel-fused",
+        });
+        const context = await session.createGenerationContext({ chunkLength: chunkRows });
+        try {
+          await runStep(
+            session,
+            context,
+            model,
+            stepInputs(model, chunkRows, 13),
+            chunkRows,
+            chunkRows,
+          );
+          const entries = requireCensus(
+            session.diagnostics().lastRunPipelines,
+            `M=${chunkRows} cap=${capacity}`,
+          );
+          assertEquals(
+            countDispatches(entries, SEAT_SIGNATURES.stateAttentionReduce["parallel-fused"]) > 0,
+            expectedFusion,
+          );
+          assertEquals(
+            entries.some((e) => e.key.startsWith("attention_state_stats:")),
+            !expectedFusion,
+          );
+          assertEquals(
+            entries.some((e) => e.key.startsWith("attention_state_pv:")),
+            !expectedFusion,
+          );
+        } finally {
+          await context.dispose();
+          await session.dispose();
+        }
       }
+    } finally {
+      gpu.destroy();
     }
-  } finally {
-    gpu.destroy();
-  }
-});
+  },
+);

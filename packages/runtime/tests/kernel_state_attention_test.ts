@@ -1,10 +1,13 @@
-// states 形 attention 3 カーネル + `state_append`（ADR 0067 決定 4〜7）の**GPU を要らない面**:
-// キーの変種ビット・生成の決定性・読み書き同式の共有・params の値域門・dispatch 幾何の純関数・
-// CPU 参照の意味論。実 GPU との突合は gpu_state_attention_test.ts。
+// The **GPU-free surface** of the three states-form attention kernels + `state_append` (ADR 0067
+// decisions 4 to 7): the variant bits of the keys, determinism of generation, the shared read/write
+// formula, the value-range checks of params, the pure functions of dispatch geometry, and the
+// semantics of the CPU reference. The comparison with the real GPU is gpu_state_attention_test.ts.
 //
-// MUST: CPU 参照の意味論は**手計算のオラクル**で押さえる（GPU 突合だけだと、参照と GPU が
-// 同じ誤りを共有していても両方緑になる）。窓の集合が値に出る形（in-window の V を col 番号に
-// して平均を作る）で、述語の上限・下限・リング写像の 3 つが 1 つの数値に畳まれる。
+// MUST: the semantics of the CPU reference are pinned with **hand-computed oracles** (comparing
+// with the GPU alone would leave both green if the reference and the GPU shared the same mistake).
+// The probes make the window set visible in the value (V of an in-window column is its col number,
+// so the output is an average), folding the predicate's upper bound, lower bound and the ring
+// mapping into one number.
 
 import { describe, it, test } from "vite-plus/test";
 import { assertAlmostEquals, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
@@ -83,7 +86,7 @@ const VARIANTS: readonly (readonly [boolean, boolean])[] = [
   [true, true],
 ];
 
-test("states 形のキーは :sliding / :gqa の 2 ビットだけで分かれる（並び順は 1 箇所）", () => {
+test("states-form keys differ only by the two bits :sliding / :gqa (their order lives in one place)", () => {
   assertEquals(stateQkKey(false, false), "attention_state_qk:v1:f32:wg16x4");
   assertEquals(stateQkKey(true, false), "attention_state_qk:v1:f32:wg16x4:sliding");
   assertEquals(stateQkKey(false, true), "attention_state_qk:v1:f32:wg16x4:gqa");
@@ -91,8 +94,9 @@ test("states 形のキーは :sliding / :gqa の 2 ビットだけで分かれ�
   assertEquals(statePvKey(true, true), "attention_state_pv:v1:f32:wg16x4:sliding:gqa");
   assertEquals(stateStatsKey(false), "attention_state_stats:v2:f32:wg256");
   assertEquals(stateStatsKey(true), "attention_state_stats:v2:f32:wg256:sliding");
-  // 融合 ②+③'（ADR 0102）も同じ 2 ビットで分かれる。キャッシュの identity なので、
-  // 綴りが動けば「同じ形なのに別パイプライン」になる面を他の変種と同じ水準で固定する。
+  // The fused ②+③' (ADR 0102) also splits by the same two bits. This is the cache identity, so the
+  // surface where a moved spelling gives "a different pipeline for the same shape" is pinned at the
+  // same level as the other variants.
   // v2 = the unrolled PV loop (perf-ledger K-91 — the WGSL bytes changed, so the key moved).
   assertEquals(stateStatsPvKey(false, false), "attention_state_stats_pv:v2:f32:wg16x16");
   assertEquals(stateStatsPvKey(true, false), "attention_state_stats_pv:v2:f32:wg16x16:sliding");
@@ -100,12 +104,14 @@ test("states 形のキーは :sliding / :gqa の 2 ビットだけで分かれ�
   assertEquals(stateStatsPvKey(true, true), "attention_state_stats_pv:v2:f32:wg16x16:sliding:gqa");
   assertEquals(stateAppendKey(false), "state_append:v1:f32:wg256");
   assertEquals(stateAppendKey(true), "state_append:v1:f32:wg256:sliding");
-  // 幾何の定数がキーに出ている（workgroup を動かせばキーが動く = 別パイプライン）
+  // The geometry constants appear in the key (moving the workgroup moves the key = a different
+  // pipeline)
   assertEquals(STATE_ATTENTION_TILE_X, 16);
   assertEquals(STATE_ATTENTION_TILE_M, 4);
   assertEquals(STATE_STATS_WORKGROUP_SIZE, 256);
   assertEquals(STATE_APPEND_WORKGROUP_SIZE, 256);
-  // 5 族 × 変種が全て別キー（同一構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
+  // Every variant of the 5 families has its own key (one configuration does not have two keys / two
+  // configurations do not share a key)
   const keys = [
     ...VARIANTS.map(([sliding, gqa]) => stateQkKey(sliding, gqa)),
     ...VARIANTS.map(([sliding, gqa]) => statePvKey(sliding, gqa)),
@@ -118,10 +124,11 @@ test("states 形のキーは :sliding / :gqa の 2 ビットだけで分かれ�
   assertEquals(new Set(keys).size, keys.length);
 });
 
-test("readonly 形のキーは live 形と別の綴りで、states 形の全キーと衝突しない", () => {
-  // readonly は束縛が 1 本少なく、② の live の式も違う。drafter と target が同じ device の
-  // パイプラインキャッシュを共有するので、キーが live 形と衝突すると他方の WGSL が配られ、
-  // 例外なしに窓がずれる。綴りをここで固定する。
+test("readonly-form keys are spelled differently from the live form and collide with no states-form key", () => {
+  // readonly has one binding fewer, and the live formula of ② differs too. The drafter and the
+  // target share the pipeline cache of the same device, so if a key collided with the live form the
+  // other's WGSL would be handed out and the window would shift without an exception. The spelling
+  // is pinned here.
   assertEquals(
     stateQkParallelReadonlyKey(false, false),
     "attention_state_qk:v1:f32:wg16x16:par:ro",
@@ -151,26 +158,27 @@ test("readonly 形のキーは live 形と別の綴りで、states 形の全キ�
   assertEquals(new Set(keys).size, keys.length);
 });
 
-test("論理 col → スロット物理行の写像は読み（①③）と書き（state_append）で同一文字列", () => {
+test("the logical col → slot physical row mapping is the same string for reads (①③) and writes (state_append)", () => {
   for (const sliding of [false, true]) {
     const fragment = stateSlotRowWgsl(sliding);
-    // MUST: 逐語で含まれること。片方だけ別式にすると ring が一周した後の全読みが黙って
-    // 別の行を指す（ADR 0067 決定 4 の「読み書き同式 MUST」の機械証明）
+    // MUST: it is contained verbatim. If only one side used a different formula, every read after
+    // the ring wrapped around would silently point at another row (the mechanical proof of the
+    // "same formula for reads and writes MUST" of ADR 0067 decision 4)
     for (const [name, wgsl] of [
       ["qk", stateQkWgsl(sliding, false)],
       ["qk gqa", stateQkWgsl(sliding, true)],
       ["pv", statePvWgsl(sliding, false)],
       ["append", stateAppendWgsl(sliding)],
     ] as const) {
-      assertEquals(wgsl.includes(fragment), true, `${name}: slot_row の断片が共有されていない`);
+      assertEquals(wgsl.includes(fragment), true, `${name}: the slot_row fragment is not shared`);
     }
   }
-  // sliding だけが剰余を持つ（full の写像は恒等）
+  // Only sliding has the modulo (the full mapping is the identity)
   assertEquals(stateSlotRowWgsl(true).includes("col % params.capacity"), true);
   assertEquals(stateSlotRowWgsl(false).includes("%"), false);
 });
 
-test("同じ生成入力からは常に同一の WGSL が出る（states 形の決定性）", () => {
+test("the same generation input always gives the same WGSL (determinism of the states form)", () => {
   for (const [sliding, gqa] of VARIANTS) {
     assertEquals(stateQkWgsl(sliding, gqa), stateQkWgsl(sliding, gqa));
     assertEquals(statePvWgsl(sliding, gqa), statePvWgsl(sliding, gqa));
@@ -178,41 +186,45 @@ test("同じ生成入力からは常に同一の WGSL が出る（states 形の�
   for (const sliding of [false, true]) {
     assertEquals(stateStatsWgsl(sliding), stateStatsWgsl(sliding));
     assertEquals(stateAppendWgsl(sliding), stateAppendWgsl(sliding));
-    // 変種が実際に別物であること（キーだけ分けて中身が同じ = 変種が効いていない）
+    // The variants are really different (keys split but identical contents = the variant has no
+    // effect)
     assertNotEquals(stateQkWgsl(sliding, false), stateQkWgsl(sliding, true));
   }
   assertNotEquals(stateStatsWgsl(false), stateStatsWgsl(true));
   assertNotEquals(stateAppendWgsl(false), stateAppendWgsl(true));
 });
 
-test("sliding 変種は causal 上限に**下限**を AND する（上限だけの実装を文字列で拒む）", () => {
-  // ADR 0067 決定 4 の第 5 巡 high: 上限だけだと row > 0 が窓外 key を row ぶん沈黙混入する
+test("the sliding variant ANDs a **lower bound** onto the causal upper bound (rejects an upper-bound-only implementation by string)", () => {
+  // ADR 0067 decision 4, round 5 high: with only the upper bound, row > 0 silently mixes in row
+  // out-of-window keys
   assertEquals(stateQkWgsl(true, false).includes("(limit - col) < params.window"), true);
   assertEquals(stateQkWgsl(false, false).includes("(limit - col) < params.window"), false);
-  // MUST: 下限の引き算は `limit − col` の側（`col + W` は P が u32 上限近くで巻き戻り、
-  // causal 対角まで窓外にして行を静かに空にする）。短絡する `col <= limit` が先に立つので
-  // `limit − col` はアンダーフローしない
+  // MUST: the subtraction of the lower bound is on the `limit − col` side (`col + W` wraps around
+  // when P is near the u32 maximum, puts even the causal diagonal out of the window and quietly
+  // empties the row). The short-circuiting `col <= limit` comes first, so `limit − col` does not
+  // underflow
   for (const [sliding, gqa] of VARIANTS) {
     assertEquals(
       stateQkWgsl(sliding, gqa).includes("col + params.window"),
       false,
-      `sliding=${sliding} gqa=${gqa}: u32 で巻き戻る加算形が残っている`,
+      `sliding=${sliding} gqa=${gqa}: the addition form that wraps around in u32 remains`,
     );
   }
-  // 空行ガード（②）— 有限 sentinel でなく -inf identity + 分母ガードの構成
+  // Empty-row guard (②) — built from the -inf identity + a denominator guard, not a finite sentinel
   assertEquals(stateStatsWgsl(false).includes("let empty = amax == neg_inf;"), true);
   assertEquals(STATE_NEG_INF_BITS, 0xff800000);
 });
 
-test("有効行の式は ①②③ の WGSL とホストで 1 本（pad 行の扱いが 3 者で割れない）", () => {
-  // ホスト（dispatch 数）: `clamp(Q − rowOffset, 0, rowsBlock)`
-  assertEquals(stateEffectiveRows(4, 0, 1), 1, "decode は 1 行だけ");
-  assertEquals(stateEffectiveRows(4, 0, 4), 4, "pad 無しの prefill は全行");
-  assertEquals(stateEffectiveRows(4, 0, 9), 4, "Q > rowsBlock はブロックで頭打ち");
-  assertEquals(stateEffectiveRows(4, 4, 6), 2, "ブロック途中で pad が始まる形");
-  assertEquals(stateEffectiveRows(4, 4, 4), 0, "丸ごと pad のブロックは 0");
-  assertEquals(stateEffectiveRows(4, 8, 4), 0, "アンダーフローで巨大値にならない");
-  // WGSL（行範囲）: 3 カーネルとも**同一文字列**を持つ（片方だけ直す形を文字列で拒む）
+test("the effective-row formula is one for the WGSL of ①②③ and the host (pad rows are not handled differently by the three)", () => {
+  // Host (dispatch count): `clamp(Q − rowOffset, 0, rowsBlock)`
+  assertEquals(stateEffectiveRows(4, 0, 1), 1, "decode has a single row");
+  assertEquals(stateEffectiveRows(4, 0, 4), 4, "prefill without pad has every row");
+  assertEquals(stateEffectiveRows(4, 0, 9), 4, "Q > rowsBlock is capped at the block");
+  assertEquals(stateEffectiveRows(4, 4, 6), 2, "pad starts in the middle of the block");
+  assertEquals(stateEffectiveRows(4, 4, 4), 0, "a block that is entirely pad is 0");
+  assertEquals(stateEffectiveRows(4, 8, 4), 0, "underflow does not give a huge value");
+  // WGSL (row range): all three kernels contain **the same string** (rejects fixing only one side
+  // by string)
   const fragment = "fn effective_rows(query: u32) -> u32 {";
   for (const [sliding, gqa] of VARIANTS) {
     assertEquals(stateQkWgsl(sliding, gqa).includes(fragment), true, "qk");
@@ -221,34 +233,35 @@ test("有効行の式は ①②③ の WGSL とホストで 1 本（pad 行の�
   for (const sliding of [false, true]) {
     assertEquals(stateStatsWgsl(sliding).includes(fragment), true, "stats");
   }
-  // ③PV は pad 行を **0 で書いて返す**（full-write を保ったまま live を走査しない）
+  // ③PV **writes 0 and returns** for pad rows (keeps full-write without scanning live)
   assertEquals(statePvWgsl(false, false).includes("out[at] = 0.0;"), true);
 });
 
-test("KV 並列縮約の PV 3 変種は pad 行の 0 を lane 0 だけが書く（同じ要素への同期なし書き込みを拒む）", () => {
-  // 1 workgroup の KV_LANES 本は同じ `out[at]` を指す。lane のガード無しで全レーンが 0 を書くと、
-  // 値が同じでも WGSL のメモリモデルではデータ競合になる — 出力の値比較では検出できないので
-  // 生成文字列の pad 分岐の中身で縛る（通常行の書き込みと同じガードに揃っていること）。
+test("the three PV variants of the KV parallel reduction write the pad rows' 0 from lane 0 only (rejects unsynchronised writes to the same element)", () => {
+  // The KV_LANES lanes of one workgroup point at the same `out[at]`. If every lane wrote 0 without
+  // a lane guard, that is a data race in the WGSL memory model even though the value is the same —
+  // comparing output values cannot detect it, so it is bound by the contents of the pad branch in
+  // the generated string (the same guard as the write of a regular row).
   const padBranch = (wgsl: string): string => {
     const start = wgsl.indexOf("if (local_row >= effective_rows(lengths.query)) {");
-    assertNotEquals(start, -1, "pad 分岐が見つからない");
+    assertNotEquals(start, -1, "the pad branch was not found");
     return wgsl.slice(start, wgsl.indexOf("return;", start));
   };
   for (const [sliding, gqa] of VARIANTS) {
     for (const [name, wgsl] of [
       ["③'", statePvParallelWgsl(sliding, gqa)],
       ["③' readonly", statePvParallelReadonlyWgsl(sliding, gqa)],
-      ["②③ 融合", stateStatsPvWgsl(sliding, gqa)],
+      ["②③ fused", stateStatsPvWgsl(sliding, gqa)],
     ] as const) {
       const where = `${name} sliding=${sliding} gqa=${gqa}`;
       const branch = padBranch(wgsl);
-      assertEquals(branch.includes("out[at] = 0.0;"), true, `${where}: pad 行の 0 書き`);
+      assertEquals(branch.includes("out[at] = 0.0;"), true, `${where}: the pad rows' 0 write`);
       assertEquals(
         branch.includes("if (lane == 0u && in_depth) {"),
         true,
-        `${where}: lane 0 ガード`,
+        `${where}: the lane 0 guard`,
       );
-      assertEquals(branch.includes("if (in_depth) {"), false, `${where}: lane 無しのガード`);
+      assertEquals(branch.includes("if (in_depth) {"), false, `${where}: a guard without the lane`);
     }
   }
 });
@@ -265,27 +278,29 @@ const GEOMETRY = {
   scale: 0.5,
 };
 
-test("①③ の params は語順どおりに詰まる（同じ幾何を 2 つの表で持たない）", () => {
+test("the params of ①③ are packed in word order (the same geometry is not held in two tables)", () => {
   const params = stateAttentionParams({ ...GEOMETRY, rowOffset: 4 });
-  assertEquals(params.length, 12, "uniform struct の整列で 48 バイト");
+  assertEquals(params.length, 12, "48 bytes with uniform struct alignment");
   assertEquals([...params.subarray(0, 9)], [4, 4, 8, 6, 2, 0, 32, 32, STATE_NEG_INF_BITS]);
   assertEquals(new Float32Array(params.buffer)[9], 0.5);
-  // ② は別 struct（batch_heads / rows_block / row_offset / col_cap / window / neg_inf の 6 語）
+  // ② has a separate struct (6 words: batch_heads / rows_block / row_offset / col_cap / window /
+  // neg_inf)
   const stats = stateStatsParams(6, 4, 4, 32, 0);
-  assertEquals(stats.length, 8, "uniform struct の整列で 32 バイト");
+  assertEquals(stats.length, 8, "32 bytes with uniform struct alignment");
   assertEquals([...stats.subarray(0, 6)], [6, 4, 4, 32, 0, STATE_NEG_INF_BITS]);
 });
 
-test("①③ の params 門が沈黙誤値になる幾何を全て拒否する", () => {
-  // r = 0（WGSL の u32 ゼロ除算は trap せず実装依存値 = kv 平面が化ける）
+test("the params check of ①③ rejects every geometry that would give a silent wrong value", () => {
+  // r = 0 (a u32 division by zero in WGSL does not trap but gives an implementation-defined value =
+  // the kv plane goes wrong)
   assertThrows(() => stateAttentionParams({ ...GEOMETRY, kvRepeat: 0 }), CodegenError, "kv_repeat");
-  // 行ブロックが chunk からはみ出す（q / O の行が別のバッチへ回り込む）
+  // The row block overflows the chunk (rows of q / O wrap into another batch)
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
     CodegenError,
     "row block",
   );
-  // full: col_cap < C（P + Q ≤ C の context 側検査を通った形が S からはみ出す）
+  // full: col_cap < C (a shape that passed the context-side check P + Q ≤ C overflows S)
   assertThrows(() => stateAttentionParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
   // sliding: W > C
   assertThrows(
@@ -300,13 +315,14 @@ test("①③ の params 門が沈黙誤値になる幾何を全て拒否する",
     "col_cap",
   );
   assertEquals(stateAttentionParams({ ...GEOMETRY, window: 8, colCap: 15 }).length, 12);
-  // 非有限 scale / u32 域外
+  // Non-finite scale / outside the u32 range
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, scale: Number.NaN }),
     CodegenError,
     "scale",
   );
-  // MUST: 有限判定は f32 として（f64 で有限な 1e39 は f32 語で +Inf になり、`0 * Inf = NaN`）
+  // MUST: finiteness is judged as f32 (1e39, finite in f64, becomes +Inf as an f32 word, and `0 *
+  // Inf = NaN`)
   assertThrows(
     () => stateAttentionParams({ ...GEOMETRY, scale: 1e39 }),
     CodegenError,
@@ -315,15 +331,17 @@ test("①③ の params 門が沈黙誤値になる幾何を全て拒否する",
   assertThrows(() => stateAttentionParams({ ...GEOMETRY, depth: 2 ** 32 }), CodegenError, "depth");
   assertThrows(() => stateStatsParams(0, 4, 0, 32, 0), CodegenError, "batch_heads");
   assertThrows(() => stateStatsParams(6, 0, 0, 32, 0), CodegenError, "rows_block");
-  // ② も sliding の値域門を持つ（②は sliding フラグを別引数で受けないので col_cap との
-  // 関係式 W ≤ col_cap で見る — 破れると live が col_cap を跨いで隣接行の S を食う）
+  // ② also has the sliding value-range check (② does not take the sliding flag as a separate
+  // argument, so it checks the relation W ≤ col_cap — if broken, live crosses col_cap and eats S of
+  // the adjacent row)
   assertThrows(() => stateStatsParams(6, 4, 0, 8, 9), CodegenError, "col_cap");
   assertEquals(stateStatsParams(6, 4, 0, 8, 8).length, 8);
-  // full（window = 0）は ② の関係式の対象外（上限は ①③ 側の C 検査が持つ）
+  // full (window = 0) is outside ②'s relation (the upper bound is held by the C check on the ①③
+  // side)
   assertEquals(stateStatsParams(6, 4, 0, 8, 0).length, 8);
 });
 
-test("state_append の params 門（容量・正整数・u32 域）", () => {
+test("the params check of state_append (capacity, positive integers, u32 range)", () => {
   const base = { kvPlanes: 2, chunkRows: 4, depth: 3, capacity: 16, window: 0 };
   assertEquals([...stateAppendParams(base)], [2, 4, 3, 16, 0, 0, 0, 0]);
   assertEquals([...stateAppendParams({ ...base, window: 8 }).subarray(0, 5)], [2, 4, 3, 16, 8]);
@@ -335,60 +353,65 @@ test("state_append の params 門（容量・正整数・u32 域）", () => {
 const DISPATCH = { batchHeads: 6, rowsBlock: 4, rowOffset: 0, depth: 32, window: 0 };
 const LIMIT = 65535;
 
-test("dispatch 幾何は live 列に比例し、容量には依らない（ADR 0066 決定 3 の機構）", () => {
-  // ①QK の x 軸 = ⌈live / 16⌉。full は P に比例して伸びる
+test("the dispatch geometry is proportional to the live columns and independent of capacity (the mechanism of ADR 0066 decision 3)", () => {
+  // The x axis of ①QK = ⌈live / 16⌉. full grows in proportion to P
   assertEquals(stateQkWorkgroups(DISPATCH, 0, 16, LIMIT, "t")[0], 1);
   assertEquals(stateQkWorkgroups(DISPATCH, 16, 16, LIMIT, "t")[0], 2);
   assertEquals(stateQkWorkgroups(DISPATCH, 1008, 16, LIMIT, "t")[0], 64);
-  // 単調（P にも Q にも減らない）
+  // Monotonic (does not decrease with P or with Q)
   let previous = 0;
   for (const past of [0, 1, 7, 64, 512, 4096]) {
     const groups = stateQkWorkgroups(DISPATCH, past, 1, LIMIT, "t")[0];
-    assertEquals(groups >= previous, true, `past=${past} で単調でない`);
+    assertEquals(groups >= previous, true, `not monotonic at past=${past}`);
     previous = groups;
   }
-  // sliding は W で**頭打ち**（P を 8 倍しても live は (W−1)+Q のまま）
+  // sliding is **capped** at W (multiplying P by 8 keeps live at (W−1)+Q)
   const sliding = { ...DISPATCH, window: 64 };
   const cap = stateQkWorkgroups(sliding, 63, 16, LIMIT, "t")[0];
   assertEquals(stateQkWorkgroups(sliding, 512, 16, LIMIT, "t")[0], cap);
   assertEquals(stateQkWorkgroups(sliding, 131072, 16, LIMIT, "t")[0], cap);
-  // z 軸は静的幾何そのもの（行軸は下の仕事量門が見る）
+  // The z axis is the static geometry itself (the row axis is checked by the workload check below)
   assertEquals(stateQkWorkgroups(DISPATCH, 100, 4, LIMIT, "t")[2], 6);
-  // ③ は論理長に依らない（pad 行も書く = full-write。走査を切るのはカーネル側）
+  // ③ is independent of the logical length (it writes pad rows too = full-write; the kernel cuts
+  // the scan)
   assertEquals(statePvWorkgroups(DISPATCH, LIMIT, "t"), [2, 1, 6]);
-  // ② は grid-stride なので上限超過は**縮退**（②③ の別扱いが崩れていないこと）
+  // ② is grid-stride, so exceeding the limit **degrades** (the separate handling of ② and ③ is
+  // intact)
   assertEquals(stateStatsWorkgroups({ ...DISPATCH, batchHeads: 4096 }, 4, 100, "t"), [100, 1, 1]);
 });
 
-test("①② の行方向 dispatch は M ではなく Q に比例する（pad だけのブロックは 0）", () => {
-  // 固定 M=8 を 4 行 × 2 ブロックに割り、Q だけを動かす（容量も colCap も 1 語も動かない）
+test("the row-direction dispatch of ①② is proportional to Q, not M (a block of pad only is 0)", () => {
+  // A fixed M=8 split into 2 blocks of 4 rows, with only Q moving (neither capacity nor colCap
+  // moves a single word)
   const first = { ...DISPATCH, rowsBlock: 4, rowOffset: 0 };
   const second = { ...DISPATCH, rowsBlock: 4, rowOffset: 4 };
-  // ①QK の y 軸 = ⌈有効行 / 4⌉
-  assertEquals(stateQkWorkgroups(first, 0, 1, LIMIT, "t")[1], 1, "Q=1 は 1 タイル");
+  // The y axis of ①QK = ⌈effective rows / 4⌉
+  assertEquals(stateQkWorkgroups(first, 0, 1, LIMIT, "t")[1], 1, "Q=1 is one tile");
   assertEquals(stateQkWorkgroups(first, 0, 4, LIMIT, "t")[1], 1);
-  assertEquals(stateQkWorkgroups(second, 0, 4, LIMIT, "t")[1], 0, "pad だけのブロックは 0");
-  assertEquals(stateQkWorkgroups(second, 0, 6, LIMIT, "t")[1], 1, "半分だけ有効なブロック");
+  assertEquals(stateQkWorkgroups(second, 0, 4, LIMIT, "t")[1], 0, "a block of pad only is 0");
+  assertEquals(stateQkWorkgroups(second, 0, 6, LIMIT, "t")[1], 1, "a block that is half effective");
   assertEquals(stateQkWorkgroups(second, 0, 8, LIMIT, "t")[1], 1);
-  // ② は 1 行 = 1 workgroup なので、行数がそのまま出る（B·H = 6）
-  assertEquals(stateStatsWorkgroups(first, 1, LIMIT, "t"), [6, 1, 1], "Q=1 は 1 行 × B·H");
-  assertEquals(stateStatsWorkgroups(first, 4, LIMIT, "t"), [24, 1, 1], "Q=M は 4 行 × B·H");
-  assertEquals(stateStatsWorkgroups(second, 4, LIMIT, "t"), [0, 1, 1], "pad だけのブロックは 0");
+  // ② is 1 row = 1 workgroup, so the row count comes out as is (B·H = 6)
+  assertEquals(stateStatsWorkgroups(first, 1, LIMIT, "t"), [6, 1, 1], "Q=1 is 1 row × B·H");
+  assertEquals(stateStatsWorkgroups(first, 4, LIMIT, "t"), [24, 1, 1], "Q=M is 4 rows × B·H");
+  assertEquals(stateStatsWorkgroups(second, 4, LIMIT, "t"), [0, 1, 1], "a block of pad only is 0");
   assertEquals(stateStatsWorkgroups(second, 6, LIMIT, "t"), [12, 1, 1]);
-  // MUST: ③PV だけは M に比例したまま（pad 行も書くのが full-write 不変条件）
+  // MUST: only ③PV stays proportional to M (writing pad rows too is the full-write invariant)
   assertEquals(statePvWorkgroups(first, LIMIT, "t")[1], 1);
   assertEquals(statePvWorkgroups(second, LIMIT, "t")[1], 1);
 });
 
-test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 65536 でも同一）", () => {
-  // 型として容量欄が無いことの実測版: 同じ (P, Q) で容量だけ違う params を作っても、
-  // dispatch へ渡す幾何は 1 語も変わらない（= 容量比例の workgroup 数を書きようがない）
+test("the dispatch geometry does not take capacity C / col_cap as an argument (identical from 64 to 65536)", () => {
+  // The measured version of "the type has no capacity field": building params that differ only in
+  // capacity for the same (P, Q) changes not a single word of the geometry passed to dispatch (=
+  // there is no way to write a workgroup count proportional to capacity)
   const small = stateAttentionParams({ ...GEOMETRY, capacity: 64, colCap: 64 });
   const large = stateAttentionParams({ ...GEOMETRY, capacity: 65536, colCap: 65536 });
-  assertNotEquals([...small], [...large], "params 側では容量が動いている");
-  // 容量欄を**載せた**表を 3 族へそのまま渡す（構造的部分型で余分な欄は通る）。今は幾何が
-  // 容量を読まないので 1024 倍の差は出力に出ない — 容量が幾何に入り込んだ瞬間（列軸を
-  // ⌈C/16⌉ にする等）小 / 大がここで割れる。
+  assertNotEquals([...small], [...large], "capacity does move on the params side");
+  // A table **with** the capacity field is passed to the three families as is (structural typing
+  // lets the extra field through). Today the geometry does not read capacity, so the 1024×
+  // difference does not show in the output — the moment capacity enters the geometry (making the
+  // column axis ⌈C/16⌉, for example), small / large split here.
   const smallCapacity = { ...DISPATCH, capacity: 64, colCap: 64 };
   const largeCapacity = { ...DISPATCH, capacity: 65536, colCap: 65536 };
   for (const [past, query] of [
@@ -415,27 +438,27 @@ test("dispatch 幾何は容量 C / col_cap を引数に取らない（64 → 655
   );
   assertEquals(Object.keys(DISPATCH).includes("capacity"), false);
   assertEquals(Object.keys(DISPATCH).includes("colCap"), false);
-  assertEquals(Object.keys(DISPATCH).includes("chunkRows"), false, "M も渡らない");
+  assertEquals(Object.keys(DISPATCH).includes("chunkRows"), false, "M is not passed either");
 });
 
-test("dispatch の上限超過はタイル系が fail loudly・grid-stride 系が縮退", () => {
+test("exceeding the dispatch limit fails loudly for the tile kinds and degrades for the grid-stride kinds", () => {
   assertThrows(() => stateQkWorkgroups(DISPATCH, 100000, 1, 16, "t"), DispatchLimitError, "limit");
   assertThrows(
     () => statePvWorkgroups({ ...DISPATCH, batchHeads: 70000 }, 65535, "t"),
     DispatchLimitError,
     "limit",
   );
-  // 論理長の値域門（Q ≥ 1・u32）
+  // The value-range check of the logical length (Q ≥ 1, u32)
   assertThrows(() => stateQkWorkgroups(DISPATCH, 0, 0, LIMIT, "t"), CodegenError, "queryLength");
   assertThrows(() => stateQkWorkgroups(DISPATCH, -1, 1, LIMIT, "t"), CodegenError, "past");
 });
 
-test("state_append の dispatch は Q に比例し P には依らない", () => {
+test("the state_append dispatch is proportional to Q and independent of P", () => {
   const geometry = { kvPlanes: 4, depth: 64 };
   assertEquals(stateAppendWorkgroups(geometry, 1, LIMIT, "t"), [1, 1, 1]);
   assertEquals(stateAppendWorkgroups(geometry, 16, LIMIT, "t"), [16, 1, 1]);
   assertEquals(stateAppendWorkgroups(geometry, 64, LIMIT, "t"), [64, 1, 1]);
-  // grid-stride なので上限は縮退
+  // Grid-stride, so the limit degrades
   assertEquals(stateAppendWorkgroups(geometry, 64, 8, "t"), [8, 1, 1]);
   assertThrows(
     () => stateAppendWorkgroups(geometry, 0, LIMIT, "t"),
@@ -444,29 +467,36 @@ test("state_append の dispatch は Q に比例し P には依らない", () => 
   );
 });
 
-test("live 範囲の純関数（full は P+Q・sliding は W で頭打ち）", () => {
+test("pure functions of the live range (full is P+Q; sliding is capped at W)", () => {
   assertEquals(stateSliding(0), false);
   assertEquals(stateSliding(1), true);
   // full
   assertEquals(stateColumnBase(0, 100), 0);
   assertEquals(stateLiveColumns(0, 100, 8), 108);
-  // sliding: P < W−1 は全 past が resident
+  // sliding: with P < W−1, every past row is resident
   assertEquals(stateColumnBase(4, 2), 0);
   assertEquals(stateLiveColumns(4, 2, 1), 3);
-  // sliding: P ≥ W−1 は直前 W−1 行だけ resident（row 0 の窓が丸ごと入る境界）
+  // sliding: with P ≥ W−1, only the last W−1 rows are resident (the boundary where row 0's window
+  // fits entirely)
   assertEquals(stateColumnBase(4, 9), 6);
   assertEquals(stateLiveColumns(4, 9, 1), 4);
   assertEquals(stateLiveColumns(4, 1000, 1), 4);
 });
 
-/** D=1 の手計算オラクル用の入力（in-window の V を col 番号にすると出力が「窓の平均」になる）。 */
+/**
+ * Input for the D=1 hand-computed oracles (with V of an in-window column set to its col number, the
+ * output is "the window's average").
+ */
 const windowProbe = (options: {
   readonly window: number;
   readonly past: number;
   readonly query: number;
   readonly chunkRows: number;
   readonly capacity: number;
-  /** resident でない物理行に置く毒値（読まれたら出力が跳ねる）。 */
+  /**
+   * The poison value placed in physical rows that are not resident (the output jumps if it is
+   * read).
+   */
   readonly poison: number;
 }): StateAttentionRefInput => {
   const { window, past, query, chunkRows, capacity, poison } = options;
@@ -474,10 +504,11 @@ const windowProbe = (options: {
   const slotV = new Float32Array(capacity).fill(poison);
   const insK = new Float32Array(chunkRows);
   const insV = new Float32Array(chunkRows).fill(poison);
-  // K は全て 1（= 全 in-window 列のスコアが同値 → 重みが一様）
+  // K is all 1 (= every in-window column has the same score → uniform weights)
   slotK.fill(1);
   insK.fill(1);
-  // V(col) = col を**論理 col → 物理行**の写像で置く。resident でない物理行は poison のまま
+  // V(col) = col, placed through the **logical col → physical row** mapping. Physical rows that are
+  // not resident keep the poison
   const base = stateColumnBase(window, past);
   for (let col = base; col < past; col += 1) {
     slotV[stateSliding(window) ? col % capacity : col] = col;
@@ -502,9 +533,10 @@ const windowProbe = (options: {
   };
 };
 
-test("CPU 参照: sliding の窓は両側で切られる（手計算 — 上限だけなら値が跳ねる）", () => {
-  // W=4 / P=5 / Q=1: row 0 が見るのは col ∈ {2,3,4,5}（下限 = 5−4+1 = 2）。平均 = 3.5。
-  // 上限だけの実装なら col 0,1 相当（= 物理行 0,1 の残骸）が混ざって値が跳ねる
+test("CPU reference: the sliding window is cut on both sides (hand-computed — with only the upper bound the value jumps)", () => {
+  // W=4 / P=5 / Q=1: row 0 sees col ∈ {2,3,4,5} (lower bound = 5−4+1 = 2). Average = 3.5. An
+  // upper-bound-only implementation would mix in the equivalent of col 0,1 (= leftovers of physical
+  // rows 0,1) and the value would jump
   const probe = windowProbe({
     window: 4,
     past: 5,
@@ -518,11 +550,11 @@ test("CPU 参照: sliding の窓は両側で切られる（手計算 — 上限�
   assertAlmostEquals(out.data[0], 3.5, 1e-6);
 });
 
-test("CPU 参照: full は先頭から causal 上限まで（pad 行は厳密 0）", () => {
-  // P=3 / Q=2 / M=3: 論理 col 空間は [0, P+Q) = {0..4}（pad 行の key は**論理 col 空間に
-  // 入らない** — 足されるのは Q 本だけ）。row 0 → 上限 3 で {0,1,2,3}（平均 1.5）・
-  // row 1 → 上限 4 で {0..4}（平均 2）・row 2 は pad 行なので**厳密 0**
-  // （書かれはする = full-write だが、値は 0 に固定 — ADR 0066 追記 6 の値契約）
+test("CPU reference: full runs from the start to the causal upper bound (pad rows are exactly 0)", () => {
+  // P=3 / Q=2 / M=3: the logical col space is [0, P+Q) = {0..4} (the keys of pad rows **do not
+  // enter the logical col space** — only Q are added). Row 0 → upper bound 3, {0,1,2,3} (average
+  // 1.5); row 1 → upper bound 4, {0..4} (average 2); row 2 is a pad row, so **exactly 0** (it is
+  // written = full-write, but the value is fixed at 0 — the value contract of ADR 0066 addendum 6)
   const probe = windowProbe({
     window: 0,
     past: 3,
@@ -534,11 +566,12 @@ test("CPU 参照: full は先頭から causal 上限まで（pad 行は厳密 0�
   const out = referenceStateAttention(probe);
   assertAlmostEquals(out.data[0], 1.5, 1e-6);
   assertAlmostEquals(out.data[1], 2, 1e-6);
-  assertEquals(Object.is(out.data[2], 0), true, "pad 行は厳密 0（−0 でも NaN でもない）");
+  assertEquals(Object.is(out.data[2], 0), true, "a pad row is exactly 0 (neither −0 nor NaN)");
 });
 
-test("CPU 参照: 空行（述語を満たす col が無い pad 行）の出力は厳密 0", () => {
-  // W=2 / P=0 / Q=1 / M=3: row 2 は下限 col ≥ 1 に対し live が {0} だけ = 空行
+test("CPU reference: the output of an empty row (a pad row with no col satisfying the predicate) is exactly 0", () => {
+  // W=2 / P=0 / Q=1 / M=3: row 2 needs col ≥ 1 as its lower bound, but live is only {0} = an empty
+  // row
   const probe = windowProbe({
     window: 2,
     past: 0,
@@ -548,21 +581,24 @@ test("CPU 参照: 空行（述語を満たす col が無い pad 行）の出力�
     poison: 1e6,
   });
   const out = referenceStateAttention(probe);
-  assertEquals(Object.is(out.data[2], 0), true, "空行は厳密 0（−0 でも NaN でもない）");
-  // row 0 は col 0 だけを見る（V(0) = 0）・row 1 は col 0,1 のうち下限で col 0 が落ち…
-  // live = {0} なので row 1 も col 0 だけ（P=0 なので col 0 は ins 行 0）
+  assertEquals(Object.is(out.data[2], 0), true, "an empty row is exactly 0 (neither −0 nor NaN)");
+  // Row 0 sees only col 0 (V(0) = 0); for row 1, col 0 of cols 0,1 drops at the lower bound…
+  // live = {0}, so row 1 also sees only col 0 (P=0, so col 0 is ins row 0)
   assertAlmostEquals(out.data[0], 0, 1e-6);
 });
 
-test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓の下限の外に NaN を置いても値が変わらない）", () => {
-  // 数式 O[row] = Σ_{述語内の col} P · V(col) のとおり、述語外の V は和に入らない。live 範囲を
-  // 走って 0 × V を足す形だと、述語外の NaN が 0 × NaN でその行を NaN にする。
-  // 共通: K / q は全て 1（述語内の重みが一様）・V(col) = col・D=1。wrap 済みの古い物理行と
-  // 論理長より先の物理行にも NaN を置く（どの形でも読まれてはいけない）。
+test("CPU reference: V of columns outside the predicate is not read (NaN outside the causal upper bound / the window's lower bound does not change the value)", () => {
+  // As in the formula O[row] = Σ_{col in the predicate} P · V(col), V outside the predicate is not
+  // in the sum. A form that walks the live range adding 0 × V would turn that row into NaN through
+  // 0 × NaN of a NaN outside the predicate.
+  // Common: K / q are all 1 (uniform weights inside the predicate), V(col) = col, D=1. NaN is also
+  // placed in old physical rows that have wrapped and in physical rows past the logical length (no
+  // form may read them).
   const cases = [
     {
-      // full・P=3 / Q=2: row 0 の述語は {0..3}（平均 1.5）。col 4（ins 行 1）は上限の外
-      name: "full の causal 上限の外",
+      // full, P=3 / Q=2: row 0's predicate is {0..3} (average 1.5). col 4 (ins row 1) is outside
+      // the upper bound
+      name: "outside the full causal upper bound",
       window: 0,
       capacity: 8,
       nanColumn: 4,
@@ -570,8 +606,8 @@ test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓�
       expected: 1.5,
     },
     {
-      // W=2・C=4・P=3 / Q=2: row 0 は {2,3}（平均 2.5）。col 4 は上限の外
-      name: "sliding の causal 上限の外",
+      // W=2, C=4, P=3 / Q=2: row 0 is {2,3} (average 2.5). col 4 is outside the upper bound
+      name: "outside the sliding causal upper bound",
       window: 2,
       capacity: 4,
       nanColumn: 4,
@@ -579,8 +615,9 @@ test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓�
       expected: 2.5,
     },
     {
-      // W=2・C=4・P=3 / Q=2: row 1 は {3,4}（平均 3.5）。col 2 は窓の下限の外（row 0 は読む列）
-      name: "sliding の窓の下限の外",
+      // W=2, C=4, P=3 / Q=2: row 1 is {3,4} (average 3.5). col 2 is outside the window's lower
+      // bound (a column row 0 reads)
+      name: "outside the sliding window's lower bound",
       window: 2,
       capacity: 4,
       nanColumn: 2,
@@ -596,7 +633,7 @@ test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓�
     for (let col = 0; col < past + query; col += 1) {
       const value = col === nanColumn ? Number.NaN : col;
       if (col < past) {
-        // sliding では窓の外に出た列（col < P − W + 1）の物理行を NaN のまま残す
+        // For sliding, the physical rows of columns that left the window (col < P − W + 1) stay NaN
         if (!stateSliding(window) || col > past - window) slotV[slotRowOf(col)] = value;
       } else {
         insV[col - past] = value;
@@ -624,9 +661,10 @@ test("CPU 参照: 述語外の列の V は読まない（causal の上限・窓�
 });
 
 /**
- * GPU の走査形（live 範囲 `[stateColumnBase, +stateLiveColumns)` を走り、述語外の列にも
- * 重み 0 × V を足す）を CPU で書き下したもの。参照は論理列を全部走って述語外を飛ばすので、
- * 有限の V で両者がビット同一であることが「走査の形を変えても値は動かない」の根拠になる。
+ * The GPU's scan form (walk the live range `[stateColumnBase, +stateLiveColumns)` and add weight
+ * 0 × V for columns outside the predicate too), written out on the CPU. The reference walks every
+ * logical column and skips those outside the predicate, so the two being bit-identical for finite V
+ * is the basis for "changing the scan form does not move the value".
  */
 const liveRangeAttention = (input: StateAttentionRefInput): Float32Array<ArrayBuffer> => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = input;
@@ -681,10 +719,12 @@ const liveRangeAttention = (input: StateAttentionRefInput): Float32Array<ArrayBu
   return out;
 };
 
-test("CPU 参照: 有限の V では、live 範囲で述語外にも 0 × V を足す形とビット同一", () => {
-  // 掃引: full / sliding（容量 = 窓・窓 + 2 で wrap 済みの古い行を作る）× P × Q。全ての物理行
-  // （窓の外・論理長より先を含む）に有限の乱数を置く — 述語外の V が値に出ないことを縛る。
-  // P には u32 の上端付近も置く（論理列番号が 2^31 を超え、[0, P+Q) を 0 まで歩けない形）。
+test("CPU reference: for finite V, bit-identical to the form that adds 0 × V outside the predicate within the live range", () => {
+  // Sweep: full / sliding (capacity = window, and window + 2 to create old wrapped rows) × P × Q.
+  // Every physical row (including outside the window and past the logical length) gets a finite
+  // random value — this binds that V outside the predicate does not show in the value.
+  // P also takes values near the top of u32 (logical column numbers above 2^31, a shape where one
+  // cannot walk [0, P+Q) down to 0).
   let seed = 0x2545f491;
   const random = (): number => {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -728,14 +768,15 @@ test("CPU 参照: 有限の V では、live 範囲で述語外にも 0 × V を�
       }
     }
   }
-  // 掃引が空回りしていないこと（full は容量 12 に収まる 10 P × 3 Q・sliding は 8 容量 × 11 P × 3 Q）
+  // The sweep is not running empty (full is 10 P × 3 Q within capacity 12; sliding is 8 capacities
+  // × 11 P × 3 Q)
   assertEquals(compared, 30 + 264);
 });
 
-test("CPU 参照: GQA は kv 平面を ⌊z/r⌋ で写す（剰余写像だと値が変わる）", () => {
+test("CPU reference: GQA maps the kv plane by ⌊z/r⌋ (a modulo mapping changes the value)", () => {
   const [batch, heads, kvHeads, chunkRows, depth, capacity] = [2, 4, 2, 1, 1, 1];
   const repeat = heads / kvHeads;
-  // kv 平面ごとに違う V を置く（z=0,1 → 平面 0 / z=2,3 → 平面 1 / …）
+  // A different V per kv plane (z=0,1 → plane 0 / z=2,3 → plane 1 / …)
   const insV = Float32Array.from([10, 20, 30, 40]);
   const out = referenceStateAttention({
     batch,
@@ -754,24 +795,24 @@ test("CPU 参照: GQA は kv 平面を ⌊z/r⌋ で写す（剰余写像だと�
     slotV: new Float32Array(batch * kvHeads * capacity * depth),
     scale: 1,
   });
-  // z = b·H + h に対し ⌊z/r⌋ = b·Hkv + ⌊h/r⌋（B の項が効く形 — 剰余 z%Hkv だと b が消える）
+  // For z = b·H + h, ⌊z/r⌋ = b·Hkv + ⌊h/r⌋ (the B term matters — the modulo z%Hkv would drop b)
   for (let z = 0; z < batch * heads; z += 1) {
     assertAlmostEquals(out.data[z], insV[Math.floor(z / repeat)], 1e-6, `z=${z}`);
   }
 });
 
-test("CPU 参照 state_append: 先頭 Q 行だけ書き・wrap で旧行を潰し・入力を破壊しない", () => {
+test("CPU reference state_append: writes only the first Q rows, overwrites old rows on wrap, and does not destroy the input", () => {
   const spec = { kvPlanes: 1, chunkRows: 4, depth: 1, capacity: 4, window: 4 };
   const slot = Float32Array.from([-1, -2, -3, -4]);
   const x = Float32Array.from([100, 200, 300, 400]);
-  // P=2 / Q=2 → 論理行 2,3 = 物理行 2,3。pad 行（2,3）は書かない
+  // P=2 / Q=2 → logical rows 2,3 = physical rows 2,3. Pad rows (2,3) are not written
   const after = referenceStateAppend({ ...spec, past: 2, query: 2, x, slot });
   assertEquals([...after.data], [-1, -2, 100, 200]);
-  assertEquals([...slot], [-1, -2, -3, -4], "入力スロットを破壊していない");
-  // wrap: P=3 / Q=3 → 論理行 3,4,5 = 物理行 3,0,1
+  assertEquals([...slot], [-1, -2, -3, -4], "the input slot is not destroyed");
+  // wrap: P=3 / Q=3 → logical rows 3,4,5 = physical rows 3,0,1
   const wrapped = referenceStateAppend({ ...spec, past: 3, query: 3, x, slot });
   assertEquals([...wrapped.data], [200, 300, -3, 100]);
-  // Q > W: 同じ物理行へ複数の論理行が写る → **最後の論理行が残る**
+  // Q > W: several logical rows map to the same physical row → **the last logical row remains**
   const collide = referenceStateAppend({
     ...spec,
     window: 2,
@@ -784,7 +825,7 @@ test("CPU 参照 state_append: 先頭 Q 行だけ書き・wrap で旧行を潰�
   assertEquals([...collide.data], [300, 400]);
 });
 
-test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
+test("CPU reference: mixed-up shapes fail before the comparison", () => {
   const probe = windowProbe({
     window: 0,
     past: 1,
@@ -815,9 +856,10 @@ test("CPU 参照: 形の取り違えは突合の前で落ちる", () => {
   );
 });
 
-test("CPU 参照: 負・非整数の pastLength / window は full 扱いや空行へ化けずに突合の前で落ちる", () => {
-  // 門が無いと window = -1 は stateSliding が false で黙って full 扱いになり、past = -1 は
-  // live 列が 0 本になって厳密 0（append は範囲外の物理行 -1 への黙った書き捨て）を返す。
+test("CPU reference: a negative or non-integer pastLength / window fails before the comparison instead of turning into full or an empty row", () => {
+  // Without the check, window = -1 makes stateSliding false and is silently treated as full, and
+  // past = -1 gives zero live columns and returns exactly 0 (append silently writes to the
+  // out-of-range physical row -1 and discards it).
   const probe = windowProbe({
     window: 0,
     past: 1,
@@ -873,9 +915,10 @@ test("CPU 参照: 負・非整数の pastLength / window は full 扱いや空�
   }
 });
 
-test("CPU 参照: NaN・非整数の queryLength は全 0 や NaN の期待値へ化けずに突合の前で落ちる", () => {
-  // 範囲比較だけだと NaN は全ての比較が偽で素通りし（行ループが 0 回 → 出力が全 0）、1.5 は
-  // 半端な live 列数で NaN を返す — どちらも「オラクルが黙って別の数を返す」形。
+test("CPU reference: a NaN or non-integer queryLength fails before the comparison instead of turning into an all-0 or NaN expectation", () => {
+  // With range comparisons alone, NaN slips through because every comparison is false (the row loop
+  // runs 0 times → the output is all 0), and 1.5 returns NaN with a fractional live column count —
+  // both are "the oracle silently returns a different number".
   const probe = {
     batch: 1,
     heads: 1,
@@ -920,9 +963,10 @@ test("CPU 参照: NaN・非整数の queryLength は全 0 や NaN の期待値�
   }
 });
 
-test("CPU 参照: NaN・非整数の次元は半端な shape の期待値へ化けずに形の誤りとして落ちる", () => {
-  // 非整数は次元の積が整数になると配列長の検査も通る（D=1.5・M=2 なら q は 3 要素）。NaN は
-  // 配列長の検査が偶然拾うが、文言が形の誤りを名乗らない — どちらも次元の検査で落とす。
+test("CPU reference: NaN or non-integer dimensions fail as shape errors instead of turning into an expectation with a fractional shape", () => {
+  // A non-integer passes even the array-length check when the product of the dimensions is an
+  // integer (with D=1.5 and M=2, q has 3 elements). NaN is caught by the array-length check by
+  // chance, but the message does not say it is a shape error — both fail at the dimension check.
   const filled = (count: number): Float32Array<ArrayBuffer> => new Float32Array(count).fill(1);
   const base = {
     batch: 1,
@@ -960,56 +1004,72 @@ test("CPU 参照: NaN・非整数の次元は半端な shape の期待値へ化�
   }
 });
 
-test("①' の並列縮約変種はキーに `:par` を持ち、① の契約断片をそのまま共有する", () => {
-  // 席の目印（census 門がこの `:par` を見る）。幾何は `wg16x16` = TILE_X × D レーン
+test("the parallel-reduction variant of ①' has `:par` in its key and shares the contract fragments of ① as is", () => {
+  // The variant's marker (the census check looks for this `:par`). The geometry `wg16x16` = TILE_X
+  // × D lanes
   assertEquals(stateQkParallelKey(false, false), "attention_state_qk:v1:f32:wg16x16:par");
   assertEquals(stateQkParallelKey(true, true), "attention_state_qk:v1:f32:wg16x16:par:sliding:gqa");
   assertEquals(STATE_QK_D_LANES, 16);
   for (const [sliding, gqa] of VARIANTS) {
-    // ① と ①' は別キー（同じ構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
+    // ① and ①' have different keys (one configuration does not have two keys / two configurations
+    // do not share a key)
     assertNotEquals(stateQkParallelKey(sliding, gqa), stateQkKey(sliding, gqa));
-    assertEquals(stateQkParallelWgsl(sliding, gqa), stateQkParallelWgsl(sliding, gqa), "決定性");
+    assertEquals(
+      stateQkParallelWgsl(sliding, gqa),
+      stateQkParallelWgsl(sliding, gqa),
+      "determinism",
+    );
     const wgsl = stateQkParallelWgsl(sliding, gqa);
-    // MUST: 縮約の並べ方だけが違う。読み書き同式・有効行・−inf の書き・u32 の巻き戻り回避は
-    // ① と**同一の断片**（片方だけ直る形を文字列で拒む）
+    // MUST: only the arrangement of the reduction differs. The shared read/write formula, the
+    // effective rows, the −inf write and avoiding the u32 wrap-around are **the same fragments** as
+    // ① (rejects fixing only one side by string)
     assertEquals(wgsl.includes(stateSlotRowWgsl(sliding)), true, "slot_row");
     assertEquals(wgsl.includes("fn effective_rows(query: u32) -> u32 {"), true, "effective_rows");
-    assertEquals(wgsl.includes("bitcast<f32>(params.neg_inf)"), true, "述語外の −inf");
-    assertEquals(wgsl.includes("col + params.window"), false, "u32 で巻き戻る加算形");
+    assertEquals(wgsl.includes("bitcast<f32>(params.neg_inf)"), true, "−inf outside the predicate");
+    assertEquals(
+      wgsl.includes("col + params.window"),
+      false,
+      "the addition form that wraps around in u32",
+    );
   }
   assertEquals(stateQkParallelWgsl(true, false).includes("(limit - col) < params.window"), true);
   assertEquals(stateQkParallelWgsl(false, false).includes("(limit - col) < params.window"), false);
 });
 
-test("①' の dispatch 幾何は ① と同じ 2 軸（列 = live・行 = 有効行）で、行のタイル幅だけが 1", () => {
-  // 列軸は ① と同じ ⌈live / TILE_X⌉（D 方向は workgroup 内のレーンなので dispatch に出ない）
+test("the dispatch geometry of ①' has the same two axes as ① (columns = live, rows = effective rows), only the row tile width is 1", () => {
+  // The column axis is ⌈live / TILE_X⌉ as in ① (the D direction is lanes inside the workgroup, so
+  // it does not appear in dispatch)
   assertEquals(stateQkParallelWorkgroups(DISPATCH, 1008, 16, LIMIT, "t")[0], 64);
   const first = { ...DISPATCH, rowsBlock: 4, rowOffset: 0 };
-  // 行軸は 1 行 = 1 workgroup（① は ⌈有効行 / TILE_M⌉ = 1）
+  // The row axis is 1 row = 1 workgroup (for ①, ⌈effective rows / TILE_M⌉ = 1)
   assertEquals(stateQkParallelWorkgroups(first, 0, 4, LIMIT, "t")[1], 4);
   assertEquals(stateQkWorkgroups(first, 0, 4, LIMIT, "t")[1], 1);
-  assertEquals(stateQkParallelWorkgroups(first, 0, 1, LIMIT, "t")[1], 1, "decode は 1 行");
-  // pad だけのブロックは 0（呼び手は dispatch そのものを積まない）
+  assertEquals(stateQkParallelWorkgroups(first, 0, 1, LIMIT, "t")[1], 1, "decode is one row");
+  // A block of pad only is 0 (the caller does not record the dispatch at all)
   const second = { ...DISPATCH, rowsBlock: 4, rowOffset: 4 };
   assertEquals(stateQkParallelWorkgroups(second, 0, 4, LIMIT, "t")[1], 0);
-  // z 軸は B·H・列軸は容量に依らない（live だけが効く = 仕事量合格条件）
+  // The z axis is B·H, and the column axis does not depend on capacity (only live matters = the
+  // workload acceptance condition)
   assertEquals(stateQkParallelWorkgroups(DISPATCH, 100, 4, LIMIT, "t")[2], 6);
-  // MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠け、②③ が残骸を読む）
+  // MUST: exceeding the limit fails loudly (a tile kind — degrading would leave S tiles missing and
+  // ②③ would read leftovers)
   assertThrows(() => stateQkParallelWorkgroups(DISPATCH, 4096, 1, 8, "t"), DispatchLimitError);
 });
 
-test("①' の適用条件は M（chunkRows）≤ 8 — 実測した範囲の外へ外挿しない", () => {
-  // decode 計画（M=1）と投機の verify 計画（M = k+1 ≤ 8）が適格。ここが唯一の適用条件で、
-  // 席の判定は runtime 側が AND する。M=1 は効く（2026-09-06）・M=4 は中立（2026-09-09・
-  // 既定席で verify の行 0 と decode の縮約順が揃う）と測ってあり、8 は verify のバケット上限
+test("the condition for ①' is M (chunkRows) ≤ 8 — no extrapolation beyond the measured range", () => {
+  // The decode plan (M=1) and the speculative verify plan (M = k+1 ≤ 8) qualify. This is the only
+  // applicability condition, and the runtime side ANDs it with the option check. M=1 was measured
+  // to help (2026-09-06) and M=4 to be neutral (2026-09-09; with the default option, row 0 of
+  // verify and decode share the reduction order); 8 is the verify bucket limit
   for (const chunkRows of [1, 2, 3, 4, 8]) {
-    assertEquals(stateQkParallelEligible(chunkRows), true, `M=${chunkRows} は ①'`);
+    assertEquals(stateQkParallelEligible(chunkRows), true, `M=${chunkRows} uses ①'`);
   }
-  // MUST: 「M が小さければ得だろう」の外挿を拒む。prefill 幅（M=768）では ①QK の GPU 時間が
-  // 1.5〜1.9 倍に伸びた（2026-09-06）。M ≥ 9 は未実測なので ① のまま — 緩めても値は帯の内側で
-  // 数値門も census 門の decode 側も鳴らない
+  // MUST: reject the extrapolation "a small M should pay off". At prefill width (M=768) the GPU
+  // time of ①QK grew 1.5 to 1.9 times (2026-09-06). M ≥ 9 is unmeasured, so it stays on ① — even if
+  // loosened, the values stay inside the tolerance band and neither the numerics check nor the
+  // decode side of the census check would fire
   for (const chunkRows of [9, 16, 768]) {
-    assertEquals(stateQkParallelEligible(chunkRows), false, `M=${chunkRows} は ① のまま`);
+    assertEquals(stateQkParallelEligible(chunkRows), false, `M=${chunkRows} stays on ①`);
   }
 });
 
@@ -1211,22 +1271,25 @@ describe("the unrolled KV loop of ③' and the fused stats + PV (perf-ledger K-9
 
 const TILED_DISPATCH = { batchHeads: 6, rowsBlock: 40, rowOffset: 0, depth: 32, window: 0 };
 
-test("①ₜ のキーは M の幾何バケットを載せる（辺だけでなく幾何そのもの）", () => {
-  // 綴りは gemm の幾何断片（`reg{tileM}x{tileN}r{regM}x{regN}w{wgX}`）と同一。変種ビットは
-  // ① と同じ順で後置する
+test("the key of ①ₜ carries the M geometry bucket (the geometry itself, not just the edge)", () => {
+  // The spelling is identical to gemm's geometry fragment
+  // (`reg{tileM}x{tileN}r{regM}x{regN}w{wgX}`). The variant bits are appended in the same order as
+  // for ①
   assertEquals(stateQkTiledKey(false, false, 16), "attention_state_qk:v1:f32:reg16x16r1x4w4");
   assertEquals(
     stateQkTiledKey(true, true, 16),
     "attention_state_qk:v1:f32:reg16x16r1x4w4:sliding:gqa",
   );
-  // バケット境界（64 / 512）を跨ぐと**キーが変わる**（= 別パイプライン）。跨がないと、同じキーで
-  // 別幾何の WGSL がキャッシュから配られ、dispatch の辺と噛み合わずにタイルが欠落する
+  // Crossing a bucket boundary (64 / 512) **changes the key** (= a different pipeline). Otherwise,
+  // WGSL of a different geometry would be handed out of the cache under the same key, would not
+  // mesh with the dispatch edge, and tiles would go missing
   assertEquals(stateQkTiledKey(false, false, 64), stateQkTiledKey(false, false, 16));
   assertEquals(stateQkTiledKey(false, false, 65), "attention_state_qk:v1:f32:reg64x32r4x4w8");
   assertEquals(stateQkTiledKey(false, false, 512), stateQkTiledKey(false, false, 65));
   assertEquals(stateQkTiledKey(false, false, 513), "attention_state_qk:v1:f32:reg128x128r8x8w16");
   assertEquals(stateQkTiledKey(false, false, 768), stateQkTiledKey(false, false, 513));
-  // 3 経路が全て別キー（同じ構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
+  // All three paths have different keys (one configuration does not have two keys / two
+  // configurations do not share a key)
   const keys = [
     ...VARIANTS.map(([sliding, gqa]) => stateQkKey(sliding, gqa)),
     ...VARIANTS.map(([sliding, gqa]) => stateQkParallelKey(sliding, gqa)),
@@ -1237,37 +1300,44 @@ test("①ₜ のキーは M の幾何バケットを載せる（辺だけでな�
   assertEquals(new Set(keys).size, keys.length);
 });
 
-test("①ₜ は ① の契約断片（読み書き同式・述語・有効行・−inf）を uniform 名だけ替えて共有する", () => {
+test("①ₜ shares the contract fragments of ① (shared read/write formula, predicate, effective rows, −inf) with only the uniform name changed", () => {
   for (const [sliding, gqa] of VARIANTS) {
     const wgsl = stateQkTiledWgsl(sliding, gqa, 16);
-    assertEquals(stateQkTiledWgsl(sliding, gqa, 16), wgsl, "決定性");
-    // MUST: 断片は ① と**同じ生成器**から出る（uniform 名が `params` → `dims` に替わるだけ）。
-    // 書き写した実装だと ring 写像・窓の下限・有効行のどれかが片方だけ直る形が通ってしまう
+    assertEquals(stateQkTiledWgsl(sliding, gqa, 16), wgsl, "determinism");
+    // MUST: the fragments come from **the same generator** as ① (only the uniform name changes from
+    // `params` to `dims`). A copied implementation would let through a form where only one side of
+    // the ring mapping, the window's lower bound or the effective rows is fixed
     assertEquals(wgsl.includes(stateSlotRowWgsl(sliding, "dims")), true, "slot_row");
     assertEquals(wgsl.includes("fn effective_rows(query: u32) -> u32 {"), true, "effective_rows");
-    assertEquals(wgsl.includes("bitcast<f32>(dims.neg_inf)"), true, "述語外の −inf");
-    // MUST: u32 で巻き戻る加算形を持たない（① と同文）
-    assertEquals(wgsl.includes("col + dims.window"), false, "u32 で巻き戻る加算形");
-    // 実効 N は live。`col_cap`（= dims.n）で B タイルを切ると残骸を読む
-    assertEquals(wgsl.includes("if (wcol0 < live) {"), true, "B ローダの live 切り");
-    assertEquals(wgsl.includes("if (ocol < live) {"), true, "store の live 切り");
-    // 半スケールは q 側と k 側の**両方**（① の 1 項の式と同じ丸め列）
-    assertEquals(wgsl.includes("* dims.scale;"), true, "A 側の半スケール");
-    assertEquals(wgsl.includes("wv0 = wv0 * dims.scale;"), true, "B 側の半スケール");
-    // K の 2 源が 1 箇所に畳まれている（① の score_slot / score_ins と同じ踏み分け）
+    assertEquals(wgsl.includes("bitcast<f32>(dims.neg_inf)"), true, "−inf outside the predicate");
+    // MUST: no addition form that wraps around in u32 (same as ①)
+    assertEquals(
+      wgsl.includes("col + dims.window"),
+      false,
+      "the addition form that wraps around in u32",
+    );
+    // The effective N is live. Cutting the B tile at `col_cap` (= dims.n) would read leftovers
+    assertEquals(wgsl.includes("if (wcol0 < live) {"), true, "the B loader's live cut");
+    assertEquals(wgsl.includes("if (ocol < live) {"), true, "the store's live cut");
+    // The half scale is on **both** the q side and the k side (the same rounding sequence as ①'s
+    // single-term formula)
+    assertEquals(wgsl.includes("* dims.scale;"), true, "the A side's half scale");
+    assertEquals(wgsl.includes("wv0 = wv0 * dims.scale;"), true, "the B side's half scale");
+    // The two sources of K are folded into one place (the same split as ①'s score_slot / score_ins)
     assertEquals(wgsl.includes("fn k_read(from_slot: bool, index: u32) -> f32 {"), true, "k_read");
   }
   assertEquals(stateQkTiledWgsl(true, false, 16).includes("(limit - col) < dims.window"), true);
   assertEquals(stateQkTiledWgsl(false, false, 16).includes("(limit - col) < dims.window"), false);
-  // 変種もバケットも実際に別物（キーだけ分けて中身が同じ = 変種 / 幾何が効いていない）
+  // The variants and buckets are really different (keys split but identical contents = the variant
+  // / geometry has no effect)
   assertNotEquals(stateQkTiledWgsl(false, false, 16), stateQkTiledWgsl(false, true, 16));
   assertNotEquals(stateQkTiledWgsl(false, false, 16), stateQkTiledWgsl(true, false, 16));
   assertNotEquals(stateQkTiledWgsl(false, false, 16), stateQkTiledWgsl(false, false, 768));
 });
 
-test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / col_cap / depth）", () => {
+test("the params of ①ₜ are packed in word order (the skeleton's m/n/k are rows_block / col_cap / depth)", () => {
   const params = stateQkTiledParams({ ...GEOMETRY, rowOffset: 4 });
-  assertEquals(params.length, 12, "uniform 整列で 48 バイト");
+  assertEquals(params.length, 12, "48 bytes with uniform alignment");
   assertEquals(
     [...params.slice(0, 9)],
     [
@@ -1283,7 +1353,8 @@ test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は row
     ],
   );
   assertEquals(new Float32Array(params.buffer)[9], GEOMETRY.scale);
-  // 値域門は ① と同じ 1 本（別に持つと片方だけ通る形ができる）
+  // One value-range check shared with ① (holding a separate one would allow a form that passes only
+  // one of them)
   assertThrows(() => stateQkTiledParams({ ...GEOMETRY, kvRepeat: 0 }), CodegenError, "kv_repeat");
   assertThrows(
     () => stateQkTiledParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
@@ -1293,60 +1364,66 @@ test("①ₜ の params は語順どおりに詰まる（骨格の m/n/k は row
   assertThrows(() => stateQkTiledParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
 });
 
-test("①ₜ の dispatch の辺は M の幾何バケットから出る（定数で持ち回らない）", () => {
-  // M ≤ 64 → M16N16。列 ⌈40/16⌉ = 3・行 ⌈40/16⌉ = 3
+test("the dispatch edges of ①ₜ come from the M geometry bucket (not carried around as constants)", () => {
+  // M ≤ 64 → M16N16. Columns ⌈40/16⌉ = 3, rows ⌈40/16⌉ = 3
   assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 40, 0, 40, LIMIT, "t"), [3, 3, 6]);
-  // 65..512 → M64N32。列 ⌈40/32⌉ = 2・行 ⌈40/64⌉ = 1
+  // 65..512 → M64N32. Columns ⌈40/32⌉ = 2, rows ⌈40/64⌉ = 1
   assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 100, 0, 40, LIMIT, "t"), [2, 1, 6]);
-  // 513.. → 既定 M128N128。列も行も 1 タイル
+  // 513.. → the default M128N128. One tile for both columns and rows
   assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 768, 0, 40, LIMIT, "t"), [1, 1, 6]);
-  // 列軸は live（容量には依らない）・行軸は有効行（pad 行を覆わない）
+  // The column axis is live (independent of capacity); the row axis is the effective rows (does not
+  // cover pad rows)
   assertEquals(stateQkTiledWorkgroups(TILED_DISPATCH, 40, 88, 40, LIMIT, "t")[0], 8, "live 128");
   const tail = { ...TILED_DISPATCH, rowsBlock: 40, rowOffset: 40 };
-  assertEquals(stateQkTiledWorkgroups(tail, 40, 0, 40, LIMIT, "t")[1], 0, "丸ごと pad は 0");
-  assertEquals(stateQkTiledWorkgroups(tail, 40, 0, 41, LIMIT, "t")[1], 1, "1 行だけ有効");
-  // MUST: 上限超過は fail loudly（タイル系 — 縮退させると S のタイルが欠け、②③ が残骸を読む）
+  assertEquals(stateQkTiledWorkgroups(tail, 40, 0, 40, LIMIT, "t")[1], 0, "entirely pad is 0");
+  assertEquals(stateQkTiledWorkgroups(tail, 40, 0, 41, LIMIT, "t")[1], 1, "only one row effective");
+  // MUST: exceeding the limit fails loudly (a tile kind — degrading would leave S tiles missing and
+  // ②③ would read leftovers)
   assertThrows(
     () => stateQkTiledWorkgroups(TILED_DISPATCH, 40, 4096, 1, 8, "t"),
     DispatchLimitError,
   );
 });
 
-test("①ₜ の適用条件は M ≥ 16（最小の行タイル辺）— ①' の M=1 とは重ならない", () => {
-  // 最小バケット M16N16 の tileM が 16。それ未満はタイルの大半が空振りして ① と同じ traffic の
-  // まま barrier と共有メモリのぶんだけ損になる
+test("the condition for ①ₜ is M ≥ 16 (the smallest row-tile edge) — it does not overlap with M=1 of ①'", () => {
+  // The tileM of the smallest bucket M16N16 is 16. Below that, most of the tile does no work: the
+  // same traffic as ①, plus the cost of barriers and shared memory
   for (const chunkRows of [1, 2, 4, 8, 15]) {
-    assertEquals(stateQkTiledEligible(chunkRows), false, `M=${chunkRows} は ① のまま`);
+    assertEquals(stateQkTiledEligible(chunkRows), false, `M=${chunkRows} stays on ①`);
   }
   for (const chunkRows of [16, 17, 40, 100, 768]) {
-    assertEquals(stateQkTiledEligible(chunkRows), true, `M=${chunkRows} は ①ₜ`);
+    assertEquals(stateQkTiledEligible(chunkRows), true, `M=${chunkRows} uses ①ₜ`);
   }
-  // MUST: 2 つの適用条件が重ならない（重なると runtime 側の優先順が値に効いてしまう）
+  // MUST: the two applicability conditions do not overlap (if they did, the runtime side's priority
+  // order would affect the values)
   for (const chunkRows of [1, 2, 15, 16, 768]) {
     assertEquals(
       stateQkTiledEligible(chunkRows) && stateQkParallelEligible(chunkRows),
       false,
-      `M=${chunkRows} で ①ₜ と ①' の適用条件が重なった`,
+      `the conditions of ①ₜ and ①' overlapped at M=${chunkRows}`,
     );
   }
 });
 
-test("③ₜ のキーは M の幾何バケットを載せる（辺だけでなく幾何そのもの）", () => {
-  // 綴りは gemm の幾何断片（`reg{tileM}x{tileN}r{regM}x{regN}w{wgX}`）と同一で、①ₜ と族名
-  // だけが違う。変種ビットは ③ と同じ順で後置する
+test("the key of ③ₜ carries the M geometry bucket (the geometry itself, not just the edge)", () => {
+  // The spelling is identical to gemm's geometry fragment
+  // (`reg{tileM}x{tileN}r{regM}x{regN}w{wgX}`) and differs from ①ₜ only in the family name. The
+  // variant bits are appended in the same order as for ③
   assertEquals(statePvTiledKey(false, false, 16), "attention_state_pv:v1:f32:reg16x16r1x4w4");
   assertEquals(
     statePvTiledKey(true, true, 16),
     "attention_state_pv:v1:f32:reg16x16r1x4w4:sliding:gqa",
   );
-  // バケット境界（64 / 512）を跨ぐと**キーが変わる**（= 別パイプライン）。跨がないと、同じキーで
-  // 別幾何の WGSL がキャッシュから配られ、dispatch の辺と噛み合わずにタイルが欠落する
+  // Crossing a bucket boundary (64 / 512) **changes the key** (= a different pipeline). Otherwise,
+  // WGSL of a different geometry would be handed out of the cache under the same key, would not
+  // mesh with the dispatch edge, and tiles would go missing
   assertEquals(statePvTiledKey(false, false, 64), statePvTiledKey(false, false, 16));
   assertEquals(statePvTiledKey(false, false, 65), "attention_state_pv:v1:f32:reg64x32r4x4w8");
   assertEquals(statePvTiledKey(false, false, 512), statePvTiledKey(false, false, 65));
   assertEquals(statePvTiledKey(false, false, 513), "attention_state_pv:v1:f32:reg128x128r8x8w16");
   assertEquals(statePvTiledKey(false, false, 768), statePvTiledKey(false, false, 513));
-  // ③ の 3 経路が全て別キー（同じ構成が 2 通りのキーを持たない / 別構成が同じキーを持たない）
+  // All three paths of ③ have different keys (one configuration does not have two keys / two
+  // configurations do not share a key)
   const keys = [
     ...VARIANTS.map(([sliding, gqa]) => statePvKey(sliding, gqa)),
     ...VARIANTS.map(([sliding, gqa]) => statePvParallelKey(sliding, gqa)),
@@ -1355,43 +1432,61 @@ test("③ₜ のキーは M の幾何バケットを載せる（辺だけでな�
     ),
   ];
   assertEquals(new Set(keys).size, keys.length);
-  // ①ₜ とも衝突しない（族名が違うので当然だが、幾何断片を共有しているぶん取り違えが起こりうる）
+  // No collision with ①ₜ either (obvious, since the family names differ, but sharing the geometry
+  // fragment makes a mix-up possible)
   assertNotEquals(statePvTiledKey(false, false, 16), stateQkTiledKey(false, false, 16));
 });
 
-test("③ₜ は ③ の契約断片（読み書き同式・有効行・確率の式）を uniform 名だけ替えて共有する", () => {
+test("③ₜ shares the contract fragments of ③ (shared read/write formula, effective rows, the probability formula) with only the uniform name changed", () => {
   for (const [sliding, gqa] of VARIANTS) {
     const wgsl = statePvTiledWgsl(sliding, gqa, 16);
-    assertEquals(statePvTiledWgsl(sliding, gqa, 16), wgsl, "決定性");
-    // MUST: 断片は ③ と**同じ生成器**から出る（uniform 名が `params` → `dims` に替わるだけ）。
-    // 書き写した実装だと ring 写像・live の切り方・有効行のどれかが片方だけ直る形が通ってしまう
+    assertEquals(statePvTiledWgsl(sliding, gqa, 16), wgsl, "determinism");
+    // MUST: the fragments come from **the same generator** as ③ (only the uniform name changes from
+    // `params` to `dims`). A copied implementation would let through a form where only one side of
+    // the ring mapping, the live cut or the effective rows is fixed
     assertEquals(wgsl.includes(stateSlotRowWgsl(sliding, "dims")), true, "slot_row");
     assertEquals(wgsl.includes("fn effective_rows(query: u32) -> u32 {"), true, "effective_rows");
-    // MUST: 述語（`in_window`）は持たない — 述語外は ① が S へ焼いた −inf を exp が 0 にする
-    assertEquals(wgsl.includes("fn in_window("), false, "③ 系は述語を評価しない");
-    assertEquals(wgsl.includes("neg_inf"), false, "③ 系は −inf を読まない");
-    assertEquals(wgsl.includes("dims.scale"), false, "③ 系は半スケールを読まない");
-    // 1 項の式が ③ と同じ字面（`exp(S − m) * inv`）
-    assertEquals(wgsl.includes(") * row_inv0;"), true, "確率の inv");
-    assertEquals(wgsl.includes("exp(s[arow_base0 + ak0] - row_max0)"), true, "確率の exp");
-    // 実効 K は live。`col_cap`（= dims.k）で A / B を切ると `[live, col_cap)` の残骸を読む
-    assertEquals(wgsl.includes("if (brow0 < live) {"), true, "B ローダの live 切り");
-    assertEquals(wgsl.includes("let tiles = (k_live + 15u) / 16u;"), true, "K ループの live 上限");
-    // pad 行は full-write のまま**厳密 0**（acc を書くと非有限 V で NaN 化する）
-    assertEquals(wgsl.includes("if (orow0 < dims.m) {"), true, "store の full-write");
-    assertEquals(wgsl.includes("select(0.0, acc0_0.x, live_row0);"), true, "pad 行の厳密 0");
-    // V の 2 源が 1 箇所に畳まれている（③ の slot_v / ins_v と同じ踏み分け）
+    // MUST: it has no predicate (`in_window`) — outside the predicate, exp turns the −inf that ①
+    // burned into S into 0
+    assertEquals(
+      wgsl.includes("fn in_window("),
+      false,
+      "the ③ kernels do not evaluate the predicate",
+    );
+    assertEquals(wgsl.includes("neg_inf"), false, "the ③ kernels do not read −inf");
+    assertEquals(wgsl.includes("dims.scale"), false, "the ③ kernels do not read the half scale");
+    // The single-term formula has the same text as ③ (`exp(S − m) * inv`)
+    assertEquals(wgsl.includes(") * row_inv0;"), true, "the probability's inv");
+    assertEquals(
+      wgsl.includes("exp(s[arow_base0 + ak0] - row_max0)"),
+      true,
+      "the probability's exp",
+    );
+    // The effective K is live. Cutting A / B at `col_cap` (= dims.k) would read the leftovers of
+    // `[live, col_cap)`
+    assertEquals(wgsl.includes("if (brow0 < live) {"), true, "the B loader's live cut");
+    assertEquals(
+      wgsl.includes("let tiles = (k_live + 15u) / 16u;"),
+      true,
+      "the K loop's live limit",
+    );
+    // Pad rows stay full-write and are **exactly 0** (writing acc would turn them NaN with a
+    // non-finite V)
+    assertEquals(wgsl.includes("if (orow0 < dims.m) {"), true, "the store's full-write");
+    assertEquals(wgsl.includes("select(0.0, acc0_0.x, live_row0);"), true, "the pad rows' exact 0");
+    // The two sources of V are folded into one place (the same split as ③'s slot_v / ins_v)
     assertEquals(wgsl.includes("fn v_read(from_slot: bool, index: u32) -> f32 {"), true, "v_read");
   }
-  // 変種もバケットも実際に別物（キーだけ分けて中身が同じ = 変種 / 幾何が効いていない）
+  // The variants and buckets are really different (keys split but identical contents = the variant
+  // / geometry has no effect)
   assertNotEquals(statePvTiledWgsl(false, false, 16), statePvTiledWgsl(false, true, 16));
   assertNotEquals(statePvTiledWgsl(false, false, 16), statePvTiledWgsl(true, false, 16));
   assertNotEquals(statePvTiledWgsl(false, false, 16), statePvTiledWgsl(false, false, 768));
 });
 
-test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k は rows_block / depth / col_cap）", () => {
+test("the params of ③ₜ are packed in word order (the skeleton's m/n/k are rows_block / depth / col_cap)", () => {
   const params = statePvTiledParams({ ...GEOMETRY, rowOffset: 4 });
-  assertEquals(params.length, 8, "uniform 整列で 32 バイト");
+  assertEquals(params.length, 8, "32 bytes with uniform alignment");
   assertEquals(
     [...params],
     [
@@ -1405,7 +1500,8 @@ test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k は row
       GEOMETRY.capacity,
     ],
   );
-  // 値域門は ③ と同じ 1 本（別に持つと片方だけ通る形ができる）
+  // One value-range check shared with ③ (holding a separate one would allow a form that passes only
+  // one of them)
   assertThrows(() => statePvTiledParams({ ...GEOMETRY, kvRepeat: 0 }), CodegenError, "kv_repeat");
   assertThrows(
     () => statePvTiledParams({ ...GEOMETRY, rowOffset: 6, rowsBlock: 4 }),
@@ -1415,41 +1511,52 @@ test("③ₜ の params は語順どおりに詰まる（骨格の m/n/k は row
   assertThrows(() => statePvTiledParams({ ...GEOMETRY, colCap: 31 }), CodegenError, "col_cap");
 });
 
-test("③ₜ の dispatch の辺は M の幾何バケットから出て、行軸は rows_block 全て", () => {
-  // M ≤ 64 → M16N16。列 ⌈32/16⌉ = 2・行 ⌈40/16⌉ = 3
+test("the dispatch edges of ③ₜ come from the M geometry bucket, and the row axis is the whole rows_block", () => {
+  // M ≤ 64 → M16N16. Columns ⌈32/16⌉ = 2, rows ⌈40/16⌉ = 3
   assertEquals(statePvTiledWorkgroups(TILED_DISPATCH, 40, LIMIT, "t"), [2, 3, 6]);
-  // 65..512 → M64N32。列 ⌈32/32⌉ = 1・行 ⌈40/64⌉ = 1
+  // 65..512 → M64N32. Columns ⌈32/32⌉ = 1, rows ⌈40/64⌉ = 1
   assertEquals(statePvTiledWorkgroups(TILED_DISPATCH, 100, LIMIT, "t"), [1, 1, 6]);
-  // 513.. → 既定 M128N128。列も行も 1 タイル
+  // 513.. → the default M128N128. One tile for both columns and rows
   assertEquals(statePvTiledWorkgroups(TILED_DISPATCH, 768, LIMIT, "t"), [1, 1, 6]);
-  // MUST: 行軸は **rows_block 全て**（① 系と違って有効行で切らない — pad 行も書くのが
-  // full-write 不変条件）。論理長を受け取らないこと自体がその構造的な裏になっている
+  // MUST: the row axis is **the whole rows_block** (unlike the ① kernels, it is not cut at the
+  // effective rows — writing pad rows too is the full-write invariant). Not taking the logical
+  // length at all is its structural backing
   const tail = { ...TILED_DISPATCH, rowsBlock: 40, rowOffset: 40 };
-  assertEquals(statePvTiledWorkgroups(tail, 40, LIMIT, "t")[1], 3, "丸ごと pad でも 3 タイル");
-  // MUST: 上限超過は fail loudly（タイル系 — 縮退させると O に未書き込みが残る）
+  assertEquals(
+    statePvTiledWorkgroups(tail, 40, LIMIT, "t")[1],
+    3,
+    "3 tiles even when entirely pad",
+  );
+  // MUST: exceeding the limit fails loudly (a tile kind — degrading would leave unwritten parts of
+  // O)
   assertThrows(
     () => statePvTiledWorkgroups({ ...TILED_DISPATCH, depth: 4096 }, 40, 8, "t"),
     DispatchLimitError,
   );
 });
 
-test("③ₜ の適用条件は M ≥ 16（最小の行タイル辺）— ③' は M < 16 の計画だけに残る", () => {
-  // 最小バケット M16N16 の tileM が 16。それ未満はタイルの大半が空振りして ③ と同じ traffic の
-  // まま barrier と共有メモリのぶんだけ損になる
+test("the condition for ③ₜ is M ≥ 16 (the smallest row-tile edge) — ③' remains only for plans with M < 16", () => {
+  // The tileM of the smallest bucket M16N16 is 16. Below that, most of the tile does no work: the
+  // same traffic as ③, plus the cost of barriers and shared memory
   for (const chunkRows of [1, 2, 4, 8, 15]) {
-    assertEquals(statePvTiledEligible(chunkRows), false, `M=${chunkRows} は席どおり ③ / ③'`);
+    assertEquals(
+      statePvTiledEligible(chunkRows),
+      false,
+      `M=${chunkRows} uses ③ / ③' as the option says`,
+    );
   }
   for (const chunkRows of [16, 17, 40, 100, 768]) {
-    assertEquals(statePvTiledEligible(chunkRows), true, `M=${chunkRows} は ③ₜ`);
+    assertEquals(statePvTiledEligible(chunkRows), true, `M=${chunkRows} uses ③ₜ`);
   }
-  // ①ₜ と同じしきい値だが別の関数（片方だけ適用範囲を動かせる形を保つ）
+  // The same threshold as ①ₜ but a separate function (keeps the form where either one's range can
+  // move alone)
   for (const chunkRows of [1, 15, 16, 768]) {
     assertEquals(
       statePvTiledEligible(chunkRows),
       stateQkTiledEligible(chunkRows),
-      `M=${chunkRows} で ①ₜ と ③ₜ のしきい値がずれた`,
+      `the thresholds of ①ₜ and ③ₜ diverged at M=${chunkRows}`,
     );
   }
-  // decode（M=1）は ③ₜ の適用外なので、席 `"parallel"` の ③' がそこに残る
+  // decode (M=1) is outside ③ₜ, so ③' of the option value `"parallel"` stays there
   assertEquals(statePvTiledEligible(1), false);
 });

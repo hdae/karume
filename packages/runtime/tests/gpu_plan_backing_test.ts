@@ -1,17 +1,17 @@
-// transient slot の GPU backing（導出済み計画にヒットした run が使う Session 常駐バッファ群）の門。
+// Checks of the GPU backing of transient slots (the Session-resident buffers used by a run that hits a derived plan).
 //
-// backed run はアリーナの確保・参照計数を通らず、**前 run の残骸が載ったバッファ**へそのまま
-// 書き込む。正しさの根拠は full-write（ADR 0014）だけなので、検出器は「値を変えながら同じ
-// bindings で回した出力が、非 backed 実行とビット単位で一致するか」— stale slot が 1 本でも
-// 混じれば前 run の値が残り、例外は 1 つも出ない。
+// A backed run bypasses the arena's allocation and reference counting and writes straight into **buffers that
+// still hold the previous run's leftovers**. Its correctness rests on full-write (ADR 0014) alone, so the detector
+// is "does the output of runs with the same bindings and changing values match a non-backed execution bit for
+// bit" — if even one stale slot slips in, the previous run's values remain and not a single exception is thrown.
 //
-// 併せて ①単発 run は slot メモリを一切払わない ②**バイト予算つきの LRU 集合**として持つ
-// （ADR 0095 決定 1 — 予算内の signature は切替で作り直さず保持・超過分は古い順に退役・
-// 新規 1 本だけで超える形は全退役してその 1 本だけ・予算 0 は従来の容量 1。予算が勘定するのは
-// **領域 + backing が所有する入力バッファ**＝診断の `residentBytes + inputBytes`）③計画の LRU
-// 追い出しで返る ④slot の総バイト数が現行 run のプール確保と一致する（footprint 不変 —
-// **backing 1 本ぶん**の命題）を固定する。④が崩れると VRAM の前提（常駐化しても新しい
-// ピークは生まれない）が崩れる。
+// It also pins: ① a one-off run pays no slot memory at all; ② the backings are held as **an LRU set with a byte
+// budget** (ADR 0095 decision 1 — signatures within the budget are kept rather than rebuilt on a switch; the excess
+// is retired oldest first; a shape that exceeds the budget on its own retires everything and keeps only itself; a
+// budget of 0 is the former capacity of 1. What the budget counts is **the regions + the input buffers the backing
+// owns** = `residentBytes + inputBytes` of the diagnostics); ③ backings are released by the LRU eviction of plans;
+// ④ the total slot bytes match the current run's pool allocation (footprint unchanged — a claim about **one
+// backing**). If ④ breaks, the VRAM premise (going resident creates no new peak) breaks.
 
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
@@ -30,7 +30,7 @@ import { type DeclarationJson, f32Bytes, fill, openGraphModel } from "./helpers/
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { injectOutOfMemory } from "./helpers/oom-injection.ts";
 
-/** y = silu(x·w + b)（x: [T,3] → y: [T,2]）。末尾 2 ノードが silu 融合に掴まれる。 */
+/** y = silu(x·w + b) (x: [T,3] → y: [T,2]). The last 2 nodes are caught by silu fusion. */
 const GRAPH: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -71,18 +71,18 @@ const openedModel = () =>
     },
   ]);
 
-/** `phase` ごとに値が変わる入力（同じ値を配ると stale slot が検出できない）。 */
+/** An input whose values change per `phase` (handing out the same values would not detect a stale slot). */
 const input = (rows: number, phase = 0): Tensor => ({
   dtype: "f32",
   shape: [rows, 3],
   data: Float32Array.from({ length: rows * 3 }, (_, i) => (((i + phase * 3) % 9) - 4) * 0.5),
 });
 
-/** 出力のビット列。値の一致は「バイト同値」で見る（丸めの取り違えを許容しない）。 */
+/** The output bit pattern. Values are compared by "byte equality" (a rounding mix-up is not tolerated). */
 const bits = (tensor: Tensor): readonly number[] =>
   Array.from(new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length));
 
-/** Session を作り直して 1 run だけ回す = 必ず非 backed（backing はヒット run でしか作らない）。 */
+/** Rebuilds the Session and runs it once = always non-backed (a backing is built only on a hit run). */
 const runFresh = async (
   gpu: Awaited<ReturnType<typeof acquireGpu>>,
   inputs: Parameters<Session["run"]>[0],
@@ -94,7 +94,7 @@ const runFresh = async (
     assertEquals(
       session.diagnostics().planBacking,
       { residentBytes: 0, inputBytes: 0, retainedCount: 0, buildCount: 0 },
-      "単発 run は slot メモリを一切払わない",
+      "a one-off run pays no slot memory at all",
     );
     return outputs["y"];
   } finally {
@@ -103,28 +103,28 @@ const runFresh = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "backed run の出力は非 backed 実行とビット単位で一致する（stale slot の門・実 GPU）",
+  "the output of a backed run is bit-identical to a non-backed execution (stale-slot check; real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
-      // 1 run 目 = ミス（アリーナ経路）/ 2 run 目 = backing 構築 / 3 run 目 = backed 高速路。
+      // Run 1 = miss (arena path) / run 2 = backing construction / run 3 = backed fast path.
       const phases = [0, 1, 2];
       const actual: Tensor[] = [];
       for (const phase of phases) actual.push((await session.run({ x: input(4, phase) }))["y"]);
       assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: 1 });
-      assertEquals(session.diagnostics().planBacking.buildCount, 1, "構築は 1 度だけ");
+      assertEquals(session.diagnostics().planBacking.buildCount, 1, "built only once");
 
-      // 恒真化の門: 入力を変えても出力が同じなら、stale slot が残っていても緑になる。
+      // Vacuity check: if the output stays the same when the input changes, a leftover stale slot would still be green.
       assert(
         JSON.stringify(bits(actual[0])) !== JSON.stringify(bits(actual[1])),
-        "phase ごとに出力が変わっていない（検出器として空振る）",
+        "the output does not change per phase (the detector would test nothing)",
       );
 
       for (const phase of phases) {
         const expected = await runFresh(gpu, { x: input(4, phase) });
         assertEquals(actual[phase].shape, expected.shape);
-        assertEquals(bits(actual[phase]), bits(expected), `phase ${phase} のビット一致`);
+        assertEquals(bits(actual[phase]), bits(expected), `phase ${phase} bit identity`);
       }
     } finally {
       await session.dispose();
@@ -134,7 +134,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "backed run のアリーナ確保は readback staging だけになる（入力固定の門・実 GPU）",
+  "the arena allocations of a backed run are only the readback staging (fixed-input check; real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -147,14 +147,18 @@ test.skipIf(!GPU_AVAILABLE)(
       const backed = session.diagnostics().lastRun;
       assert(miss !== undefined && built !== undefined && backed !== undefined);
 
-      // グラフ出力は 1 本なので staging も 1 本。入力アップロードが 1 本でもアリーナに
-      // 残っていればここが 2 以上になる（中間は既に slot 常駐へ移っている）。
-      assertEquals(backed.allocCount, 1, "backed run の確保は readback staging の 1 本だけ");
-      assertEquals(built.allocCount, 1, "初ヒット（構築）run も同じ");
-      assertEquals(backed.transientBytes, 0, "中間はアリーナを通らない");
+      // The graph has 1 output, so 1 staging buffer. If even one input upload remained in the arena, this would be
+      // 2 or more (the intermediates have already moved to resident slots).
+      assertEquals(
+        backed.allocCount,
+        1,
+        "a backed run allocates only the 1 readback staging buffer",
+      );
+      assertEquals(built.allocCount, 1, "the same for the first hit (construction) run");
+      assertEquals(backed.transientBytes, 0, "intermediates do not go through the arena");
       assert(
         miss.allocCount > backed.allocCount,
-        `ミス run の確保が減っていない（${miss.allocCount} → ${backed.allocCount}）`,
+        `the allocations did not decrease from the miss run (${miss.allocCount} → ${backed.allocCount})`,
       );
     } finally {
       await session.dispose();
@@ -258,21 +262,21 @@ describe("the release wait before building a backing", () => {
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "同一 signature の並行 run は共有入力バッファでも取り違えない（実 GPU）",
+  "concurrent runs of the same signature do not mix up even with a shared input buffer (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
-      // backed run の入力は backing 所有の**1 本**へ上書きされる。await せず並行発行して、
-      // 直列化（#chain）と「run は flush 完了後にしか返らない」が崩れたときに落ちる形にする
-      // — 崩れれば後続 run の writeBuffer が先行 run の未 submit dispatch を追い越し、
-      // 例外なしで前後の phase の値が混ざる。
+      // The inputs of a backed run are overwritten into **the one** buffer the backing owns. Issuing them
+      // concurrently without await makes the test fail if the serialization (#chain) and "a run returns only after
+      // its flush completes" break — then a later run's writeBuffer would overtake an earlier run's unsubmitted
+      // dispatch, and the values of adjacent phases would mix without an exception.
       const phases = [0, 1, 2, 3, 4];
       const actual = await Promise.all(phases.map((phase) => session.run({ x: input(4, phase) })));
       assertEquals(session.diagnostics().planBacking.buildCount, 1);
       for (const phase of phases) {
         const expected = await runFresh(gpu, { x: input(4, phase) });
-        assertEquals(bits(actual[phase]["y"]), bits(expected), `phase ${phase} のビット一致`);
+        assertEquals(bits(actual[phase]["y"]), bits(expected), `phase ${phase} bit identity`);
       }
     } finally {
       await session.dispose();
@@ -281,7 +285,7 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** グラフ出力が入力の別名になる形（reshape）+ 実 dispatch を 1 本持つ形。 */
+/** A shape whose graph output aliases an input (reshape) + one real dispatch. */
 const ALIAS_GRAPH: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -301,7 +305,7 @@ const ALIAS_GRAPH: DeclarationJson = {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "グラフ出力が入力の別名でも backed run は読み戻せる（実 GPU）",
+  "a backed run can read back even when the graph output aliases an input (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const opened = await openGraphModel(ALIAS_GRAPH);
@@ -310,10 +314,10 @@ test.skipIf(!GPU_AVAILABLE)(
       for (const phase of [0, 1, 2]) {
         const x = input(4, phase);
         const outputs = await session.run({ x });
-        // 別名出力は入力バッファそのものの読み戻し。値が phase ごとに変わることが、
-        // 「常駐入力バッファに毎 run 書けている」ことの検出器になる。
+        // An aliased output reads back the input buffer itself. The values changing per phase is the detector for
+        // "the resident input buffer is written on every run".
         assertEquals(outputs["y"].shape, [12]);
-        assertEquals(bits(outputs["y"]), bits(x), `phase ${phase} の別名出力`);
+        assertEquals(bits(outputs["y"]), bits(x), `phase ${phase} aliased output`);
 
         const reference = await createSessionFromContainer(gpu, opened, "model");
         try {
@@ -331,19 +335,21 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** backing 1 本ぶんの実測（領域 = `residentBytes` / 所有する入力バッファ = `inputBytes`）。 */
+/** Measurements of one backing (regions = `residentBytes` / owned input buffers = `inputBytes`). */
 type Measured = { readonly residentBytes: number; readonly inputBytes: number };
 
 /**
- * 予算が勘定する量（`#evictBackingsFor` と同じ算式 — 領域と所有入力バッファの両方）。
+ * The amount the budget counts (the same formula as `#evictBackingsFor` — both the regions and the owned input
+ * buffers).
  *
- * MUST: 予算の門はこれで組む。領域だけで組むと、入力バッファのぶんだけ実際の勘定が予算を
- * 上回り、「予算ちょうど」のつもりの Session が最初から超過側（= 常に全退役）で回る。
+ * MUST: the budget checks are built from this. Building them from the regions alone makes the real count exceed
+ * the budget by the input buffers, so a Session meant to be "exactly at budget" runs on the over-budget side
+ * (= always retiring everything) from the start.
  */
 const accountedBytes = (measured: readonly Measured[]): number =>
   measured.reduce((total, one) => total + one.residentBytes + one.inputBytes, 0);
 
-/** 保持集合が `retained` のときの診断（**全欄** — 部分一致に逃げない）。 */
+/** The diagnostics when the retained set is `retained` (**every field** — no retreat to a partial match). */
 const expectStats = (retained: readonly Measured[], buildCount: number): PlanBackingStats => ({
   residentBytes: retained.reduce((total, one) => total + one.residentBytes, 0),
   inputBytes: retained.reduce((total, one) => total + one.inputBytes, 0),
@@ -352,12 +358,12 @@ const expectStats = (retained: readonly Measured[], buildCount: number): PlanBac
 });
 
 /**
- * signature（`T = rows`）1 本ぶんの backing が常駐させるバイト数を、**その形だけを回した
- * 別 Session** で測る。
+ * Measures the bytes the backing of one signature (`T = rows`) keeps resident, on **a separate Session that ran
+ * only that shape**.
  *
- * 予算の門（下の 3 本）はこの実測値から組む。定数で書くと、slot 表の詰め方（ADR 0093）が
- * 変わったときに「予算ちょうど」の意味が黙ってずれて、LRU の順を見ているつもりの門が
- * 「全部入る」形か「1 本も入らない」形に化ける。
+ * The budget checks (the 3 below) are built from this measurement. Written as a constant, a change to how the slot
+ * table is packed (ADR 0093) would silently shift what "exactly at budget" means, and checks meant to look at the
+ * LRU order would turn into a "everything fits" or a "nothing fits" shape.
  */
 const backingBytes = async (
   gpu: Awaited<ReturnType<typeof acquireGpu>>,
@@ -365,15 +371,25 @@ const backingBytes = async (
 ): Promise<Measured> => {
   const session = await createSessionFromContainer(gpu, await openedModel(), "model");
   try {
-    // 1 run 目 = ミス（計画の導出）/ 2 run 目 = ヒット（backing の構築）。
+    // Run 1 = miss (plan derivation) / run 2 = hit (backing construction).
     await session.run({ x: input(rows) });
     await session.run({ x: input(rows) });
     const stats = session.diagnostics().planBacking;
-    assertEquals(stats.retainedCount, 1, `T=${rows} を 1 形だけ回した Session の保持が 1 本でない`);
-    assert(stats.residentBytes > 0, `T=${rows} の backing が 0 バイト（門が空振る）`);
-    // 通常入力（常駐でない `Tensor`）のバッファは backing 所有 = 予算の勘定に入る。0 なら
-    // 「入力を勘定していない」形なので、下の予算の門は領域だけで組まれたことになる。
-    assert(stats.inputBytes > 0, `T=${rows} の所有入力バッファが 0 バイト（予算が勘定していない）`);
+    assertEquals(
+      stats.retainedCount,
+      1,
+      `the Session that ran only the T=${rows} shape does not retain exactly 1`,
+    );
+    assert(
+      stats.residentBytes > 0,
+      `the T=${rows} backing is 0 bytes (the check would test nothing)`,
+    );
+    // The buffers of normal inputs (non-resident `Tensor`) are owned by the backing = counted by the budget. If this
+    // is 0, "inputs are not counted", so the budget checks below would have been built from the regions alone.
+    assert(
+      stats.inputBytes > 0,
+      `the owned input buffers of T=${rows} are 0 bytes (the budget does not count them)`,
+    );
     return { residentBytes: stats.residentBytes, inputBytes: stats.inputBytes };
   } finally {
     await session.dispose();
@@ -381,7 +397,7 @@ const backingBytes = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "予算内の 2 signature は交互に回しても保持されたまま作り直されない（既定予算・実 GPU）",
+  "2 signatures within the budget stay retained and are not rebuilt even when alternated (default budget; real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -389,52 +405,52 @@ test.skipIf(!GPU_AVAILABLE)(
       const wide = await backingBytes(gpu, 9);
       assert(
         accountedBytes([wide]) > accountedBytes([narrow]),
-        `T=9 の backing が T=4 より大きくない（${JSON.stringify(narrow)} / ${JSON.stringify(
+        `the T=9 backing is not larger than T=4 (${JSON.stringify(narrow)} / ${JSON.stringify(
           wide,
-        )}）`,
+        )})`,
       );
 
-      // 既定予算（256 MiB）— この 2 形はどちらも数十バイトなので両方が収まる。
+      // Default budget (256 MiB) — both shapes are tens of bytes, so both fit.
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
       try {
         await session.run({ x: input(4) });
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([], 0),
-          "ミス run は backing を作らない",
+          "a miss run does not build a backing",
         );
 
         await session.run({ x: input(4) });
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([narrow], 1),
-          "初ヒットで slot が 1 本常駐する",
+          "the first hit makes 1 slot set resident",
         );
 
-        // 別 signature はミス run では作らず、ヒットして初めて**足される**（置き換えではない）。
+        // Another signature is not built on a miss run; it is **added** only on a hit (not a replacement).
         await session.run({ x: input(9) });
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([narrow], 1),
-          "別 signature のミス run では不変",
+          "unchanged on a miss run of another signature",
         );
         await session.run({ x: input(9) });
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([narrow, wide], 2),
-          "2 本目が旧 backing を退役させている（総和が単独実測の和にならない）",
+          "the second retired the old backing (the total is not the sum of the separate measurements)",
         );
 
-        // 交互に 3 往復しても作り直さない = 切替 1 回ぶんの再構築（perf-ledger H-15 の ≈ 40 ms）が
-        // 消えたことの観測点。値も非 backed 実行とビット一致する（保持した束が別の形の実体を
-        // 掴んでいれば、例外なしでここが割れる）。
+        // Not rebuilding across 3 round trips = the observation point that the per-switch rebuild (≈ 40 ms of
+        // perf-ledger H-15) is gone. The values are bit-identical to a non-backed execution too (if a retained set
+        // held buffers of a different shape, this would break without an exception).
         for (const phase of [1, 2, 3]) {
           const narrowOut = (await session.run({ x: input(4, phase) }))["y"];
           const wideOut = (await session.run({ x: input(9, phase) }))["y"];
           assertEquals(
             session.diagnostics().planBacking,
             expectStats([narrow, wide], 2),
-            `phase ${phase}: 切替で backing を作り直している`,
+            `phase ${phase}: the backing is rebuilt on a switch`,
           );
           assertEquals(bits(narrowOut), bits(await runFresh(gpu, { x: input(4, phase) })));
           assertEquals(bits(wideOut), bits(await runFresh(gpu, { x: input(9, phase) })));
@@ -449,7 +465,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "予算 0 の Session は切替のたびに作り直す（従来の容量 1 の再現・実 GPU）",
+  "a Session with budget 0 rebuilds on every switch (reproducing the former capacity of 1; real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -464,22 +480,22 @@ test.skipIf(!GPU_AVAILABLE)(
         await session.run({ x: input(4) });
         assertEquals(session.diagnostics().planBacking, expectStats([narrow], 1));
 
-        // 予算 0 では新規 1 本が必ず超過側になるので、保持中は全て退役する。
+        // With budget 0 a new backing is always over budget, so everything retained is retired.
         await session.run({ x: input(9) });
         await session.run({ x: input(9) });
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([wide], 2),
-          "予算 0 で旧 backing が残っている（容量 1 の挙動が再現できていない）",
+          "the old backing remains at budget 0 (the capacity-1 behaviour is not reproduced)",
         );
 
-        // 計画は LRU に残っているので、戻った run はヒットして**作り直し**になる。
+        // The plan stays in the LRU, so the run that switches back hits and **rebuilds**.
         const narrowOut = (await session.run({ x: input(4, 1) }))["y"];
         assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([narrow], 3),
-          "切替で作り直していない（予算 0 が効いていない）",
+          "no rebuild on a switch (budget 0 is not in effect)",
         );
         assertEquals(bits(narrowOut), bits(await runFresh(gpu, { x: input(4, 1) })));
       } finally {
@@ -492,16 +508,19 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "新規 1 本だけで予算を超える形は保持中を全て退役させて 1 本だけ持つ（実 GPU）",
+  "a shape that exceeds the budget on its own retires everything retained and keeps only itself (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       const narrow = await backingBytes(gpu, 4);
       const wide = await backingBytes(gpu, 9);
-      // どの 1 本も単体で超える予算（= 常駐は `max(予算, 最大 1 本)`（ADR 0095 決定 1）の
-      // 「最大 1 本」側だけになる形）。勘定は領域 + 所有入力なので、引くのもその和から。
+      // A budget that any single backing exceeds on its own (= residency is only the "largest one" side of
+      // `max(budget, largest one)` (ADR 0095 decision 1)). The count is regions + owned inputs, so subtract from that sum.
       const budget = accountedBytes([narrow]) - 1;
-      assert(budget >= 0, `narrow の実測 ${JSON.stringify(narrow)} が小さすぎて予算を作れない`);
+      assert(
+        budget >= 0,
+        `the measurement of narrow ${JSON.stringify(narrow)} is too small to make a budget`,
+      );
 
       const session = await createSessionFromContainer(gpu, await openedModel(), "model", {
         planBackingBudgetBytes: budget,
@@ -512,7 +531,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([narrow], 1),
-          "予算を超える 1 本目が確保されていない（backed 経路が消えている）",
+          "the first backing that exceeds the budget was not allocated (the backed path is gone)",
         );
 
         await session.run({ x: input(9) });
@@ -520,7 +539,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([wide], 2),
-          "予算超過の新規が旧 backing を残している（常駐が max(予算, 最大 1 本) を超える）",
+          "a new over-budget backing leaves the old one in place (residency exceeds max(budget, largest one))",
         );
       } finally {
         await session.dispose();
@@ -532,7 +551,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "backed 計画が LRU から追い出されると backing も返り、後続 run は完走する（実 GPU）",
+  "when a backed plan is evicted from the LRU its backing is released too, and later runs complete (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -541,19 +560,19 @@ test.skipIf(!GPU_AVAILABLE)(
       await session.run({ x: input(4) });
       assert(session.diagnostics().planBacking.residentBytes > 0);
 
-      // T=4 は最古。別 shape を**上限ちょうど**通すと、追い出されるのは T=4 の 1 本だけになる
-      // （下で T=5 のヒットを見るので、余分に追い出すと門が別の理由で赤くなる）。本数は定数から
-      // 出す — 写しを置くと上限を動かしたときに追い出しが起きず、この門が空振りする。
+      // T=4 is the oldest. Running **exactly the limit** of other shapes evicts only T=4 (the T=5 hit is checked
+      // below, so evicting more would turn the check red for another reason). The count comes from the constant —
+      // a copy would stop evicting when the limit moves, and this check would test nothing.
       for (let rows = 5; rows < 5 + PREPARED_PLAN_CAPACITY; rows += 1) {
         await session.run({ x: input(rows) });
       }
       assertEquals(
         session.diagnostics().planBacking,
         expectStats([], 1),
-        "追い出された計画の backing は返る（作り直しは起きていない）",
+        "the backing of an evicted plan is released (no rebuild happened)",
       );
 
-      // 追い出し + 破棄の後も、残った計画のヒット run は正しく完走する。
+      // After eviction + destruction, hit runs of the remaining plans still complete correctly.
       const hit = (await session.run({ x: input(5) }))["y"];
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
       assertEquals(session.diagnostics().planBacking.buildCount, 2);
@@ -566,8 +585,8 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * attention（ノード内一時 2 本）+ reshape（別名・グラフ出力）。slot 導出の 3 経路
- * （出力確保 / 一時の入れ子寿命 / 別名越しのピン留め）を 1 本のグラフで踏む。
+ * attention (2 node-local temporaries) + reshape (alias, graph output). One graph covers the 3 paths of slot
+ * derivation (output allocation / nested lifetimes of temporaries / pinning through an alias).
  */
 const HALF_SCALE = Math.fround(Math.sqrt(1 / Math.sqrt(4)));
 
@@ -600,18 +619,18 @@ const tempInputs = (phase: number) => ({
   v: fill([1, 1, 4, 4], (i) => ((i % 3) - 1) * 0.75),
 });
 
-/** アリーナが 1 本のバッファに配る大きさ（最小 4 バイト + 4 バイト整列）。 */
+/** The size the arena hands out for one buffer (minimum 4 bytes + 4-byte alignment). */
 const bufferBytes = (count: number): number => Math.max(4, count * 4);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "slot の総バイト数は非 backed run のプール確保と一致する（footprint 不変の門・実 GPU）",
+  "the total slot bytes match the pool allocation of a non-backed run (footprint-unchanged check; real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // グラフ入力 3 本のアップロード（q: [1,1,ROWS,4] / k, v: [1,1,4,4]）。backed run では同じ
-    // 大きさのバッファを backing が所有する = 診断の `inputBytes` の期待値でもある。
+    // Uploads of the 3 graph inputs (q: [1,1,ROWS,4] / k, v: [1,1,4,4]). In a backed run the backing owns buffers
+    // of the same size = also the expected value of `inputBytes` in the diagnostics.
     const inputHostBytes = bufferBytes(ROWS * 4) + bufferBytes(16) * 2;
-    // プール外（入力アップロードと readback staging）のぶん。アリーナの allocatedBytes から
-    // これを引いた残りが「dispatch が書く出力ストレージの実確保」= slot 表の総バイト数。
+    // The part outside the pool (input uploads and readback staging). The arena's allocatedBytes minus this is "the
+    // real allocation of the output storage the dispatches write" = the total bytes of the slot table.
     const hostBytes = inputHostBytes + bufferBytes(ROWS * 4);
     const reference = await createSessionFromContainer(
       gpu,
@@ -622,9 +641,12 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       await reference.run(tempInputs(0));
       const stats = reference.diagnostics().lastRun;
-      assert(stats !== undefined, "1 run 目のアリーナ実績が無い");
+      assert(stats !== undefined, "no arena record for run 1");
       pooledBytes = stats.allocatedBytes - hostBytes;
-      assert(pooledBytes > 0, `プール確保が 0（門が空振る）: ${stats.allocatedBytes}`);
+      assert(
+        pooledBytes > 0,
+        `the pool allocation is 0 (the check would test nothing): ${stats.allocatedBytes}`,
+      );
     } finally {
       await reference.dispose();
     }
@@ -637,27 +659,27 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const first = (await session.run(tempInputs(1)))["y"];
       const second = (await session.run(tempInputs(1)))["y"];
-      // MUST: 保持 1 本の状態で測る（診断の `residentBytes` は保持集合の総和なので、2 形を
-      // 回した Session で測ると「1 run のプール確保と一致する」という命題そのものが変わる）。
+      // MUST: measure with exactly 1 backing retained (`residentBytes` in the diagnostics is the sum over the retained
+      // set, so measuring on a Session that ran 2 shapes would change the very claim "matches one run's pool allocation").
       assertEquals(
         session.diagnostics().planBacking.retainedCount,
         1,
-        "footprint 不変は backing 1 本ぶんの命題（保持が 1 本でない状態で測っている）",
+        "footprint-unchanged is a claim about one backing (measured with other than 1 retained)",
       );
       assertEquals(
         session.diagnostics().planBacking.residentBytes,
         pooledBytes,
-        "slot 表が現行のプール確保と食い違う（VRAM の前提が崩れる）",
+        "the slot table disagrees with the current pool allocation (the VRAM premise breaks)",
       );
-      // 入力側も同じ命題 — backing が所有する入力バッファは、アリーナ経路が run ごとに確保して
-      // いたアップロード先そのもの（予算が勘定するのはこの和なので、ここがずれると予算の意味が
-      // 実際の VRAM から外れる）。
+      // The same claim on the input side — the input buffers the backing owns are exactly the upload targets the
+      // arena path allocated per run (the budget counts this sum, so if this drifts, the budget's meaning departs
+      // from the real VRAM).
       assertEquals(
         session.diagnostics().planBacking.inputBytes,
         inputHostBytes,
-        "backing の所有入力がアリーナ経路のアップロード先と食い違う",
+        "the backing's owned inputs disagree with the upload targets of the arena path",
       );
-      // 一時と別名を踏む形でも backed 出力は非 backed と一致する（別名越しのピン留めも門）。
+      // Even in a shape with temporaries and aliases the backed output matches the non-backed one (pinning through an alias is checked too).
       assertEquals(bits(second), bits(first));
       assertEquals(second.shape, [ROWS, 4]);
     } finally {
@@ -667,22 +689,22 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** storage バッファ 1 本ぶんの記録（確保の順に 1 要素 = その実体の destroy 回数）。 */
+/** Record of one storage buffer (one element per allocation in order = the destroy count of that buffer). */
 type BufferRecord = { readonly destroyCounts: number[] };
 
 /**
- * `#activateBacking` の確保途中失敗を撃つ注入。
+ * Injection that fails `#activateBacking` in the middle of its allocations.
  *
- * 実 GPU では「N 本目の createBuffer だけ落とす」形も「確保済みがちょうど 1 回返ったか」も
- * 作れないので、device の `createBuffer` を包む（生産コードに注入面を開けないための代替 —
- * `gpu_generation_context_test.ts` の `injectFaults` と同型）。
- * MUST: 返す実体は**本物の GPUBuffer のまま**にする（`destroy` だけを包む）。差し替えると
- * bind group 生成に渡す実体がテスト側の作り物になり、門が実装を検査しなくなる。
+ * A real GPU can neither "fail only the N-th createBuffer" nor tell "whether an allocated buffer was released
+ * exactly once", so the device's `createBuffer` is wrapped (a substitute for opening an injection surface in
+ * production code — the same shape as `injectFaults` in `gpu_generation_context_test.ts`).
+ * MUST: the returned objects stay **real GPUBuffers** (only `destroy` is wrapped). Replacing them would make the
+ * objects passed to bind group creation the test's own fakes, and the check would stop testing the implementation.
  */
 const injectStorageFault = (
   device: GPUDevice,
 ): {
-  /** 以後の storage 確保を新しい記録へ載せる（`failAt` 本目で同期 throw）。 */
+  /** Puts later storage allocations on a new record (synchronous throw at allocation `failAt`). */
   readonly record: (failAt?: number) => BufferRecord;
   readonly restore: () => void;
 } => {
@@ -691,11 +713,11 @@ const injectStorageFault = (
   let creations = 0;
   let failAt: number | undefined;
   device.createBuffer = ((descriptor: GPUBufferDescriptor): GPUBuffer => {
-    // 数えるのは slot / 入力の storage だけ（readback staging は MAP_READ で別経路）。
+    // Only slot / input storage is counted (the readback staging takes another path with MAP_READ).
     if ((descriptor.usage & BUFFER_USAGE.STORAGE) === 0) return original(descriptor);
     creations += 1;
     if (creations === failAt) {
-      throw new Error(`注入: storage ${creations} 本目の createBuffer が同期 throw`);
+      throw new Error(`injected: synchronous throw from storage createBuffer #${creations}`);
     }
     const buffer = original(descriptor);
     const counts = current.destroyCounts;
@@ -720,19 +742,19 @@ const injectStorageFault = (
   };
 };
 
-// executor.ts の `#activateBacking` は「確保 → 保持集合（`#backings`）への登録（所有権の確立）」
-// までを try/catch で囲む。この窓で漏れた実体は `#retireBacking()` からも `dispose()` からも
-// 到達できず、しかも量はこの Session で最大（slot 表の総バイト）になる。同型の門は
-// `GenerationContext.create` 側にあるが executor 側には無かった。
+// `#activateBacking` in executor.ts wraps "allocation → registration in the retained set (`#backings`)
+// (establishing ownership)" in a try/catch. A buffer leaked in this window is reachable from neither
+// `#retireBacking()` nor `dispose()`, and its size is the largest in this Session (the total bytes of the slot
+// table). A check of the same shape exists on the `GenerationContext.create` side but was missing on the executor side.
 //
-// 予算で分かれるのは**旧 backing の扱い**だけ（ADR 0095 決定 2 — 失敗経路が退役させるのは
-// 「この run が新規構築した 1 本」）: 予算内なら旧 backing は保持されたまま、予算 0 なら確保の
-// 前の退役が先に効いているので旧 backing も返る。確保途中で漏れた実体がちょうど 1 回返ること
-// は、どちらの予算でも同じ。
+// The budget decides only **what happens to the old backing** (ADR 0095 decision 2 — the failure path retires
+// "the one this run newly built"): within the budget the old backing stays retained; at budget 0 the retirement
+// before allocation has already taken effect, so the old backing is released too. That the buffers leaked in the
+// middle of allocation are released exactly once is the same under both budgets.
 const assertPartialBackingFault = async (
   planBackingBudgetBytes: number | undefined,
   expected: {
-    /** 失敗 run の後に旧 backing（T=4）が保持されたままか。 */
+    /** Whether the old backing (T=4) stays retained after the failed run. */
     readonly retainsOld: boolean;
   },
 ): Promise<void> => {
@@ -743,8 +765,8 @@ const assertPartialBackingFault = async (
     "model",
     planBackingBudgetBytes === undefined ? {} : { planBackingBudgetBytes },
   );
-  // 常駐入力（焼き込み参照が retain / release される側）。backing は入力バッファを所有
-  // しないので、storage の記録は slot 表そのものになる。
+  // Resident inputs (the side whose baked references are retained / released). The backing does not own input
+  // buffers, so the storage record is the slot table itself.
   const narrow = await gpu.createResident(4 * 3 * 4, "narrow");
   const wide = await gpu.createResident(9 * 3 * 4, "wide");
   const fault = injectStorageFault(gpu.device);
@@ -752,13 +774,13 @@ const assertPartialBackingFault = async (
     narrow.write(input(4, 0).data);
     wide.write(input(9, 0).data);
 
-    // ミス run（アリーナ経路）の確保は別の記録へ逃がす。以後 backing の構築だけを数える。
-    // MUST: 記号 T は明示で束縛する（常駐入力は shape を持たないので束縛源にならない）。
+    // The miss run's (arena path) allocations go to a separate record. From here on only backing construction is counted.
+    // MUST: bind the symbol T explicitly (resident inputs have no shape, so they cannot be a binding source).
     fault.record();
     await session.run({ x: narrow }, { T: 4 });
 
-    // T=4 のヒット run = backing の構築。この窓の storage 確保は slot 表そのもの
-    // （常駐入力は backing 所有ではなく、readback staging は MAP_READ で別経路）。
+    // The T=4 hit run = backing construction. The storage allocations in this window are the slot table itself
+    // (resident inputs are not owned by the backing, and the readback staging takes another path with MAP_READ).
     const built = fault.record();
     await session.run({ x: narrow }, { T: 4 });
     assertEquals(session.diagnostics().planBacking.buildCount, 1);
@@ -766,46 +788,54 @@ const assertPartialBackingFault = async (
       residentBytes: session.diagnostics().planBacking.residentBytes,
       inputBytes: session.diagnostics().planBacking.inputBytes,
     };
-    // 常駐入力は GpuContext 所有 = backing は所有しない。ここが 0 でなくなると、下の
-    // 「storage の記録は slot 表そのもの」という前提（= 本数の数え方）が崩れる。
-    assertEquals(old.inputBytes, 0, "常駐入力を backing 所有として勘定している");
-    assertEquals(narrow.bakedReferences, 1, "焼き込み参照が立っていない（門が空振りする）");
+    // Resident inputs are owned by the GpuContext = not by the backing. If this stops being 0, the premise below that
+    // "the storage record is the slot table itself" (= how the buffers are counted) breaks.
+    assertEquals(old.inputBytes, 0, "resident inputs are counted as owned by the backing");
+    assertEquals(
+      narrow.bakedReferences,
+      1,
+      "no baked reference is held (the check would test nothing)",
+    );
     const slots = built.destroyCounts.length;
-    assert(slots >= 2, `slot が ${slots} 本しかなく「途中で落とす」形にならない`);
+    assert(slots >= 2, `only ${slots} slots, so "fail in the middle" cannot happen`);
 
-    // T=9 はミス run では backing を作らない。次のヒット run が構築の窓。
+    // T=9 builds no backing on a miss run. The next hit run is the construction window.
     fault.record();
     await session.run({ x: wide }, { T: 9 });
 
     const partial = fault.record(2);
-    await assertRejects(() => session.run({ x: wide }, { T: 9 }), Error, "注入: storage 2 本目");
+    await assertRejects(
+      () => session.run({ x: wide }, { T: 9 }),
+      Error,
+      "injected: synchronous throw from storage createBuffer #2",
+    );
 
-    assertEquals(partial.destroyCounts, [1], "確保済みの 1 本がちょうど 1 回だけ返る");
+    assertEquals(partial.destroyCounts, [1], "the 1 allocated buffer is released exactly once");
     assertEquals(
       built.destroyCounts,
       Array(slots).fill(expected.retainsOld ? 0 : 1),
       expected.retainsOld
-        ? "無関係な失敗で旧 backing が退役している（再構築のスラッシングの入り口）"
-        : "退役した旧 backing もちょうど 1 回ずつ返る",
+        ? "an unrelated failure retired the old backing (the entrance to rebuild thrashing)"
+        : "the retired old backing is also released exactly once each",
     );
     assertEquals(
       session.diagnostics().planBacking,
       expected.retainsOld ? expectStats([old], 1) : expectStats([], 1),
-      "失敗した構築が backing として据わっている",
+      "the failed construction sits in place as a backing",
     );
     assertEquals(
       narrow.bakedReferences,
       expected.retainsOld ? 1 : 0,
       expected.retainsOld
-        ? "保持されたままの backing の焼き込み参照が返っている"
-        : "退役で焼き込み参照が返っていない",
+        ? "the baked references of the still-retained backing were released"
+        : "retirement did not release the baked references",
     );
-    assertEquals(wide.bakedReferences, 0, "失敗した構築が焼き込み参照を残している");
+    assertEquals(wide.bakedReferences, 0, "the failed construction leaves baked references behind");
 
-    // 同一 signature の次の run は作り直して完走し、非 backed 実行とビット一致する。
+    // The next run of the same signature rebuilds, completes, and is bit-identical to a non-backed execution.
     fault.restore();
     const actual = (await session.run({ x: wide }, { T: 9 }))["y"];
-    assertEquals(session.diagnostics().planBacking.buildCount, 2, "作り直していない");
+    assertEquals(session.diagnostics().planBacking.buildCount, 2, "not rebuilt");
     assertEquals(bits(actual), bits(await runFresh(gpu, { x: input(9, 0) })));
   } finally {
     fault.restore();
@@ -817,21 +847,22 @@ const assertPartialBackingFault = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "backing 確保の途中失敗は確保済みだけを 1 回返し、旧 backing は保持したまま（既定予算・故障注入・実 GPU）",
+  "a failure in the middle of backing allocation releases only what was allocated, once, and keeps the old backing (default budget; fault injection; real GPU)",
   () => assertPartialBackingFault(undefined, { retainsOld: true }),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "予算 0 では確保の前に旧 backing が退役し、確保済みと合わせてちょうど 1 回ずつ返る（故障注入・実 GPU）",
+  "at budget 0 the old backing is retired before allocation and released exactly once along with what was allocated (fault injection; real GPU)",
   () => assertPartialBackingFault(0, { retainsOld: false }),
 );
 
 /**
- * 予算ちょうどの Session に 3 つ目の signature を入れて、退役するのが**最も古く使われた方**
- * （直前に触った方ではない）ことを見る。
+ * Puts a third signature into a Session exactly at budget and checks that the one retired is **the least recently
+ * used** (not the one touched just before).
  *
- * `touched` は 3 つ目の前に触り直す形（= LRU の最新へ動く形）。2 通りとも置くのは、片方だけだと
- * 「常に先に構築した方を退役させる」実装（挿入順のみ・ヒットで動かさない）が緑のまま通るため。
+ * `touched` is the one touched again before the third (= moved to the most recent end of the LRU). Both variants
+ * are kept because with only one of them an implementation that "always retires the one built first" (insertion
+ * order only, not moved on a hit) would stay green.
  */
 const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
   const gpu = await acquireGpu();
@@ -839,12 +870,12 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
     const narrow = await backingBytes(gpu, 4);
     const wide = await backingBytes(gpu, 9);
     const small = await backingBytes(gpu, 2);
-    // 3 つ目は「1 本退役させれば必ず収まる」大きさでなければ、退役が 2 本に及んで LRU の順が
-    // 観測できない（門が空振る）。比べるのは予算が勘定する量（領域 + 所有入力）。
+    // Unless the third is of a size that "always fits after retiring one", retirement would extend to 2 and the LRU
+    // order could not be observed (the check would test nothing). What is compared is what the budget counts (regions + owned inputs).
     assert(
       accountedBytes([small]) <= accountedBytes([narrow]) &&
         accountedBytes([small]) <= accountedBytes([wide]),
-      `T=2 の実測 ${JSON.stringify(small)} が他の形以下でない` +
+      `the measurement of T=2 ${JSON.stringify(small)} is not at most the other shapes` +
         `（${JSON.stringify(narrow)} / ${JSON.stringify(wide)}）`,
     );
 
@@ -853,7 +884,7 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
     });
     const fault = injectStorageFault(gpu.device);
     try {
-      // ミス run のぶんは捨てる記録へ逃がし、構築の窓だけを形ごとに数える。
+      // The miss runs go to a discarded record, and only the construction windows are counted per shape.
       fault.record();
       await session.run({ x: input(4) });
       const narrowRecord = fault.record();
@@ -865,18 +896,18 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
       assertEquals(
         session.diagnostics().planBacking,
         expectStats([narrow, wide], 2),
-        "予算ちょうどの 2 本が両方とも保持されていない",
+        "the 2 backings exactly at budget are not both retained",
       );
 
-      // 触り直し（LRU の最新へ動かす）。ヒットなので作り直しは起きない。
+      // Touch again (move to the most recent end of the LRU). It is a hit, so no rebuild happens.
       await session.run({ x: input(touched) });
       assertEquals(
         session.diagnostics().planBacking.buildCount,
         2,
-        "触り直しで backing を作り直している",
+        "touching again rebuilds the backing",
       );
 
-      // 3 つ目。予算ちょうどなので、最も古く使われた 1 本だけが退役する。
+      // The third. Exactly at budget, so only the least recently used one is retired.
       fault.record();
       await session.run({ x: input(2) });
       const smallRecord = fault.record();
@@ -891,28 +922,31 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
       assertEquals(
         session.diagnostics().planBacking,
         expectStats([kept.measured, small], 3),
-        `直前に触った T=${touched} ではない方が退役している（LRU の順が挿入順のまま）`,
+        `the one other than T=${touched}, touched just before, was not retired (the LRU order stays the insertion order)`,
       );
-      assert(evicted.record.destroyCounts.length > 0, "退役側の記録が空（門が空振る）");
+      assert(
+        evicted.record.destroyCounts.length > 0,
+        "the record of the retired side is empty (the check would test nothing)",
+      );
       assertEquals(
         evicted.record.destroyCounts,
         Array(evicted.record.destroyCounts.length).fill(1),
-        `退役した T=${evicted.rows} のバッファがちょうど 1 回ずつ返っていない`,
+        `the buffers of the retired T=${evicted.rows} were not released exactly once each`,
       );
       assertEquals(
         kept.record.destroyCounts,
         Array(kept.record.destroyCounts.length).fill(0),
-        `保持中の T=${kept.rows} のバッファが返っている（使用中の実体を破棄している）`,
+        `the buffers of the retained T=${kept.rows} were released (destroying buffers in use)`,
       );
       assertEquals(
         smallRecord.destroyCounts,
         Array(smallRecord.destroyCounts.length).fill(0),
-        "新規に確保した backing がその場で返っている",
+        "the newly allocated backing was released on the spot",
       );
 
-      // 保持している形は作り直さずに回り、値は非 backed 実行と一致する。
+      // Retained shapes run without rebuilding, and the values match a non-backed execution.
       const hit = (await session.run({ x: input(kept.rows, 1) }))["y"];
-      assertEquals(session.diagnostics().planBacking.buildCount, 3, "保持中の形を作り直した");
+      assertEquals(session.diagnostics().planBacking.buildCount, 3, "a retained shape was rebuilt");
       assertEquals(bits(hit), bits(await runFresh(gpu, { x: input(kept.rows, 1) })));
     } finally {
       fault.restore();
@@ -924,25 +958,25 @@ const assertLruOrder = async (touched: 4 | 9): Promise<void> => {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "予算超過の退役は最も古く使われた 1 本（直前に触った T=4 が残る・実 GPU）",
+  "over-budget retirement takes the least recently used one (T=4, touched just before, remains; real GPU)",
   () => assertLruOrder(4),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "予算超過の退役は最も古く使われた 1 本（直前に触った T=9 が残る・実 GPU）",
+  "over-budget retirement takes the least recently used one (T=9, touched just before, remains; real GPU)",
   () => assertLruOrder(9),
 );
 
-// batch の失敗決着（ADR 0095 決定 2 の batch 版）。非致命 OOM（`createBuffer` が無効なバッファを
-// 返すだけで例外にならない）は enqueue を成功させたまま、`finish()` の errorScope で初めて
-// 判明する。決着で退役させないと、壊れた backing が保持集合に居座り、同じ形の次の batch / run が
-// メモリが空いた後も作り直さずに再利用し続ける。
+// Failure settlement of a batch (the batch version of ADR 0095 decision 2). A non-fatal OOM (`createBuffer` merely
+// returns an invalid buffer without throwing) lets the enqueue succeed and is discovered only in the errorScope of
+// `finish()`. Unless the settlement retires it, the broken backing stays in the retained set, and the next batch /
+// run of the same shape keeps reusing it without rebuilding even after memory frees up.
 //
-// 計画の導出は前置きの run で済ませておく（enqueue の導出が作る params も storage を使うので、
-// 同じ記録に混ざると「backing の実体がちょうど 1 回返る」の勘定が崩れる）。
-describe("batch の finish で GPU 失敗（非致命 OOM）が判明したとき（注入・実 GPU）", () => {
+// Plan derivation is done beforehand by a preliminary run (the params created by enqueue's derivation use storage
+// too, and mixing them into the same record would break the count of "the backing's buffers are released exactly once").
+describe("when finish of a batch discovers a GPU failure (non-fatal OOM) (injected; real GPU)", () => {
   it.skipIf(!GPU_AVAILABLE)(
-    "その batch が新規構築した backing は退役してちょうど 1 回返り、次の batch が同じ形を作り直す",
+    "the backing that batch newly built is retired and released exactly once, and the next batch rebuilds the same shape",
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -958,28 +992,36 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
         assertEquals(
           session.diagnostics().planBacking.buildCount,
           1,
-          "enqueue が backing を作っていない",
+          "enqueue did not build a backing",
         );
         oom.arm();
         await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
-        assertEquals(oom.fired(), 1, "注入が finish の pop に当たっていない（門が空振る）");
+        assertEquals(
+          oom.fired(),
+          1,
+          "the injection did not hit finish's pop (the check would test nothing)",
+        );
         assertEquals(
           session.diagnostics().planBacking,
           expectStats([], 1),
-          "失敗で決着した batch の backing が保持集合に残っている",
+          "the backing of the batch that settled with a failure remains in the retained set",
         );
-        // 旧 backing の VRAM は作り直しより**前**に返る（破棄は Session の直列化鎖に積まれ、
-        // 後続の enqueue の後始末に便乗しない）。鎖を 1 本だけ進めるため、束縛の解決で落ちる
-        // run を流す — 鎖の上で走るが、破棄待ちにも backing にも触れずに落ちる。
+        // The old backing's VRAM is released **before** the rebuild (destruction is queued on the Session's
+        // serialization chain and does not ride on the cleanup of a later enqueue). To advance the chain by exactly
+        // one step, a run that fails at binding resolution is sent — it runs on the chain but fails without touching
+        // either the pending destruction or the backing.
         await assertRejects(
           () => session.run({ x: { dtype: "f32", shape: [4, 5], data: new Float32Array(20) } }),
           ExecutionError,
         );
-        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assert(
+          built.destroyCounts.length > 0,
+          "the construction record is empty (the check would test nothing)",
+        );
         assertEquals(
           built.destroyCounts,
           Array(built.destroyCounts.length).fill(1),
-          "失敗で決着した batch の backing を、直列化鎖の 1 本目で返していない",
+          "the backing of the batch that settled with a failure was not released at the first step of the serialization chain",
         );
 
         storage.record();
@@ -989,21 +1031,24 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
         assertEquals(
           session.diagnostics().planBacking.buildCount,
           2,
-          "失敗した batch の backing を作り直さずに再利用している",
+          "reuses the failed batch's backing without rebuilding",
         );
         assertEquals(
           session.diagnostics().lastRunPrepared?.hit,
           true,
-          "失敗した batch と無関係な（先行 run が登録した）計画まで捨てている",
+          "discards even plans unrelated to the failed batch (registered by an earlier run)",
         );
-        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assert(
+          built.destroyCounts.length > 0,
+          "the construction record is empty (the check would test nothing)",
+        );
         assertEquals(
           built.destroyCounts,
           Array(built.destroyCounts.length).fill(1),
-          "退役した backing の実体がちょうど 1 回ずつ返っていない",
+          "the buffers of the retired backing were not released exactly once each",
         );
 
-        // 作り直した backing の上のヒット run は、非 backed 実行とビット一致する。
+        // A hit run on the rebuilt backing is bit-identical to a non-backed execution.
         const actual = (await session.run({ x: input(4, 2) }))["y"];
         assertEquals(session.diagnostics().planBacking.buildCount, 2);
         assertEquals(bits(actual), bits(await runFresh(gpu, { x: input(4, 2) })));
@@ -1017,7 +1062,7 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
   );
 
   it.skipIf(!GPU_AVAILABLE)(
-    "既存の backing に当たっただけの batch の失敗では退役させない（再構築のスラッシングを起こさない）",
+    "a failure of a batch that merely hit an existing backing does not retire it (no rebuild thrashing)",
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -1039,7 +1084,11 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
         await session.enqueue({ x: input(4, 1) }, { batch: failed });
         oom.arm();
         await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
-        assertEquals(oom.fired(), 1, "注入が finish の pop に当たっていない（門が空振る）");
+        assertEquals(
+          oom.fired(),
+          1,
+          "the injection did not hit finish's pop (the check would test nothing)",
+        );
 
         const next = await gpu.beginBatch();
         await session.enqueue({ x: input(4, 2) }, { batch: next });
@@ -1047,13 +1096,16 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
         assertEquals(
           session.diagnostics().planBacking,
           retained,
-          "既存の backing を無関係な失敗で退役させている",
+          "an unrelated failure retires an existing backing",
         );
-        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assert(
+          built.destroyCounts.length > 0,
+          "the construction record is empty (the check would test nothing)",
+        );
         assertEquals(
           built.destroyCounts,
           Array(built.destroyCounts.length).fill(0),
-          "保持中の backing の実体を破棄している",
+          "destroys the buffers of a retained backing",
         );
       } finally {
         oom.restore();
@@ -1065,12 +1117,12 @@ describe("batch の finish で GPU 失敗（非致命 OOM）が判明したと�
   );
 });
 
-// 区間本体（errorScope の検査）は通り、ある enqueue のホスト側の失敗（入力の誤り）だけで決着した
-// batch。同じ区間の別の enqueue が作った backing は有効なので、決着で退役させない — 退役させると
-// 無関係な入力の誤りのたびに backing を作り直すことになる（ADR 0095 決定 2 が避けている形）。
-describe("ホスト側の失敗だけで batch が失敗に決着したとき（実 GPU）", () => {
+// A batch whose scope body (the errorScope check) passed and that settled only on the host-side failure (input
+// error) of one enqueue. The backing another enqueue of the same scope built is valid, so the settlement does not
+// retire it — retiring would rebuild the backing on every unrelated input error (the shape ADR 0095 decision 2 avoids).
+describe("when a batch settles as failed on a host-side failure only (real GPU)", () => {
   it.skipIf(!GPU_AVAILABLE)(
-    "同じ区間の別の enqueue が新規構築した backing は保持したまま残す",
+    "keeps the backing newly built by another enqueue of the same scope retained",
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -1082,7 +1134,7 @@ describe("ホスト側の失敗だけで batch が失敗に決着したとき（
         const built = storage.record();
         const batch = await gpu.beginBatch();
         await session.enqueue({ x: input(4, 0) }, { batch });
-        // 要素数の誤りは束縛の解決を通り、導出の後の入力検査で落ちる（backing の構築より前）。
+        // A wrong element count passes binding resolution and fails at the input check after derivation (before backing construction).
         const wrongCount: Tensor = { dtype: "f32", shape: [4, 3], data: new Float32Array(11) };
         await assertRejects(() => session.enqueue({ x: wrongCount }, { batch }), ExecutionError);
         await assertRejects(() => batch.finish(), ExecutionError);
@@ -1091,13 +1143,16 @@ describe("ホスト側の失敗だけで batch が失敗に決着したとき（
         assertEquals(
           [stats.retainedCount, stats.buildCount],
           [1, 1],
-          "ホスト側の失敗だけの決着で、別の enqueue が作った backing を退役させている",
+          "a settlement on a host-side failure alone retires the backing another enqueue built",
         );
-        assert(built.destroyCounts.length > 0, "構築の記録が空（門が空振る）");
+        assert(
+          built.destroyCounts.length > 0,
+          "the construction record is empty (the check would test nothing)",
+        );
         assertEquals(
           built.destroyCounts,
           Array(built.destroyCounts.length).fill(0),
-          "保持中の backing の実体を破棄している",
+          "destroys the buffers of a retained backing",
         );
       } finally {
         storage.restore();

@@ -1,31 +1,35 @@
-// grid-stride の実効性を、dispatch 数を意図的に絞って直接確かめる（実 GPU）。
+// Checks that grid-stride really works by deliberately cutting the dispatch count (real GPU).
 //
-// 1 次元の workgroup 上限（既定 65535）を本物の要素数で踏むには数十 MB のバッファが要る。
-// カーネル側の縮退耐性そのものは「必要数より遥かに少ない workgroup で全域が埋まるか」で
-// 等価に検証できるので、小さい入力に絞った dispatch を当てる。
+// Reaching the 1-D workgroup limit (65535 by default) with real element counts needs buffers of
+// tens of MB. Whether a kernel copes with a reduced dispatch can be checked equivalently by asking
+// "does it fill the whole range with far fewer workgroups than needed", so small inputs get a cut
+// dispatch.
 //
-// MUST: grid-stride を謳う**全カーネル族**をここに載せる。実測形のテスト（gpu_ops_test.ts）は
-// 「大きめの入力」を通すだけで、必要数の workgroup が実際に割り当たるため縮退経路を 1 度も
-// 踏まない — `stride` を `nwg.x * WG` ではなく定数にする誤りは、そちらでは緑のまま通る。
-// 要素方向の族（elementwise / strided 読み書き / gather / embedding / masked_fill / conv 族 /
-// pad / flip / upsample_bilinear2d / deform_conv2d / **軸 reduce**）は `gid.x` の 1 次元
-// grid-stride、
-// 行方向の族（行 reduce / **argmax** / **topk** / softmax /
-// layer_norm / rms_norm / **gru_scan**）は `workgroup_id.x` を `num_workgroups.x` で送る
-// 行ループを踏ませる（gru_scan の「行」はバッチ要素で、時間ループはカーネル内）。
-// **reduce 族は 2 変種とも載せる**（最終次元 = 行方向 / それ以外 = 要素方向で、走らせ方が違う）。
-// cumsum は**行を単位とした
-// `gid.x` の grid-stride**（1 invocation = 1 行の逐次走査）で、必要数は行数ではなく
-// `ceil(行数 / workgroup サイズ)`。
+// MUST: list **every kernel family** that claims grid-stride here. The tests with measured shapes
+// (gpu_ops_test.ts) only pass "fairly large inputs", where the needed workgroups really are
+// assigned, so they never take the reduced path — making `stride` a constant instead of
+// `nwg.x * WG` stays green there.
+// The element-wise families (elementwise / strided read and write / gather / embedding /
+// masked_fill / the conv family / pad / flip / upsample_bilinear2d / deform_conv2d / **axis
+// reduce**) exercise 1-D grid-stride over `gid.x`,
+// the row-wise families (row reduce / **argmax** / **topk** / softmax /
+// layer_norm / rms_norm / **gru_scan**) exercise the row loop that advances `workgroup_id.x` by
+// `num_workgroups.x` (a "row" of gru_scan is a batch element; the time loop is inside the kernel).
+// **Both reduce variants are listed** (last dimension = row-wise / otherwise = element-wise; they
+// run differently). cumsum is **grid-stride over `gid.x` with a row as the unit** (1 invocation = a
+// sequential scan of 1 row), and the needed count is `ceil(rows / workgroup size)`, not the row
+// count.
 //
-// NOTE: conv2d は 2 カーネルに分かれた（ADR 0024）。ここが載せるのは **直接カーネル**
-// （groups > 1 用に恒久で残る grid-stride 側）だけで、implicit GEMM 変種は「1 workgroup =
-// 1 出力タイル」なのでカテゴリ違い — 安全網は `tiledWorkgroups` の fail loudly と
-// tests/gpu_full_write_test.ts の毒値注入の 2 本（GEMM 3 op と同じ判断）。
+// NOTE: conv2d was split into 2 kernels (ADR 0024). Only the **direct kernel** is listed here (the
+// grid-stride side that stays permanently for groups > 1); the implicit GEMM variant is "1
+// workgroup = 1 output tile" and so a different category — its safety nets are the fail loudly of
+// `tiledWorkgroups` and the poison-value injection in tests/gpu_full_write_test.ts (the same
+// decision as for the 3 GEMM ops).
 //
-// NOTE: 実運用で必ず縮退経路に入るのは **pad**（flow / voice の相対位置注意の value 側
-// `F.pad(p_attn, [w, w])` は T ≳ 2900 で必要 workgroup 数が 65535 を超える）。他の族は
-// 「今の実測形では超えない」だけなので、上限を踏むかどうかで載せる・載せないを決めない。
+// NOTE: the one that always takes the reduced path in real use is **pad** (on the value side of
+// the relative-position attention of flow / voice, `F.pad(p_attn, [w, w])` needs more than 65535
+// workgroups at T ≳ 2900). The other families merely "do not exceed it with today's measured
+// shapes", so whether they reach the limit does not decide whether they are listed.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
@@ -80,11 +84,12 @@ const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
 /**
- * 出力バッファを**期待値の意味論 dtype で**読む（ADR 0009 の実表現 — bool は u32 の 0/1）。
+ * Reads the output buffer **in the semantic dtype of the expected value** (the physical
+ * representation of ADR 0009 — bool is a u32 0/1).
  *
- * MUST: dtype を固定で f32 にしない。`argmax` は i32（添字）を書くので、f32 として読むと
- * ビット列の読み替えになって突合が丸ごと無意味になる（比較は必ず落ちるが、落ち方が
- * 「縮退耐性の欠陥」に見えて原因を隠す）。
+ * MUST: do not hard-code the dtype to f32. `argmax` writes i32 (indices), so reading it as f32
+ * reinterprets the bits and makes the comparison entirely meaningless (it always fails, but the
+ * failure looks like "the kernel does not cope with a reduced dispatch" and hides the cause).
  */
 const readback = async (
   device: GPUDevice,
@@ -166,8 +171,9 @@ const CASES: readonly DegenerateCase[] = [
   stridedCase(),
   gatherCase(),
   maskedFillCase(),
-  // 重み格納の変種を持つ 4 族は**変種ぶん**載せる（WGSL 本体が違う = 別の検出対象）。
-  // linear はタイル固定で grid-stride を謳わないのでこのハーネスの対象外。
+  // The 4 families with weight-storage variants are listed **once per variant** (a different WGSL
+  // body = a separate target). linear uses fixed tiles and does not claim grid-stride, so it is
+  // outside this harness.
   ...WEIGHT_STORAGES.flatMap((storage) => [
     embeddingCase(storage),
     conv1dCase(storage),
@@ -182,19 +188,25 @@ const CASES: readonly DegenerateCase[] = [
   cumsumCase(),
   reduceCase(),
   axisReduceCase(),
-  // argmax は行 reduce と同じ行方向 grid-stride の**別族**（identity −inf + index 追跡）。
-  // 出力が i32 なので readback は期待値の dtype で view を張る。
+  // argmax is a **separate family** with the same row-wise grid-stride as row reduce (identity −inf
+  // + index tracking).
+  // Its output is i32, so readback takes a view in the expected value's dtype.
   argmaxCase(),
-  // topk も同じ行方向 grid-stride の別族（レーン局所 top-k → トーナメント merge・出力 2 本）。
-  // 突合は添字の列で、値の列は sideOutputBytes 側（helpers/gridstride_cases.ts の doc）。
+  // topk is another separate family with the same row-wise grid-stride (lane-local top-k →
+  // tournament merge, 2 outputs).
+  // The comparison is on the index column; the value column goes to sideOutputBytes (doc of
+  // helpers/gridstride_cases.ts).
   topkCase(),
   softmaxCase(),
-  // 融合 attention の 3 カーネルのうち行方向 grid-stride なのは ② だけ（①③ はタイル系で
-  // カテゴリ違い — 安全網は tiledWorkgroups の fail loudly + full-write テスト）。
+  // Of the 3 kernels of the fused attention, only ② is row-wise grid-stride (①③ are tiled, a
+  // different category — their safety nets are the fail loudly of tiledWorkgroups + the full-write
+  // test).
   attentionStatsCase(),
-  // S の f16 格納変種（案 γ 波 1）は core WGSL なのでここに載る（`:c16` 版は別 device）
+  // The f16-storage variant of S (option γ, phase 1) is core WGSL, so it is listed here (the `:c16`
+  // version needs another device)
   attentionStatsS16Case(),
-  // w8a8 の活性量子化（1 ノード 2 dispatch の前段 — i8a8 GEMM 側はタイル系でカテゴリ違い）
+  // Activation quantization of w8a8 (the first of 1 node's 2 dispatches — the i8a8 GEMM side is
+  // tiled, a different category)
   quantizeRowsCase(),
   quantizeRowsGroupedCase(),
   // The channel-major form conv3d w8a8 reads its input with (perf-ledger V-6)
@@ -207,24 +219,26 @@ const CASES: readonly DegenerateCase[] = [
   rmsNormCase(true),
   rmsNormPrefetchCase(),
   gruScanCase(),
-  // 融合カーネル（op 語彙の外 — src/runtime/fusion.ts が置換で挿す 3 族）。担当テストは形が
-  // 小さく必要数の workgroup がそのまま割り当たるので、縮退経路はここでしか踏まれない。
+  // Fused kernels (outside the op vocabulary — the 3 families src/runtime/fusion.ts inserts by
+  // rewriting). Their own tests have small shapes where the needed workgroups are assigned as is,
+  // so the reduced path is exercised only here.
   upsample2xCase(),
   siluCase(),
   adalnNormCase(),
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "grid-stride の全カーネル族が必要数より遥かに少ない workgroup でも全域を書く（実 GPU）",
+  "every grid-stride kernel family writes the whole range even with far fewer workgroups than needed (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of CASES) {
-        // 縮退させていることの証拠。素直に割った必要数がこれだけあるのに groups 本で回す。
+        // Evidence that the dispatch is reduced: the plain split needs this many, yet it runs with
+        // `groups`.
         assertEquals(
           testCase.natural > testCase.groups * 10,
           true,
-          `${testCase.name}: 必要数 ${testCase.natural} に対し dispatch ${testCase.groups} は縮退と言えない`,
+          `${testCase.name}: ${testCase.natural} workgroups needed, so a dispatch of ${testCase.groups} does not count as reduced`,
         );
         await runDegenerate(gpu, testCase);
       }
@@ -235,13 +249,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * f16 計算変種（ADR 0028）の族。**別の device が要る**（`shader-f16` は device 作成時にしか
- * 要求できない）ので、上の一括ハーネスとは別のテストに分ける。列挙しないアダプタでは SKIP。
+ * Families of the f16 compute variants (ADR 0028). They **need another device** (`shader-f16` can
+ * only be requested when the device is created), so they are a separate test from the combined
+ * harness above. SKIP on adapters that do not list it.
  */
 const F16_CASES: readonly DegenerateCase[] = [attentionStatsF16Case()];
 
 test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
-  "f16 計算変種の grid-stride 族も縮退した dispatch で全域を書く（実 GPU）",
+  "the grid-stride families of the f16 compute variants also write the whole range with a reduced dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     try {
@@ -249,7 +264,7 @@ test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
         assertEquals(
           testCase.natural > testCase.groups * 10,
           true,
-          `${testCase.name}: 必要数 ${testCase.natural} に対し dispatch ${testCase.groups} は縮退と言えない`,
+          `${testCase.name}: ${testCase.natural} workgroups needed, so a dispatch of ${testCase.groups} does not count as reduced`,
         );
         await runDegenerate(gpu, testCase);
       }

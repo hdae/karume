@@ -1,13 +1,16 @@
 /**
- * CPU 展開の読み手は、取得元の器の中程を指す view（byteOffset ≠ 0）を tight な写しと同じに読む。
+ * The readers of the CPU decode read a view pointing into the middle of the source buffer
+ * (byteOffset ≠ 0) the same as a tight copy.
  *
- * hub の scan 経路は block を part の器の view として返す（写さない — container-v1 §11）。
- * 読み手が `bytes.buffer` を byteOffset 抜きで読むと、器の先頭（隣の block）を黙って読む。
- * 器の余白を**毒（0xFF）**で埋めるのは、ずれた読みが「偶然それらしい値」にならないようにするため —
- * 0xFF は f16 / f32 で NaN、i8 で −1、i4 / i2 で範囲端のコードになる。
+ * The hub's scan path returns a block as a view into the part's buffer (no copy — container-v1
+ * §11). A reader that reads `bytes.buffer` without the byteOffset silently reads the head of the
+ * buffer (the neighbouring block). The buffer's slack is filled with **poison (0xFF)** so that a
+ * misaligned read does not happen to produce plausible values — 0xFF is NaN in f16 / f32, −1 in i8
+ * and an edge-of-range code in i4 / i2.
  *
- * view の byteOffset は 64 の倍数に置く（block 開始は 64 B 整列 — descriptor の parse が強制）。
- * scale の Float32Array view はこの整列の上で張る（session-build の `scaleTensor` と同じ組み方）。
+ * The view's byteOffset is placed at a multiple of 64 (blocks start 64 B aligned — enforced by the
+ * descriptor parse). The scale's Float32Array view is built on this alignment (the same way as
+ * `scaleTensor` in session-build).
  */
 
 import { assertEquals, assertNotEquals } from "@std/assert";
@@ -23,17 +26,20 @@ import { f32Bytes } from "./helpers/model-fixture.ts";
 
 const POISON = 0xff;
 const BLOCK_ALIGN = 64;
-/** view を置く位置（block 開始と同じ 64 B 整列・0 以外）。 */
+/** Where the view is placed (64 B aligned like a block start, non-zero). */
 const OFFSETS = [BLOCK_ALIGN, 3 * BLOCK_ALIGN] as const;
 
-/** 毒で埋めた器の `offset` に `payload` を置き、その区間の view を返す（後ろにも毒を残す）。 */
+/**
+ * Places `payload` at `offset` in a poison-filled buffer and returns a view of that range (poison
+ * is left behind it too).
+ */
 const embed = (payload: Uint8Array<ArrayBuffer>, offset: number): Uint8Array<ArrayBuffer> => {
   const vessel = new Uint8Array(offset + payload.byteLength + BLOCK_ALIGN).fill(POISON);
   vessel.set(payload, offset);
   return vessel.subarray(offset, offset + payload.byteLength);
 };
 
-/** `scaleTensor`（session-build.ts）と同じ組み方の scale view。 */
+/** A scale view built the same way as `scaleTensor` (session-build.ts). */
 const scaleView = (bytes: Uint8Array<ArrayBuffer>): Float32Array<ArrayBuffer> =>
   new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
 
@@ -43,17 +49,17 @@ const bitsOf = (values: Float32Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>
 const values = (count: number): number[] =>
   Array.from({ length: count }, (_, i) => Math.sin(i * 0.37) * 0.75);
 
-describe("CPU 展開の読み手に器の中程を指す view を渡す", () => {
-  it("scale の Float32Array view は byteOffset から読む（器の先頭の毒を読まない）", () => {
+describe("passing a view into the middle of a buffer to the readers of the CPU decode", () => {
+  it("a scale Float32Array view reads from byteOffset (not the poison at the buffer head)", () => {
     const scale = Float32Array.of(0.5, -1.25, 3.0, 0.0078125);
     for (const offset of OFFSETS) {
       const view = scaleView(embed(f32Bytes(scale), offset));
       assertEquals(view.byteOffset, offset);
-      assertEquals(bitsOf(view), bitsOf(scale), `offset ${offset} の scale が化けている`);
+      assertEquals(bitsOf(view), bitsOf(scale), `the scale at offset ${offset} is corrupted`);
     }
   });
 
-  it("decodeF16 は view と tight な写しで同じビット列を出す", () => {
+  it("decodeF16 produces the same bits for the view and a tight copy", () => {
     const quantized = quantizeF16(values(40));
     for (const offset of OFFSETS) {
       const view = embed(quantized.bytes, offset);
@@ -63,7 +69,7 @@ describe("CPU 展開の読み手に器の中程を指す view を渡す", () => 
     }
   });
 
-  it("decodeI8 は view の重みと view の scale を tight な写しと同じに読む", () => {
+  it("decodeI8 reads view weights and a view scale the same as a tight copy", () => {
     const shape = [6, 8];
     const quantized = quantizeI8(values(48), shape, 0);
     const scaleBytes = f32Bytes(quantized.scale);
@@ -82,7 +88,7 @@ describe("CPU 展開の読み手に器の中程を指す view を渡す", () => 
     }
   });
 
-  it("decodeI4 は view の重みと view の group scale を tight な写しと同じに読む", () => {
+  it("decodeI4 reads view weights and a view group scale the same as a tight copy", () => {
     const shape = [4, 32];
     const groupSize = 16;
     const quantized = quantizeI4(values(128), shape, groupSize);
@@ -103,7 +109,7 @@ describe("CPU 展開の読み手に器の中程を指す view を渡す", () => 
     }
   });
 
-  it("decodeI2 は view の重みと view の行 scale を tight な写しと同じに読む", () => {
+  it("decodeI2 reads view weights and a view row scale the same as a tight copy", () => {
     const shape = [2, 16];
     const bytes = Uint8Array.of(0xe4, 0x1b, 0x72, 0x8d, 0x1b, 0xe4, 0x8d, 0x72);
     const scale = Float32Array.of(0.375, 1.25);

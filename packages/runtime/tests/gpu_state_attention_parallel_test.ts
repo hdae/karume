@@ -1,22 +1,25 @@
-// states 形 attention の**並列縮約変種 2 段**（席は 1 つ — `stateAttentionReduce: "parallel"`）の
-// A/B 帯門（ADR 0058 決定 4 ②）:
-//   ③' = ③PV の KV 並列縮約（perf-ledger K-12）
-//   ①' = ①QK の D 並列縮約（perf-ledger K-14）
-// 参照経路（① ③ の逐次）の門は gpu_state_attention_test.ts のまま 1 文字も動かさない
-// （同決定 4 ①の凍結）。
+// A/B band checks (ADR 0058 decision 4 ②) for the **two parallel-reduction stages** of states-form
+// attention (one preset — `stateAttentionReduce: "parallel"`):
+//   ③' = KV-parallel reduction of ③PV (perf-ledger K-12)
+//   ①' = D-parallel reduction of ①QK (perf-ledger K-14)
+// The checks of the reference path (sequential ① ③) stay in gpu_state_attention_test.ts without a
+// single character changed (the freeze of decision 4 ① of the same ADR).
 //
-// どちらも縮約順が違うので参照経路とビット同一ではない。ここで見るのは
-//   ① f64 参照との allclose（参照経路と同じ許容差 — 順序が変わっても正しさの帯は同じ）
-//   ② 参照経路との A/B 帯（実測ドリフト × マージン — 下の `AB_TOLERANCE` /
-//      `QK_AB_TOLERANCE` の導出表）
-//   ③ 構造的保証は参照経路と同じ: pad 行（空行を包含）は**厳密 0**・①' は述語外の S が
-//      **厳密 −inf のビット列**で `[live, col_cap)` と pad 行を 1 語も書かない・容量 C を
-//      変えてもビット同一・行ブロックを割ってもビット同一・同一入力の 2 回 dispatch は
-//      ビット同一（決定性）
-//   ④ 故障注入: 木縮約を潰す / レーンの走査幅を変える変異が ① で落ちる（門が空振りでない証明）
+// Both change the reduction order, so neither is bit-identical to the reference path. Checked here:
+//   ① allclose against the f64 reference (the same tolerance as the reference path — changing the
+//      order does not change the band of correctness)
+//   ② the A/B band against the reference path (measured drift × margin — the derivation tables of
+//      `AB_TOLERANCE` / `QK_AB_TOLERANCE` below)
+//   ③ the same structural guarantees as the reference path: pad rows (which include empty rows)
+//      are **exactly 0**; ①' writes S outside the predicate as **exactly the −inf bit pattern** and
+//      writes not a single word of `[live, col_cap)` or the pad rows; bit-identical when the
+//      capacity C changes; bit-identical when split into row blocks; two dispatches on the same
+//      input are bit-identical (determinism)
+//   ④ fault injection: mutations that flatten the tree reduction / change the lanes' scan width
+//      fail ① (proof that the check fires)
 //
-// census 門（同決定 4 ③ — 席を指定したとき ①' と ③' が実際に走る）は
-// gpu_state_execution_test.ts。
+// The census check (decision 4 ③ of the same ADR — with the preset specified, ①' and ③' really
+// run) is in gpu_state_execution_test.ts.
 
 import { describe, it, test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -41,50 +44,62 @@ import {
 } from "./helpers/state-dispatch.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** f64 参照との許容差（gpu_state_attention_test.ts の `STATE_TOLERANCE` と同値・同根拠）。 */
+/**
+ * The tolerance against the f64 reference (the same value and rationale as `STATE_TOLERANCE` in
+ * gpu_state_attention_test.ts).
+ */
 const STATE_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
 /**
- * ③ と ③' の A/B 帯。
+ * The A/B band between ③ and ③'.
  *
- * 導出: 両者とも f32 で `live` 本の積を足すが順序が違う（③ = 昇順逐次・③' = 16 レーン部分和 →
- * 固定順の木）。差の上界は f32 の縮約誤差 2 本ぶんで、出力の大きさ O(1)。実測最悪は下の
- * `PARALLEL_CASES` 全件（縮約長 `live` は 1 〜 16,384）で
- * **vs ③ maxAbs 2.38e-7 / vs f64 参照 3.99e-7**（2026-09-03 / RTX 3080 Ti・Vulkan）。
- * `atol = 5e-6` はそこへ約 20 倍の余裕（f64 参照との帯と同じ値 — 両者が f64 参照と同じ帯に
- * 居るなら互いの差もその帯の 2 倍以内）。`rtol = 0` の理由は STATE_TOLERANCE と同じ。
- * NOTE: この最悪値を作るのは live が**小さい**側のケースで、live 4,096 / 16,384 の
- * 射程宣言ケースを足しても最悪値は動かない（重みが多数の列へ散るぶん出力の変動が小さくなる）。
- * メイン実測（レビュー 2026-09-03）では live 65,536 まで同傾向 — ③' vs f64 1.8e-8 /
- * ③ vs f64 3.6e-8 / ③' vs ③ 5.0e-8 で、いずれも帯 5e-6 の 1/100 に収まる。
- * NOTE: 実測値はドライバの fma 使用に依るので、別アダプタでは「実測 → 余裕を積む」の手順ごと
- * 繰り返す（テストは最悪値を毎回 stdout に出す）。
+ * Derivation: both sum `live` products in f32 but in a different order (③ = ascending sequential,
+ * ③' = 16-lane partial sums → a fixed-order tree). The difference is bounded by two f32 reduction
+ * errors, with outputs of magnitude O(1). The measured worst over all `PARALLEL_CASES` below (the
+ * reduction length `live` from 1 to 16,384) is **vs ③ maxAbs 2.38e-7 / vs the f64 reference
+ * 3.99e-7** (2026-09-03 / RTX 3080 Ti, Vulkan). `atol = 5e-6` adds about 20× headroom to that (the
+ * same value as the band against the f64 reference — if both sit in the same band around the f64
+ * reference, their mutual difference is within twice that band). `rtol = 0` for the same reason as
+ * STATE_TOLERANCE.
+ * NOTE: the worst value comes from the cases on the **small** live side; adding the coverage cases
+ * with live 4,096 / 16,384 does not move it (the weights spread over many columns, so the output
+ * varies less). The main-session measurement (review 2026-09-03) shows the same trend up to
+ * live 65,536 — ③' vs f64 1.8e-8 / ③ vs f64 3.6e-8 / ③' vs ③ 5.0e-8, all within 1/100 of the band
+ * 5e-6.
+ * NOTE: the measured values depend on the driver's use of fma, so on another adapter repeat the
+ * whole "measure → add headroom" procedure (the test prints the worst value to stdout on every
+ * run).
  */
 const AB_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
 /**
- * ① と ①' の A/B 帯（出力 O で見る — S の差は softmax を通ってから O に出る）。
+ * The A/B band between ① and ①' (checked on the output O — a difference in S reaches O through
+ * softmax).
  *
- * 導出は 2 段:
- * 1. **S の差**: 両者とも同じ `D` 本の積（半スケールを q 側と k 側の両方に載せた積 —
- *    生成は src/kernels/state-attention.ts の `stateScoreFn` 1 箇所）を f32 で足すが順序が
- *    違う（① = `d` 昇順の逐次・
- *    ①' = 16 レーン部分和 → 固定順の木）。f32 の縮約誤差の上界は 2 通りとも
- *    `O(D · eps · Σ|項|)`（eps = 2⁻²³ ≈ 1.19e-7）で、差はその 2 本ぶん。本ファイルの格子は
- *    `D ≤ 32`・項の大きさ ≤ 約 2.6（`|q| ≤ 1.87 · |k| ≤ 2.07 · scale²` で scale² = 1/√D）
- *    なので、`|S|` は O(10) 以下・S の差の上界は **約 1e-5**。
- * 2. **O への伝播**: `p = exp(S − m)·inv` なので S の差 δ は重み比を `exp(δ) ≈ 1 + δ` 倍に
- *    しか動かさず、正規化（Σp = 1）で共通因子は打ち消える。したがって O の差は
- *    `δ · max|V|` の程度に収まる（`|V| ≤ 2.48`）。
+ * The derivation has two steps:
+ * 1. **The difference in S**: both sum the same `D` products (with the half scale applied on both
+ *    the q side and the k side — generated in one place, `stateScoreFn` in
+ *    src/kernels/state-attention.ts) in f32 but in a different order (① = sequential in
+ *    ascending `d`,
+ *    ①' = 16-lane partial sums → a fixed-order tree). In both, the f32 reduction error is bounded
+ *    by `O(D · eps · Σ|term|)` (eps = 2⁻²³ ≈ 1.19e-7), and the difference is two of those. The grid
+ *    in this file has `D ≤ 32` and terms of magnitude ≤ about 2.6
+ *    (`|q| ≤ 1.87 · |k| ≤ 2.07 · scale²` with scale² = 1/√D), so `|S|` is O(10) or less and the
+ *    difference in S is bounded by
+ *    **about 1e-5**.
+ * 2. **Propagation to O**: `p = exp(S − m)·inv`, so a difference δ in S moves the weight ratios
+ *    only by a factor of `exp(δ) ≈ 1 + δ`, and the normalization (Σp = 1) cancels the common
+ *    factor. So the difference in O stays on the order of `δ · max|V|` (`|V| ≤ 2.48`).
  *
- * 実測最悪は下の `PARALLEL_CASES` 全件で **vs ① maxAbs 3.58e-7 / vs f64 参照 4.17e-7**
- * （S そのものの差は 4.77e-7・席そのままの組〈①' + ③'〉vs f64 参照は 3.58e-7 —
- * 2026-09-06 / RTX 3080 Ti・Vulkan。テストが毎回 stdout に出す）。`atol = 5e-6` は ③' の
- * A/B 帯と同値で、実測へ約 14 倍・上の上界にも余裕を持つ（両者が f64 参照の帯 5e-6 に居るなら
- * 互いの差もその 2 倍以内、という同じ論法）。
- * `rtol = 0` の理由は STATE_TOLERANCE と同じ。
- * NOTE: 実測値はドライバの fma 使用に依るので、別アダプタでは「実測 → 余裕を積む」の手順ごと
- * 繰り返す。
+ * The measured worst over all `PARALLEL_CASES` below is **vs ① maxAbs 3.58e-7 / vs the f64
+ * reference 4.17e-7** (the difference in S itself is 4.77e-7; the preset's own combination
+ * (①' + ③') vs the f64 reference is 3.58e-7 — 2026-09-06 / RTX 3080 Ti, Vulkan. The test prints it
+ * on every run). `atol = 5e-6` equals ③''s A/B band, about 14× over the measurement and with
+ * headroom over the bound above too (the same argument: if both sit in the f64 reference's band
+ * 5e-6, their mutual difference is within twice that).
+ * `rtol = 0` for the same reason as STATE_TOLERANCE.
+ * NOTE: the measured values depend on the driver's use of fma, so on another adapter repeat the
+ * whole "measure → add headroom" procedure.
  */
 const QK_AB_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
@@ -94,7 +109,10 @@ const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
 const SLOT_POISON_K = 9;
 const SLOT_POISON_V = 400;
 
-/** gpu_state_attention_test.ts の `makeInputs` と同じ毒値規約（非 resident 行・pad 行に毒）。 */
+/**
+ * The same poison rules as `makeInputs` in gpu_state_attention_test.ts (poison in non-resident rows
+ * and pad rows).
+ */
 const makeInputs = (spec: StateCase): StateInputs => {
   const { batch, heads, kvHeads, chunkRows, depth, capacity, window, past, query } = spec;
   const kvPlanes = batch * kvHeads;
@@ -141,13 +159,14 @@ const refInput = (spec: StateCase, inputs: StateInputs): StateAttentionRefInput 
 });
 
 /**
- * ③' が ③ と違う経路を踏む形を優先した格子: live がレーン数 16 を跨ぐ（部分和が複数レーンに
- * 散る）・live が 16 の倍数ちょうど / 端数・D が TILE_X の端数（`d ≥ D` のレーンが barrier に
- * 参加する経路）・行ブロック複数・MQA 8:1 decode（Gemma 4 E2B 型）・sliding の ring 跨ぎ。
+ * A grid that favours shapes where ③' takes a different path from ③: live crossing the lane count
+ * 16 (partial sums spread over several lanes), live exactly a multiple of 16 / uneven, D not a
+ * multiple of TILE_X (the path where lanes with `d ≥ D` join the barrier), several row blocks,
+ * MQA 8:1 decode (Gemma 4 E2B type), sliding across a ring wrap.
  */
 const PARALLEL_CASES: readonly StateCase[] = [
   {
-    name: "full r1 decode P0（live 1 = レーン 0 だけ）",
+    name: "full r1 decode P0 (live 1 = lane 0 only)",
     batch: 1,
     heads: 2,
     kvHeads: 2,
@@ -159,7 +178,7 @@ const PARALLEL_CASES: readonly StateCase[] = [
     query: 1,
   },
   {
-    name: "full r8 MQA decode live 18（16 を跨ぐ）",
+    name: "full r8 MQA decode live 18 (crosses 16)",
     batch: 2,
     heads: 8,
     kvHeads: 1,
@@ -171,7 +190,7 @@ const PARALLEL_CASES: readonly StateCase[] = [
     query: 1,
   },
   {
-    name: "full r8 MQA decode live 48（16 の倍数ちょうど）D 20（端数）",
+    name: "full r8 MQA decode live 48 (exactly a multiple of 16) D 20 (uneven)",
     batch: 1,
     heads: 8,
     kvHeads: 1,
@@ -194,8 +213,9 @@ const PARALLEL_CASES: readonly StateCase[] = [
     past: 300,
     query: 1,
   },
-  // 射程宣言（帯の根拠を実運用の live まで伸ばす — レビュー W-G1-1）。縮約長 `live` が
-  // 4 桁 / 5 桁でも帯が桁で動かないことを門にする。形は Gemma 4 E2B の decode（MQA 8:1・D 32）。
+  // Coverage statement (extends the band's rationale to production live — review W-G1-1). Checks
+  // that the band does not move by an order of magnitude with a four- / five-digit reduction length
+  // `live`. The shape is the Gemma 4 E2B decode (MQA 8:1, D 32).
   {
     name: "full r8 MQA decode live 4096",
     batch: 1,
@@ -221,7 +241,7 @@ const PARALLEL_CASES: readonly StateCase[] = [
     query: 1,
   },
   {
-    name: "full r2 pad B2 D6（prefill・pad 行あり）",
+    name: "full r2 pad B2 D6 (prefill, with pad rows)",
     batch: 2,
     heads: 4,
     kvHeads: 2,
@@ -258,7 +278,7 @@ const PARALLEL_CASES: readonly StateCase[] = [
     query: 1,
   },
   {
-    name: "sliding W32 r2 prefill pad（live 36 が 16 を跨ぐ）",
+    name: "sliding W32 r2 prefill pad (live 36 crosses 16)",
     batch: 1,
     heads: 4,
     kvHeads: 2,
@@ -270,7 +290,7 @@ const PARALLEL_CASES: readonly StateCase[] = [
     query: 5,
   },
   {
-    name: "sliding W512 r8 MQA decode（Gemma 4 E2B 型）",
+    name: "sliding W512 r8 MQA decode (Gemma 4 E2B type)",
     batch: 1,
     heads: 8,
     kvHeads: 1,
@@ -283,7 +303,10 @@ const PARALLEL_CASES: readonly StateCase[] = [
   },
 ];
 
-/** スロット行を容量 `capacity` の器へ写す（余った行は毒値 — 読まれたら値が跳ねる）。 */
+/**
+ * Copies the slot rows into a container of capacity `capacity` (the spare rows are poison — the
+ * values jump if they are read).
+ */
 const widenSlots = (spec: StateCase, inputs: StateInputs, capacity: number): StateInputs => {
   const kvPlanes = spec.batch * spec.kvHeads;
   const slotK = seeded(kvPlanes * capacity * spec.depth, () => SLOT_POISON_K);
@@ -315,18 +338,18 @@ const assertBitIdentical = (
   b: Float32Array<ArrayBuffer>,
   label: string,
 ): void => {
-  assertEquals(a.length, b.length, `${label}: 長さ`);
+  assertEquals(a.length, b.length, `${label}: length`);
   const ab = bitsOf(a);
   const bb = bitsOf(b);
   for (let i = 0; i < ab.length; i += 1) {
     if (ab[i] !== bb[i]) {
-      throw new Error(`${label}: 要素 ${i} がビット不一致（${a[i]} vs ${b[i]}）`);
+      throw new Error(`${label}: element ${i} differs in bits (${a[i]} vs ${b[i]})`);
     }
   }
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 ③' KV 並列縮約は f64 参照と ③ の両方の帯に収まり、構造的保証を保つ（実 GPU）",
+  "the states-form ③' KV-parallel reduction stays within the bands of both the f64 reference and ③ and keeps the structural guarantees (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -342,11 +365,11 @@ test.skipIf(!GPU_AVAILABLE)(
         });
         const sequential = await runStateAttention(gpu.device, spec, inputs, { cache });
 
-        // ① f64 参照との帯
+        // ① the band of the f64 reference
         const ref = compareTensors({ dtype: "f32", data: parallel.out }, expected, STATE_TOLERANCE);
-        assert(ref.pass, `${spec.name} vs 参照: ${formatAllclose(ref)}`);
+        assert(ref.pass, `${spec.name} vs reference: ${formatAllclose(ref)}`);
         worstRef = Math.max(worstRef, ref.maxAbsError);
-        // ② ③ との A/B 帯
+        // ② the A/B band against ③
         const ab = compareTensors(
           { dtype: "f32", data: parallel.out },
           {
@@ -358,7 +381,8 @@ test.skipIf(!GPU_AVAILABLE)(
         assert(ab.pass, `${spec.name} ③ vs ③': ${formatAllclose(ab)}`);
         worstAb = Math.max(worstAb, ab.maxAbsError);
 
-        // ③ pad 行（空行を包含）は厳密 0（Object.is — −0 も NaN も通さない）
+        // ③ pad rows (which include empty rows) are exactly 0 (Object.is — lets neither −0 nor
+        // NaN through)
         const rowsOf = spec.batch * spec.heads;
         for (let z = 0; z < rowsOf; z += 1) {
           for (const row of padRows(spec)) {
@@ -366,23 +390,24 @@ test.skipIf(!GPU_AVAILABLE)(
               const at = (z * spec.chunkRows + row) * spec.depth + d;
               assert(
                 Object.is(parallel.out[at], 0),
-                `${spec.name}: pad 行 (z ${z}, row ${row}, d ${d}) が厳密 0 でない（${
+                `${spec.name}: pad row (z ${z}, row ${row}, d ${d}) is not exactly 0 (${
                   parallel.out[at]
-                }）`,
+                })`,
               );
             }
           }
         }
 
-        // ③ 決定性（同一入力の 2 回 dispatch がビット同一）
+        // ③ determinism (two dispatches on the same input are bit-identical)
         const again = await runStateAttention(gpu.device, spec, inputs, {
           cache,
           pvReduce: "parallel",
         });
-        assertBitIdentical(parallel.out, again.out, `${spec.name}: 決定性`);
+        assertBitIdentical(parallel.out, again.out, `${spec.name}: determinism`);
 
-        // ③ 容量非依存（C を大きくしても出力ビット同一 — 仕事量条件の裏）。スロットは**同じ行を
-        // 広い容量の器へ写す**（seeded を引き直すと平面オフセットが動いて別の値になる）
+        // ③ capacity independence (a larger C leaves the output bit-identical — the flip side of
+        // the work condition). The slots **copy the same rows into a wider container** (redrawing
+        // seeded would move the plane offsets and give different values)
         if (!stateSliding(spec.window)) {
           const wide: StateCase = { ...spec, capacity: spec.capacity * 8 };
           const wideInputs = widenSlots(spec, inputs, wide.capacity);
@@ -390,10 +415,10 @@ test.skipIf(!GPU_AVAILABLE)(
             cache,
             pvReduce: "parallel",
           });
-          assertBitIdentical(parallel.out, wideOut.out, `${spec.name}: 容量 ×8`);
+          assertBitIdentical(parallel.out, wideOut.out, `${spec.name}: capacity ×8`);
         }
 
-        // ③ 行ブロック非依存（M > 1 の形は 1 枚 vs 複数枚がビット同一）
+        // ③ row-block independence (for M > 1, 1 block vs several are bit-identical)
         if (spec.chunkRows > 1) {
           const split: StateCase = {
             ...spec,
@@ -408,13 +433,13 @@ test.skipIf(!GPU_AVAILABLE)(
             cache,
             pvReduce: "parallel",
           });
-          assertBitIdentical(a.out, b.out, `${spec.name}: 行ブロック 1 枚 vs 3 枚`);
+          assertBitIdentical(a.out, b.out, `${spec.name}: row blocks 1 vs 3`);
         }
       }
       console.log(
-        `③' 実測最悪: vs 参照 maxAbs ${worstRef.toExponential(2)} / vs ③ maxAbs ${worstAb.toExponential(
+        `③' measured worst: vs reference maxAbs ${worstRef.toExponential(2)} / vs ③ maxAbs ${worstAb.toExponential(
           2,
-        )}（帯 ${STATE_TOLERANCE.atol} / ${AB_TOLERANCE.atol}）`,
+        )} (band ${STATE_TOLERANCE.atol} / ${AB_TOLERANCE.atol})`,
       );
     } finally {
       gpu.destroy();
@@ -429,19 +454,19 @@ const replaceEach = (wgsl: string, ...pairs: readonly (readonly [string, string]
     return text.replace(from, to);
   }, wgsl);
 
-/** 故障注入 — 各変異が①の帯で落ちること（門が空振りでない証明）。 */
+/** Fault injection — each mutation fails ①'s band (proof that the check fires). */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 ③' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
+  "states-form ③' fault injection (flatten the tree reduction / change the lane width) fails the reference band (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // live がレーン数を跨ぐ形でないと「レーン 0 の部分和だけ」でも一致してしまう
+      // Unless live crosses the lane count, "lane 0's partial sum alone" would still match
       const spec = PARALLEL_CASES.find((c) => c.name.includes("live 301"))!;
       const inputs = makeInputs(spec);
       const expected = referenceStateAttention(refInput(spec, inputs));
       const mutations: readonly [string, (wgsl: string) => string][] = [
         [
-          "木縮約を潰す（stride ループを回さない）",
+          "flatten the tree reduction (skip the stride loop)",
           (wgsl) => wgsl.replace("var stride = 8u;", "var stride = 0u;"),
         ],
         [
@@ -475,7 +500,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           report.pass,
           false,
-          `${label}: 変異が帯を通ってしまった（${formatAllclose(report)}）`,
+          `${label}: the mutation passed the band (${formatAllclose(report)})`,
         );
       }
     } finally {
@@ -485,15 +510,18 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * ①' の S を ① と突き合わせる（**構造は厳密・値だけ帯**）。単一ブロックのケース専用
- * （局所行 = グローバル行・`runStateAttention` が返す S が 1 枚に閉じる）。
+ * Compares ①''s S against ① (**structure exact, only the values within a band**). Single-block
+ * cases only (local row = global row; the S `runStateAttention` returns fits in one block).
  *
- * 見るのは 4 つで、どれも tolerance に隠れない構造の側:
- *   ① 述語内は両者とも有限で毒値でない（書かれている） — 値の差は戻り値の最悪差で返す
- *   ② 述語外は両者とも **厳密 −inf のビット列**（同じ位置が同じビット）
- *   ③ `[live, col_cap)` の残骸は両者とも毒値のまま（①' の列添字は `wid.x·16 + lid.x` なので、
- *      端数タイルのレーンを止め損ねるとここが書かれる）
- *   ④ pad 行は 1 語も書かれない（仕事量が M でなく Q に比例することの直接の裏）
+ * Four things are checked, all on the structural side that a tolerance cannot hide:
+ *   ① inside the predicate both are finite and not poison (they are written) — the value
+ *      difference is returned as the worst difference
+ *   ② outside the predicate both are **exactly the −inf bit pattern** (the same bits at the same
+ *      position)
+ *   ③ the leftovers in `[live, col_cap)` stay poison in both (①''s column index is
+ *      `wid.x·16 + lid.x`, so failing to stop the lanes of a partial tile writes here)
+ *   ④ not a single word of the pad rows is written (direct evidence that the work scales with Q,
+ *      not M)
  */
 type ScoreCensus = { written: number; masked: number; beyond: number; skipped: number };
 
@@ -521,7 +549,7 @@ const assertQkScores = (
         if (inWindow) {
           assert(
             Number.isFinite(parallel[at]) && parallel[at] !== STATE_S_POISON,
-            `${spec.name}: ①' の述語内 (${local},${cl}) が書かれていない（${parallel[at]}）`,
+            `${spec.name}: ①' did not write (${local},${cl}) inside the predicate (${parallel[at]})`,
           );
           worst = Math.max(worst, Math.abs(parallel[at] - sequential[at]));
           census.written += 1;
@@ -529,7 +557,7 @@ const assertQkScores = (
           assertEquals(
             [bitsP[at], bitsS[at]],
             [0xff800000, 0xff800000],
-            `${spec.name}: 述語外 (${local},${cl}) が −inf のビット列でない（① と ①' の突合）`,
+            `${spec.name}: (${local},${cl}) outside the predicate is not the −inf bit pattern (① vs ①')`,
           );
           census.masked += 1;
         }
@@ -539,7 +567,7 @@ const assertQkScores = (
         assertEquals(
           parallel[at],
           STATE_S_POISON,
-          `${spec.name}: ①' が live の外 (${local},${cl}) を書いた（端数タイルのレーンが止まっていない）`,
+          `${spec.name}: ①' wrote (${local},${cl}) outside live (the lanes of a partial tile did not stop)`,
         );
         census.beyond += 1;
       }
@@ -550,7 +578,7 @@ const assertQkScores = (
         assertEquals(
           parallel[at],
           STATE_S_POISON,
-          `${spec.name}: ①' が pad 行 (${local},${cl}) の S を書いた（M 行を回している）`,
+          `${spec.name}: ①' wrote S of pad row (${local},${cl}) (it loops over M rows)`,
         );
         census.skipped += 1;
       }
@@ -560,17 +588,18 @@ const assertQkScores = (
 };
 
 /**
- * ①' の帯門。格子は {@link PARALLEL_CASES} をそのまま使う — `D` が 4 / 6 / 8（レーンが遊ぶ）・
- * 16（1 レーン 1 本ちょうど）・20（端数 = `d ≥ D` のレーンが barrier に参加する経路）・
- * 32（1 レーン 2 本）と、live が 16 の倍数 / 端数・pad 行あり・行ブロック複数・sliding の
- * ring 跨ぎを既に覆っているため（③' の格子と要求が一致する）。
+ * The band check of ①'. The grid reuses {@link PARALLEL_CASES} as is — it already covers `D` of
+ * 4 / 6 / 8 (idle lanes), 16 (exactly one per lane), 20 (uneven = the path where lanes with
+ * `d ≥ D` join the barrier) and 32 (two per lane), plus live a multiple of 16 / uneven, with pad
+ * rows, several row blocks and sliding across a ring wrap (the requirements match ③''s grid).
  *
- * MUST: ③ は**参照経路に固定**して撃つ（席は 2 段を一緒に切り替えるが、ここで両方替えると
- * 差が ①' 由来か ③' 由来か分けられない）。席そのままの組（①' + ③'）は最後に f64 参照との
- * 帯だけ見る。
+ * MUST: run with ③ **pinned to the reference path** (the preset switches both stages together,
+ * but switching both here would make it impossible to tell whether a difference comes from ①' or
+ * ③'). The preset's own combination (①' + ③') is checked last, against the f64 reference band
+ * only.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 ①' D 並列縮約は f64 参照と ① の両方の帯に収まり、構造的保証を保つ（実 GPU）",
+  "the states-form ①' D-parallel reduction stays within the bands of both the f64 reference and ① and keeps the structural guarantees (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -589,11 +618,11 @@ test.skipIf(!GPU_AVAILABLE)(
         });
         const sequential = await runStateAttention(gpu.device, spec, inputs, { cache });
 
-        // ① f64 参照との帯
+        // ① the band of the f64 reference
         const ref = compareTensors({ dtype: "f32", data: parallel.out }, expected, STATE_TOLERANCE);
-        assert(ref.pass, `${spec.name} vs 参照: ${formatAllclose(ref)}`);
+        assert(ref.pass, `${spec.name} vs reference: ${formatAllclose(ref)}`);
         worstRef = Math.max(worstRef, ref.maxAbsError);
-        // ② ① との A/B 帯
+        // ② the A/B band against ①
         const ab = compareTensors(
           { dtype: "f32", data: parallel.out },
           {
@@ -605,8 +634,9 @@ test.skipIf(!GPU_AVAILABLE)(
         assert(ab.pass, `${spec.name} ① vs ①': ${formatAllclose(ab)}`);
         worstAb = Math.max(worstAb, ab.maxAbsError);
 
-        // ③ S の構造（述語外 −inf のビット一致・live の外と pad 行の非書き込み）。
-        // 行ブロックを割るケースは S が最後の 1 枚しか戻らないので単一ブロックだけ見る
+        // ③ the structure of S (bit equality of −inf outside the predicate; no writes outside
+        // live or in pad rows). Cases split into row blocks return only the last block of S, so
+        // only single blocks are checked
         if (spec.rowsBlock === undefined) {
           worstScore = Math.max(
             worstScore,
@@ -614,14 +644,15 @@ test.skipIf(!GPU_AVAILABLE)(
           );
         }
 
-        // ④ 決定性（同一入力の 2 回 dispatch がビット同一）
+        // ④ determinism (two dispatches on the same input are bit-identical)
         const again = await runStateAttention(gpu.device, spec, inputs, {
           cache,
           qkReduce: "parallel",
         });
-        assertBitIdentical(parallel.out, again.out, `${spec.name}: 決定性`);
+        assertBitIdentical(parallel.out, again.out, `${spec.name}: determinism`);
 
-        // ⑤ 容量非依存（C を大きくしても出力ビット同一 — 仕事量条件の裏）
+        // ⑤ capacity independence (a larger C leaves the output bit-identical — the flip side of
+        // the work condition)
         if (!stateSliding(spec.window)) {
           const wide: StateCase = { ...spec, capacity: spec.capacity * 8 };
           const wideInputs = widenSlots(spec, inputs, wide.capacity);
@@ -629,10 +660,10 @@ test.skipIf(!GPU_AVAILABLE)(
             cache,
             qkReduce: "parallel",
           });
-          assertBitIdentical(parallel.out, wideOut.out, `${spec.name}: 容量 ×8`);
+          assertBitIdentical(parallel.out, wideOut.out, `${spec.name}: capacity ×8`);
         }
 
-        // ⑥ 行ブロック非依存（M > 1 の形は 1 枚 vs 複数枚がビット同一）
+        // ⑥ row-block independence (for M > 1, 1 block vs several are bit-identical)
         if (spec.chunkRows > 1) {
           const split: StateCase = {
             ...spec,
@@ -647,28 +678,38 @@ test.skipIf(!GPU_AVAILABLE)(
             cache,
             qkReduce: "parallel",
           });
-          assertBitIdentical(a.out, b.out, `${spec.name}: 行ブロック 1 枚 vs 3 枚`);
+          assertBitIdentical(a.out, b.out, `${spec.name}: row blocks 1 vs 3`);
         }
 
-        // ⑦ 席そのままの組（①' + ③'）も f64 参照の帯に居る
+        // ⑦ the preset's own combination (①' + ③') also sits in the f64 reference band
         const seat = await runStateAttention(gpu.device, spec, inputs, {
           cache,
           qkReduce: "parallel",
           pvReduce: "parallel",
         });
         const seatRef = compareTensors({ dtype: "f32", data: seat.out }, expected, STATE_TOLERANCE);
-        assert(seatRef.pass, `${spec.name} 席 parallel vs 参照: ${formatAllclose(seatRef)}`);
+        assert(
+          seatRef.pass,
+          `${spec.name} preset parallel vs reference: ${formatAllclose(seatRef)}`,
+        );
         worstSeat = Math.max(worstSeat, seatRef.maxAbsError);
       }
-      // 門が空振りしていない（述語内・述語外・live の外・pad 行が全て実在する格子である）
-      assert(census.written > 0 && census.masked > 0, `S の門が空振り: ${JSON.stringify(census)}`);
-      assert(census.beyond > 0 && census.skipped > 0, `S の門が空振り: ${JSON.stringify(census)}`);
+      // The checks fire (the grid has columns inside and outside the predicate, outside live and
+      // pad rows)
+      assert(
+        census.written > 0 && census.masked > 0,
+        `the S check never fires: ${JSON.stringify(census)}`,
+      );
+      assert(
+        census.beyond > 0 && census.skipped > 0,
+        `the S check never fires: ${JSON.stringify(census)}`,
+      );
       console.log(
-        `①' 実測最悪: vs 参照 maxAbs ${worstRef.toExponential(2)} / vs ① maxAbs ${worstAb.toExponential(
+        `①' measured worst: vs reference maxAbs ${worstRef.toExponential(2)} / vs ① maxAbs ${worstAb.toExponential(
           2,
-        )} / S の差 ${worstScore.toExponential(2)} / 席 ①'+③' vs 参照 ${worstSeat.toExponential(
+        )} / S difference ${worstScore.toExponential(2)} / preset ①'+③' vs reference ${worstSeat.toExponential(
           2,
-        )}（帯 ${STATE_TOLERANCE.atol} / ${QK_AB_TOLERANCE.atol}）`,
+        )} (band ${STATE_TOLERANCE.atol} / ${QK_AB_TOLERANCE.atol})`,
       );
     } finally {
       gpu.destroy();
@@ -676,23 +717,24 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 故障注入 — 各変異が①の帯で落ちること（門が空振りでない証明）。 */
+/** Fault injection — each mutation fails ①'s band (proof that the check fires). */
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 ①' の故障注入（木縮約を潰す / レーン幅を変える）は参照との帯で落ちる（実 GPU）",
+  "states-form ①' fault injection (flatten the tree reduction / change the lane width) fails the reference band (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // D がレーン数を跨ぐ形でないと「レーン 0 の部分和だけ」でも一致してしまう（D 32 = 2 本／レーン）
+      // Unless D crosses the lane count, "lane 0's partial sum alone" would still match (D 32 =
+      // two per lane)
       const spec = PARALLEL_CASES.find((c) => c.name.includes("live 301"))!;
       const inputs = makeInputs(spec);
       const expected = referenceStateAttention(refInput(spec, inputs));
       const mutations: readonly [string, (wgsl: string) => string][] = [
         [
-          "木縮約を潰す（stride ループを回さない）",
+          "flatten the tree reduction (skip the stride loop)",
           (wgsl) => wgsl.replace("var stride = 8u;", "var stride = 0u;"),
         ],
         [
-          "レーンの走査幅を 32 にする（D の半分を落とす）",
+          "set the lane scan width to 32 (drops half of D)",
           (wgsl) => wgsl.replace("d = d + 16u", "d = d + 32u"),
         ],
       ];
@@ -714,7 +756,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           report.pass,
           false,
-          `${label}: 変異が帯を通ってしまった（${formatAllclose(report)}）`,
+          `${label}: the mutation passed the band (${formatAllclose(report)})`,
         );
       }
     } finally {
@@ -725,7 +767,8 @@ test.skipIf(!GPU_AVAILABLE)(
 
 // Stats/PV fusion (`statsPvFusion`) is a variant on top of the parallel seat (QK and PV both
 // parallel), so its gates live beside the parallel-variant gates above.
-// 融合前の parallel と u32 で比較し、独立 f64 参照の既存 5e-6 も維持する。
+// They compare in u32 against parallel before fusion and also keep the existing 5e-6 against the
+// independent f64 reference.
 //
 // Inputs: the fusion gates keep their own sin-based inputs and poison values (20 / 400) instead
 // of `makeInputs`, so these cases run on exactly the inputs they were written against.
@@ -770,114 +813,121 @@ const fusionInputs = (spec: StateCase): StateInputs => {
   return inputs;
 };
 
-describe("states attention の行統計/PV融合", () => {
-  it("静的な適用境界を守る", () => {
+describe("states attention row-stats/PV fusion", () => {
+  it("respects the static eligibility bounds", () => {
     assert(stateStatsPvEligible(1, 1024));
     assert(stateStatsPvEligible(8, 1024));
     assertEquals(stateStatsPvEligible(9, 1024), false);
     assertEquals(stateStatsPvEligible(1, 1025), false);
   });
 
-  it.skipIf(!GPU_AVAILABLE)("ring・GQA・端数D・pad・行分割でparallelと同じ値を返す", async () => {
-    const gpu = await acquireGpu(),
-      cache = new Map<string, GPUComputePipeline>();
-    let maxAbs = 0;
-    try {
-      for (const depth of [1, 17, 256, 512]) {
-        for (const [chunkRows, query, window, past] of [
-          [1, 1, 0, 0],
-          [4, 4, 0, 31],
-          [8, 1, 0, 95],
-          [8, 4, 1, 4095],
-          [4, 1, 31, 4095],
-          [8, 8, 127, 0xfffffff0],
-          // live 701（= past + query）で行統計の 256 レーン grid-stride が 3 周回る形。
-          // 他の 6 形は live ≤ 134 なので 1 周で終わり、多周回の加算順が ② と一致する
-          // ことを実機で見る線が無い（colCap 717 ≤ 1024 で適用条件は満たす）。
-          // 実行時間が depth ループ 4 本に掛かるので、長い列はこの 1 形だけにする。
-          [1, 1, 0, 700],
-        ]) {
-          const spec: StateCase = {
-            name: "fused",
-            batch: 2,
-            heads: 4,
-            kvHeads: depth === 1 ? 4 : 1,
-            chunkRows,
-            query,
-            window,
-            past,
-            depth,
-            capacity: window ? window + 8 : past + chunkRows + 16,
-          };
+  it.skipIf(!GPU_AVAILABLE)(
+    "returns the same values as parallel with ring, GQA, uneven D, pad and row splits",
+    async () => {
+      const gpu = await acquireGpu(),
+        cache = new Map<string, GPUComputePipeline>();
+      let maxAbs = 0;
+      try {
+        for (const depth of [1, 17, 256, 512]) {
+          for (const [chunkRows, query, window, past] of [
+            [1, 1, 0, 0],
+            [4, 4, 0, 31],
+            [8, 1, 0, 95],
+            [8, 4, 1, 4095],
+            [4, 1, 31, 4095],
+            [8, 8, 127, 0xfffffff0],
+            // live 701 (= past + query): the shape where the row stats' 256-lane grid-stride makes
+            // three passes. The other six shapes have live ≤ 134 and finish in one pass, so nothing
+            // would check on hardware that the multi-pass addition order matches ② (colCap 717 ≤
+            // 1024 meets the eligibility condition).
+            // The run time multiplies by the four depth loops, so this is the only long sequence.
+            [1, 1, 0, 700],
+          ]) {
+            const spec: StateCase = {
+              name: "fused",
+              batch: 2,
+              heads: 4,
+              kvHeads: depth === 1 ? 4 : 1,
+              chunkRows,
+              query,
+              window,
+              past,
+              depth,
+              capacity: window ? window + 8 : past + chunkRows + 16,
+            };
+            const inputs = fusionInputs(spec);
+            const ref = referenceStateAttention({ ...spec, ...inputs, scale: halfScale(depth) });
+            const before = await runStateAttention(gpu.device, spec, inputs, {
+              cache,
+              qkReduce: "parallel",
+              pvReduce: "parallel",
+            });
+            for (const rowsBlock of [chunkRows, 1]) {
+              const after = await runStateAttention(gpu.device, { ...spec, rowsBlock }, inputs, {
+                cache,
+                qkReduce: "parallel",
+                pvReduce: "parallel",
+                statsPvFusion: true,
+              });
+              assertEquals(new Uint32Array(after.out.buffer), new Uint32Array(before.out.buffer));
+              for (let i = 0; i < after.out.length; i++) {
+                const error = Math.abs(after.out[i] - ref.data[i]);
+                assert(error < 5e-6, "the existing states attention absolute tolerance");
+                maxAbs = Math.max(maxAbs, error);
+              }
+            }
+          }
+        }
+        console.log("stats/PV fusion vs f64 maxAbs", maxAbs);
+      } finally {
+        gpu.destroy();
+      }
+    },
+  );
+
+  it.skipIf(!GPU_AVAILABLE)(
+    "preserves the NaN/Inf classification and the exact 0 of pad",
+    async () => {
+      const gpu = await acquireGpu(),
+        cache = new Map<string, GPUComputePipeline>();
+      try {
+        const spec: StateCase = {
+          name: "special",
+          batch: 1,
+          heads: 4,
+          kvHeads: 1,
+          chunkRows: 4,
+          query: 1,
+          window: 31,
+          past: 40,
+          capacity: 39,
+          depth: 17,
+        };
+        for (const target of ["q", "insK", "insV", "slotK", "slotV"] as const) {
           const inputs = fusionInputs(spec);
-          const ref = referenceStateAttention({ ...spec, ...inputs, scale: halfScale(depth) });
+          inputs[target].set([NaN, Infinity, -Infinity, 0, -0]);
           const before = await runStateAttention(gpu.device, spec, inputs, {
             cache,
             qkReduce: "parallel",
             pvReduce: "parallel",
           });
-          for (const rowsBlock of [chunkRows, 1]) {
-            const after = await runStateAttention(gpu.device, { ...spec, rowsBlock }, inputs, {
-              cache,
-              qkReduce: "parallel",
-              pvReduce: "parallel",
-              statsPvFusion: true,
-            });
-            assertEquals(new Uint32Array(after.out.buffer), new Uint32Array(before.out.buffer));
-            for (let i = 0; i < after.out.length; i++) {
-              const error = Math.abs(after.out[i] - ref.data[i]);
-              assert(error < 5e-6, "states attention の既存絶対許容差");
-              maxAbs = Math.max(maxAbs, error);
-            }
+          const after = await runStateAttention(gpu.device, spec, inputs, {
+            cache,
+            qkReduce: "parallel",
+            pvReduce: "parallel",
+            statsPvFusion: true,
+          });
+          const a = new Uint32Array(after.out.buffer),
+            b = new Uint32Array(before.out.buffer);
+          for (let i = 0; i < a.length; i++) {
+            if (Number.isNaN(before.out[i])) assert(Number.isNaN(after.out[i]));
+            else assertEquals(a[i], b[i]);
+            if (Math.floor(i / spec.depth) % spec.chunkRows >= spec.query) assertEquals(a[i], 0);
           }
         }
+      } finally {
+        gpu.destroy();
       }
-      console.log("stats/PV融合 vs f64 maxAbs", maxAbs);
-    } finally {
-      gpu.destroy();
-    }
-  });
-
-  it.skipIf(!GPU_AVAILABLE)("NaN/Infの分類とpadの厳密0を維持する", async () => {
-    const gpu = await acquireGpu(),
-      cache = new Map<string, GPUComputePipeline>();
-    try {
-      const spec: StateCase = {
-        name: "special",
-        batch: 1,
-        heads: 4,
-        kvHeads: 1,
-        chunkRows: 4,
-        query: 1,
-        window: 31,
-        past: 40,
-        capacity: 39,
-        depth: 17,
-      };
-      for (const target of ["q", "insK", "insV", "slotK", "slotV"] as const) {
-        const inputs = fusionInputs(spec);
-        inputs[target].set([NaN, Infinity, -Infinity, 0, -0]);
-        const before = await runStateAttention(gpu.device, spec, inputs, {
-          cache,
-          qkReduce: "parallel",
-          pvReduce: "parallel",
-        });
-        const after = await runStateAttention(gpu.device, spec, inputs, {
-          cache,
-          qkReduce: "parallel",
-          pvReduce: "parallel",
-          statsPvFusion: true,
-        });
-        const a = new Uint32Array(after.out.buffer),
-          b = new Uint32Array(before.out.buffer);
-        for (let i = 0; i < a.length; i++) {
-          if (Number.isNaN(before.out[i])) assert(Number.isNaN(after.out[i]));
-          else assertEquals(a[i], b[i]);
-          if (Math.floor(i / spec.depth) % spec.chunkRows >= spec.query) assertEquals(a[i], 0);
-        }
-      }
-    } finally {
-      gpu.destroy();
-    }
-  });
+    },
+  );
 });

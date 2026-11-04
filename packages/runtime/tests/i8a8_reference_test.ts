@@ -1,23 +1,29 @@
-// w8a8 参照オラクル（src/reference/i8a8.ts）の **CPU 単独**の門。
+// **CPU-only** checks of the w8a8 reference oracle (src/reference/i8a8.ts).
 //
-// 参照は「GPU と atol=0 で一致する」ことを主張する数値契約の正本で、その主張は
-// tests/gpu_i8a8_test.ts などの実 GPU 突合が担う。ところが突合は**参照と GPU が同じ向きに
-// 壊れたら通る**（恒真化）ため、参照そのものが仕様（設計 doc §4.2 / 各 docstring の MUST）を
-// 満たしていることは、GPU に依らない既知値の門で別に固定しなければならない。
+// The reference is the source of truth of a numeric contract that claims "it matches the GPU with
+// atol=0", and that claim is carried by the real-GPU comparisons such as tests/gpu_i8a8_test.ts.
+// But a comparison **passes when the reference and the GPU break in the same direction**
+// (tautology), so that the reference itself meets the spec (design doc §4.2 / the MUSTs of each
+// docstring) has to be pinned separately, by known-value checks that do not depend on the GPU.
 //
-// MUST: このファイルは `ignore: !GPU_AVAILABLE` を持たない。アダプタ無し環境（CI）でも
-// 参照側の退行を検出できることがこのファイルの存在理由そのもの。
-// MUST: 期待値は参照の実装式ではなく**仕様から独立に**書き下した既知値で持つ（同じ式を
-// 写すと故障注入で落ちない恒真な門になる）。tests/reference_ops_test.ts と同じ規律。
+// MUST: this file has no `ignore: !GPU_AVAILABLE`. Detecting regressions on the reference side even
+// in environments without an adapter (CI) is the very reason this file exists.
+// MUST: the expected values are known values written out **independently from the spec**, not the
+// reference's implementation formulas (copying the same formula makes a tautological check that
+// fault injection cannot break). The same rule as tests/reference_ops_test.ts.
 //
-// 検出できる変異（設計時に確認した故障注入）:
-// - `Math.max(..., F32_TINY)` の床を外す → 全ゼロ行の scale が 0 になり ①が落ちる
-// - `sawNan` 分岐を落として素の `Math.max` にする → NaN が飲まれて ②が落ちる
-// - 量子化格子を ±128 にする → 絶対値最大が 128（= i8 では −128）へ乗り ③が落ちる
-// - 乗算順序を逐次形へ崩す → ⑤が落ちる（畳み形と値が割れるデータを選んである）
-// - group を跨いで i32 のまま足し込む（丸めが 1 回に減る）→ ⑤c が落ちる（w4a8 の畳み順）
-// - w4a8 の group 整除の門を外す → ⑤d が落ちる（端数の k が NaN / 隣の行の混入を返す）
-// - `roundTiesToEven` を `Math.round` にする → ⑦が落ちる（同点が +∞ 方向へ倒れる）
+// Mutations it detects (fault injections confirmed at design time):
+// - removing the floor of `Math.max(..., F32_TINY)` → the scale of an all-zero row becomes 0 and ①
+//   fails
+// - dropping the `sawNan` branch for a plain `Math.max` → NaN is swallowed and ② fails
+// - making the quantization lattice ±128 → the largest magnitude lands on 128 (= −128 in i8) and ③
+//   fails
+// - breaking the multiplication order into the sequential form → ⑤ fails (the data is chosen so the
+//   folded and sequential forms give different values)
+// - accumulating across groups in i32 (one rounding fewer) → ⑤c fails (the w4a8 folding order)
+// - removing the w4a8 group-divisibility check → ⑤d fails (a partial k returns NaN / mixes in the
+//   next row)
+// - replacing `roundTiesToEven` with `Math.round` → ⑦ fails (ties go towards +∞)
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals, assertThrows } from "@std/assert";
@@ -32,39 +38,41 @@ import {
 } from "../src/reference/i8a8.ts";
 
 /**
- * f32 の最小 normal（`torch.finfo(float32).tiny`）。
+ * Smallest normal f32 (`torch.finfo(float32).tiny`).
  *
- * MUST: 参照の定数を輸入しない（参照が床を落としたときに期待値も一緒に動くと門が消える）。
+ * MUST: the reference's constant is not imported (if the reference dropped the floor and the
+ * expected value moved along with it, the check would disappear).
  */
 const F32_TINY = 1.1754943508222875e-38;
 
 // ---------------------------------------------------------------------------
-// ① quantizeRowsReference — 全ゼロ行の scale 床
+// ① quantizeRowsReference — scale floor of an all-zero row
 // ---------------------------------------------------------------------------
 
-test("i8a8 参照: 全ゼロ行の scale は f32 tiny（床が無いと 0/0 = NaN になる）", () => {
+test("i8a8 reference: the scale of an all-zero row is f32 tiny (without the floor it would be 0/0 = NaN)", () => {
   const { q, scale } = quantizeRowsReference([0, 0, 0, 0], 1, 4);
-  assertEquals(scale[0], F32_TINY, "全ゼロ行の scale");
-  // 床があるので x/s は 0/tiny = 0 で厳密に復元される（床が無いと NaN → i8 化で 0 に化け、
-  // q だけを見ても退行が見えない — scale の側が検出器）
-  assertEquals([...q], [0, 0, 0, 0], "全ゼロ行の q");
+  assertEquals(scale[0], F32_TINY, "scale of the all-zero row");
+  // With the floor, x/s is 0/tiny = 0, restored exactly (without it, NaN turns into 0 when cast to
+  // i8, so the regression would not show in q alone — the scale side is the detector)
+  assertEquals([...q], [0, 0, 0, 0], "q of the all-zero row");
 });
 
 // ---------------------------------------------------------------------------
-// ② quantizeRowsReference — 非有限の伝播（行の独立性込み）
+// ② quantizeRowsReference — propagation of non-finite values (including row independence)
 // ---------------------------------------------------------------------------
 
-test("i8a8 参照: 入力長が rows × dim と合わない・次元が非負整数でない入力は計算に入る前に落ちる", () => {
-  // 長さを見ないと、足りない要素は undefined → NaN として行の scale へ伝播し、契約外の
-  // 「NaN 行」を期待値として返す（[1] を 1×2 で読むと scale=[NaN]）。
+test("i8a8 reference: input whose length does not match rows × dim, or whose dimensions are not non-negative integers, fails before computing", () => {
+  // Without the length check, missing elements are undefined → NaN, propagating into the row scale
+  // and returning an out-of-contract "NaN row" as the expected value (reading [1] as 1×2 gives
+  // scale=[NaN]).
   assertThrows(() => quantizeRowsReference([1], 1, 2), I8a8Error, "element count");
   assertThrows(() => quantizeRowsReference([1, 2, 3], 1, 2), I8a8Error, "element count");
   assertThrows(() => quantizeRowsReference([], -1, 0), I8a8Error, "rows");
   assertThrows(() => quantizeRowsReference([1, 2], 1, 2.5), I8a8Error, "dim");
 });
 
-test("i8a8 参照: NaN / ±Inf は行 scale へ伝播し、隣の行を汚さない", () => {
-  // 行 0 = NaN 混じり / 行 1 = +Inf / 行 2 = −Inf / 行 3 = 通常
+test("i8a8 reference: NaN / ±Inf propagate into the row scale without contaminating neighbouring rows", () => {
+  // row 0 = contains NaN / row 1 = +Inf / row 2 = −Inf / row 3 = normal
   const x = [
     1,
     Number.NaN,
@@ -80,40 +88,41 @@ test("i8a8 参照: NaN / ±Inf は行 scale へ伝播し、隣の行を汚さな
     3,
   ];
   const { q, scale } = quantizeRowsReference(x, 4, 3);
-  // MUST: 素の Math.max は NaN を飲む（`NaN > amax` が偽）ので amax = 3 の有限 scale になる
-  assert(Number.isNaN(scale[0]), `NaN 行の scale が ${scale[0]}`);
-  assertEquals(scale[1], Number.POSITIVE_INFINITY, "+Inf 行の scale");
-  // |−Inf| = +Inf なので絶対値最大は +Inf（scale に符号は残らない）
-  assertEquals(scale[2], Number.POSITIVE_INFINITY, "−Inf 行の scale");
-  // 通常行は無傷 — s = f32(3 · (1/127))、q = round(x/s)
-  assertEquals(scale[3], 0.023622047156095505, "通常行の scale");
-  assertEquals([...q.slice(9, 12)], [42, 85, 127], "通常行の q");
+  // MUST: a plain Math.max swallows NaN (`NaN > amax` is false), giving a finite scale with amax =
+  // 3
+  assert(Number.isNaN(scale[0]), `scale of the NaN row is ${scale[0]}`);
+  assertEquals(scale[1], Number.POSITIVE_INFINITY, "scale of the +Inf row");
+  // |−Inf| = +Inf, so the largest magnitude is +Inf (no sign is left in the scale)
+  assertEquals(scale[2], Number.POSITIVE_INFINITY, "scale of the −Inf row");
+  // The normal row is untouched — s = f32(3 · (1/127)), q = round(x/s)
+  assertEquals(scale[3], 0.023622047156095505, "scale of the normal row");
+  assertEquals([...q.slice(9, 12)], [42, 85, 127], "q of the normal row");
 });
 
 // ---------------------------------------------------------------------------
-// ③ quantizeRowsReference — 格子の端（±127）
+// ③ quantizeRowsReference — the ends of the lattice (±127)
 // ---------------------------------------------------------------------------
 
-test("i8a8 参照: 絶対値最大の要素は ±127 へちょうど乗る（±128 の格子では割れる）", () => {
-  // amax = 127 にすると s = f32(127 · (1/127)) = 1.0 ちょうどになり、x/s が入力そのもの
-  // （除数 1.0 の除算は厳密）なので格子の端だけを切り出せる。
+test("i8a8 reference: the element with the largest magnitude lands exactly on ±127 (a ±128 lattice breaks it)", () => {
+  // With amax = 127, s = f32(127 · (1/127)) = exactly 1.0 and x/s is the input itself (division by
+  // 1.0 is exact), so only the ends of the lattice are isolated.
   const { q, scale } = quantizeRowsReference([127, -127, 3, 0], 1, 4);
-  assertEquals(scale[0], 1, "s は 1.0 ちょうど");
-  // 格子を ±128 にすると s = f32(127/128) < 1 になり、127/s = 128 → i8 では −128 に化ける
-  assertEquals([...q], [127, -127, 3, 0], "±127 の端点");
+  assertEquals(scale[0], 1, "s is exactly 1.0");
+  // With a ±128 lattice s = f32(127/128) < 1, and 127/s = 128 → turns into −128 in i8
+  assertEquals([...q], [127, -127, 3, 0], "the ±127 end points");
 });
 
 // ---------------------------------------------------------------------------
-// ④⑤ referenceLinearI8a8 — 既知値と乗算順序
+// ④⑤ referenceLinearI8a8 — known values and multiplication order
 // ---------------------------------------------------------------------------
 
-test("i8a8 参照: linear の既知値（整数内積 → f32 dequant → bias）", () => {
-  // x = [8, 3] → amax = 8・s = f32(8/127) = 0.06299212574958801・q = [127, 48]
+test("i8a8 reference: known values of linear (integer dot product → f32 dequant → bias)", () => {
+  // x = [8, 3] → amax = 8, s = f32(8/127) = 0.06299212574958801, q = [127, 48]
   const x = [8, 3];
   const quantized = quantizeRowsReference(x, 1, 2);
-  assertEquals([...quantized.q], [127, 48], "活性の量子化値");
-  assertEquals(quantized.scale[0], 0.06299212574958801, "活性の行 scale");
-  // W[2,2] の量子化値（行 = 出力チャネル）と per-channel scale
+  assertEquals([...quantized.q], [127, 48], "quantized activations");
+  assertEquals(quantized.scale[0], 0.06299212574958801, "row scale of the activations");
+  // Quantized values of W[2,2] (row = output channel) and the per-channel scale
   //   acc[0] = 127·1 + 48·2   =  223 → 223·(s·0.5)  + 1  ≈  7.0236218 + 1
   //   acc[1] = 127·(−3) + 48·4 = −189 → −189·(s·0.25) − 1 ≈ −2.9763780 − 1
   const out = referenceLinearI8a8({
@@ -125,14 +134,14 @@ test("i8a8 参照: linear の既知値（整数内積 → f32 dequant → bias�
     n: 2,
     k: 2,
   });
-  assertEquals([...out], [8.023621559143066, -3.9763779640197754], "w8a8 linear の出力");
+  assertEquals([...out], [8.023621559143066, -3.9763779640197754], "output of the w8a8 linear");
 });
 
-test("i8a8 参照: linear は xs·wscale を先に畳む（逐次形と値が割れるデータで固定）", () => {
-  // acc = 127・s = f32(0.001/127)・wscale = f32(0.001) の組は、
-  //   畳み形 f32(127 · f32(s·w))   = 9.999999974752427e-7
-  //   逐次形 f32(f32(127·s) · w)   = 1.0000001111620804e-6
-  // と丸めの位置が違う（GPU 側は fma の第 2 引数を 1 つの f32 に畳む — 設計 §4.2）。
+test("i8a8 reference: linear folds xs·wscale first (pinned with data on which the sequential form differs)", () => {
+  // The combination acc = 127, s = f32(0.001/127), wscale = f32(0.001) rounds at different places:
+  //   folded     f32(127 · f32(s·w))   = 9.999999974752427e-7
+  //   sequential f32(f32(127·s) · w)   = 1.0000001111620804e-6
+  // (the GPU side folds the second argument of fma into one f32 — design §4.2).
   const out = referenceLinearI8a8({
     x: [0.001, 0],
     weight: [1, 0],
@@ -142,25 +151,26 @@ test("i8a8 参照: linear は xs·wscale を先に畳む（逐次形と値が割
     n: 1,
     k: 2,
   });
-  assertEquals(out[0], 9.999999974752427e-7, "畳み形の値");
-  assertNotEquals(out[0], 1.0000001111620804e-6, "逐次形へ崩れている");
+  assertEquals(out[0], 9.999999974752427e-7, "value of the folded form");
+  assertNotEquals(out[0], 1.0000001111620804e-6, "degraded into the sequential form");
 });
 
 // ---------------------------------------------------------------------------
-// ⑤b⑤c referenceLinearW4a8 — 既知値と group ごとの畳み順
+// ⑤b⑤c referenceLinearW4a8 — known values and the per-group folding order
 // ---------------------------------------------------------------------------
 
-test("w4a8 参照: linear の既知値（group ごとに i32 → group 境界で f32 flush → xs）", () => {
-  // x = [8, 3, −2, 5] → amax = 8・s = f32(8 · f32(1/127)) = 0.06299212574958801
-  //   q = [127, 48, −32, 79]（半整数から十分離れているので偶数丸めの分岐は踏まない）
-  // group_size 2 なので行内は 2 group。scale は 2 冪だけを使い、flush までの算術を
-  // f32 で厳密にしてある（最後の xs の乗算だけが丸める形 = 検算が手でできる）。
-  //   行 0: g0 acc = 127·1 + 48·2   =  223 → 223·0.5   = 111.5
-  //         g1 acc = −32·(−3) + 79·4 =  412 → 412·0.25  = 103   → accf = 214.5
-  //         out = f32(214.5 · s + 1)
-  //   行 1: g0 acc = 127·7 + 48·(−7) =  553 → 553·0.125 =  69.125
-  //         g1 acc = −32·5 + 79·(−6) = −634 → −634·2    = −1268 → accf = −1198.875
-  //         out = f32(−1198.875 · s − 1)
+test("w4a8 reference: known values of linear (i32 per group → f32 flush at the group boundary → xs)", () => {
+  // x = [8, 3, −2, 5] → amax = 8, s = f32(8 · f32(1/127)) = 0.06299212574958801
+  //   q = [127, 48, −32, 79] (far enough from half-integers that the round-to-even branch is not
+  //   taken)
+  // group_size 2, so a row has 2 groups. The scales are powers of 2 only, which keeps the
+  // arithmetic up to the flush exact in f32 (only the final multiplication by xs rounds = checkable
+  //   by hand). row 0: g0 acc = 127·1 + 48·2   =  223 → 223·0.5   = 111.5
+  //          g1 acc = −32·(−3) + 79·4 =  412 → 412·0.25  = 103   → accf = 214.5
+  //          out = f32(214.5 · s + 1)
+  //   row 1: g0 acc = 127·7 + 48·(−7) =  553 → 553·0.125 =  69.125
+  //          g1 acc = −32·5 + 79·(−6) = −634 → −634·2    = −1268 → accf = −1198.875
+  //          out = f32(−1198.875 · s − 1)
   const out = referenceLinearW4a8({
     x: [8, 3, -2, 5],
     weight: [1, 2, -3, 4, 7, -7, 5, -6],
@@ -171,16 +181,17 @@ test("w4a8 参照: linear の既知値（group ごとに i32 → group 境界で
     k: 4,
     groupSize: 2,
   });
-  assertEquals([...out], [14.511811256408691, -76.519683837890625], "w4a8 linear の出力");
+  assertEquals([...out], [14.511811256408691, -76.519683837890625], "output of the w4a8 linear");
 });
 
-test("w4a8 参照: group ごとに f32 へ畳む（全 group を 1 本の和にした形と値が割れる）", () => {
-  // amax = 127 の行は s = f32(127 · f32(1/127)) = 1.0 ちょうど（除数 1.0 の除算は厳密）
-  // なので q = x そのもの・最後の `accf · xs` も恒等になり、**畳み順だけ**が出力に残る。
+test("w4a8 reference: folds into f32 per group (differs from summing all groups into one)", () => {
+  // A row with amax = 127 has s = f32(127 · f32(1/127)) = exactly 1.0 (division by 1.0 is exact),
+  // so q = x itself and the final `accf · xs` is the identity too; **only the folding order**
+  // remains in the output.
   //   g0 acc = 127·(−7) + 37·(−3) = −1000 / g1 acc = 121·(−7) + 20·(−6) = −967
-  //   group ごと  : f32(f32(−967 · s) + f32(−1000 · s)) = −33.45867156982422
-  //   1 本の和    : f32(−1967 · s)                      = −33.45866775512695
-  // MUST: group を跨いで i32 のまま足し込む実装（丸めが 1 回に減る）はここで落ちる。
+  //   per group  : f32(f32(−967 · s) + f32(−1000 · s)) = −33.45867156982422
+  //   single sum : f32(−1967 · s)                      = −33.45866775512695
+  // MUST: an implementation that accumulates across groups in i32 (one rounding fewer) fails here.
   const scale = 0.017009999603033066;
   const out = referenceLinearW4a8({
     x: [127, 37, 121, 20],
@@ -192,16 +203,17 @@ test("w4a8 参照: group ごとに f32 へ畳む（全 group を 1 本の和に�
     k: 4,
     groupSize: 2,
   });
-  assertEquals(out[0], -33.45867156982422, "group ごとの畳み");
-  assertNotEquals(out[0], -33.45866775512695, "全 group を 1 本の和にまとめている");
+  assertEquals(out[0], -33.45867156982422, "per-group folding");
+  assertNotEquals(out[0], -33.45866775512695, "sums all groups into one");
 });
 
-// ⑤d group 整除の門
-test("w4a8 参照: k が group 長で割り切れない入力は計算に入る前に落ちる", () => {
-  // groups = 48 / 32 = 1.5。門が無いと group ループが `group = 1` まで回り、内側が
-  // `q[row·48 + 32..63]` を読む — 実測では m=1 で全要素 NaN（q の範囲外 = undefined）、
-  // m ≥ 2 では row 0 / col 0 だけが**次の行の活性**を足し込んだ有限の誤値になる
-  // （どちらも「オラクルが黙って別の数を返す」形で、atol=0 の主張が意味を失う）。
+// ⑤d group-divisibility check
+test("w4a8 reference: input whose k is not divisible by the group length fails before computing", () => {
+  // groups = 48 / 32 = 1.5. Without the check, the group loop runs up to `group = 1` and the inner
+  // loop reads `q[row·48 + 32..63]` — measured: with m=1 every element is NaN (out of range of q =
+  // undefined); with m ≥ 2 only row 0 / col 0 becomes a finite wrong value that adds in **the next
+  // row's activations** (both are "the oracle silently returns a different number", and the atol=0
+  // claim loses its meaning).
   assertThrows(
     () =>
       referenceLinearW4a8({
@@ -219,14 +231,15 @@ test("w4a8 参照: k が group 長で割り切れない入力は計算に入る�
   );
 });
 
-test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算に入る前に落ちる", () => {
+test("w4a8 reference: a non-integer or negative group length fails before computing even when it divides k", () => {
   const input = {
     weightScale: new Array(4).fill(1),
     bias: [0, 0],
     m: 1,
     n: 2,
   };
-  // k=5 / g=2.5 は groups = 2 で整除の門を通るが、活性と重みの添字が非整数になり NaN を返す
+  // k=5 / g=2.5 passes the divisibility check with groups = 2, but the activation and weight
+  // indices become non-integers and it returns NaN
   assertThrows(
     () =>
       referenceLinearW4a8({
@@ -239,7 +252,7 @@ test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算
     I8a8Error,
     "positive integer",
   );
-  // k=4 / g=-2 は groups = -2 で group ループが 0 回になり、bias をそのまま返す
+  // k=4 / g=-2 gives groups = -2, the group loop runs 0 times, and it returns the bias as is
   assertThrows(
     () =>
       referenceLinearW4a8({
@@ -255,40 +268,41 @@ test("w4a8 参照: 非整数・負の group 長は k を割り切っても計算
 });
 
 // ---------------------------------------------------------------------------
-// ⑥ referenceAttentionQkI8a8 — 半スケールが q / k の両側へ掛かる
+// ⑥ referenceAttentionQkI8a8 — the half scale applies to both q and k
 // ---------------------------------------------------------------------------
 
-test("i8a8 参照: QK の半スケールは q と k の双方へ掛かる（scale 2 倍 → 出力 4 倍）", () => {
-  // q = k = [8, 3] → 両側とも q̂ = [127, 48]・s = f32(8/127)
+test("i8a8 reference: the QK half scale applies to both q and k (scale ×2 → output ×4)", () => {
+  // q = k = [8, 3] → on both sides q̂ = [127, 48], s = f32(8/127)
   //   acc = 127² + 48² = 18433 / S = f32(acc · f32((s·scale)·(s·scale)))
   const input = { q: [8, 3], k: [8, 3], batch: 1, m: 1, n: 1, d: 2 };
   const half = referenceAttentionQkI8a8({ ...input, scale: 0.5 });
   const full = referenceAttentionQkI8a8({ ...input, scale: 1 });
-  assertEquals(half[0], 18.285572052001953, "scale = 0.5 の S");
-  // 2 倍は f32 で厳密なので、片側にしか掛かっていなければ 2 倍にしかならない
-  assertEquals(full[0], 73.14228820800781, "scale = 1.0 の S");
-  assertEquals(full[0], half[0] * 4, "scale が二乗で効いていない");
+  assertEquals(half[0], 18.285572052001953, "S with scale = 0.5");
+  // Doubling is exact in f32, so if it applied to only one side the output would only double
+  assertEquals(full[0], 73.14228820800781, "S with scale = 1.0");
+  assertEquals(full[0], half[0] * 4, "the scale does not take effect squared");
 });
 
 // ---------------------------------------------------------------------------
-// ⑦ referenceAttentionPvQuant — 127·exp(0) と偶数丸め
+// ⑦ referenceAttentionPvQuant — 127·exp(0) and round-to-even
 // ---------------------------------------------------------------------------
 
-test("i8a8 参照: P̃ の量子化は round(127·exp(S−m)) で、同点は偶数側へ倒れる", () => {
-  // 行の最大 m を引いた位置は exp(0) = 1 → 127 ちょうど（格子の上端に張り付く）
+test("i8a8 reference: P̃ is quantized as round(127·exp(S−m)), with ties going to even", () => {
+  // At the position where the row maximum m is subtracted, exp(0) = 1 → exactly 127 (it sticks to
+  // the top of the lattice)
   const qp = referenceAttentionPvQuant([5, 4], [5], 1, 2);
   assertEquals([...qp], [127, 47], "exp(0) → 127 / exp(−1)·127 ≈ 46.7 → 47");
-  // 同点の実例: S−m = f32(−0.195) では f32(f32(exp(x))·127) がちょうど 104.5 に乗る。
-  // 偶数丸めなら 104、Math.round（half-up）なら 105 になるので両者が割れる。
+  // A real tie: with S−m = f32(−0.195), f32(f32(exp(x))·127) lands exactly on 104.5.
+  // Round-to-even gives 104 and Math.round (half-up) gives 105, so the two differ.
   const tie = referenceAttentionPvQuant([Math.fround(-0.195)], [0], 1, 1);
-  assertEquals(tie[0], 104, "同点は偶数側（Math.round なら 105）");
+  assertEquals(tie[0], 104, "a tie goes to even (Math.round would give 105)");
 });
 
 // ---------------------------------------------------------------------------
-// ⑧ referenceAttentionPvI8a8Core — 既知値（整数を受け取ってからの純関数）
+// ⑧ referenceAttentionPvI8a8Core — known values (the pure function after the integers are taken)
 // ---------------------------------------------------------------------------
 
-test("i8a8 参照: ③PV は f32(Σ qP·vq) · ((inv·(1/127))·vs) の既知値と一致する", () => {
+test("i8a8 reference: ③PV matches the known value of f32(Σ qP·vq) · ((inv·(1/127))·vs)", () => {
   //   acc  = 127·100 + 64·(−50) = 9500
   //   prow = f32(0.5 · f32(1/127)) = 0.003937007859349251
   //   O    = f32(9500 · f32(prow · 2)) ≈ 74.803149
@@ -302,5 +316,5 @@ test("i8a8 参照: ③PV は f32(Σ qP·vq) · ((inv·(1/127))·vs) の既知値
     n: 2,
     d: 1,
   });
-  assertEquals([...out], [74.80314636230469], "③PV の出力");
+  assertEquals([...out], [74.80314636230469], "output of ③PV");
 });

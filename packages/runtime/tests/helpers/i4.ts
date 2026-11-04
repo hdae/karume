@@ -1,44 +1,50 @@
-// i4 格納テストの組み立てヘルパ（ホスト側の f32 → K 方向 group 対称 int4 の符号化 + pack）。
+// Builders for i4 storage tests (host-side f32 → symmetric int4 grouped along K, encoded + packed).
 //
-// 符号化は**テスト専用**（本番はエクスポータ = Python 側 `karume/emit.py: pack_int4` の担当で、
-// ランタイムは decode しか持たない）。pack 順「要素 2i = 下位 nibble / 2i+1 = 上位・
-// 格納値 u = q + 8」はエクスポータの仕様をここで**書き下す** — 実装（format/i4.ts）から
-// 引くと往復が恒真化する（helpers/i8.ts と同じ規律）。
-//   bytes  = packed 4bit の生バイト列（GPU / ロード経路に渡す）
-//   scale  = group ごとの scale（group 形の F32 テンソルとして配布形に載せる）
-//   values = そのバイト列を**本番の decodeI4 で**戻した f32 列（CPU 参照が使う期待値）
+// The encoding is **test-only** (in production the exporter encodes, on the Python side in
+// `karume/emit.py: pack_int4`, and the runtime only decodes). The pack order "element 2i = low
+// nibble / 2i+1 = high nibble, stored value u = q + 8" is the exporter's spec, **written out here**
+// — taking it from the implementation (format/i4.ts) would make the round trip tautological (the
+// same rule as helpers/i8.ts).
+//   bytes  = raw bytes of the packed 4-bit values (passed to the GPU / load path)
+//   scale  = scale per group (carried in the distribution form as an F32 tensor of group shape)
+//   values = those bytes decoded back to f32 **by the production decodeI4** (the expected values
+//            the CPU reference uses)
 
 import { decodeI4 } from "../../src/format/i4.ts";
 import { F32_TINY } from "./i8.ts";
 
 export type QuantizedI4 = {
-  /** safetensors に載せる I4 の生バイト列（numel / 2 バイト）。 */
+  /** Raw I4 bytes to put in safetensors (numel / 2 bytes). */
   readonly bytes: Uint8Array<ArrayBuffer>;
   /**
-   * 量子化後の**整数値** `q ∈ [−7, 7]`（平坦・pack 前）。w4a8 の CPU 参照
-   * （`referenceLinearW4a8`）が受け取る形で、`bytes` と同じループで作る — バイト列から
-   * 割り直すと nibble 順の仕様がテスト側にも 2 箇所できる。
+   * The quantized **integer values** `q ∈ [−7, 7]` (flat, before packing). This is the form the
+   * w4a8 CPU reference (`referenceLinearW4a8`) takes, built in the same loop as `bytes` —
+   * re-deriving it from the bytes would put a second copy of the nibble-order spec in the tests.
    */
   readonly q: Int8Array<ArrayBuffer>;
-  /** group ごとの scale（平坦 = 行 × group 順）。 */
+  /** Scale per group (flat = row × group order). */
   readonly scale: Float32Array<ArrayBuffer>;
-  /** scale テンソルの group 形 shape（rank 非依存の rank 2 = `[shape[0], 行長 / g]`）。 */
+  /**
+   * Group shape of the scale tensor (rank 2 whatever the input rank =
+   * `[shape[0], row length / g]`).
+   */
   readonly scaleShape: readonly number[];
-  /** 量子化後の値（fake-quant — CPU 参照はこちらを重みとして使う）。 */
+  /** The quantized values (fake-quant — the CPU reference uses these as the weights). */
   readonly values: Float32Array<ArrayBuffer>;
 };
 
 /**
- * K 方向 group symmetric int4 の fake-quant + pack（ADR 0069 決定 3 / 4）。
+ * Fake-quant + pack of symmetric int4 grouped along K (ADR 0069 decisions 3 / 4).
  *
- * `scale = max(amax_group / 7, tiny)` / `q = round(w / scale)` を **±7 に閉じる**。
- * 丸めは half-away-from-zero（i8 ヘルパと同じ — 期待値は decodeI4 から作るので
- * ランタイムの検証には影響しない）。
+ * `scale = max(amax_group / 7, tiny)` / `q = round(w / scale)` **clamped to ±7**.
+ * Rounding is half-away-from-zero (the same as the i8 helper — the expected values come from
+ * decodeI4, so this does not affect what the runtime is checked against).
  *
- * 行の割り方は**先頭次元を行・残りを平坦化**（`channel_rows` の規則 — linear `[O,I]` /
- * embedding `[V,D]` では最終次元と同値・conv1d `[O,Cin,K]` では `Cin·K`）。scale の形は
- * rank に依らず rank 2 になる。MUST: 実装（format/i4.ts）から引かずにここで書き下す
- * （引くと往復が恒真化する — helpers/i8.ts と同じ規律）。
+ * Rows are **the leading dimension, with the rest flattened** (the `channel_rows` rule — the same
+ * as the last dimension for linear `[O,I]` / embedding `[V,D]`, `Cin·K` for conv1d `[O,Cin,K]`).
+ * The scale is rank 2 whatever the input rank. MUST: written out here, not taken from the
+ * implementation (format/i4.ts) (taking it would make the round trip tautological — the same rule
+ * as helpers/i8.ts).
  */
 export const quantizeI4 = (
   values: ArrayLike<number>,
@@ -48,7 +54,7 @@ export const quantizeI4 = (
   const rows = shape[0];
   const width = values.length / rows;
   if (width % groupSize !== 0) {
-    throw new Error(`quantizeI4: 行長 ${width} が group_size ${groupSize} で割り切れない`);
+    throw new Error(`quantizeI4: row length ${width} is not divisible by group_size ${groupSize}`);
   }
   const groups = width / groupSize;
 
@@ -63,7 +69,8 @@ export const quantizeI4 = (
     scale[slot] = Math.max(Math.fround(scale[slot] / 7), F32_TINY);
   }
 
-  // pack: 要素 2i = 下位 nibble / 2i+1 = 上位・u = q + 8（正本 = emit.py の pack_int4）
+  // pack: element 2i = low nibble / 2i+1 = high nibble, u = q + 8 (source of truth = pack_int4 in
+  // emit.py)
   const bytes = new Uint8Array(values.length / 2);
   const q = new Int8Array(values.length);
   for (let i = 0; i < values.length; i += 1) {

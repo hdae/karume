@@ -1,15 +1,19 @@
-// フェンス数の機械検査（`queue.onSubmittedWorkDone` の呼び出し回数）。
+// Mechanical check of the fence count (the number of `queue.onSubmittedWorkDone` calls).
 //
-// 「待ちを減らす」最適化は値が正しいままでも黙って退化する（内部で flush へ退避しても例外も
-// 警告も出ない）ので、フェンスが実際に減っていることを数える門が要る。実装内部に観測点を
-// 足さずに済むよう、テスト側でキューの面をラップする。
+// An optimization that "waits less" can silently regress while the values stay correct (falling
+// back to a flush internally raises no exception and no warning), so a check has to count that
+// the fences really went down. The test side wraps the queue's surface so the implementation
+// needs no extra observation points.
 
 import type { GpuContext } from "../../src/gpu/device.ts";
 
 export type FenceCounter = {
-  /** ラップしてからの `onSubmittedWorkDone` の呼び出し回数。 */
+  /** The number of `onSubmittedWorkDone` calls since wrapping. */
   readonly count: () => number;
-  /** 元の面へ戻す（MUST: finally で必ず呼ぶ — 他のテストへ計数が漏れる）。 */
+  /**
+   * Restores the original surface (MUST: always call it in finally — otherwise the count leaks
+   * into other tests).
+   */
   restore: () => void;
 };
 

@@ -1,5 +1,5 @@
-// 実 GPU 実行 vs CPU 参照の数値突合（ADR 0005 の段 2）。M0 の全 op を代表 shape で回す。
-// MUST: 乱数を使わない — 失敗が再現しないと原因の切り分けができない。
+// Numeric comparison of real GPU execution vs the CPU reference (stage 2 of ADR 0005). Runs every M0 op on representative shapes.
+// MUST: no random numbers — if a failure does not reproduce, its cause cannot be isolated.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
@@ -61,8 +61,8 @@ import {
 import { assertMutated } from "./helpers/state-dispatch.ts";
 
 /**
- * 1 ケースを実 GPU で走らせ、**出力 slot 昇順の列**を返す（ADR 0068 決定 1）。単一出力 op では
- * 長さ 1 の列で、`topk` だけが 2 本になる。
+ * Runs one case on the real GPU and returns **the outputs in ascending slot order** (ADR 0068 decision 1). For a
+ * single-output op it is a list of length 1; only `topk` has 2.
  */
 const runOutputs = async (gpu: GpuContext, testCase: OpCase): Promise<readonly Tensor[]> => {
   const graph = singleOpDeclaration(
@@ -94,10 +94,10 @@ const runOutputs = async (gpu: GpuContext, testCase: OpCase): Promise<readonly T
   }
 };
 
-/** 単一出力ケースの実行（多出力 op は {@link runOutputs} で受ける）。 */
+/** Runs a single-output case (multi-output ops go through {@link runOutputs}). */
 const runCase = async (gpu: GpuContext, testCase: OpCase): Promise<Tensor> => {
   const outputs = await runOutputs(gpu, testCase);
-  assertEquals(outputs.length, 1, `${testCase.name}: 単一出力ケース`);
+  assertEquals(outputs.length, 1, `${testCase.name}: single-output case`);
   return outputs[0];
 };
 
@@ -112,14 +112,14 @@ const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
         testCase.attrs ?? {},
         testCase.outShapes[0],
       );
-      // MUST: 本数から突き合わせる（多出力 op で片方を読み飛ばした形が緑になるのを防ぐ）
-      assertEquals(actual.length, expected.length, `${testCase.name}: 出力本数`);
+      // MUST: compare the counts first (keeps a multi-output op that skips reading one output from going green)
+      assertEquals(actual.length, expected.length, `${testCase.name}: number of outputs`);
       actual.forEach((tensor, slot) => {
-        const label = expected.length === 1 ? testCase.name : `${testCase.name} 出力 ${slot}`;
+        const label = expected.length === 1 ? testCase.name : `${testCase.name} output ${slot}`;
         assertEquals(tensor.shape, expected[slot].shape, label);
         assertEquals(tensor.dtype, expected[slot].dtype, `${label}: dtype`);
-        // f32 は op 別 tolerance 表（helpers/op-tolerance.ts — 表に無い op は fail loudly）、
-        // i32 / bool は compareTensors が dtype で厳密一致を選ぶ（ADR 0009）
+        // f32 uses the per-op tolerance table (helpers/op-tolerance.ts — an op missing from the table fails loudly);
+        // for i32 / bool, compareTensors picks exact equality by dtype (ADR 0009)
         const report = compareTensors(
           tensor,
           expected[slot],
@@ -133,34 +133,35 @@ const checkAll = async (cases: readonly OpCase[]): Promise<void> => {
   }
 };
 
-test.skipIf(!GPU_AVAILABLE)("unary 11 種が CPU 参照と一致する（実 GPU）", () =>
+test.skipIf(!GPU_AVAILABLE)("11 unary ops match the CPU reference (real GPU)", () =>
   checkAll(UNARY_CASES),
 );
 
-test.skipIf(!GPU_AVAILABLE)("binary 4 種が broadcast 込みで CPU 参照と一致する（実 GPU）", () =>
-  checkAll(BINARY_CASES),
+test.skipIf(!GPU_AVAILABLE)(
+  "4 binary ops match the CPU reference, broadcast included (real GPU)",
+  () => checkAll(BINARY_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "i32 / bool の elementwise（mask 経路）が CPU 参照と厳密一致する（実 GPU）",
+  "i32 / bool elementwise (mask path) matches the CPU reference exactly (real GPU)",
   () => checkAll(DTYPE_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "波3 の数理 op（where / 比較 / clamp / leaky_relu / log1p / cumsum / bool sum）が CPU 参照と一致する（実 GPU）",
+  "the wave 3 math ops (where / comparisons / clamp / leaky_relu / log1p / cumsum / bool sum) match the CPU reference (real GPU)",
   () => checkAll(MATH_CASES),
 );
 
 /**
- * leaky_relu の NaN 伝播（ADR 0015 の裁定を実 GPU で固定する）。
+ * NaN propagation of leaky_relu (pins the ruling of ADR 0015 on a real GPU).
  *
- * torch は `leaky_relu(NaN) = NaN` だが、WGSL の `max` は NaN 伝播を保証しない実装が
- * ありうる（relu / clamp が既に同じ乖離を抱えていることは limitations.md が既知化済み）。
- * MUST: allclose は NaN をどちらの側でも不合格にするので、この検査は checkAll に載せられない
- * — 生の値を見る専用テストとして持つ。
+ * torch gives `leaky_relu(NaN) = NaN`, but WGSL's `max` may have implementations that do not guarantee NaN
+ * propagation (that relu / clamp already carry the same divergence is a known item in limitations.md).
+ * MUST: allclose fails NaN on either side, so this check cannot go into checkAll
+ * — it is kept as a dedicated test that looks at the raw values.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "leaky_relu は NaN を伝播する（select 形の裁定 — 実 GPU）",
+  "leaky_relu propagates NaN (the ruling for the select form — real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -176,7 +177,7 @@ test.skipIf(!GPU_AVAILABLE)(
         values.map((v) => Number.isNaN(v)),
         [true, false, false, false],
       );
-      // NaN 以外は通常経路（負側は slope 倍・正側は素通し）
+      // Everything but NaN takes the normal path (slope times on the negative side, pass-through on the positive side)
       assertEquals(values[1], Math.fround(-0.2));
       assertEquals(values[2], 0);
       assertEquals(values[3], 3);
@@ -186,12 +187,12 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** NaN の位置（先頭 / 中間 / 末尾）。elementwise の入力長 4 に対する添字。 */
+/** NaN positions (first / middle / last). Indices into the elementwise input of length 4. */
 const NAN_POSITIONS = [0, 2, 3] as const;
-/** NaN を差し込む前の素の列。clamp（min=-1 / max=1）の下限側・上限側・素通しを跨ぐ。 */
+/** The plain sequence before NaN is inserted. Spans the lower side, upper side and pass-through of clamp (min=-1 / max=1). */
 const NAN_BASE = [-3, -0.5, 0.5, 3] as const;
 
-/** 同じ op について「NaN の位置を変えた 3 本 + NaN 無しの対照 1 本」を組む。 */
+/** Builds, for one op, "3 inputs with NaN at different positions + 1 NaN-free control". */
 const nanUnaryCases = (op: string, attrs?: Record<string, unknown>): readonly OpCase[] => [
   ...NAN_POSITIONS.map((position) => ({
     name: `${op} NaN@${position}`,
@@ -201,7 +202,7 @@ const nanUnaryCases = (op: string, attrs?: Record<string, unknown>): readonly Op
     attrs,
   })),
   {
-    name: `${op} NaN 無し（対照）`,
+    name: `${op} without NaN (control)`,
     op,
     inputs: [fill([4], (i) => NAN_BASE[i])],
     outShapes: [[4]],
@@ -209,7 +210,7 @@ const nanUnaryCases = (op: string, attrs?: Record<string, unknown>): readonly Op
   },
 ];
 
-/** 行ごとの NaN 位置（-1 = NaN 無しの対照行）。縮約は「行内のどこにあっても」伝播する。 */
+/** The NaN position per row (-1 = a NaN-free control row). A reduction propagates it "wherever it is in the row". */
 const NAN_REDUCE_AT = [0, 2, 3, -1] as const;
 const NAN_REDUCE_ROWS = (index: number): number => {
   const row = Math.floor(index / 4);
@@ -223,17 +224,17 @@ const NAN_CASES: readonly OpCase[] = [
   ...nanUnaryCases("relu"),
   ...(["amax", "amin"] as const).flatMap((op): readonly OpCase[] => [
     {
-      name: `${op} 行内の位置を変えた NaN [4,4]`,
+      name: `${op} NaN at varying positions in the row [4,4]`,
       op,
       inputs: [fill([4, 4], NAN_REDUCE_ROWS)],
       outShapes: [[4]],
       attrs: { dim: 1 },
     },
     {
-      // 行長 300 > workgroup サイズ 256 → 添字 299 は 1 スレッドの走査ループの **2 周目**で
-      // 読まれる（[4,4] は 1 周目しか回らないので、この経路はここでしか踏まない）。
-      // 行 1 は NaN 無しの対照。
-      name: `${op} 走査ループ 2 周目の NaN [2,300]`,
+      // Row length 300 > workgroup size 256 → index 299 is read in the **second pass** of one thread's scan loop
+      // ([4,4] only runs the first pass, so this path is hit only here).
+      // Row 1 is the NaN-free control.
+      name: `${op} NaN in the second pass of the scan loop [2,300]`,
       op,
       inputs: [fill([2, 300], (i) => (i === 299 ? Number.NaN : SIGNED(i)))],
       outShapes: [[2]],
@@ -243,16 +244,16 @@ const NAN_CASES: readonly OpCase[] = [
 ];
 
 /**
- * clamp / clamp_min / relu / amax / amin の NaN 伝播（ビット列判定の裁定を実 GPU で固定）。
+ * NaN propagation of clamp / clamp_min / relu / amax / amin (pins the ruling of bit-pattern checks on a real GPU).
  *
- * torch は 5 op とも「入力（縮約なら縮約対象の語群）に NaN があれば結果は NaN」。ドライバの
- * `max` / `min` は NaN を飲むので、伝播を担うのは生成 WGSL のビット列判定だけ
- * （機序は src/codegen/elementwise.ts の IS_NAN_BITS_WGSL）。
- * MUST: allclose は NaN をどちらの側でも不合格にするので checkAll には載せられない —
- * **CPU 参照との isNaN パターン一致**で突合する（NaN のビットパターン一致までは求めない）。
+ * For all 5 ops torch gives "if the input (for a reduction, the words being reduced) has a NaN, the result is
+ * NaN". The driver's `max` / `min` swallow NaN, so only the bit-pattern check of the generated WGSL carries the
+ * propagation (the mechanism is IS_NAN_BITS_WGSL in src/codegen/elementwise.ts).
+ * MUST: allclose fails NaN on either side, so this cannot go into checkAll — compare by **matching the isNaN
+ * pattern against the CPU reference** (matching the NaN bit patterns themselves is not required).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "clamp / clamp_min / relu / amax / amin が NaN を伝播する（実 GPU）",
+  "clamp / clamp_min / relu / amax / amin propagate NaN (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -268,17 +269,17 @@ test.skipIf(!GPU_AVAILABLE)(
         const expectedValues = [...expected.data];
         const actualNan = actualValues.map((value) => Number.isNaN(value));
         const expectedNan = expectedValues.map((value) => Number.isNaN(value));
-        assertEquals(actualNan, expectedNan, `${testCase.name}: NaN の位置`);
-        // MUST: 対照要素を持つこと。「常に NaN を返す」実装は位置の一致だけでは落ちない。
-        assertEquals(expectedNan.includes(false), true, `${testCase.name}: 対照要素が無い`);
-        // 非 NaN 側は丸め差の入らない値なので生で厳密一致（NaN 同士は比較が成立しないので
-        // 該当要素だけ 0 に潰してから見る）
+        assertEquals(actualNan, expectedNan, `${testCase.name}: NaN positions`);
+        // MUST: have control elements. An implementation that "always returns NaN" passes a position match alone.
+        assertEquals(expectedNan.includes(false), true, `${testCase.name}: no control elements`);
+        // The non-NaN side has values without rounding differences, so they are compared raw and exactly (NaN never
+        // compares equal, so only those elements are flattened to 0 before checking)
         const finiteOnly = (values: readonly number[], isNan: readonly boolean[]): number[] =>
           values.map((value, index) => (isNan[index] ? 0 : value));
         assertEquals(
           finiteOnly(actualValues, actualNan),
           finiteOnly(expectedValues, expectedNan),
-          `${testCase.name}: 非 NaN の値`,
+          `${testCase.name}: non-NaN values`,
         );
       }
     } finally {
@@ -288,15 +289,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * log1p の精度（実装方針の実測根拠 — src/codegen/elementwise.ts の LOG1P_FN）。
+ * Precision of log1p (the measured basis of the implementation choice — LOG1P_FN in src/codegen/elementwise.ts).
  *
- * 素朴な `log(1 + x)` は |x| ≪ 1 で `1 + x` の丸めが有効桁を食う。ここは f32 で
- * 「1 + x が 1 に丸まる領域」を含む x を与え、CPU 参照（`Math.log1p`）との**相対誤差**が
- * f32 の数 ulp に収まることを実測する。素朴形なら x = 1e-8 で出力 0（相対誤差 1）になり、
- * この閾値では通らない。
+ * The naive `log(1 + x)` loses significant digits to the rounding of `1 + x` for |x| ≪ 1. Here x includes the
+ * f32 range where "1 + x rounds to 1", and the **relative error** against the CPU reference (`Math.log1p`) is
+ * measured to stay within a few f32 ulp. The naive form gives output 0 (relative error 1) at x = 1e-8 and does not
+ * pass this threshold.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "log1p は 1+x が丸まる領域でも相対誤差 f32 数 ulp に収まる（実 GPU）",
+  "log1p stays within a few f32 ulp of relative error even where 1+x rounds (real GPU)",
   async () => {
     const smalls = [1e-8, -1e-8, 1e-7, 5e-7, -3e-6, 1e-4, -1e-3, 0.5, 2, 100];
     const gpu = await acquireGpu();
@@ -316,26 +317,27 @@ test.skipIf(!GPU_AVAILABLE)(
     } finally {
       gpu.destroy();
     }
-    // f32 の eps は 1.19e-7。log / 除算・乗算の合成で数 ulp を見込んで 8 倍を上限にする
-    // （素朴形の誤差は x = 1e-8 で 1.0 = この閾値の 7 桁上）。
-    assertEquals(worst < 1e-6, true, `log1p の最悪相対誤差 ${worst}`);
+    // The f32 eps is 1.19e-7. Allowing a few ulp for the composition of log / division / multiplication, the cap is 8×
+    // (the naive form's error at x = 1e-8 is 1.0 = 7 orders of magnitude above this threshold).
+    assertEquals(worst < 1e-6, true, `worst relative error of log1p ${worst}`);
   },
 );
 
 /**
- * GEMM / conv / 縮約系の**ビット同一門**（op-tolerance 研究 §7.1 = 案 γ の後半）。
+ * **Bit-identity check** of the GEMM / conv / reduction ops (op-tolerance research §7.1 = the second half of option γ).
  *
- * 現行コーパスの入力は 2 進格子（0.75 / 0.125 / 0.5 の倍数）に載っており、中間和も f32 の
- * 厳密整数域に収まるため丸めが一度も起きない — IEEE-754 f32 準拠のどの実装でも GPU と
- * f64 オラクルは**ビット単位で一致する**（格子論証は研究 §2 で機械確認済み）。op 別
- * tolerance 表の GEMM / 縮約帯はこのコーパスでは消費率 0 なので、退行検出はこの門が担う。
+ * The inputs of the current corpus sit on a binary lattice (multiples of 0.75 / 0.125 / 0.5), and the
+ * intermediate sums stay within the exact integer range of f32, so no rounding ever happens — on any IEEE-754 f32
+ * conforming implementation the GPU and the f64 oracle **match bit for bit** (the lattice argument was checked
+ * mechanically in research §2). The GEMM / reduction bands of the per-op tolerance table are consumed at a rate of
+ * 0 on this corpus, so this check carries regression detection.
  *
- * MUST: 割れても tolerance を緩めない。意味は「ドライバが f32 未満で計算している / 生成
- * WGSL が別演算へ落ちた」— 特定ドライバで割れる場合は op 単位で門を外して理由を記録する
- * （tanh 飽和カナリアと同じ運用）。
+ * MUST: do not loosen the tolerance if it breaks. It means "the driver computes below f32 / the generated WGSL fell
+ * to a different operation" — if it breaks on a specific driver, take the op out of the check and record why
+ * (the same practice as the tanh saturation canary).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GEMM / conv / 縮約系は現行コーパスで f64 オラクルとビット同一（実 GPU）",
+  "GEMM / conv / reduction ops are bit-identical to the f64 oracle on the current corpus (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -347,13 +349,13 @@ test.skipIf(!GPU_AVAILABLE)(
         ...UPSAMPLE_CASES,
         ...REDUCE_CASES,
       ].filter((testCase) => BIT_IDENTICAL_OPS.has(testCase.op));
-      // 対象 op が 1 ケースも拾えていない形（リスト構成の変更で門が空転する形）を塞ぐ。
-      // MUST: 総数の下限では足りない（UPSAMPLE / DEFORM を丸ごと外しても数は残る）— op の
-      // 集合そのものを突き合わせ、BIT_IDENTICAL_OPS へ足したらケースを足すまで赤にする。
+      // Blocks the form where a target op picks up no case at all (the form where a list change makes the check spin idle).
+      // MUST: a lower bound on the total is not enough (dropping UPSAMPLE / DEFORM entirely still leaves a count) —
+      // compare the set of ops itself, so adding to BIT_IDENTICAL_OPS is red until a case is added.
       assertEquals(
         new Set(cases.map((testCase) => testCase.op)),
         new Set(BIT_IDENTICAL_OPS),
-        "ビット同一門の対象 op がケース集合と食い違う",
+        "the target ops of the bit-identity check disagree with the case set",
       );
       for (const testCase of cases) {
         const actual = await runOutputs(gpu, testCase);
@@ -384,9 +386,9 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             bad,
             -1,
-            `${testCase.name}: 要素 #${bad} が 0x${(got[bad] ?? 0).toString(16)} vs 0x${(
+            `${testCase.name}: element #${bad} is 0x${(got[bad] ?? 0).toString(16)} vs 0x${(
               want[bad] ?? 0
-            ).toString(16)}（現行コーパスは丸めゼロのはず — 研究 §2）`,
+            ).toString(16)} (the current corpus should have zero rounding — research §2)`,
           );
         });
       }
@@ -397,37 +399,38 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * tanh / gelu_tanh の**飽和域**（src/codegen/elementwise.ts の TANH_STABLE_WGSL）。
+ * The **saturation range** of tanh / gelu_tanh (TANH_STABLE_WGSL in src/codegen/elementwise.ts).
  *
- * **この 2 本は「Metal でだけ赤 → 修正後に緑」になるカナリア**で、Vulkan / DXC のように
- * tanh を IEEE 忠実に実装するドライバでは打ち切りの前後どちらでも緑のまま（打ち切りは
- * 非 NaN の値をビット単位で変えない）。赤くなるのは tanh を `(exp(2x)−1)/(exp(2x)+1)` で
- * 計算する実装（Metal の fast-math 経路 — 実測）だけで、そこでは
- *   - `tanh` は |x| > 44.36
- *   - `gelu_tanh` は前活性 x ≳ 10.05（内側引数 √(2/π)·(x + 0.044715x³) が 44.36 を超える）
- * で exp(2x) が f32 のオーバーフローに入り `Inf/Inf` = 沈黙 NaN を返す。実モデル
- * （gemma4 E2B の活性は実測最大 11.45）が毎 token 踏んでいた穴がこれ。
+ * **These 2 are canaries that go "red only on Metal → green after the fix"**; on drivers that implement tanh
+ * IEEE-faithfully, like Vulkan / DXC, they stay green both before and after the cutoff (the cutoff does not change
+ * non-NaN values bit for bit). They turn red only on implementations that compute tanh as
+ * `(exp(2x)−1)/(exp(2x)+1)` (Metal's fast-math path — measured), where for
+ *   - `tanh`: |x| > 44.36
+ *   - `gelu_tanh`: pre-activation x ≳ 10.05 (the inner argument √(2/π)·(x + 0.044715x³) exceeds 44.36)
+ * exp(2x) overflows f32 and returns `Inf/Inf` = a silent NaN. This is the hole a real model (gemma4 E2B
+ * activations measure up to 11.45) was hitting on every token.
  *
- * MUST: 入力に**飽和帯の内と外の両方**を含める。打ち切り閾値（9.5）の内側だけを見ると
- * 「打ち切りが効いていない実装」も緑で通る。
- * MUST: NaN 伝播を対で見る。打ち切りを `clamp` イディオムで書くと NaN が閾値に化けて
- * ±1.0 に飲まれる（機序は src/codegen/elementwise.ts の IS_NAN_BITS_WGSL）— そこを見張る 1 本。
+ * MUST: the input includes **both the inside and the outside of the saturation band**. Looking only inside the
+ * cutoff threshold (9.5) lets "an implementation whose cutoff is not in effect" pass green as well.
+ * MUST: check NaN propagation as a pair. Writing the cutoff with the `clamp` idiom turns NaN into the threshold and
+ * swallows it into ±1.0 (the mechanism is IS_NAN_BITS_WGSL in src/codegen/elementwise.ts) — one test watches that.
  */
 const TANH_SATURATION_INPUTS = [
   0, 5, -5, 9, -9,
-  // 9.2 = 「打ち切らない（< 9.5）が f32 では既に 1.0（> 9.011）」の帯 — 閾値を 9.011 未満へ
-  // 下げる退行と、飽和境界そのもののずれをここで検出する。9.5 は打ち切り境界ちょうど。
-  9.2, -9.2, 9.5, -9.5, 10.6, -10.6, 12, -12, 50, -50, 88, -88, 120, -120,
+  // 9.2 = the band "not cut off (< 9.5) but already 1.0 in f32 (> 9.011)" — detects a regression that lowers the
+  // threshold below 9.011 and a shift of the saturation boundary itself. 9.5 is exactly the cutoff boundary.
+  9.2,
+  -9.2, 9.5, -9.5, 10.6, -10.6, 12, -12, 50, -50, 88, -88, 120, -120,
 ] as const;
 
 test.skipIf(!GPU_AVAILABLE)(
-  "tanh / gelu_tanh が飽和域で CPU 参照と一致する（NaN を吐かない — 実 GPU）",
+  "tanh / gelu_tanh match the CPU reference in the saturation range (no NaN emitted — real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const op of ["tanh", "gelu_tanh"] as const) {
         const actual = await runCase(gpu, {
-          name: `${op} 飽和域`,
+          name: `${op} saturation range`,
           op,
           inputs: [fill([TANH_SATURATION_INPUTS.length], (i) => TANH_SATURATION_INPUTS[i])],
           outShapes: [[TANH_SATURATION_INPUTS.length]],
@@ -438,65 +441,65 @@ test.skipIf(!GPU_AVAILABLE)(
           {},
           [TANH_SATURATION_INPUTS.length],
         );
-        // MUST: NaN を先に落とす。下の許容差判定は NaN をどちらの側でも不合格にするが、
-        // 「どの入力で NaN になったか」がメッセージに出ないと Metal の切り分けに使えない。
+        // MUST: catch NaN first. The tolerance check below fails NaN on either side, but unless the message says
+        // "which input produced NaN", it is useless for isolating the Metal case.
         TANH_SATURATION_INPUTS.forEach((x, index) => {
           assertEquals(
             Number.isNaN(actual.data[index]),
             false,
-            `${op}(${x}) が NaN（tanh の exp 経由実装が中間でオーバーフローしている）`,
+            `${op}(${x}) is NaN (an exp-based tanh implementation overflows in the middle)`,
           );
         });
-        // 絶対 + 相対の合成で見る（gelu_tanh の負の飽和側は期待値が ±0 になり、相対だけでは
-        // 判定できない）。WGSL は tanh の精度を保証しないので厳密一致は求めない。
+        // Checked with combined absolute + relative tolerance (on the negative saturated side of gelu_tanh the
+        // expectation is ±0, which relative tolerance alone cannot judge). WGSL does not guarantee tanh precision, so exact equality is not required.
         TANH_SATURATION_INPUTS.forEach((x, index) => {
           const want = expected.data[index];
           const gap = Math.abs(actual.data[index] - want);
           assertEquals(
             gap <= 1e-6 * Math.max(1, Math.abs(want)),
             true,
-            `${op}(${x}): GPU ${actual.data[index]} vs CPU 参照 ${want}`,
+            `${op}(${x}): GPU ${actual.data[index]} vs CPU reference ${want}`,
           );
         });
-        // MUST: 飽和域は**厳密値**で固定する（打ち切りの中核主張 = 非 NaN の値をビット単位で
-        // 変えない、の device 側の門）。上の 1e-6 帯は 2.5 ulp 低い 0.99999985 も通すため、
-        // 「打ち切りが値を変えていない」ことはここでしか見えない。tanh は ±1.0、gelu_tanh は
-        // 正側 = x そのもの・負側 = **−0.0**（0.5·x·(1 + (−1.0)) の符号付きゼロ）。
-        // NOTE: WGSL は tanh に絶対誤差 1e-5 を許すので、仕様適合のままこの門が赤くなる
-        // ドライバは理論上ありうる — そのときはビット同一 golden 群も同時に割れているはずで、
-        // この門は「その事実を単体テストで最初に知る」カナリア（機で緩めない）。
+        // MUST: pin the saturation range to **exact values** (the device-side check of the core claim of the cutoff
+        // = it does not change non-NaN values bit for bit). The 1e-6 band above also lets 0.99999985, 2.5 ulp lower,
+        // through, so "the cutoff does not change the values" is visible only here. tanh is ±1.0, gelu_tanh is
+        // x itself on the positive side and **−0.0** on the negative side (the signed zero of 0.5·x·(1 + (−1.0))).
+        // NOTE: WGSL allows tanh an absolute error of 1e-5, so a spec-conforming driver could in theory turn this
+        // check red — then the bit-identical goldens should break at the same time, and this check is the canary
+        // that "learns that fact first in a unit test" (do not loosen it per machine).
         TANH_SATURATION_INPUTS.forEach((x, index) => {
           const v = actual.data[index];
           if (op === "tanh" && Math.abs(x) >= 9.2) {
             assertEquals(
               Object.is(v, Math.sign(x)),
               true,
-              `tanh(${x}) = ${v}（飽和域が厳密な ±1.0 でない）`,
+              `tanh(${x}) = ${v} (the saturation range is not exactly ±1.0)`,
             );
           }
           if (op === "gelu_tanh" && x >= 9) {
             assertEquals(
               Object.is(v, Math.fround(x)),
               true,
-              `gelu_tanh(${x}) = ${v}（正の飽和域が x 厳密でない）`,
+              `gelu_tanh(${x}) = ${v} (the positive saturation range is not exactly x)`,
             );
           }
           if (op === "gelu_tanh" && x <= -9) {
             assertEquals(
               Object.is(v, -0),
               true,
-              `gelu_tanh(${x}) = ${v}（負の飽和域が −0.0 厳密でない）`,
+              `gelu_tanh(${x}) = ${v} (the negative saturation range is not exactly −0.0)`,
             );
           }
         });
-        // MUST: 恒真化しない。飽和域の外（x = ±5）が定数へ潰れていないことを見る
-        // （「全部 ±1 を返す」実装は上の 2 つの判定だけでは落ちない）。
-        assertNotEquals(actual.data[1], actual.data[3], `${op}: x=5 と x=9 が同値`);
+        // MUST: do not become vacuous. Check that outside the saturation range (x = ±5) does not collapse to a constant
+        // (an implementation that "returns ±1 for everything" passes the 2 checks above).
+        assertNotEquals(actual.data[1], actual.data[3], `${op}: x=5 and x=9 are equal`);
       }
 
-      // ±Inf（打ち切りが副次的に塞いだ穴 — 素の exp 経由実装では tanh(±Inf) = Inf/Inf = NaN）。
-      // gelu_tanh(−Inf) は NaN が正: 0.5·(−Inf)·0.0 の 0·Inf で、torch も NaN
-      //（F.gelu(-inf) 実測 torch 2.13.0 — approximate 両方）。CPU 参照とも三者一致。
+      // ±Inf (a hole the cutoff closed as a side effect — with a plain exp-based implementation tanh(±Inf) = Inf/Inf = NaN).
+      // NaN is correct for gelu_tanh(−Inf): the 0·Inf of 0.5·(−Inf)·0.0, and torch gives NaN too
+      // (F.gelu(-inf) measured on torch 2.13.0 — both approximate settings). The CPU reference agrees too, all three.
       const infInput = fill([2], (i) => (i === 0 ? Infinity : -Infinity));
       const tanhInf = await runCase(gpu, {
         name: "tanh ±Inf",
@@ -516,7 +519,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         Number.isNaN(geluInf.data[1]),
         true,
-        `gelu_tanh(-Inf) = ${geluInf.data[1]}（torch と同じ NaN のはず）`,
+        `gelu_tanh(-Inf) = ${geluInf.data[1]} (should be NaN, as in torch)`,
       );
     } finally {
       gpu.destroy();
@@ -525,25 +528,26 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * softmax 族の NaN 保存と融合 attention の空行ガード（v2 — nan_max 統一 + safe ガード移植。
- * ADR 0044 追記 2026-08-31）。
+ * NaN preservation of the softmax family and the empty-row guard of fused attention (v2 — unified nan_max + the
+ * safe guard ported. ADR 0044 addendum 2026-08-31).
  *
- * - 旧実装は WGSL の `max` が仕様レベルで NaN を落とすため、**全要素 NaN の行が safe_softmax
- *   の空行判定に化けて厳密 0 になり NaN が黙って消えていた**（部分 NaN 行は総和経由で従来
- *   から伝播 — 穴は全 NaN 行だけ）。
- * - 融合 attention は全マスク行（mask が全列 −inf）で `1/0` の不定値だった — v2 の空行ガード
- *   で safe_softmax と同じ「出力 0 行」に確定する（契約違反 → 正規入力への拡張）。
+ * - In the old implementation WGSL's `max` drops NaN at the spec level, so **an all-NaN row turned into the
+ *   empty-row case of safe_softmax, became exactly 0, and the NaN silently vanished** (partially NaN rows have
+ *   always propagated through the sum — the hole was only all-NaN rows).
+ * - Fused attention gave an indeterminate `1/0` on fully masked rows (mask is −inf in every column) — v2's
+ *   empty-row guard settles them to the same "output 0 row" as safe_softmax (contract violation → extension to a
+ *   valid input).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "softmax 族は全 NaN 行を 0 に潰さず、融合 attention の全マスク行は厳密 0（実 GPU）",
+  "the softmax family does not flatten all-NaN rows to 0, and fully masked rows of fused attention are exactly 0 (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // 行 0 = 全 NaN・行 1 = 通常行（NaN 行が隣の行を汚染しないことも同時に見る）
+      // Row 0 = all NaN, row 1 = a normal row (also checks that the NaN row does not contaminate the neighbouring row)
       const nanRows = (i: number): number => (i < 4 ? Number.NaN : SIGNED(i));
       for (const op of ["softmax", "safe_softmax"] as const) {
         const actual = await runCase(gpu, {
-          name: `${op} 全 NaN 行`,
+          name: `${op} all-NaN row`,
           op,
           inputs: [fill([2, 4], nanRows)],
           outShapes: [[2, 4]],
@@ -553,24 +557,28 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             Number.isNaN(actual.data[i]),
             true,
-            `${op}: 全 NaN 行の要素 ${i} が ${actual.data[i]}（NaN が消えた）`,
+            `${op}: element ${i} of the all-NaN row is ${actual.data[i]} (the NaN vanished)`,
           );
         }
         const tail = [...actual.data.slice(4)];
-        assertEquals(tail.every(Number.isFinite), true, `${op}: 通常行が汚染された（${tail}）`);
+        assertEquals(
+          tail.every(Number.isFinite),
+          true,
+          `${op}: the normal row was contaminated (${tail})`,
+        );
         const sum = tail.reduce((a, b) => a + b, 0);
-        assertEquals(Math.abs(sum - 1) < 1e-5, true, `${op}: 通常行の総和 ${sum} ≠ 1`);
+        assertEquals(Math.abs(sum - 1) < 1e-5, true, `${op}: the sum of the normal row ${sum} ≠ 1`);
       }
 
-      // 融合 attention: mask の行 0 を全列 −inf（全マスク行）にする。出力の行 0 は厳密 0・
-      // 行 1 は有限のまま（CPU 参照の空行分岐と同じ値になることは掃引側が担うので、ここは
-      // 「不定値でも NaN でもなく厳密 0」というガードの発火だけを固定する）
+      // Fused attention: make row 0 of the mask −inf in every column (a fully masked row). Row 0 of the output is
+      // exactly 0 and row 1 stays finite (the sweep covers matching the CPU reference's empty-row branch, so this
+      // pins only that the guard fires: "exactly 0, neither indeterminate nor NaN")
       const m = 2;
       const n = 3;
       const d = 4;
       const scale = Math.fround(Math.sqrt(1 / Math.sqrt(d)));
       const masked = await runCase(gpu, {
-        name: "attention 全マスク行",
+        name: "attention fully masked row",
         op: "attention",
         inputs: [
           fill([1, 1, m, d], SIGNED),
@@ -585,13 +593,13 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           Object.is(masked.data[i], 0),
           true,
-          `attention: 全マスク行の要素 ${i} が ${masked.data[i]}（厳密 0 でない）`,
+          `attention: element ${i} of the fully masked row is ${masked.data[i]} (not exactly 0)`,
         );
       }
       assertEquals(
         [...masked.data.slice(d)].every(Number.isFinite),
         true,
-        "attention: 通常行が汚染された",
+        "attention: the normal row was contaminated",
       );
     } finally {
       gpu.destroy();
@@ -600,16 +608,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 上のカナリアの NaN 側。`tanh` はビット列判定の外殻、`gelu_tanh` は式の外に残る因子 `x` で
- * それぞれ NaN を運ぶ（機序が違うので op ごとに見る）。
+ * The NaN side of the canary above. `tanh` carries NaN through the outer shell of the bit-pattern check,
+ * `gelu_tanh` through the factor `x` left outside the expression (different mechanisms, so each op is checked).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "tanh / gelu_tanh が NaN を伝播する（打ち切りが NaN を飲まない — 実 GPU）",
+  "tanh / gelu_tanh propagate NaN (the cutoff does not swallow NaN — real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const op of ["tanh", "gelu_tanh"] as const) {
-        // 飽和帯の内（0.5）・外（12）と NaN を混ぜる。対照が無いと「常に NaN」で緑になる。
+        // Mixes values inside (0.5) and outside (12) the saturation band with NaN. Without a control, "always NaN" would be green.
         const inputs = [Number.NaN, 0.5, 12, Number.NaN] as const;
         const actual = await runCase(gpu, {
           name: `${op} NaN`,
@@ -620,7 +628,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           [...actual.data].map((value) => Number.isNaN(value)),
           [true, false, false, true],
-          `${op}: NaN の位置`,
+          `${op}: NaN positions`,
         );
       }
     } finally {
@@ -629,35 +637,38 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test.skipIf(!GPU_AVAILABLE)("matmul がタイル端数込みで CPU 参照と一致する（実 GPU）", () =>
-  checkAll(MATMUL_CASES),
-);
-
-test.skipIf(!GPU_AVAILABLE)("bmm が非対称形・タイル端数込みで CPU 参照と一致する（実 GPU）", () =>
-  checkAll(BMM_CASES),
+test.skipIf(!GPU_AVAILABLE)(
+  "matmul matches the CPU reference, tile remainders included (real GPU)",
+  () => checkAll(MATMUL_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "融合 attention が CPU 参照と一致する（軸全異・端数・D≠128 込み / 実 GPU）",
+  "bmm matches the CPU reference with asymmetric shapes and tile remainders (real GPU)",
+  () => checkAll(BMM_CASES),
+);
+
+test.skipIf(!GPU_AVAILABLE)(
+  "fused attention matches the CPU reference (all axes distinct, remainders and D≠128 included / real GPU)",
   () => checkAll(ATTENTION_CASES),
 );
 
-test.skipIf(!GPU_AVAILABLE)("gather（最終次元固定）が CPU 参照と一致する（実 GPU）", () =>
-  checkAll(GATHER_CASES),
+test.skipIf(!GPU_AVAILABLE)(
+  "gather (last dimension fixed) matches the CPU reference (real GPU)",
+  () => checkAll(GATHER_CASES),
 );
 
 /**
- * 範囲外添字の裁定（src/kernels/gather.ts）を実 GPU で固定する。
+ * Pins the ruling for out-of-range indices (src/kernels/gather.ts) on a real GPU.
  *
- * GPU は例外を投げられないので、範囲外の要素**だけ**を NaN で汚染する（別の要素を静かに
- * 返さない）。オラクル側の CPU 参照は同じ入力で必ず throw する — 両者が一致してしまうと
- * 「契約違反のグラフが突合を通る」ことになるので、ここは意図的に非対称であることを固定する。
+ * The GPU cannot throw, so it contaminates **only** the out-of-range elements with NaN (it does not quietly return
+ * another element). The CPU reference on the oracle side always throws on the same input — if the two agreed,
+ * "a graph that violates the contract would pass the comparison", so this pins that they are deliberately asymmetric.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "gather の範囲外添字は GPU で NaN 汚染・CPU 参照で throw（実 GPU）",
+  "out-of-range gather indices contaminate with NaN on the GPU and throw in the CPU reference (real GPU)",
   async () => {
     const src = fill([2, 4], POSITIVE);
-    // 添字 4（上限超え）と -1（負）をそれぞれ 1 本ずつ混ぜ、残りは正しい列を引く
+    // Mixes in one index 4 (above the limit) and one -1 (negative); the rest look up valid columns
     const index = fill([2, 3], (i) => [1, 4, 0, 2, -1, 3][i], "i32");
     const gpu = await acquireGpu();
     try {
@@ -672,7 +683,7 @@ test.skipIf(!GPU_AVAILABLE)(
         values.map((v) => Number.isNaN(v)),
         [false, true, false, false, true, false],
       );
-      // 契約内の添字は通常どおり自分の行から引く（汚染は範囲外の要素だけ）
+      // Indices within the contract look up their own row as usual (only out-of-range elements are contaminated)
       assertEquals(values[0], src.data[1]);
       assertEquals(values[3], src.data[4 + 2]);
     } finally {
@@ -682,26 +693,26 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test.skipIf(!GPU_AVAILABLE)("行 reduce 3 種が CPU 参照と一致する（実 GPU）", () =>
+test.skipIf(!GPU_AVAILABLE)("3 row reduces match the CPU reference (real GPU)", () =>
   checkAll(REDUCE_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "argmax（最終次元・rank 保存）が CPU 参照と厳密一致する（実 GPU）",
+  "argmax (last dimension, rank preserved) matches the CPU reference exactly (real GPU)",
   () => checkAll(ARGMAX_CASES),
 );
 
 /**
- * argmax のタイブレーク直接門（ADR 0068 決定 2 の 3 つの MUST を**期待値リテラル**で固定）。
+ * Direct check of argmax tie-breaking (pins the 3 MUSTs of ADR 0068 decision 2 with **literal expected values**).
  *
- * MUST: CPU 参照との突合（checkAll）では代替できない。両側が同じ向きに間違えれば緑になる
- * 軸（タイブレークの向き・NaN の扱い・全 −inf 行の答え）なので、torch の実測値そのものを
- * リテラルで置く（表と行の意味は `helpers/gpu_op_cases.ts` の `ARGMAX_TIEBREAK_INPUT`）。
- * ここは **GPU の出力**だけを見る — 同じ表に対する CPU 参照の向きは、アダプタ無しの環境でも
- * 走る `reference_ops_test.ts` 側の門が縛る。
+ * MUST: comparison with the CPU reference (checkAll) cannot replace it. These axes (direction of tie-breaking,
+ * handling of NaN, the answer for all −inf rows) go green if both sides are wrong in the same direction, so the
+ * values measured on torch are placed as literals (the meaning of the table and its rows is `ARGMAX_TIEBREAK_INPUT`
+ * in `helpers/gpu_op_cases.ts`). This looks only at **the GPU output** — the direction of the CPU reference on the
+ * same table is bound by the check in `reference_ops_test.ts`, which also runs without an adapter.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "argmax のタイブレーク / NaN / 全 −inf 行が torch の実測値と一致する（実 GPU）",
+  "argmax tie-breaking / NaN / all −inf rows match the values measured on torch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -715,7 +726,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         [...actual.data],
         [...ARGMAX_TIEBREAK_TORCH],
-        "GPU の argmax が torch の実測値と違う",
+        "the GPU argmax differs from the values measured on torch",
       );
     } finally {
       gpu.destroy();
@@ -724,19 +735,20 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 2 相形 argmax（行長 ≥ 16,384 — src/kernels/argmax.ts の「2 相分割」）の固定挙動を**期待値
- * リテラル**で固定する。CPU 参照との突合（ARGMAX_CASES の 2 相ケース）は「区間ごとの最大元を
- * 畳んでも全域の最大元になる」ことを見るが、タイブレークの向き・NaN・全 −inf 行は両側が同じ向きに
- * 間違えれば緑になる軸なので、1 dispatch 形の門（上）と同じ値をリテラルで置く。
+ * Pins the fixed behaviour of two-phase argmax (row length ≥ 16,384 — the "two-phase split" of src/kernels/argmax.ts)
+ * with **literal expected values**. The comparison with the CPU reference (the two-phase cases of ARGMAX_CASES)
+ * checks that "folding the maximum of each segment gives the maximum of the whole range", but tie-breaking
+ * direction, NaN and all −inf rows are axes that go green if both sides are wrong in the same direction, so the same
+ * values as the one-dispatch check (above) are placed as literals.
  *
- * 行の意味（行長 20,000 = 区間 4,096 × 5 本）:
- * 0. 同値の最大が区間 1（index 5,000）と区間 2（index 9,000）→ 最小 index 5,000
- * 1. 区間 0 に有限の最大（index 10・値 99）・区間 3 に NaN（index 13,000）→ **NaN が最大** 13,000
- * 2. 全要素 −inf → 0（区間ごとの番兵が merge で全部負け、区間 0 の最小 index が残る）
- * 3. 最大が最終区間の末尾（index 19,999）→ 19,999（端数の区間の走査が末尾まで届く）
+ * Meaning of the rows (row length 20,000 = 5 segments of 4,096):
+ * 0. Equal maxima in segment 1 (index 5,000) and segment 2 (index 9,000) → the smallest index 5,000
+ * 1. A finite maximum in segment 0 (index 10, value 99) and a NaN in segment 3 (index 13,000) → **NaN is the maximum** 13,000
+ * 2. All elements −inf → 0 (every segment's sentinel loses in the merge, and the smallest index of segment 0 remains)
+ * 3. The maximum at the end of the last segment (index 19,999) → 19,999 (the scan of the remainder segment reaches the end)
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "2 相形 argmax の区間境界 / NaN / 全 −inf 行が 1 dispatch 形と同じ規定どおり（実 GPU）",
+  "segment boundaries / NaN / all −inf rows of two-phase argmax follow the same rules as the one-dispatch form (real GPU)",
   async () => {
     const dim = 20000;
     const rows = 4;
@@ -763,7 +775,7 @@ test.skipIf(!GPU_AVAILABLE)(
         outShapes: [[rows, 1]],
         outDtypes: ["i32"],
       });
-      assertEquals([...actual.data], [5000, 13000, 0, 19999], "2 相形 argmax の規定");
+      assertEquals([...actual.data], [5000, 13000, 0, 19999], "the rules of two-phase argmax");
     } finally {
       gpu.destroy();
     }
@@ -771,42 +783,44 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "topk（最終次元・static-k・値 + 添字の 2 出力）が CPU 参照と一致する（実 GPU）",
+  "topk (last dimension, static k, 2 outputs: values + indices) matches the CPU reference (real GPU)",
   () => checkAll(TOPK_CASES),
 );
 
-/** NaN を "NaN" に潰した表示形（allclose も assertEquals も NaN 同士を一致と見ないため）。 */
+/** A display form with NaN flattened to "NaN" (neither allclose nor assertEquals treats NaN as equal to NaN). */
 const nanSafe = (values: Iterable<number>): readonly (number | "NaN")[] =>
   [...values].map((value) => (Number.isNaN(value) ? "NaN" : value));
 
 /**
- * topk の同値 tie / NaN / 全 −inf 行（ADR 0068 決定 3 の固定挙動を**期待値リテラル**で固定）。
+ * Equal-value ties / NaN / all −inf rows of topk (pins the fixed behaviour of ADR 0068 decision 3 with **literal
+ * expected values**).
  *
- * MUST: CPU 参照との突合（checkAll）では代替できない。両側が同じ向きに間違えれば緑になる軸
- * （タイブレークの向き・NaN の扱い・全 −inf 行の答え）なので、リテラルで置く。
+ * MUST: comparison with the CPU reference (checkAll) cannot replace it. These axes (direction of tie-breaking,
+ * handling of NaN, the answer for all −inf rows) go green if both sides are wrong in the same direction, so literals are used.
  *
- * **torch との関係（実測 2026-08-17 / torch 2.13.0+cpu）**:
+ * **Relation to torch (measured 2026-08-17 / torch 2.13.0+cpu)**:
  *
- * - **値の列は torch とビット一致**（`VALUES` は torch の実測値そのもの）。降順で同値の
- *   多重度も同じなので、重複だらけの行でも一致する（`torch.topk` の values 列を
- *   (値降順, index昇順) 実装と 200×4 ケースで突合した結果も全一致）。
- * - **添字の列は torch と一致しない**（`INDICES` は karume の規定）。torch の topk は同値
- *   要素の順序を保証せず、`[5,5,5,5]` の k=1 で index **2** を返すのに `argmax` は **0** を
- *   返す（同一リポ内の自己矛盾）。karume は argmax と同族の**最小 index 優先**に規定した。
- *   下表で torch と割れるのは行 1 / 2 / 4 / 5 / 6（torch は順に [2,3,0,1] / [2,3,0,1] /
- *   [2,3,0,1] / [1,3,2,0] / [0,2,3,1]）。
+ * - **The value column is bit-identical to torch** (`VALUES` are the values measured on torch). The multiplicity
+ *   of equal values in descending order is the same too, so even rows full of duplicates match (comparing the values
+ *   column of `torch.topk` against a (value descending, index ascending) implementation over 200×4 cases also
+ *   matched everywhere).
+ * - **The index column does not match torch** (`INDICES` is karume's rule). torch's topk does not guarantee the
+ *   order of equal elements, and for `[5,5,5,5]` with k=1 it returns index **2** while `argmax` returns **0**
+ *   (self-contradictory within the same repository). karume defines **smallest index first**, consistent with argmax.
+ *   In the table below the rows that disagree with torch are 1 / 2 / 4 / 5 / 6 (torch gives, in order, [2,3,0,1] /
+ *   [2,3,0,1] / [2,3,0,1] / [1,3,2,0] / [0,2,3,1]).
  *
- * 行の意味:
- * 0. 同値が 2 つ（3.0 が index 1,2）→ 最小 index が先（torch も同じ）
- * 1. 全要素が同値 → index 昇順（「最後の最大値」実装なら降順になる）
- * 2. 全要素 −inf → index 昇順（有限 sentinel の identity だと番兵 index が漏れる）
- * 3. NaN が 2 つ（index 1,3）→ **NaN は最大**・NaN 同士は最小 index（torch も同じ）
- * 4. 全要素 NaN → index 昇順
- * 5. −inf と同値の最大が混在 → 2.0 が先・−inf は index 昇順
- * 6. 同値が 2 組 → 2.0 の組が先、その中は index 昇順
+ * Meaning of the rows:
+ * 0. Two equal values (3.0 at index 1,2) → the smallest index first (torch agrees)
+ * 1. Every element equal → index ascending (a "last maximum" implementation would give descending)
+ * 2. All elements −inf → index ascending (with a finite-sentinel identity the sentinel index leaks)
+ * 3. Two NaN (index 1,3) → **NaN is the maximum**; among NaN the smallest index (torch agrees)
+ * 4. All elements NaN → index ascending
+ * 5. −inf mixed with equal maxima → 2.0 first; −inf in index ascending
+ * 6. Two groups of equal values → the 2.0 group first, index ascending within it
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "topk の同値 tie / NaN / 全 −inf 行が固定挙動どおり（値は torch とビット一致 — 実 GPU）",
+  "equal-value ties / NaN / all −inf rows of topk follow the fixed behaviour (values bit-identical to torch — real GPU)",
   async () => {
     const NEG = Number.NEGATIVE_INFINITY;
     const NAN = Number.NaN;
@@ -819,7 +833,7 @@ test.skipIf(!GPU_AVAILABLE)(
       [NEG, 2, NEG, 2],
       [2, 1, 2, 1],
     ];
-    // torch 実測の values 列（k = 4 = 最終次元 = 行全体の降順）
+    // The values column measured on torch (k = 4 = the last dimension = the whole row in descending order)
     const VALUES = [
       [3, 3, 2, 1],
       [5, 5, 5, 5],
@@ -829,7 +843,7 @@ test.skipIf(!GPU_AVAILABLE)(
       [2, 2, NEG, NEG],
       [2, 2, 1, 1],
     ];
-    // karume の規定（最小 index 優先 — torch は同値の順序を保証しない）
+    // karume's rule (smallest index first — torch does not guarantee the order of equal values)
     const INDICES = [
       [1, 2, 3, 0],
       [0, 1, 2, 3],
@@ -854,28 +868,28 @@ test.skipIf(!GPU_AVAILABLE)(
     const gpu = await acquireGpu();
     try {
       const actual = await runOutputs(gpu, testCase);
-      assertEquals(nanSafe(actual[0].data), nanSafe(VALUES.flat()), "GPU の topk 値列");
-      assertEquals([...actual[1].data], INDICES.flat(), "GPU の topk 添字列");
+      assertEquals(nanSafe(actual[0].data), nanSafe(VALUES.flat()), "GPU topk values");
+      assertEquals([...actual[1].data], INDICES.flat(), "GPU topk indices");
     } finally {
       gpu.destroy();
     }
-    // 同じ表を CPU 参照にも当てて、オラクル側の向きも同時に固定する
+    // Applies the same table to the CPU reference too, pinning the direction of the oracle side at the same time
     const expected = applyReferenceOpOutputs("topk", [input], { k: 4 });
-    assertEquals(nanSafe(expected[0].data), nanSafe(VALUES.flat()), "CPU 参照の topk 値列");
-    assertEquals([...expected[1].data], INDICES.flat(), "CPU 参照の topk 添字列");
+    assertEquals(nanSafe(expected[0].data), nanSafe(VALUES.flat()), "CPU reference topk values");
+    assertEquals([...expected[1].data], INDICES.flat(), "CPU reference topk indices");
   },
 );
 
 /**
- * k=1 の topk が argmax と一致する（族間の食い違い検出）。
+ * topk with k=1 matches argmax (detects disagreement between the families).
  *
- * MUST: 同じ入力で 2 つの op を実走させて突き合わせる。両者はカーネルもキーも別なので、
- * 述語の本文を片方だけ書き換えても shape も dtype も合ったまま答えだけが割れる。
- * 入力は**タイと NaN と全 −inf 行**を含む形（一意な最大値だけの入力では、どちらの
- * タイブレーク規律でも同じ答えになって検出器にならない）。
+ * MUST: run both ops on the same input and compare them. Their kernels and keys differ, so rewriting the
+ * predicate body of only one keeps shape and dtype matching while only the answers split.
+ * The input contains **ties, NaN and all −inf rows** (with an input that has only unique maxima, either
+ * tie-breaking discipline gives the same answer and it is no detector).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "k=1 の topk の添字が argmax と一致する（タイ / NaN / 全 −inf 行込み・実 GPU）",
+  "the topk index with k=1 matches argmax (ties / NaN / all −inf rows included; real GPU)",
   async () => {
     const NEG = Number.NEGATIVE_INFINITY;
     const NAN = Number.NaN;
@@ -907,12 +921,12 @@ test.skipIf(!GPU_AVAILABLE)(
         outShapes: [[rows.length, 1]],
         outDtypes: ["i32"],
       });
-      assertEquals([...topk[1].data], [...argmax.data], "k=1 の topk が argmax と食い違う");
-      // 値の側も amax と同じ要素を返している（添字だけ合っていて値が別の要素という形を潰す）
+      assertEquals([...topk[1].data], [...argmax.data], "topk with k=1 disagrees with argmax");
+      // The value side returns the same element as amax too (rules out matching indices with values from another element)
       assertEquals(
         nanSafe(topk[0].data),
         nanSafe([...argmax.data].map((at, row) => rows[row][at])),
-        "k=1 の topk 値が添字の指す要素と違う",
+        "the topk value with k=1 differs from the element its index points to",
       );
     } finally {
       gpu.destroy();
@@ -920,39 +934,39 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** f32 テンソルの**ビット列**（±0.0 は数値としては同値なので、符号ビットはここでしか見えない）。 */
+/** The **bit pattern** of an f32 tensor (±0.0 are numerically equal, so the sign bit is visible only here). */
 const f32Bits = (tensor: Tensor | RefTensor): readonly number[] => {
-  if (tensor.dtype !== "f32") throw new Error(`f32 でない dtype: ${tensor.dtype}`);
+  if (tensor.dtype !== "f32") throw new Error(`not an f32 dtype: ${tensor.dtype}`);
   return [...new Uint32Array(tensor.data.slice().buffer)];
 };
 
 /**
- * `+0.0` と `-0.0` が混じる tie 行（**選ばれた添字の要素のビットがそのまま出る**こと）。
+ * Tie rows mixing `+0.0` and `-0.0` (**the bits of the element at the chosen index come out as they are**).
  *
- * MUST: 期待値は **karume の規範**（同値類は最小 index 優先・値は選ばれた要素のビットそのもの）
- * で、torch 突合ではない。`±0.0` は比較上同値なので、どちらの符号を書いても数値の突合
- * （allclose も assertEquals も `-0 === +0`）は緑になる — 符号ビットは **Uint32 のビット列**
- * でしか見えない。ここが緩むと、比較を `max` イディオムへ畳んだ実装（ドライバの
- * `max(-0.0, +0.0)` は `+0.0` を返しうる）や、値を添字から引き直さず正規化して書く実装が
- * 黙って通る。
+ * MUST: the expected values are **karume's rule** (smallest index first within an equivalence class, the value is
+ * the chosen element's bits themselves), not a torch comparison. `±0.0` compare equal, so writing either sign keeps
+ * the numeric comparison green (both allclose and assertEquals have `-0 === +0`) — the sign bit is visible only in
+ * **the Uint32 bit pattern**. If this loosens, an implementation that folds the comparison into the `max` idiom
+ * (the driver's `max(-0.0, +0.0)` may return `+0.0`), or one that normalizes the value instead of looking it up again
+ * from the index, passes silently.
  *
- * NOTE: NaN payload の差（同じ NaN でも仮数部のビットが違う形）は対象外 — WGSL / ドライバは
- * payload の保存を保証しないので、規範として固定できない。
+ * NOTE: differences in NaN payload (the same NaN with different mantissa bits) are out of scope — WGSL / drivers
+ * do not guarantee payload preservation, so it cannot be pinned as a rule.
  *
- * 行の意味:
- * 0. 全要素が ±0.0 の tie → 添字昇順・値は各添字の符号がそのまま
- * 1. 有限値 1 本 + ±0.0 の tie → 1.0 が先頭、零は添字昇順
- * 2. ±0.0 の tie + 負値 → 零 3 本が先（添字昇順）、−1.0 が最後
+ * Meaning of the rows:
+ * 0. A tie of all-±0.0 elements → index ascending, each value keeps its index's sign
+ * 1. One finite value + a ±0.0 tie → 1.0 first, the zeros in index ascending order
+ * 2. A ±0.0 tie + a negative value → the 3 zeros first (index ascending), −1.0 last
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "topk は ±0.0 の tie でも選択添字どおりのビットを書く（値をビット列で固定・実 GPU）",
+  "topk writes the bits of the selected index even on ±0.0 ties (values pinned as bit patterns; real GPU)",
   async () => {
     const rows = [
       [-0, 0, -0, 0],
       [0, -0, 1, -0],
       [-0, 0, -1, -0],
     ];
-    // 値のビット列（0x80000000 = −0.0 / 0x00000000 = +0.0 / 0x3f800000 = 1.0 / 0xbf800000 = −1.0）
+    // Bit patterns of the values (0x80000000 = −0.0 / 0x00000000 = +0.0 / 0x3f800000 = 1.0 / 0xbf800000 = −1.0)
     const VALUE_BITS = [
       [0x80000000, 0x00000000, 0x80000000, 0x00000000],
       [0x3f800000, 0x00000000, 0x80000000, 0x80000000],
@@ -978,19 +992,19 @@ test.skipIf(!GPU_AVAILABLE)(
     const gpu = await acquireGpu();
     try {
       const actual = await runOutputs(gpu, testCase);
-      assertEquals(f32Bits(actual[0]), VALUE_BITS.flat(), "GPU の topk 値ビット列");
-      assertEquals([...actual[1].data], INDICES.flat(), "GPU の topk 添字列");
+      assertEquals(f32Bits(actual[0]), VALUE_BITS.flat(), "GPU topk value bits");
+      assertEquals([...actual[1].data], INDICES.flat(), "GPU topk indices");
     } finally {
       gpu.destroy();
     }
-    // 同じ表を CPU 参照にも当てて、オラクル側の符号も同時に固定する
+    // Applies the same table to the CPU reference too, pinning the sign on the oracle side at the same time
     const expected = applyReferenceOpOutputs("topk", [input], { k: 4 });
-    assertEquals(f32Bits(expected[0]), VALUE_BITS.flat(), "CPU 参照の topk 値ビット列");
-    assertEquals([...expected[1].data], INDICES.flat(), "CPU 参照の topk 添字列");
+    assertEquals(f32Bits(expected[0]), VALUE_BITS.flat(), "CPU reference topk value bits");
+    assertEquals([...expected[1].data], INDICES.flat(), "CPU reference topk indices");
   },
 );
 
-/** CPU の通常の数値比較から順位を作る。GPU の整数順序変換を複製しない。 */
+/** Builds the ranking from the CPU's ordinary numeric comparison. Does not duplicate the GPU's integer order transform. */
 const rank = (data: Float32Array<ArrayBuffer>, base: number, dim: number): number[] =>
   Array.from({ length: dim }, (_, i) => i).sort((a, b) => {
     const va = data[base + a],
@@ -1001,7 +1015,7 @@ const rank = (data: Float32Array<ArrayBuffer>, base: number, dim: number): numbe
   });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "argmax/topk: 非正規数をゼロと区別し、短い行と分割境界でCPUと同じ値・添字を返す",
+  "argmax/topk: distinguish subnormals from zero and return the same values and indices as the CPU on short rows and split boundaries",
   async function () {
     const cases = [
       [0, 1, 2, 0x80000001],
@@ -1021,7 +1035,7 @@ test.skipIf(!GPU_AVAILABLE)(
         const rows = cases.length,
           data = new Float32Array(rows * dim).fill(-Infinity);
         const bits = new Uint32Array(data.buffer);
-        // 最小 index 同点を、レーン・部分区間の境界を越えて検査する。
+        // Checks smallest-index ties across lane and partial-segment boundaries.
         const positions = [0, Math.floor(dim / 3), Math.floor((dim * 2) / 3), dim - 1];
         for (let r = 0; r < rows; r++) {
           for (let i = 0; i < positions.length; i++) bits[r * dim + positions[i]] = cases[r][i];
@@ -1058,7 +1072,7 @@ test.skipIf(!GPU_AVAILABLE)(
                 assertEquals(
                   [...new Uint32Array(out.y.data.buffer, out.y.data.byteOffset, out.y.data.length)],
                   expected.map((i, r) => bits[r * dim + i]),
-                  "選択した値のビット列を保つ",
+                  "keeps the bit pattern of the selected value",
                 );
               }
             }
@@ -1074,7 +1088,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "topk: 非正規数・NaN・符号付きゼロの複数候補をCPUと同じ順序・値ビットで返す",
+  "topk: returns multiple candidates of subnormals, NaN and signed zeros in the same order and value bits as the CPU",
   async function () {
     const edgeBits = [
       0x80000000, 1, 0x80000001, 0x007fffff, 0x807fffff, 0, 0x00800000, 0x80800000, 0x7f800000,
@@ -1096,7 +1110,7 @@ test.skipIf(!GPU_AVAILABLE)(
         for (let i = 0; i < bits.length; i++) {
           state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
           const row = Math.floor(i / dim);
-          // row 0/1 は全要素が正/負の非正規数、row 2 は境界と重複、row 3 は全ビット分布。
+          // Rows 0/1 are all positive / negative subnormals, row 2 boundaries and duplicates, row 3 the full bit distribution.
           bits[i] =
             row === 0
               ? state & 0x7fffff
@@ -1132,7 +1146,7 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             [...new Uint32Array(out.y.data.buffer, out.y.data.byteOffset, out.y.data.length)],
             expected.flatMap((row, r) => row.map((i) => bits[r * dim + i])),
-            "全候補の値ビットを保つ",
+            "keeps the value bits of every candidate",
           );
         } finally {
           await session.dispose();
@@ -1145,24 +1159,24 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * topk の **k の実装上限**（ADR 0068 決定 3 — 縮退しない・上限値つきで fail loudly）。
+ * The **implementation limit of k** for topk (ADR 0068 decision 3 — no degradation; fail loudly with the limit).
  *
- * MUST: **絞った device**（`LIMIT_CAPS`）で見る。手元のアダプタは workgroup storage を
- * 49152 バイト出すので上限 k は 191 になり、既定の機（16384 → 上限 63）で落ちる k を
- * 実走で確かめる手段が他に無い（列挙は「動く」の証拠にならない、と同じ規律）。
- * 上限の内側（k=2）が**同じ絞った device で緑**であることも対で見る — 全部落ちる実装でも
- * 拒否側の門だけなら通ってしまう。
+ * MUST: check it on **a narrowed device** (`LIMIT_CAPS`). The local adapter offers 49152 bytes of workgroup storage,
+ * so the k limit is 191, and there is no other way to confirm by running the k that fails on the default machine
+ * (16384 → limit 63) (the same discipline as "enumeration is no evidence that it works").
+ * Also check as a pair that inside the limit (k=2) is **green on the same narrowed device** — an implementation that
+ * fails everything would still pass the rejection-side check alone.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "topk は workgroup storage 由来の k 上限を超えたら上限値つきで落ちる（絞った device / 実 GPU）",
+  "topk fails with the limit when k exceeds the limit derived from workgroup storage (narrowed device / real GPU)",
   async () => {
-    // 8·W·(k+1) ≤ 1024 → 上限 k = 3
+    // 8·W·(k+1) ≤ 1024 → k limit = 3
     const gpu = await acquireGpu({ [LIMIT_CAPS]: { maxComputeWorkgroupStorageSize: 1024 } });
     try {
       assertEquals(gpu.limits.maxComputeWorkgroupStorageSize, 1024);
       const input = fill([2, 8], SIGNED);
       const outputs = await runOutputs(gpu, {
-        name: "topk k=2（上限の内側）",
+        name: "topk k=2 (inside the limit)",
         op: "topk",
         inputs: [input],
         outShapes: [
@@ -1175,7 +1189,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const expected = applyReferenceOpOutputs("topk", [input], { k: 2 });
       assertEquals([...outputs[0].data], [...expected[0].data]);
       assertEquals([...outputs[1].data], [...expected[1].data]);
-      // 上限超過は縮退せず落ちる（診断に上限値 3 が出る）
+      // Exceeding the limit fails rather than degrading (the diagnostics show the limit value 3)
       const graph = singleOpDeclaration(
         "topk",
         [[2, 8]],
@@ -1209,42 +1223,44 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 故障注入（ADR 0068 受入条件③）— argmax / topk の門が**実際に検出器**であることの実証。
+ * Fault injection (ADR 0068 acceptance criterion ③) — proof that the argmax / topk checks **actually are detectors**.
  *
- * MUST: Session 経由（{@link runOutputs}）では撃てない。`PipelineCache` は**キー**でキャッシュ
- * するので、変異版 WGSL を流し込む口が無い（口を作っても正常版のパイプラインが配られる）。
- * ここは `helpers/rank-dispatch.ts` の直接 dispatch で、**最終 WGSL 文字列**をキーにした
- * キャッシュを使う（states 形の `helpers/state-dispatch.ts` と同じ流儀）。
+ * MUST: it cannot be fired through a Session ({@link runOutputs}). `PipelineCache` caches by **key**, so there is no
+ * inlet to feed mutated WGSL (even with one, the normal pipeline would be handed out). This uses the direct dispatch
+ * of `helpers/rank-dispatch.ts` with a cache keyed by **the final WGSL string** (the same style as
+ * `helpers/state-dispatch.ts` for the states form).
  *
- * MUST: 入力は**両系統**を用意する。P2E の実測（`.claude/reviews/2026-08-19_b04f589/findings/
- * P2E-topk-merge-fuzz.md` §3・18,000 ケース）が示すとおり、topk の変異は検出できる入力の族が
- * 相補的で、片方だけでは変異が**常に緑**になる:
+ * MUST: prepare inputs of **both families**. As the P2E measurement (`.claude/reviews/2026-08-19_b04f589/findings/
+ * P2E-topk-merge-fuzz.md` §3, 18,000 cases) shows, the input families that can detect topk mutations are
+ * complementary, and with only one of them a mutation is **always green**:
  *
- * - **単一レーン入力**（上位 k 本が全て `i ≡ l (mod W)`）でしか③（レーン局所挿入の末尾比較）は
- *   出ない — 上位 k 本が 1 レーンに載らないと局所リストが溢れず、末尾比較そのものが働かない。
- * - **分散入力**（同値がレーンに散る）でしか①②（カーソル前進・tie 分岐）は出ない — 単一レーンが
- *   全ラウンド勝つ入力ではカーソル前進の分岐が無害化し、tie も起きない。
+ * - ③ (the tail comparison of the lane-local insertion) shows only with **single-lane inputs** (the top k all
+ *   `i ≡ l (mod W)`) — unless the top k land on one lane, the local list does not overflow and the tail comparison
+ *   never acts.
+ * - ① ② (cursor advance, tie branch) show only with **spread inputs** (equal values scattered over lanes) — with an
+ *   input where a single lane wins every round, the cursor-advance branch becomes harmless and no tie occurs.
  *
- * 本テストでもその相補性を再現した（2026-08-19 実測 / RTX 3080 Ti）: ①を単一レーン入力へ、
- * ③を分散入力へ当てるとどちらも緑（= 検出できず）になる。
+ * This test reproduced that complementarity (measured 2026-08-19 / RTX 3080 Ti): applying ① to the single-lane input
+ * and ③ to the spread input are both green (= not detected).
  *
- * NOTE: 検討したが**入れなかった**変異が 2 本ある（恒真テストを置かないため。同上の実測）:
+ * NOTE: 2 mutations were considered but **not included** (to avoid vacuous tests; same measurement as above):
  *
- * - **topk の最終 `workgroupBarrier()` 削除**: rows=256・dim=320・k=16 の 20 回試行で
- *   mismatch 0。W=32 は NVIDIA の warp 幅そのもので workgroup が lockstep 実行されるため、
- *   `won` の読みと次ラウンドの `head` 上書きが競合しない。P2E §4-1 の「逐次シミュレートでは
- *   原理的に検出不能」は、この機では**実 GPU でも同じ**という実測。
- * - **argmax の番兵 `dim` → `0`**: 番兵が答えに効くのは行の最大値が −inf のとき（= 全要素が
- *   −inf）だけで、その行の正解添字は 0 なので**変異版も同じ 0** を返す。原理的に値へ出ない。
- *   代わりに同じ MUST（有限 sentinel 禁止 — src/kernels/argmax.ts）を撃つ**番兵値**の変異
- *   （`neg_inf` → 正のゼロの順位キー）を置いた。こちらは全負値の行で番兵 index `dim` が出力へ漏れる。
+ * - **removing the final `workgroupBarrier()` of topk**: 0 mismatches in 20 trials at rows=256, dim=320, k=16.
+ *   W=32 is exactly NVIDIA's warp width and the workgroup executes in lockstep, so the read of `won` and the
+ *   overwrite of `head` in the next round do not race. P2E §4-1's "undetectable in principle by sequential
+ *   simulation" was measured to hold **on a real GPU as well** on this machine.
+ * - **argmax sentinel `dim` → `0`**: the sentinel affects the answer only when the row maximum is −inf (= every
+ *   element is −inf), and the correct index of that row is 0, so **the mutant returns the same 0**. It cannot show
+ *   in the values in principle. Instead, a mutation of **the sentinel value** (`neg_inf` → the rank key of positive
+ *   zero) that fires the same MUST (no finite sentinel — src/kernels/argmax.ts) is included. That one leaks the
+ *   sentinel index `dim` into the output on all-negative rows.
  */
 type RankInjection = {
   readonly label: string;
   readonly mutate: RankMutation;
 };
 
-/** WGSL の該当箇所を書き換える（空振り = 文言変更で置換対象が消えた形は `assertMutated`）。 */
+/** Rewrites the relevant part of the WGSL (a miss = the replacement target vanished because of a wording change is caught by `assertMutated`). */
 const injectRank =
   (from: string, to: string): RankMutation =>
   (wgsl) => {
@@ -1253,7 +1269,7 @@ const injectRank =
     return mutated;
   };
 
-/** topk の故障注入 1 件（どの入力系統で撃つかまで含めて 1 件 — 上の相補性）。 */
+/** One topk fault injection (including which input family it is fired with — the complementarity above). */
 type TopkInjection = RankInjection & { readonly input: TopkFaultInput };
 
 type TopkFaultInput = {
@@ -1264,9 +1280,9 @@ type TopkFaultInput = {
 };
 
 /**
- * 分散入力（`W = 32` の 3 周ぶん）。行 0 = 全要素同値、行 1 = 8 要素ずつの同値ブロックが
- * レーン境界を跨ぐ形。どちらも「同値の集合から k 本を最小 index 順で取る」ので、カーソル前進を
- * 1 レーンでも余計に進めると答えが飛ぶ。
+ * Spread input (3 rounds of `W = 32`). Row 0 = every element equal, row 1 = equal blocks of 8 elements crossing
+ * lane boundaries. Both "take k from the set of equal values in smallest-index order", so advancing the cursor even
+ * one lane too far makes the answer jump.
  */
 const TOPK_SPREAD_INPUT: TopkFaultInput = {
   rows: 2,
@@ -1278,8 +1294,8 @@ const TOPK_SPREAD_INPUT: TopkFaultInput = {
 };
 
 /**
- * 単一レーン入力（上位 5 本が全て `i ≡ 7 (mod 32)` = レーン 7 の担当）。k=3 なのでレーン 7 の
- * 局所リストは 5 候補で 2 回溢れ、末尾比較が実際に候補を捨てる経路に乗る。
+ * Single-lane input (the top 5 all `i ≡ 7 (mod 32)` = handled by lane 7). k=3, so lane 7's local list overflows twice
+ * with 5 candidates, taking the path where the tail comparison actually discards candidates.
  */
 const TOPK_SINGLE_LANE_INPUT: TopkFaultInput = {
   rows: 1,
@@ -1291,21 +1307,21 @@ const TOPK_SINGLE_LANE_INPUT: TopkFaultInput = {
 };
 
 const TOPK_INJECTIONS: readonly TopkInjection[] = [
-  // ① 勝った要素の持ち主だけが進むカーソルを**全レーン前進**にする（merge の中核）
+  // ① Make the cursor, which only the owner of the winning element advances, **advance on every lane** (the core of the merge)
   {
-    label: "カーソル前進条件を恒真にする",
+    label: "make the cursor-advance condition always true",
     input: TOPK_SPREAD_INPUT,
     mutate: injectRank(`won % ${TOPK_WORKGROUP_SIZE}u == lid`, "true"),
   },
-  // ② 勝者述語の tie 分岐を反転（最小 index 規範 → 最大 index）
+  // ② Invert the tie branch of the winner predicate (smallest-index rule → largest index)
   {
-    label: "tie 分岐を ib > ia へ反転",
+    label: "invert the tie branch to ib > ia",
     input: TOPK_SPREAD_INPUT,
     mutate: injectRank("(kb == ka && ib < ia)", "(kb == ka && ib > ia)"),
   },
-  // ③ レーン局所挿入の末尾（最弱）比較を 1 つ手前へずらす（k 本目が入らなくなる）
+  // ③ Shift the tail (weakest) comparison of the lane-local insertion one place earlier (the k-th no longer gets in)
   {
-    label: "レーン局所挿入の末尾比較を 1 ずらす",
+    label: "shift the tail comparison of the lane-local insertion by 1",
     input: TOPK_SINGLE_LANE_INPUT,
     mutate: injectRank(
       `block + ${TOPK_SINGLE_LANE_INPUT.k - 1}u`,
@@ -1315,9 +1331,10 @@ const TOPK_INJECTIONS: readonly TopkInjection[] = [
 ];
 
 /**
- * argmax の故障注入用の行。0 = NaN 混在（NaN 分岐の検出線）/ 1 = 全負値（番兵値の検出線 —
- * 有限 sentinel なら番兵 index `dim` が漏れる）/ 2 = 全 −inf（identity の順位が効く行）。
- * `dim = 8 < 256` なので**担当要素を持たないレーン**が居る = 番兵がそのまま木へ入る。
+ * Rows for argmax fault injection. 0 = NaN mixed in (the detection line of the NaN branch) / 1 = all negative (the
+ * detection line of the sentinel value — a finite sentinel leaks the sentinel index `dim`) / 2 = all −inf (the row
+ * where the rank of the identity matters).
+ * `dim = 8 < 256`, so **some lanes hold no element** = the sentinel enters the tree as is.
  */
 const ARGMAX_FAULT_INPUT = {
   rows: 3,
@@ -1344,14 +1361,14 @@ const ARGMAX_FAULT_INPUT = {
 };
 
 const ARGMAX_INJECTIONS: readonly RankInjection[] = [
-  // ① identity の**値**を有限 sentinel にする（番兵 index が [0, dim) の外へ漏れる）
+  // ① Make the identity **value** a finite sentinel (the sentinel index leaks outside [0, dim))
   {
-    label: "行 max の identity を有限 sentinel にする",
+    label: "make the identity of the row max a finite sentinel",
     mutate: injectRank("var best = neg_inf;", "var best = 0x80000000u;"),
   },
-  // ② NaN と非 NaN の優先順位を反転（NaN が有限値へ負ける誤りの検出線）。
+  // ② Invert the priority of NaN versus non-NaN (the detection line for NaN losing to a finite value).
   {
-    label: "最大値比較の NaN 優先順位を反転",
+    label: "invert the NaN priority of the max comparison",
     mutate: injectRank(
       "select(ordered, 0xffffffffu, magnitude > 0x7f800000u)",
       "select(ordered, 0u, magnitude > 0x7f800000u)",
@@ -1359,7 +1376,7 @@ const ARGMAX_INJECTIONS: readonly RankInjection[] = [
   },
 ];
 
-/** topk の 2 出力を 1 つの比較対象へ畳む（片方だけ見る形を潰す）。 */
+/** Folds the 2 outputs of topk into one comparison target (rules out looking at only one). */
 const topkPair = (result: {
   readonly values: Float32Array;
   readonly indices: Int32Array;
@@ -1375,18 +1392,18 @@ const referenceTopkPair = (input: TopkFaultInput): readonly (readonly number[])[
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "故障注入: argmax / topk の変異版はいずれも参照突合で赤くなる（実 GPU）",
+  "fault injection: every argmax / topk mutant turns red in the reference comparison (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: RankPipelineCache = new Map();
     try {
-      // 正常版が期待値と一致することが前提（ここが赤なら「変異版が不一致」は何の証拠にもならない）
+      // Precondition: the normal version matches the expected values (if this is red, "the mutant mismatches" is evidence of nothing)
       for (const input of [TOPK_SPREAD_INPUT, TOPK_SINGLE_LANE_INPUT]) {
         const actual = await runTopkDirect(gpu.device, input, input.data, { cache });
         assertEquals(
           topkPair(actual),
           referenceTopkPair(input),
-          `正常版の topk（dim=${input.dim} k=${input.k}）が CPU 参照と違う`,
+          `the normal topk (dim=${input.dim} k=${input.k}) differs from the CPU reference`,
         );
       }
       const argmaxExpected = [
@@ -1404,7 +1421,7 @@ test.skipIf(!GPU_AVAILABLE)(
           })),
         ],
         argmaxExpected,
-        "正常版の argmax が CPU 参照と違う",
+        "the normal argmax differs from the CPU reference",
       );
       for (const injection of TOPK_INJECTIONS) {
         const input = injection.input;
@@ -1415,7 +1432,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertNotEquals(
           topkPair(actual),
           referenceTopkPair(input),
-          `topk の故障注入 '${injection.label}' が検出されなかった`,
+          `topk fault injection '${injection.label}' was not detected`,
         );
       }
       for (const injection of ARGMAX_INJECTIONS) {
@@ -1428,7 +1445,7 @@ test.skipIf(!GPU_AVAILABLE)(
         assertNotEquals(
           [...actual],
           argmaxExpected,
-          `argmax の故障注入 '${injection.label}' が検出されなかった`,
+          `argmax fault injection '${injection.label}' was not detected`,
         );
       }
     } finally {
@@ -1438,17 +1455,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "レイアウト 3 種（別名 reshape / strided permute・expand）が CPU 参照と一致する（実 GPU）",
+  "3 layout ops (aliasing reshape / strided permute and expand) match the CPU reference (real GPU)",
   () => checkAll(LAYOUT_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "レイアウト第 2 群（slice / cat / pad / flip）が CPU 参照と一致する（実 GPU）",
+  "the second group of layout ops (slice / cat / pad / flip) matches the CPU reference (real GPU)",
   () => checkAll(LAYOUT2_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "融合 op 10 種（linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d）が CPU 参照と一致する（実 GPU）",
+  "10 fused ops (linear / layer_norm / rms_norm / softmax / safe_softmax / embedding / masked_fill / conv1d / conv2d / conv_transpose1d) match the CPU reference (real GPU)",
   () => checkAll(FUSED_CASES),
 );
 
@@ -1458,45 +1475,46 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "双線形 resample（拡大 / 縮小 / scale 0）が CPU 参照と一致する（実 GPU）",
+  "bilinear resample (upscale / downscale / scale 0) matches the CPU reference (real GPU)",
   () => checkAll(UPSAMPLE_CASES),
 );
 
 /**
- * 非厳密 scale（`fl((in−1)/(out−1))` が f32 で往復しない形）の突合。**ビット同一門とは別立て**
- * にするのは、この形が定義上ビット同一を満たさないため（helpers/gpu_op_cases.ts の
- * UPSAMPLE_FRACTIONAL_CASES の MUST）。ここが見るのは実測表の帯での一致で、λ が 0 / 1 に
- * 潰れない丸め列を GPU と CPU 参照の双方に踏ませる唯一のケース。
+ * Comparison for inexact scales (shapes where `fl((in−1)/(out−1))` does not round-trip in f32). It is **kept
+ * separate from the bit-identity check** because by definition this shape does not satisfy bit identity (the MUST
+ * of UPSAMPLE_FRACTIONAL_CASES in helpers/gpu_op_cases.ts). What it checks is agreement within the band of the
+ * measured table, and it is the only case that makes both the GPU and the CPU reference walk a rounding sequence
+ * where λ does not collapse to 0 / 1.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "双線形 resample は scale が f32 で厳密でない形でも CPU 参照と実測表の帯で一致する（実 GPU）",
+  "bilinear resample matches the CPU reference within the measured band even when the scale is not exact in f32 (real GPU)",
   () => checkAll(UPSAMPLE_FRACTIONAL_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "DCNv2（k の 2 形 / バッチ 2 / 非対称形）が CPU 参照と一致する（実 GPU）",
+  "DCNv2 (2 shapes of k / batch 2 / asymmetric shapes) matches the CPU reference (real GPU)",
   () => checkAll(DEFORM_CASES),
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "GRU 隠れ側スキャン（2 方向 × バッチ 1 / 3）が CPU 参照と一致する（実 GPU）",
+  "the GRU hidden-side scan (2 directions × batch 1 / 3) matches the CPU reference (real GPU)",
   () => checkAll(GRU_SCAN_CASES),
 );
 
 /**
- * `align_corners = True` の**定義そのもの**を実 GPU で固定する — 出力の 1 行目 / 最終行と
- * 1 列目 / 最終列が、入力の対応する端と**厳密に一致**する（λ が 0 か 1 に潰れるので丸めが
- * 入らない）。
+ * Pins **the definition itself** of `align_corners = True` on a real GPU — the first / last output row and the first
+ * / last output column **match exactly** the corresponding edges of the input (λ collapses to 0 or 1, so no rounding
+ * enters).
  *
- * MUST: allclose ではなく厳密一致で見る。`align_corners = False` の座標式へ取り違えると
- * 端が半画素ずれるが、ずれ幅は許容差より小さいことがあり、checkAll では**両側が同じ誤りを
- * 共有していれば緑のまま**通る（CPU 参照も GPU もこのテストの対象）。ここは参照実装を
- * 経由せず、入力テンソルの端の値そのものと突き合わせる。
+ * MUST: check exact equality, not allclose. Mixing it up with the coordinate formula of `align_corners = False`
+ * shifts the edges by half a pixel, but the shift can be smaller than the tolerance, and in checkAll it **stays green
+ * if both sides share the same error** (both the CPU reference and the GPU are under test here). This compares
+ * against the edge values of the input tensor itself, without going through the reference implementation.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "双線形 resample は (in−1)/(out−1) が f32 で往復する形で出力の端を入力の端へ厳密一致させる（align_corners — 実 GPU）",
+  "bilinear resample makes the output edges match the input edges exactly where (in−1)/(out−1) round-trips in f32 (align_corners — real GPU)",
   async () => {
-    // H≠W / Hout≠Wout（軸の取り違えが端の値に出る）。値は全て相異なる列にする。
+    // H≠W / Hout≠Wout (mixing up axes shows in the edge values). All values are distinct.
     const [heightIn, widthIn] = [4, 5];
     const [heightOut, widthOut] = [9, 7];
     const input = fill([1, 1, heightIn, widthIn], (i) => 1 + i * 0.5);
@@ -1511,13 +1529,13 @@ test.skipIf(!GPU_AVAILABLE)(
       });
       const at = (row: number, column: number): number => actual.data[row * widthOut + column];
       const src = (row: number, column: number): number => input.data[row * widthIn + column];
-      assertEquals(at(0, 0), src(0, 0), "左上");
-      assertEquals(at(0, widthOut - 1), src(0, widthIn - 1), "右上");
-      assertEquals(at(heightOut - 1, 0), src(heightIn - 1, 0), "左下");
-      assertEquals(at(heightOut - 1, widthOut - 1), src(heightIn - 1, widthIn - 1), "右下");
-      // 中は補間される（端だけ見ると恒等コピーでも通ってしまう）。scale_h = 3/8 なので
-      // 出力行 4 の源座標は 1.5 = 入力行 1 と 2 の中点 — 端の厳密一致と両立する内点。
-      assertEquals(at(4, 0), Math.fround((src(1, 0) + src(2, 0)) / 2), "H の中点");
+      assertEquals(at(0, 0), src(0, 0), "top left");
+      assertEquals(at(0, widthOut - 1), src(0, widthIn - 1), "top right");
+      assertEquals(at(heightOut - 1, 0), src(heightIn - 1, 0), "bottom left");
+      assertEquals(at(heightOut - 1, widthOut - 1), src(heightIn - 1, widthIn - 1), "bottom right");
+      // The interior is interpolated (checking only the edges would let an identity copy pass). scale_h = 3/8, so
+      // the source coordinate of output row 4 is 1.5 = the midpoint of input rows 1 and 2 — an interior point consistent with the exact edges.
+      assertEquals(at(4, 0), Math.fround((src(1, 0) + src(2, 0)) / 2), "midpoint along H");
     } finally {
       gpu.destroy();
     }
@@ -1525,39 +1543,40 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 上の門の**裏**（by-design の非厳密端点）。`scale = fl((in−1)/(out−1))` が f32 で往復しない形
- * では、最終出力の源座標が `fl(fl(1/41)·41) = 0.9999999403953552` に留まり、**出力の端は入力の
- * 端と厳密には一致しない**（docs/limitations.md・src/kernels/upsample-bilinear2d.ts の NOTE で
- * 公開している by-design 契約 — torch と同じ式を同じ順で踏む代償）。
+ * **The other side** of the check above (by-design inexact endpoints). For shapes where `scale = fl((in−1)/(out−1))`
+ * does not round-trip in f32, the source coordinate of the last output stays at `fl(fl(1/41)·41) = 0.9999999403953552`,
+ * and **the output edge does not exactly match the input edge** (a by-design contract published in
+ * docs/limitations.md and the NOTE of src/kernels/upsample-bilinear2d.ts — the price of walking the same formula in
+ * the same order as torch).
  *
- * MUST: 「端をクランプして厳密化する」変更が必ず赤くなる形にする。他の全ケースは scale が
- * f32 で厳密なので、クランプを足しても値が 1 ビットも動かず緑のまま通る。
+ * MUST: shape it so that a change that "clamps the edges to make them exact" always turns red. Every other case has
+ * an exact scale in f32, so adding a clamp moves no value by a single bit and stays green.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "双線形 resample は scale が f32 で往復しない形で端を厳密一致させない（クランプしない・実 GPU）",
+  "bilinear resample does not make the edges exact where the scale does not round-trip in f32 (no clamping; real GPU)",
   async () => {
     const rows = 42;
-    // 端の 2 値を 0 / 1 にする（λ = 1 − 2⁻²⁴ の差が f32 の格子上で表せる値域 — 値が大きいと
-    // 補間結果が端の値へ丸め戻り、非厳密が観測できなくなる）。
+    // The 2 edge values are 0 / 1 (the value range where the difference of λ = 1 − 2⁻²⁴ is representable on the f32
+    // lattice — with large values the interpolation rounds back to the edge value and the inexactness cannot be observed).
     const input = fill([1, 1, 2, 1], (i) => i);
     const attrs = { output_size: [rows, 1] };
     const gpu = await acquireGpu();
     try {
       const actual = await runCase(gpu, {
-        name: "upsample_bilinear2d 非厳密端点",
+        name: "upsample_bilinear2d inexact endpoint",
         op: "upsample_bilinear2d",
         inputs: [input],
         outShapes: [[1, 1, rows, 1]],
         attrs,
       });
       const last = actual.data[rows - 1];
-      assertNotEquals(last, input.data[1], "最終行が入力の端へクランプされている");
-      // λ = fl(fl(1/41)·41)（源座標が 1 に届かない量そのもの）
-      assertEquals(last, Math.fround(Math.fround(1 / 41) * 41), "最終行の λ");
-      // CPU 参照も同じ非厳密端点を出す（片側だけクランプする退行も落ちる）
+      assertNotEquals(last, input.data[1], "the last row is clamped to the input edge");
+      // λ = fl(fl(1/41)·41) (exactly the amount by which the source coordinate falls short of 1)
+      assertEquals(last, Math.fround(Math.fround(1 / 41) * 41), "λ of the last row");
+      // The CPU reference produces the same inexact endpoint too (a regression that clamps only one side fails too)
       const expected = applyReferenceOp("upsample_bilinear2d", [input], attrs, [1, 1, rows, 1]);
       const report = compareTensors(actual, expected, opTolerance("upsample_bilinear2d"));
-      assertEquals(report.pass, true, `非厳密端点: ${formatAllclose(report)}`);
+      assertEquals(report.pass, true, `inexact endpoint: ${formatAllclose(report)}`);
     } finally {
       gpu.destroy();
     }
@@ -1565,14 +1584,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * embedding の範囲外添字の裁定（src/kernels/embedding.ts）を実 GPU で固定する。gather と
- * 同じ非対称性 — GPU は範囲外の**行だけ**を NaN で汚染し、オラクルの CPU 参照は throw する。
+ * Pins the ruling for out-of-range embedding indices (src/kernels/embedding.ts) on a real GPU. The same asymmetry as
+ * gather — the GPU contaminates **only** the out-of-range rows with NaN, and the CPU reference of the oracle throws.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "embedding の範囲外添字は GPU で NaN 汚染・CPU 参照で throw（実 GPU）",
+  "out-of-range embedding indices contaminate with NaN on the GPU and throw in the CPU reference (real GPU)",
   async () => {
     const weight = fill([3, 2], POSITIVE);
-    // 添字 3（語彙数超え）と -1（負）をそれぞれ 1 本ずつ混ぜ、残りは正しい行を引く
+    // Mixes in one index 3 (beyond the vocabulary size) and one -1 (negative); the rest look up valid rows
     const index = fill([4], (i) => [1, 3, -1, 0][i], "i32");
     const gpu = await acquireGpu();
     try {
@@ -1588,7 +1607,7 @@ test.skipIf(!GPU_AVAILABLE)(
         values.map((v) => Number.isNaN(v)),
         [false, false, true, true, true, true, false, false],
       );
-      // 契約内の添字は通常どおり自分の行を引く（汚染は範囲外の行だけ）
+      // Indices within the contract look up their own row as usual (only out-of-range rows are contaminated)
       assertEquals(values[0], weight.data[2]);
       assertEquals(values[1], weight.data[3]);
       assertEquals(values[6], weight.data[0]);
@@ -1600,20 +1619,20 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "境界（大きめ 1 本 / 行数が workgroup 上限超え）が CPU 参照と一致する（実 GPU）",
+  "boundaries (one large tensor / row count above the workgroup limit) match the CPU reference (real GPU)",
   () => checkAll(BOUNDARY_CASES),
 );
 
 /**
- * sym_prefix_slice（ADR 0010）— Tmax で焼いた定数の**先頭**を実行時の長さで切り出す。
- * 実行は strided 実体化コピーの流用（新カーネル無し）で、読み出し stride は入力（Tmax 形）
- * の連続 stride。
+ * sym_prefix_slice (ADR 0010) — cuts **the head** of a constant baked at Tmax to the runtime length.
+ * Execution reuses the strided materializing copy (no new kernel), and the read stride is the contiguous stride of
+ * the input (Tmax shape).
  *
- * MUST: **T < Tmax のケースだけを置く**。T = Tmax では「stride を束縛後の出力 shape から
- * 組む」誤りと正しい実装が同じ答えを出すため、その形は検出器にならない（波 2 の permute で
- * 対合の並べ替えが空振りしたのと同型の罠）。
- * MUST: 縮める軸は最終次元だけでなく**先行次元**も踏む。最終次元だけを縮める形は行の
- * 送り幅が変わらない特殊ケースで、stride の取り違えが値に出ない。
+ * MUST: **place only cases with T < Tmax**. At T = Tmax the error "building the stride from the output shape after
+ * binding" and the correct implementation give the same answer, so that shape is no detector (the same trap as the
+ * involution reorders of the wave 2 permute testing nothing).
+ * MUST: shrink not only the last dimension but **leading dimensions** too. Shrinking only the last dimension is a
+ * special case where the row step does not change, and a mixed-up stride does not show in the values.
  */
 const prefixSliceGraph = (
   constShape: readonly number[],
@@ -1625,8 +1644,8 @@ const prefixSliceGraph = (
   version: 2,
   requires: { ops: ["sym_prefix_slice"] },
   symbols: ["T"],
-  // 束縛は入力 shape の次元位置からしか取れない（docs/ir-v2.md）ので、T を素の形で運ぶ
-  // ダミー入力を 1 本置く。
+  // A binding can only be taken from a dimension position of an input shape (docs/ir-v2.md), so one dummy input
+  // carries T in its plain form.
   inputs: [{ name: "bind", dtype: "f32", shape: ["T"] }],
   outputs: ["y"],
   initializers: { table: {} },
@@ -1645,12 +1664,12 @@ const prefixSliceGraph = (
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "sym_prefix_slice が Tmax 定数の先頭を切り出す（実 GPU / T < Tmax）",
+  "sym_prefix_slice cuts the head of a Tmax constant (real GPU / T < Tmax)",
   async () => {
     const bound = 3;
     const cases = [
       {
-        name: "2 軸とも縮める（相対位置バケット表 i32 [6,5] → [3,3]）",
+        name: "shrinks both axes (relative-position bucket table i32 [6,5] → [3,3])",
         constShape: [6, 5],
         outShape: ["T", "T"],
         resolved: [3, 3],
@@ -1662,7 +1681,7 @@ test.skipIf(!GPU_AVAILABLE)(
         generator: INTEGERS,
       },
       {
-        name: "先行次元だけ縮める（位置テーブル f32 [7,4] → [3,4]）",
+        name: "shrinks only a leading dimension (position table f32 [7,4] → [3,4])",
         constShape: [7, 4],
         outShape: ["T", 4],
         resolved: [3, 4],
@@ -1671,7 +1690,7 @@ test.skipIf(!GPU_AVAILABLE)(
         generator: SIGNED,
       },
       {
-        name: "係数付き（f32 [16] → [2T+1] = [7]）",
+        name: "with a coefficient (f32 [16] → [2T+1] = [7])",
         constShape: [16],
         outShape: ["2T+1"],
         resolved: [7],
@@ -1680,7 +1699,7 @@ test.skipIf(!GPU_AVAILABLE)(
         generator: POSITIVE,
       },
       {
-        name: "rank4 の中間軸を縮める（i32 [2,6,3,4] → [2,3,3,4]）",
+        name: "shrinks the middle axis of rank 4 (i32 [2,6,3,4] → [2,3,3,4])",
         constShape: [2, 6, 3, 4],
         outShape: [2, "T", 3, 4],
         resolved: [2, 3, 3, 4],
@@ -1717,17 +1736,21 @@ test.skipIf(!GPU_AVAILABLE)(
         );
         try {
           const outputs = await session.run({ bind: fill([bound], SIGNED) });
-          // MUST: 期待 shape は**リテラル**（`resolved`）で持つ。実出力の shape を
-          // applyReferenceOp に渡して同じものと突き合わせると、束縛から prefix 長を導く経路が
-          // 丸ごと壊れていても恒真で通る。
-          assertEquals(outputs["y"].shape, testCase.resolved, `${testCase.name}: 束縛後の shape`);
+          // MUST: keep the expected shape as **a literal** (`resolved`). Passing the actual output's shape to
+          // applyReferenceOp and comparing against the same thing passes vacuously even if the path that derives the
+          // prefix length from the bindings is completely broken.
+          assertEquals(
+            outputs["y"].shape,
+            testCase.resolved,
+            `${testCase.name}: shape after binding`,
+          );
           const expected = applyReferenceOp(
             "sym_prefix_slice",
             [table],
             graph.nodes[0].attrs as Record<string, unknown>,
             testCase.resolved,
           );
-          // MUST: 帯は実測表から引く（既定帯へ落とすと EXACT の op が 1e-5 級の汚れを通す）
+          // MUST: take the band from the measured table (falling to the default band lets EXACT ops through with 1e-5-level noise)
           const report = compareTensors(outputs["y"], expected, opTolerance("sym_prefix_slice"));
           assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
         } finally {
@@ -1741,21 +1764,23 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 記号軸 cat（ADR 0046）— 連結軸が `T+定数` / `2T` に解決される形を実 GPU で閉じる。
+ * Symbolic-axis cat (ADR 0046) — closes on a real GPU the shapes where the concatenation axis resolves to
+ * `T+constant` / `2T`.
  *
- * 緩めたのは**宣言レベルのガードだけ**で、束縛後は数値 shape なので strided 書きコピーの
- * カーネルは無変更のはず。「はず」を実測に置き換えるのがこのテストで、書き込み offset を
- * 静的軸の総和から組んでいる経路が残っていれば必ずずれる。
+ * What was relaxed is **only the declaration-level guard**; after binding the shapes are numeric, so the strided
+ * write-copy kernel should be unchanged. This test replaces "should" with a measurement: if a path still builds the
+ * write offset from the sum of static axes, it is bound to drift.
  *
- * MUST: 期待 shape は**リテラル**（`resolved`）で持つ。実出力の shape を参照側にも渡すと、
- * 束縛から連結軸長を導く経路が丸ごと壊れていても恒真で通る。
+ * MUST: keep the expected shape as **a literal** (`resolved`). Passing the actual output's shape to the reference
+ * side too passes vacuously even if the path that derives the concatenation axis length from the bindings is
+ * completely broken.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "記号軸 cat（T+定数 / 2T）が CPU 参照と一致する（実 GPU）",
+  "symbolic-axis cat (T+constant / 2T) matches the CPU reference (real GPU)",
   async () => {
     const cases = [
       {
-        name: "記号 + 定数 [1,T,4] + [1,3,4] dim=1（DiT の KV 連結と同型）",
+        name: "symbol + constant [1,T,4] + [1,3,4] dim=1 (same shape as DiT's KV concatenation)",
         inShapes: [
           [1, "T", 4],
           [1, 3, 4],
@@ -1766,7 +1791,7 @@ test.skipIf(!GPU_AVAILABLE)(
         dim: 1,
       },
       {
-        name: "同一シンボルどうし [T,3] + [T,3] dim=0",
+        name: "same symbol on both sides [T,3] + [T,3] dim=0",
         inShapes: [
           ["T", 3],
           ["T", 3],
@@ -1786,7 +1811,7 @@ test.skipIf(!GPU_AVAILABLE)(
           [[...testCase.outShape]],
           { symbols: ["T"], attrs: { dim: testCase.dim } },
         );
-        // 束縛は入力 shape の次元位置から取る（'T' が素の形で現れる位置）。
+        // The binding is taken from a dimension position of an input shape (the position where 'T' appears in plain form).
         const inputs = testCase.inShapes.map((shape) =>
           fill(
             shape.map((dim) => (dim === "T" ? testCase.bound : (dim as number))),
@@ -1802,14 +1827,18 @@ test.skipIf(!GPU_AVAILABLE)(
           const outputs = await session.run(
             Object.fromEntries(inputs.map((input, index) => [`x${index}`, input])),
           );
-          assertEquals(outputs["y"].shape, testCase.resolved, `${testCase.name}: 束縛後の shape`);
+          assertEquals(
+            outputs["y"].shape,
+            testCase.resolved,
+            `${testCase.name}: shape after binding`,
+          );
           const expected = applyReferenceOp(
             "cat",
             inputs,
             { dim: testCase.dim },
             testCase.resolved,
           );
-          // MUST: 帯は実測表から引く（既定帯へ落とすと EXACT の op が 1e-5 級の汚れを通す）
+          // MUST: take the band from the measured table (falling to the default band lets EXACT ops through with 1e-5-level noise)
           const report = compareTensors(outputs["y"], expected, opTolerance("cat"));
           assertEquals(report.pass, true, `${testCase.name}: ${formatAllclose(report)}`);
         } finally {

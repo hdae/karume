@@ -1,6 +1,6 @@
-// VAE nearest-exact x2 の strict peephole（融合ルール upsample2x — src/runtime/fusion.ts）。
-// エクスポータと同じ expand 2 本の列を private 1-pass copy に置換しても、全ビットが
-// そのまま複製されることを固定する。
+// The strict peephole for the VAE's nearest-exact x2 (fusion rule upsample2x —
+// src/runtime/fusion.ts). Pins that replacing the exporter's sequence of two expands with a private
+// 1-pass copy still duplicates every bit unchanged.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
@@ -11,13 +11,13 @@ import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helper
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
-// B>1 / C>1、H/W は奇数、かつ 2*3*5*7=210 は workgroup 幅 256 の非整数倍。
+// B>1 / C>1, odd H/W, and 2*3*5*7=210 is not a multiple of the workgroup width 256.
 const SHAPE = [2, 3, 5, 7] as const;
 const FIRST_RESHAPE = [30, 7, 1] as const;
 const WIDE = [30, 7, 2] as const;
 const OUT = [2, 3, 10, 14] as const;
 
-/** 実 exporter の reshape→expand→reshape→reshape→expand→reshape を逐語で組む。 */
+/** Builds the real exporter's reshape→expand→reshape→reshape→expand→reshape verbatim. */
 const upsampleGraph = (interpose: boolean, scaleWidth = 2): DeclarationJson => {
   const wide = [FIRST_RESHAPE[0], FIRST_RESHAPE[1], scaleWidth];
   const wideReshape = [6, 5, 7 * scaleWidth];
@@ -37,7 +37,8 @@ const upsampleGraph = (interpose: boolean, scaleWidth = 2): DeclarationJson => {
     { op: "reshape", ins: ["x"], outs: ["first_reshape"], attrs: {} },
   ];
   if (interpose) {
-    // 同 shape の別名だけを挟み、値も物理 dispatch 数も変えず exact matcher だけを外す。
+    // Inserts only a same-shape alias: neither the values nor the physical dispatch count change,
+    // only the exact matcher stops matching.
     nodes.push({ op: "reshape", ins: ["first_reshape"], outs: ["first_alias"], attrs: {} });
   }
   nodes.push(
@@ -65,7 +66,7 @@ const words = (tensor: Tensor): Uint32Array =>
 
 const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
 
-/** u32 コピーカーネル自身は、NaN payload を含む全ビットを保存する。 */
+/** The u32 copy kernel itself preserves every bit, NaN payloads included. */
 const assertExactWords = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
   assertEquals(actual.length, expected.length, label + ": length");
   for (let i = 0; i < actual.length; i++) {
@@ -73,7 +74,10 @@ const assertExactWords = (actual: Uint32Array, expected: Uint32Array, label: str
   }
 };
 
-/** 既存 f32 primitive との比較では、バックエンドが正規化しうる NaN だけ分類一致にする。 */
+/**
+ * Against the existing f32 primitives, only NaNs (which a backend may canonicalize) are compared by
+ * classification.
+ */
 const assertSemanticWords = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
   assertEquals(actual.length, expected.length, label + ": length");
   for (let i = 0; i < actual.length; i++) {
@@ -106,11 +110,12 @@ const expectedUpsampleWords = (input: Uint32Array): Uint32Array => {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "VAE nearest x2 融合は実 export 列と同じ全要素を書き、2→1 dispatch へ畳む（実 GPU）",
+  "the VAE nearest x2 fusion writes every element the real exported sequence writes and folds 2 → 1 dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const x = fill(SHAPE, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
-    // コピー融合は算術をしないため、以下のビット列も全て保存されなければならない。
+    // The copy fusion does no arithmetic, so all of the following bit patterns must be preserved
+    // too.
     new Uint32Array(x.data.buffer).set([
       0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x7f800000,
       0xff800000, 0x7fc01234, 0xff801234,
@@ -134,8 +139,12 @@ test.skipIf(!GPU_AVAILABLE)(
       assertSemanticWords(words(fusedOut), words(primitiveOut), "fused vs primitive");
       assertEquals(fused.diagnostics().submit.dispatchCount, 1, "fused copy 1 pass");
       assertEquals(primitive.diagnostics().submit.dispatchCount, 2, "expand x2 primitive");
-      assertEquals(fused.diagnostics().lastRunFusions?.upsample2x, 1, "融合カウンタ");
-      assertEquals(primitive.diagnostics().lastRunFusions?.upsample2x, 0, "反例のカウンタは 0");
+      assertEquals(fused.diagnostics().lastRunFusions?.upsample2x, 1, "fusion counter");
+      assertEquals(
+        primitive.diagnostics().lastRunFusions?.upsample2x,
+        0,
+        "the counter of the counterexample is 0",
+      );
       assertEquals(
         requireCensus(fused.diagnostics().lastRunPipelines, "upsample2x").map((row) => row.key),
         [UPSAMPLE_2X_KEY],
@@ -149,7 +158,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "upsample x2 の内部値が output / 別 consumer なら、また near-shape なら融合しない（実 GPU）",
+  "upsample x2 does not fuse when an internal value is an output or has another consumer, nor for a near shape (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const x = fill(SHAPE, (i) => (i % 13) - 6.25);
@@ -168,7 +177,7 @@ test.skipIf(!GPU_AVAILABLE)(
           2,
           "internal output fallback",
         );
-        assertEquals(outputSession.diagnostics().lastRunFusions?.upsample2x, 0, "融合カウンタ 0");
+        assertEquals(outputSession.diagnostics().lastRunFusions?.upsample2x, 0, "fusion counter 0");
       } finally {
         await outputSession.dispose();
       }
@@ -190,7 +199,11 @@ test.skipIf(!GPU_AVAILABLE)(
           3,
           "extra consumer fallback",
         );
-        assertEquals(consumerSession.diagnostics().lastRunFusions?.upsample2x, 0, "融合カウンタ 0");
+        assertEquals(
+          consumerSession.diagnostics().lastRunFusions?.upsample2x,
+          0,
+          "fusion counter 0",
+        );
       } finally {
         await consumerSession.dispose();
       }
@@ -203,8 +216,12 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       try {
         const output = (await nearSession.run({ x })).y;
-        assertEquals(nearSession.diagnostics().submit.dispatchCount, 2, "x2 以外は fallback");
-        assertEquals(nearSession.diagnostics().lastRunFusions?.upsample2x, 0, "融合カウンタ 0");
+        assertEquals(
+          nearSession.diagnostics().submit.dispatchCount,
+          2,
+          "anything but x2 falls back",
+        );
+        assertEquals(nearSession.diagnostics().lastRunFusions?.upsample2x, 0, "fusion counter 0");
         assertEquals(output.shape, [2, 3, 10, 21]);
       } finally {
         await nearSession.dispose();

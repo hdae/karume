@@ -22,14 +22,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 test.skipIf(!GPU_AVAILABLE)(
-  "workgroup サイズ超過のパイプラインは errorScope 経由で例外になる（実 GPU）",
+  "a pipeline that exceeds the workgroup size becomes an exception through errorScope (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache = new PipelineCache(gpu.device);
     try {
       const tooLarge = gpu.limits.maxComputeWorkgroupSizeX + 1;
 
-      // 生成そのものは同期例外にならない（沈黙 no-op 化の入口）。可視化は errorScope のみ。
+      // Creation itself raises no synchronous exception (the entry to a silent no-op). Only errorScope makes it visible.
       let threwSynchronously = false;
       gpu.device.pushErrorScope("validation");
       try {
@@ -39,19 +39,22 @@ test.skipIf(!GPU_AVAILABLE)(
         threwSynchronously = true;
       }
       const raw = await gpu.device.popErrorScope();
-      assert(threwSynchronously || raw !== null, "無効パイプラインが完全に無検出のまま通った");
+      assert(
+        threwSynchronously || raw !== null,
+        "an invalid pipeline went through completely undetected",
+      );
 
-      // PipelineCache 経由なら必ず例外になる（沈黙 no-op の検出網）
+      // Through PipelineCache it always becomes an exception (the net that catches silent no-ops)
       const error = await assertRejects(
         () => cache.get("test:too-large", wgslWithWorkgroupSize(tooLarge)),
         GpuValidationError,
         "test:too-large",
       );
-      assert(error.message.length > "test:too-large".length, "原因メッセージが保持される");
-      assertEquals(cache.size, 0, "失敗したパイプラインはキャッシュしない");
+      assert(error.message.length > "test:too-large".length, "the cause message is kept");
+      assertEquals(cache.size, 0, "a failed pipeline is not cached");
 
-      // 直前の失敗で errorScope が積み残されていないこと（後続の検証が誤ったスコープに
-      // 吸われると、以後の validation エラーが恒久的に見えなくなる）
+      // The previous failure left no errorScope behind (if later checks were absorbed by the wrong scope,
+      // validation errors from then on would be invisible for good)
       const valid = await cache.get("test:valid", wgslWithWorkgroupSize(64));
       assert(valid !== undefined);
       assertEquals(cache.size, 1);
@@ -62,35 +65,36 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "withPipelineScope は body の同期例外でも 2 本とも pop する（実 GPU）",
+  "withPipelineScope pops both scopes even on a synchronous exception from body (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // 積み残し / 過剰 pop はスコープの中身を見ても分からない（自分の push と pop は LIFO で
-      // 必ず対応する）ので、**外側の番兵スコープ**で間接的に門にする。番兵には先にエラーを
-      // 1 つ入れておき、withPipelineScope の後にそれを取り返せるかを見る。
+      // A scope left behind / an excess pop cannot be told from the scope's contents (one's own push and
+      // pop always pair up LIFO), so it is checked indirectly with **an outer sentinel scope**. One error
+      // is put into the sentinel first, and the test checks that it can be taken back after
+      // withPipelineScope.
       const { layout } = await new PipelineCache(gpu.device).get(
         "pipeline-scope-probe",
         wgslWithWorkgroupSize(64),
       );
       gpu.device.pushErrorScope("validation");
-      // binding 0 が欠落した bindGroup は同期例外にならず errorScope にだけ現れる
+      // A bindGroup missing binding 0 raises no synchronous exception and shows up only in errorScope
       gpu.device.createBindGroup({ layout, entries: [] });
 
-      const thrown = new Error("body 側の失敗");
+      const thrown = new Error("failure on the body side");
       const caught = await assertRejects(() =>
         withPipelineScope(gpu.device, "body-throws", () => {
           throw thrown;
         }),
       );
-      assertEquals(caught, thrown, "body の例外はそのまま伝播する");
+      assertEquals(caught, thrown, "the body's exception propagates as is");
 
-      // 1 本しか pop していなければ、この pop が取るのは積み残された空のスコープ（= null）。
-      // 3 本 pop していれば番兵は既に消えており、この pop 自体が失敗して落ちる。
+      // If only 1 scope had been popped, this pop would take the empty scope left behind (= null).
+      // If 3 had been popped, the sentinel would already be gone and this pop itself would fail.
       const sentinel = await gpu.device.popErrorScope();
       assert(
         sentinel !== null,
-        "番兵スコープのエラーが取り返せない = withPipelineScope がスコープを積み残した",
+        "the sentinel scope's error cannot be taken back = withPipelineScope left a scope behind",
       );
     } finally {
       gpu.destroy();
@@ -99,23 +103,23 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "無効パイプラインは internal ではなく validation として返る（実 GPU）",
+  "an invalid pipeline comes back as validation, not internal (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache = new PipelineCache(gpu.device);
     try {
-      // internal エラー自体は実 GPU では作れないため、2 本張りの導入で「validation だった
-      // ものが internal 扱いに化けない」ことだけを門にする（優先順位の誤りの検出）。
+      // An internal error itself cannot be produced on a real GPU, so this only checks that, with the two
+      // scopes introduced, "what was validation does not turn into internal" (detects a wrong priority).
       const tooLarge = gpu.limits.maxComputeWorkgroupSizeX + 1;
       const error = await assertRejects(
         () => cache.get("test:internal-misfire", wgslWithWorkgroupSize(tooLarge)),
         GpuValidationError,
       );
-      assertEquals(error.name, "GpuValidationError", "internal 分岐が誤爆している");
-      assertEquals(cache.size, 0, "失敗したパイプラインはキャッシュしない");
+      assertEquals(error.name, "GpuValidationError", "the internal branch misfires");
+      assertEquals(cache.size, 0, "a failed pipeline is not cached");
 
-      // 失敗経路でも 2 本とも pop されていること（積み残しがあると後続の検証が誤ったスコープに
-      // 吸われる）。直後の正常な生成が通ることで間接的に確かめる。
+      // Both scopes are popped on the failure path too (a scope left behind would make later checks be
+      // absorbed by the wrong scope). Confirmed indirectly by the normal creation right after succeeding.
       const valid = await cache.get("test:internal-misfire-after", wgslWithWorkgroupSize(64));
       assert(valid !== undefined);
     } finally {
@@ -125,16 +129,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "同一 device 上の複数 Session の並行 run が互いに干渉せず完走する（実 GPU）",
+  "concurrent runs of several Sessions on the same device complete without interfering with each other (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // 後始末は取得の直後から保証する。構築と dispose は allSettled で全部の決着を待ってから回収し、
-    // 片方の失敗で成功した側の Session や device を破棄し損ねない（失敗系のテストが後続の GPU
-    // テストへ資源を持ち越さないため）。
+    // Cleanup is guaranteed from right after acquisition. Construction and dispose wait with allSettled
+    // for everything to settle before collecting, so a failure on one side does not fail to destroy the
+    // Session or device of the side that succeeded (so that a failing test does not carry resources over
+    // to later GPU tests).
     try {
-      // run のスコープ区間は device 単位ロックで直列化される。ロック内から呼ばれる層
-      // （PipelineCache 等）がロックを再取得すると自己デッドロックになるため、並行 run が
-      // ハングせず完走すること自体が回帰の対象になる。
+      // A run's scope range is serialized by a per-device lock. If a layer called from inside the lock
+      // (PipelineCache, etc.) took the lock again it would self-deadlock, so concurrent runs completing
+      // without hanging is itself what this regression test covers.
       const built = await Promise.allSettled(
         (["relu", "neg"] as const).map(
           async (op) =>
@@ -153,8 +158,9 @@ test.skipIf(!GPU_AVAILABLE)(
         for (const result of built) if (result.status === "rejected") throw result.reason;
         const x = fill([8, 8], (i) => (i % 13) - 6);
 
-        // await を挟まずに発行する（Session 間で区間が重なる形）。run も allSettled で全部の決着を
-        // 待つ —— Promise.all だと片方の reject で、もう片方の run が走っている最中に dispose へ進む。
+        // Issued without an await in between (the form in which the ranges of the Sessions overlap). The
+        // runs also wait with allSettled for everything to settle —— with Promise.all, one reject would move
+        // on to dispose while the other run is still running.
         const ran = await Promise.allSettled(sessions.map((session) => session.run({ x0: x })));
         const [relu, neg] = ran.map((result) => {
           if (result.status === "rejected") throw result.reason;
@@ -166,7 +172,7 @@ test.skipIf(!GPU_AVAILABLE)(
       } catch (error) {
         failure = { error };
       }
-      // 本体の失敗を優先して投げる（dispose の失敗で原因を上書きしない）。
+      // Throw the body's failure first (a dispose failure does not overwrite the cause).
       const disposed = await Promise.allSettled(sessions.map((session) => session.dispose()));
       if (failure !== undefined) throw failure.error;
       for (const result of disposed) if (result.status === "rejected") throw result.reason;
@@ -177,12 +183,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "Session.run は自分のスコープ区間を device 単位ロックで守る（実 GPU）",
+  "Session.run guards its own scope range with the per-device lock (real GPU)",
   async () => {
-    // プリミティブ（GpuContext.withScopeLock）の契約は gpu_device_test が固定しているが、
-    // それを Session.run が**使っている**という結線はここでしか固定されない。executor から
-    // ラップが外れる（あるいは readback / flush をロック外へ動かす）リファクタは、この 1 本が
-    // 無いと全緑のまま通り、m0-review が major とした誤帰属がそのまま復活する。
+    // The contract of the primitive (GpuContext.withScopeLock) is pinned by gpu_device_test, but the
+    // wiring that Session.run **uses** it is pinned only here. Without this test, a refactor that drops
+    // the wrapper from the executor (or moves readback / flush outside the lock) would pass all green,
+    // and the misattribution that m0-review rated major would come back as is.
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
       gpu,
@@ -196,12 +202,13 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       const x = fill([8, 8], (i) => (i % 13) - 6);
 
-      // MUST: faulty 側を**先に**開かせる。pop はスタック先頭を無条件に取るので、誤帰属は
-      // 「faulty が先に push し先に pop する」重なりでのみ起きる（run 先行だと両者とも正しい
-      // 側に帰属し、ロックが外れても緑になってしまう）。
+      // MUST: let the faulty side open **first**. pop takes the top of the stack unconditionally, so the
+      // misattribution happens only with the overlap "faulty pushes first and pops first" (with the run
+      // first, both are attributed to the right side, and the test would stay green even without the
+      // lock).
       const faulty = gpu[RUNTIME_INTERNAL].withScopeLock(async () => {
         pushFailureScopes(gpu.device);
-        // binding 0 が欠落した bindGroup は同期例外にならず errorScope にだけ現れる
+        // A bindGroup missing binding 0 raises no synchronous exception and shows up only in errorScope
         gpu.device.createBindGroup({ layout, entries: [] });
         for (let i = 0; i < 4; i += 1) await Promise.resolve();
         return await popFailureScopes(gpu.device, "faulty");
@@ -210,10 +217,14 @@ test.skipIf(!GPU_AVAILABLE)(
 
       const [faultyResult, outputs] = await Promise.all([faulty, running]);
 
-      assertInstanceOf(faultyResult, GpuValidationError, "エラーを起こした側が捕捉する");
+      assertInstanceOf(
+        faultyResult,
+        GpuValidationError,
+        "the side that caused the error captures it",
+      );
       assert(faultyResult.message.startsWith("faulty:"), faultyResult.message);
-      // ロックが外れると run が faulty のエラーで落ち（本来通るはずの run が他人のメッセージで
-      // 落ちる）、faulty は自分の失敗を取り逃がす。
+      // Without the lock the run fails with faulty's error (a run that should pass fails with someone
+      // else's message), and faulty misses its own failure.
       assertEquals([...outputs.y.data], [...applyReferenceOp("relu", [x]).data]);
     } finally {
       await session.dispose();

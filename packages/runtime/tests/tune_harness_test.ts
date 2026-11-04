@@ -36,8 +36,9 @@ import {
   sweepCase,
 } from "../src/tune/harness.ts";
 
-// 形状表の DiT 形は 1 本 数 ms 〜 数百 ms なので、GPU テストは同じ経路の小さい形で回す
-// （M ≥ 513 で既定幾何 128×128 のバケットに入る最小の丸い形）。
+// The shape table's DiT shapes take a few ms to a few hundred ms each, so the GPU tests run a small
+// shape on the same path (the smallest round shape that lands in the 128×128 default-geometry
+// bucket at M ≥ 513).
 const LINEAR: LinearCase = {
   id: "test-linear-m1024-n512-k256",
   op: "linear",
@@ -53,7 +54,10 @@ const I8A8_LINEAR: LinearCase = {
   op: "i8a8-linear",
 };
 
-/** 融合 attention の小形（B·H 2・M = N = 128・D 128 — 既定幾何 128×128 の 1 タイル）。 */
+/**
+ * A small fused-attention shape (B·H 2, M = N = 128, D 128 — one tile of the 128×128 default
+ * geometry).
+ */
 const attentionCase = (op: AttentionCase["op"], stage: AttentionCase["stage"]): AttentionCase => ({
   id: `test-${op}-${stage}-bh2-m128-n128-d128`,
   op,
@@ -68,7 +72,10 @@ const attentionCase = (op: AttentionCase["op"], stage: AttentionCase["stage"]): 
   source: "test",
 });
 
-/** conv2d の小形（Cin = Cout = 64・16²・3×3 — m タイル 64 行の本番幾何）。 */
+/**
+ * A small conv2d shape (Cin = Cout = 64, 16², 3×3 — the production geometry with m tiles of 64
+ * rows).
+ */
 const CONV2D: Conv2dCase = {
   id: "test-conv2d-c64-16x16",
   op: "conv2d",
@@ -143,7 +150,7 @@ const CONV3D_SCALAR_OUT: Conv3dI8a8Case = {
   dims: { ...CONV3D_VEC4_OUT.dims, widthIn: 4, widthOut: 2 },
 };
 
-/** 64×64 / 256 スレッド（quick の 2 番目）。 */
+/** 64×64 / 256 threads (the second entry of quick). */
 const GEMM_64X64 = gemmCandidate({ regM: 4, regN: 4, wgX: 16, wgY: 16 });
 const I8A8_64X64 = i8a8Candidate({ regM: 4, regN: 4, wgX: 16, wgY: 16, tileK: 16 });
 const CONV2D_64X64 = conv2dCandidate({ regM: 4, regN: 4, wgX: 16, wgY: 16 });
@@ -152,8 +159,10 @@ const adapter = navigator.gpu === undefined ? null : await navigator.gpu.request
 const timestampQuery = adapter !== null && adapter.features.has("timestamp-query");
 
 /**
- * 2 行（既定 → 別幾何）が測れて出力 digest が一致し、ケースの末尾で既定幾何を測り直した比が
- * 残ったこと。キーは幾何の名前を含む（名前は v4 抜きの綴りなので、キーの `v4` を除いて見る）。
+ * Asserts that 2 rows (the default → another geometry) were measured with matching output digests,
+ * and that the ratio of re-measuring the default geometry at the end of the case was kept. The key
+ * contains the geometry's name (the name is spelled without v4, so `v4` is removed from the key
+ * before looking).
  */
 const assertMeasuredPair = (result: CaseResult, defaultName: string, other: string): void => {
   const { rows, summary } = result;
@@ -168,7 +177,7 @@ const assertMeasuredPair = (result: CaseResult, defaultName: string, other: stri
     assert((row.reps ?? 0) >= 1);
     assertMatch(row.outputSha256 ?? "", /^[0-9a-f]{64}$/);
     const key = (row.key ?? "").replaceAll("v4", "");
-    assert(key.includes(row.geometry), `${row.key} に ${row.geometry} が無い`);
+    assert(key.includes(row.geometry), `${row.key} does not contain ${row.geometry}`);
   }
   assertEquals(second.identicalToDefault, true);
   assert((second.speedupVsDefault ?? 0) > 0);
@@ -178,7 +187,7 @@ const assertMeasuredPair = (result: CaseResult, defaultName: string, other: stri
   assert((summary.defaultRepeat?.driftRatio ?? 0) > 0);
 };
 
-/** 実 GPU で 1 ケースを既定 + 1 幾何で回す（rounds 1）。 */
+/** Runs 1 case on the real GPU with the default + 1 geometry (rounds 1). */
 const sweepPair = async (
   target: SweepCase,
   other: GeometryCandidate,
@@ -195,7 +204,7 @@ const sweepPair = async (
   }
 };
 
-test("束縛表は WGSL の storage の役割（本数と書き込み先の位置）と突き合わせて通る", () => {
+test("the binding table passes the comparison with the WGSL storage roles (count and the position of the write target)", () => {
   const roles = parseStorageRoles(linearWgsl("f16", true, "f32", 1024));
   assertBindingRoles(
     { key: "linear", bindings: ["x", "w", "bias", "out"], writes: ["out"] },
@@ -203,7 +212,7 @@ test("束縛表は WGSL の storage の役割（本数と書き込み先の位�
   );
 });
 
-test("束縛表の書き込み先の位置が WGSL と違えば落ちる（位置束縛の取り違えの検出）", () => {
+test("fails when the binding table's write-target position differs from the WGSL (detects swapped positional bindings)", () => {
   const roles = parseStorageRoles(linearWgsl("f16", true, "f32", 1024));
   assertThrows(
     () =>
@@ -216,14 +225,14 @@ test("束縛表の書き込み先の位置が WGSL と違えば落ちる（位�
   );
 });
 
-test("matmul / bmm の全ケースの束縛表は、既定幾何の WGSL の storage の役割と噛み合う", () => {
+test("the binding tables of every matmul / bmm case agree with the storage roles of the default geometry's WGSL", () => {
   const dense = SWEEP_CASES.filter((target) => target.op === "matmul" || target.op === "bmm");
   assertEquals(new Set(dense.map((target) => target.op)), new Set(["matmul", "bmm"]));
   for (const target of dense) {
     const plan = casePlan(target, 65535, false);
     const launch = plan.launch(plan.defaultCandidate);
     assertBindingRoles(launch, parseStorageRoles(launch.wgsl));
-    // 束縛の名前は全て資源表にあり、出力は書き込み先
+    // Every binding name is in the resource table, and the output is the write target
     const names = new Set(plan.resources.map((spec) => spec.name));
     for (const name of launch.bindings) assert(names.has(name), `${target.id}: ${name}`);
     assert(launch.writes.includes(plan.output), target.id);
@@ -293,7 +302,7 @@ test("every conv3d w8a8 case launches the shared kernel function's variant, whic
   }
 });
 
-test("束縛表の本数が WGSL と違えば落ちる", () => {
+test("fails when the binding table's count differs from the WGSL", () => {
   const roles = parseStorageRoles(linearWgsl("f16", true, "f32", 1024));
   assertThrows(
     () =>
@@ -303,7 +312,7 @@ test("束縛表の本数が WGSL と違えば落ちる", () => {
   );
 });
 
-test("1 dispatch 15 µs の小さいケースでも、掃引の反復は opbench の上限 1024 を超えて pass が目標長に届く", () => {
+test("even for a small case of 15 µs per dispatch, the sweep's iterations go beyond opbench's cap of 1024 so a pass reaches the target length", () => {
   const nsPerDispatch = 15e3;
   const reps = calibrateReps(nsPerDispatch, TARGET_PASS_MS, SWEEP_MAX_REPS);
   assertEquals(reps, 5334);
@@ -312,7 +321,7 @@ test("1 dispatch 15 µs の小さいケースでも、掃引の反復は opbench
 });
 
 test.skipIf(adapter === null)(
-  "実 GPU: f32 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
+  "real GPU: measuring f32 linear with the default and 64×64/256 gives positive times for both and matching outputs",
   async () => {
     assertMeasuredPair(
       await sweepPair(LINEAR, GEMM_64X64),
@@ -323,7 +332,7 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: i8a8 linear を既定と 64×64/256 で測ると両方の時間が正で出力が一致する",
+  "real GPU: measuring i8a8 linear with the default and 64×64/256 gives positive times for both and matching outputs",
   async () => {
     assertMeasuredPair(
       await sweepPair(I8A8_LINEAR, I8A8_64X64),
@@ -334,17 +343,17 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: timestamp-query の無い device は壁時計（wall）で同じ規約を回す",
+  "real GPU: a device without timestamp-query runs the same protocol on the wall clock (wall)",
   async () => {
     const result = await sweepPair(LINEAR, GEMM_64X64, false);
     assertMeasuredPair(result, gemmCandidate(defaultGemmGeometry()).name, GEMM_64X64.name);
-    // 単位が wall なら round の値は壁時計そのもの
+    // With the unit wall, the round values are the wall-clock times themselves
     for (const row of result.rows) assertEquals(row.rounds, row.wallRounds);
   },
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: f32 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
+  "real GPU: measuring ①QK of the f32 fused attention with the default and 64×64/256 gives matching outputs",
   async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("attention", "qk"), GEMM_64X64),
@@ -355,7 +364,7 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: f32 融合 attention の ③PV（前段 ①QK → ② 行統計）を既定と 64×64/256 で測ると出力が一致する",
+  "real GPU: measuring ③PV of the f32 fused attention (preceded by ①QK → ② row stats) with the default and 64×64/256 gives matching outputs",
   async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("attention", "pv"), GEMM_64X64),
@@ -366,7 +375,7 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: i8a8 融合 attention の ①QK を既定と 64×64/256 で測ると出力が一致する",
+  "real GPU: measuring ①QK of the i8a8 fused attention with the default and 64×64/256 gives matching outputs",
   async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("i8a8-attention", "qk"), I8A8_64X64),
@@ -377,7 +386,7 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: i8a8 融合 attention の ③PV を既定と 64×64/256 で測ると出力が一致する",
+  "real GPU: measuring ③PV of the i8a8 fused attention with the default and 64×64/256 gives matching outputs",
   async () => {
     assertMeasuredPair(
       await sweepPair(attentionCase("i8a8-attention", "pv"), I8A8_64X64),
@@ -399,7 +408,7 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: conv2d の implicit GEMM を既定と 64×64/256 で測ると出力が一致する",
+  "real GPU: measuring conv2d's implicit GEMM with the default and 64×64/256 gives matching outputs",
   async () => {
     assertMeasuredPair(
       await sweepPair(CONV2D, CONV2D_64X64),
@@ -409,12 +418,13 @@ test.skipIf(adapter === null)(
   },
 );
 
-// 幾何どうしの一致は「全幾何が同じ取り違え（束縛の入れ替わり・params の誤り）をしている」場合を
-// 検出できないので、linear の既定幾何の出力だけは CPU の参照と突き合わせる。参照の丸め順は
-// src/kernels/gemm.ts の契約（K 昇順・acc へ `acc + a * b` の逐次加算・fma を明示しない・bias は
-// 末尾で 1 度）に合わせ、ビット同一を要求する。
+// Agreement between geometries cannot detect the case where "every geometry makes the same mistake
+// (swapped bindings, wrong params)", so the output of linear's default geometry is also compared
+// with a CPU reference. The reference's rounding order follows the contract of src/kernels/gemm.ts
+// (K ascending, sequential accumulation `acc + a * b` into acc, no explicit fma, bias once at the
+// end), and bit identity is required.
 
-/** f16 のビット列 → 値（正規数・非正規数。掃引の入力は正規数だけを作る）。 */
+/** f16 bits → value (normal and subnormal numbers; the sweep's inputs are only normal numbers). */
 const f16ToNumber = (bits: number): number => {
   const sign = bits & 0x8000 ? -1 : 1;
   const exponent = (bits >>> 10) & 0x1f;
@@ -424,7 +434,7 @@ const f16ToNumber = (bits: number): number => {
   return sign * (1 + mantissa / 1024) * 2 ** (exponent - 15);
 };
 
-/** f32 の隣（`up` なら +∞ 側）。 */
+/** The neighbouring f32 (towards +∞ when `up`). */
 const adjacentF32 = (value: number, up: boolean): number => {
   const bits = new Uint32Array(new Float32Array([value]).buffer);
   if (value === 0) {
@@ -437,9 +447,10 @@ const adjacentF32 = (value: number, up: boolean): number => {
 };
 
 /**
- * f32 の fma（`a·b + c` を 1 回だけ丸める）。f32 どうしの積は f64 で厳密なので、和の誤差を
- * TwoSum で採り、f32 の丸めの中点に乗ったときだけ誤差の符号で向きを決める。失敗時の診断用
- * （契約は fma を明示しないが、backend が縮約するかどうかを失敗の文言で見分けられるように）。
+ * An f32 fma (`a·b + c` rounded only once). A product of two f32 values is exact in f64, so the
+ * error of the sum is taken with TwoSum, and only when the value lands on an f32 rounding midpoint
+ * does the error's sign decide the direction. For diagnostics on failure (the contract does not
+ * make fma explicit, but the failure message can then tell whether the backend contracted).
  */
 const fmaF32 = (a: number, b: number, c: number): number => {
   const product = a * b;
@@ -456,12 +467,12 @@ const fmaF32 = (a: number, b: number, c: number): number => {
 const digestOf = async (values: Float32Array<ArrayBuffer>): Promise<string> =>
   await joinChunkDigests([await crypto.subtle.digest("SHA-256", new Uint8Array(values.buffer))]);
 
-/** 資源表の 1 本を、harness が GPU へ書いたのと同じ語列で作る。 */
+/** Builds one resource-table entry as the same words the harness wrote to the GPU. */
 const resourceWords = (target: SweepCase, name: string): Uint32Array<ArrayBuffer> => {
   const specs = casePlan(target, 65535, false).resources;
   const index = specs.findIndex((spec) => spec.name === name);
   const spec = specs[index];
-  if (spec === undefined || spec.fill === "none") throw new Error(`資源 ${name} が埋まらない`);
+  if (spec === undefined || spec.fill === "none") throw new Error(`resource ${name} is not filled`);
   const words = new Uint32Array(Math.max(4, Math.ceil(spec.bytes / 4) * 4) / 4);
   const next = resourceWordStream(spec.fill, index);
   for (let at = 0; at < words.length; at += 1) words[at] = next();
@@ -469,7 +480,7 @@ const resourceWords = (target: SweepCase, name: string): Uint32Array<ArrayBuffer
 };
 
 test.skipIf(adapter === null)(
-  "実 GPU: f32 linear の既定幾何の出力は CPU 参照（K 昇順の逐次積和 + 末尾の bias・非融合か fma 縮約のどちらか）とビット同一",
+  "real GPU: the output of f32 linear's default geometry is bit-identical to a CPU reference (sequential multiply-add in K order + bias at the end, either uncontracted or fma-contracted)",
   async () => {
     const target: LinearCase = {
       id: "test-linear-cpu-m64-n64-k64",
@@ -484,14 +495,15 @@ test.skipIf(adapter === null)(
     const x = new Float32Array(resourceWords(target, "x").buffer);
     const weightWords = resourceWords(target, "w");
     const bias = new Float32Array(resourceWords(target, "bias").buffer);
-    // 重みの f16 は 1 語に 2 つ（下位 = 偶数添字 — kernels/weight-storage.ts）
+    // Two f16 weights per word (low half = even index — kernels/weight-storage.ts)
     const weight = (index: number): number =>
       f16ToNumber((weightWords[index >> 1] >>> ((index & 1) * 16)) & 0xffff);
     const expected = new Float32Array(m * n);
-    // 同じ順序で積和だけを fma に縮約した参照。src/kernels/gemm.ts の契約は「`acc + a * b` の字面のまま」で、
-    // fma に縮約するかは backend が決める（B570 / Vulkan は縮約する・RTX / Vulkan は縮約しなかった —
-    // docs/limitations.md の環境依存の軸）。束縛・params・K の順序の取り違えはどちらの参照とも一致しないので、
-    // 「どちらか一方とビット同一」でこのテストの目的（配線の検出）は保たれる。
+    // A reference in the same order with only the multiply-add contracted to fma. The contract of
+    // src/kernels/gemm.ts is "`acc + a * b` as written", and whether it is contracted to fma is up
+    // to the backend (B570 / Vulkan contracts, RTX / Vulkan did not — the environment-dependent
+    // axis of docs/limitations.md). Swapped bindings, params or K order match neither reference, so
+    // "bit identical to one of the two" keeps this test's purpose (detecting wiring mistakes).
     const contracted = new Float32Array(m * n);
     for (let row = 0; row < m; row += 1) {
       for (let col = 0; col < n; col += 1) {
@@ -518,7 +530,7 @@ test.skipIf(adapter === null)(
       const digest = rows[0].outputSha256;
       assert(
         digest === reference || digest === contractedReference,
-        `出力 ${digest} が非融合の CPU 参照 ${reference} とも fma 縮約の CPU 参照 ${contractedReference} とも一致しない（束縛・params・K の順序のどれかが違う）`,
+        `output ${digest} matches neither the uncontracted CPU reference ${reference} nor the fma-contracted CPU reference ${contractedReference} (one of the bindings, params or K order is wrong)`,
       );
     } finally {
       destroySweepContext(context);
@@ -528,8 +540,9 @@ test.skipIf(adapter === null)(
 );
 
 /**
- * dense の GEMM（matmul / bmm — bias 無し・B 側 `[K,N]`）の CPU 参照 2 本（非融合 / fma 縮約）。
- * 丸め順は linear の参照と同じ（K 昇順の逐次積和）。bmm は行列 `batch` 枚を連続に並べる。
+ * The two CPU references (uncontracted / fma-contracted) of a dense GEMM (matmul / bmm — no bias,
+ * B side `[K,N]`). The rounding order is the same as linear's reference (sequential multiply-add in
+ * K order). bmm lays `batch` matrices out contiguously.
  */
 const denseReferences = async (
   target: MatmulCase | BmmCase,
@@ -560,8 +573,9 @@ const denseReferences = async (
 };
 
 /**
- * 既定幾何と 64×64/256 の 2 行を測り、既定の出力が CPU 参照のどちらかとビット同一で、もう 1 行が
- * 既定と一致すること（束縛・params・dispatch の取り違えは参照と食い違う）。
+ * Measures the 2 rows of the default geometry and 64×64/256, and asserts that the default's output
+ * is bit-identical to one of the CPU references and that the other row matches the default (swapped
+ * bindings, params or dispatch disagree with the reference).
  */
 const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promise<void> => {
   const { plain, contracted } = await denseReferences(target);
@@ -574,7 +588,7 @@ const assertDenseMatchesReference = async (target: MatmulCase | BmmCase): Promis
     const digest = rows[0].outputSha256;
     assert(
       digest === plain || digest === contracted,
-      `${target.op}: 出力 ${digest} が非融合の CPU 参照 ${plain} とも fma 縮約の CPU 参照 ${contracted} とも一致しない（束縛・params・dispatch のどれかが違う）`,
+      `${target.op}: output ${digest} matches neither the uncontracted CPU reference ${plain} nor the fma-contracted CPU reference ${contracted} (one of the bindings, params or dispatch is wrong)`,
     );
     assertEquals(rows[1].identicalToDefault, true);
   } finally {
@@ -649,9 +663,9 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: f32 matmul の出力は CPU 参照（K 昇順の逐次積和・非融合か fma 縮約のどちらか）とビット同一",
+  "real GPU: the output of f32 matmul is bit-identical to a CPU reference (sequential multiply-add in K order, either uncontracted or fma-contracted)",
   async () => {
-    // M / N / K を全て違う値にする（m・n・k の取り違えが寸法の食い違いとして出る）
+    // M / N / K all differ (a mix-up of m, n and k shows up as a dimension mismatch)
     await assertDenseMatchesReference({
       id: "test-matmul-cpu-m64-n48-k32",
       op: "matmul",
@@ -666,10 +680,11 @@ test.skipIf(adapter === null)(
 );
 
 test.skipIf(adapter === null)(
-  "実 GPU: f32 bmm（batch 3）の出力は CPU 参照とビット同一（バッチの取り違えは参照と食い違う）",
+  "real GPU: the output of f32 bmm (batch 3) is bit-identical to the CPU reference (a batch mix-up disagrees with the reference)",
   async () => {
-    // 入力は資源ごとの擬似乱数列なのでバッチごとに値が違う — z のオフセットを取り違えると
-    // （全バッチが 0 枚目を読む・書き先が重なる・書き残しが 0 のまま）参照と一致しない
+    // The inputs are a pseudo-random sequence per resource, so the values differ per batch — a
+    // wrong z offset (every batch reading matrix 0, overlapping write targets, unwritten entries
+    // left at 0) does not match the reference
     await assertDenseMatchesReference({
       id: "test-bmm-cpu-b3-m64-n48-k32",
       op: "bmm",

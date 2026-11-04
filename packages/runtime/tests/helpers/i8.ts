@@ -1,41 +1,44 @@
-// i8 格納テストの組み立てヘルパ（ホスト側の f32 → per-channel int8 符号化）。
+// Builders for i8 storage tests (host-side f32 → per-channel int8 encoding).
 //
-// 符号化は**テスト専用**（本番はエクスポータ = Python 側の担当で、ランタイムは decode しか
-// 持たない）。ここは「i8 + per-channel scale で厳密に表せる重み」を作るための道具で、
-// ADR 0006 の fake-quant をホストで再現する役目を持つ:
-//   bytes  = 量子化した格納バイト列（GPU / ロード経路に渡す）
-//   scale  = チャネルごとの scale（keepdim 形の F32 テンソルとして配布形に載せる）
-//   values = そのバイト列を**本番の decodeI8 で**戻した f32 列（CPU 参照が使う期待値）
-// MUST: 期待値は符号化器ではなく decodeI8 から作る。両側を符号化器で作ると、符号化器の
-// 誤りが期待値にも同じだけ乗って恒真化する。
+// The encoding is **test-only** (in production the exporter encodes, on the Python side, and the
+// runtime only decodes). This is the tool that builds "weights exactly representable as i8 +
+// per-channel scale", and it reproduces ADR 0006's fake-quant on the host:
+//   bytes  = the quantized stored bytes (passed to the GPU / load path)
+//   scale  = scale per channel (carried in the distribution form as an F32 tensor of keepdim shape)
+//   values = those bytes decoded back to f32 **by the production decodeI8** (the expected values
+//            the CPU reference uses)
+// MUST: the expected values come from decodeI8, not from the encoder. Building both sides with the
+// encoder would carry an encoder bug into the expected values just the same, making the check
+// tautological.
 
 import { decodeI8 } from "../../src/format/i8.ts";
 
-/** f32 の最小 normal（`torch.finfo(float32).tiny` — scale の下限 clamp に使う）。 */
+/** Smallest normal f32 (`torch.finfo(float32).tiny` — used as the lower clamp of the scale). */
 export const F32_TINY = 1.1754943508222875e-38;
 
-/** 符号付き 8bit の並び → 生バイト列（下位 8bit だけを見る）。 */
+/** Sequence of signed 8-bit values → raw bytes (only the low 8 bits are used). */
 export const i8BytesFrom = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   Uint8Array.from(values, (value) => value & 0xff);
 
 export type QuantizedI8 = {
-  /** safetensors に載せる I8 の生バイト列。 */
+  /** Raw I8 bytes to put in safetensors. */
   readonly bytes: Uint8Array<ArrayBuffer>;
-  /** チャネルごとの scale（平坦 = チャネル順）。 */
+  /** Scale per channel (flat = channel order). */
   readonly scale: Float32Array<ArrayBuffer>;
-  /** scale テンソルの keepdim 形 shape。 */
+  /** Keepdim shape of the scale tensor. */
   readonly scaleShape: readonly number[];
-  /** 量子化後の値（fake-quant — CPU 参照はこちらを重みとして使う）。 */
+  /** The quantized values (fake-quant — the CPU reference uses these as the weights). */
   readonly values: Float32Array<ArrayBuffer>;
 };
 
 /**
- * per-channel symmetric int8 の fake-quant（ADR 0019）。
+ * Per-channel symmetric int8 fake-quant (ADR 0019).
  *
- * `scale = max(amax / 127, tiny)` / `q = round(w / scale)` を **±127 に閉じる**
- * （−128 を使わないので最大絶対値要素が厳密復元される）。丸めは 0 から遠い側への
- * half-away-from-zero で、torch 側（half-to-even）と厳密には違うが、**期待値は decodeI8 から
- * 作る**のでランタイムの検証には影響しない（本番の符号化器はエクスポータ側）。
+ * `scale = max(amax / 127, tiny)` / `q = round(w / scale)` **clamped to ±127**
+ * (−128 is not used, so the element with the largest magnitude is restored exactly). Rounding is
+ * half-away-from-zero, which differs strictly from the torch side (half-to-even), but **the
+ * expected values come from decodeI8**, so this does not affect what the runtime is checked
+ * against (the production encoder lives in the exporter).
  */
 export const quantizeI8 = (
   values: ArrayLike<number>,

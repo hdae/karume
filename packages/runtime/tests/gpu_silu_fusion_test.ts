@@ -1,5 +1,6 @@
-// SiLU = x * sigmoid(x) の strict peephole（融合ルール silu — src/runtime/fusion.ts）。
-// エクスポータが出す隣接 2 ノードだけを 1 dispatch へ畳み、掴めない形は素の列へ落ちる。
+// The strict peephole for SiLU = x * sigmoid(x) (fusion rule silu — src/runtime/fusion.ts).
+// Only the two adjacent nodes the exporter emits are folded into one dispatch; any shape the
+// matcher does not catch falls back to the plain sequence.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
@@ -10,7 +11,7 @@ import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helper
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
-// 256 スレッド workgroup の端数を通す長さ。
+// A length that leaves a partial 256-thread workgroup.
 const SHAPE = [257] as const;
 
 type MulOrder = "xs" | "sx";
@@ -24,9 +25,10 @@ type SiluGraphOptions = {
 };
 
 /**
- * `sigmoid(x) → mul(x, sigmoid(x))` の実 export 形。
- * `interpose` は 0 dispatch の別名を 1 本挟むだけで、値も物理 dispatch 数も変えずに
- * strict matcher の隣接条件だけを外す（= 同一バックエンド上の正本を作る）。
+ * The real exported form of `sigmoid(x) → mul(x, sigmoid(x))`.
+ * `interpose` only inserts one zero-dispatch alias, which breaks the strict matcher's adjacency
+ * condition without changing the values or the physical dispatch count (= it builds the
+ * reference on the same backend).
  */
 const siluGraph = (order: MulOrder, options: SiluGraphOptions = {}): DeclarationJson => {
   const sigmoidName = "sigmoid";
@@ -98,7 +100,10 @@ const words = (tensor: Tensor): Uint32Array =>
 
 const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
 
-/** 非 NaN はビット一致、NaN はバックエンド差を許して分類だけ一致させる。 */
+/**
+ * Non-NaN values must be bit-identical; NaN only has to match in class, allowing backend
+ * differences.
+ */
 const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
   assertEquals(actual.length, expected.length, label + ": length");
   for (let i = 0; i < actual.length; i++) {
@@ -112,7 +117,8 @@ const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: st
 
 const testInput = (): Tensor => {
   const x = fill(SHAPE, (i) => Math.sin(i * 0.37) * 3.1 + i / 997);
-  // 有限値 / 符号付きゼロ / subnormal / 最小正規化数 / overflow 境界 / ±Inf / NaN を同居させる。
+  // Mix finite values, signed zeros, subnormals, the smallest normal, the overflow boundary, ±Inf
+  // and NaN.
   words(x).set([
     0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x007fffff, 0x807fffff, 0x00800000, 0x80800000,
     0x7f800000, 0xff800000, 0x7fc01234, 0xff801234,
@@ -122,7 +128,7 @@ const testInput = (): Tensor => {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "SiLU 融合は xs / sx 両順で primitive と有限ビット / NaN 分類が一致し、2→1 dispatch へ畳む（実 GPU）",
+  "SiLU fusion matches the primitives in finite bits and NaN class in both xs / sx orders and folds 2→1 dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const x = testInput();
@@ -148,12 +154,13 @@ test.skipIf(!GPU_AVAILABLE)(
             2,
             `${order}: sigmoid + mul primitive`,
           );
-          // 融合が黙って外れれば値は正しいまま dispatch だけ増える。カウンタで直接押さえる。
-          assertEquals(fused.diagnostics().lastRunFusions?.silu, 1, `${order}: 融合カウンタ`);
+          // If fusion silently stopped applying, the values would stay correct and only the
+          // dispatch count would grow. Pin it directly with the counter.
+          assertEquals(fused.diagnostics().lastRunFusions?.silu, 1, `${order}: fusion counter`);
           assertEquals(
             primitive.diagnostics().lastRunFusions?.silu,
             0,
-            `${order}: 反例のカウンタは 0`,
+            `${order}: the counter of the counterexample is 0`,
           );
           assertEquals(
             requireCensus(fused.diagnostics().lastRunPipelines, order).map((row) => row.key),
@@ -172,7 +179,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "SiLU で x を 2 回 release しても後続 consumer まで入力バッファを保持する（実 GPU）",
+  "SiLU keeps the input buffer alive until the later consumer even when x is released twice (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const x = testInput();
@@ -202,7 +209,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "SiLU の内部 sigmoid output / 別 consumer / 別名 / 別 mul 入力は strict matcher から fallback する（実 GPU）",
+  "SiLU with the inner sigmoid as an output / another consumer / an alias / another mul input falls back from the strict matcher (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const x = testInput();
@@ -255,7 +262,7 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             session.diagnostics().lastRunFusions?.silu,
             0,
-            `${testCase.name}: 融合カウンタ 0`,
+            `${testCase.name}: fusion counter 0`,
           );
         } finally {
           await session.dispose();

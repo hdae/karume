@@ -1,23 +1,25 @@
-// i4（K 方向 group symmetric packed 4bit）の CPU 側展開（format/i4.ts — ADR 0069）。
+// CPU-side decoding of i4 (group-symmetric packed 4-bit along K) (format/i4.ts — ADR 0069).
 //
-// pack 順の期待バイトは**手で書き下す**（エクスポータ `karume/emit.py: pack_int4` の仕様 —
-// tests 側 tools/exporter/tests/test_emit.py の `q=[1,2] → 0xA9` と同じ値で両言語を対に固定
-// する）。実装から期待値を引くと往復が恒真化する。
+// The expected bytes of the pack order are **written out by hand** (the spec of the exporter's
+// `karume/emit.py: pack_int4` — the same value as `q=[1,2] → 0xA9` in
+// tools/exporter/tests/test_emit.py pins both languages as a pair). Deriving the expected values
+// from the implementation makes the round trip a tautology.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { decodeI4, I4Error } from "../src/format/i4.ts";
 
-test("decodeI4: pack 順は要素 2i = 下位 nibble / 2i+1 = 上位・u = q + 8", () => {
-  // q = [1, 2] → u = [9, 10] → 1 バイト 0xA9（上下を逆に読むと [2, 1] になる）。
-  // Python 側 test_emit.py の TestPackedFourBitOrder と同じ値 — 両言語の pack 対応を固定する。
+test("decodeI4: pack order is element 2i = low nibble / 2i+1 = high nibble, u = q + 8", () => {
+  // q = [1, 2] → u = [9, 10] → one byte 0xA9 (reading the nibbles swapped gives [2, 1]).
+  // The same value as TestPackedFourBitOrder in test_emit.py on the Python side — pins the packing
+  // correspondence between the two languages.
   const decoded = decodeI4(Uint8Array.from([0xa9]), [1, 2], Float32Array.from([1]), [1, 1], 2);
   assertEquals([...decoded], [1, 2]);
 });
 
-test("decodeI4: 隣接要素が全て異なる非対称パターンの位置が完全一致する", () => {
-  // [1,-2,3,-4,...]（±7 内）— 対称なパターンだと nibble の取り違えが値に出ない
-  // （ADR 0069 決定 4 ① の CPU 側）。
+test("decodeI4: positions match exactly for an asymmetric pattern where all neighbours differ", () => {
+  // [1,-2,3,-4,...] (within ±7) — with a symmetric pattern, swapped nibbles would not show in the
+  // values (the CPU side of ADR 0069 decision 4 ①).
   const q = Array.from({ length: 16 }, (_, i) => ((i % 7) + 1) * (i % 2 === 0 ? 1 : -1));
   const bytes = new Uint8Array(8);
   for (const [i, value] of q.entries()) {
@@ -31,20 +33,21 @@ test("decodeI4: 隣接要素が全て異なる非対称パターンの位置が�
   );
 });
 
-test("decodeI4: scale は group ごとに引かれる（行 × group の平坦順）", () => {
-  // [2, 8]・group 4 → group 形 [2, 2]。全要素 q = 1（u = 9 = 0x99）で、値の違いは
-  // scale の添字だけから出る — 添字の誤り（行と group の取り違え）が直接赤になる。
+test("decodeI4: scale is looked up per group (flat row × group order)", () => {
+  // [2, 8], group 4 → group shape [2, 2]. Every element is q = 1 (u = 9 = 0x99), so value
+  // differences come only from the scale index — an index error (rows and groups swapped) goes red
+  // directly.
   const bytes = new Uint8Array(8).fill(0x99);
   const scale = Float32Array.from([1, 2, 4, 8]);
   const decoded = decodeI4(bytes, [2, 8], scale, [2, 2], 4);
   assertEquals([...decoded], [1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 8, 8, 8, 8]);
 });
 
-test("decodeI4: 語彙表 [V,D] は適格外でもそのまま展開できる（group 32・行 × group 順）", () => {
-  // embedding の重み `[V,D]` は `channel_rows` が恒等なので、group は D 軸に沿って切られる
-  // （ADR 0069 決定 5 の embedding 追補）。適格外の i4 embedding はこの展開器が受け皿になる。
-  // V = 3 / D = 64 / group 32 → group 形 [3, 2]。q は行と列で変える（行 / group の取り違えが
-  // 値に出る形）。
+test("decodeI4: an embedding table [V,D] decodes as is even when not eligible (group 32, row × group order)", () => {
+  // The embedding weight `[V,D]` has an identity `channel_rows`, so groups are cut along the D axis
+  // (the embedding addendum to ADR 0069 decision 5). This decoder is what handles an ineligible i4
+  // embedding. V = 3 / D = 64 / group 32 → group shape [3, 2]. q varies by row and column (a form
+  // where swapping rows / groups shows in the values).
   const vocab = 3;
   const hidden = 64;
   const groupSize = 32;
@@ -69,11 +72,12 @@ test("decodeI4: 語彙表 [V,D] は適格外でもそのまま展開できる（
   assertEquals([...decoded], expected);
 });
 
-test("decodeI4: conv1d の rank 3 重みは rank 2 scale で展開できる（行 = Cout・行長 = Cin·K）", () => {
-  // 波 J-5b: 適格 op の `channel_rows` はどれも「先頭次元 = 行・残りを平坦化」で、scale は
-  // rank に依らず rank 2 `[shape[0], (numel / shape[0]) / g]`。`[2,4,4]`（行長 16）× g8 →
-  // scale `[2,2]`。nibble の並びは平坦メモリ順（`[O,Cin,K]` row-major = `[O, Cin·K]` 平坦）
-  // なので、行 / group の取り違えが scale の値差でそのまま出る形にする。
+test("decodeI4: a rank-3 conv1d weight decodes with a rank-2 scale (row = Cout, row length = Cin·K)", () => {
+  // Step J-5b: every eligible op's `channel_rows` is "leading dimension = row, the rest flattened",
+  // and the scale is rank 2 `[shape[0], (numel / shape[0]) / g]` whatever the rank. `[2,4,4]` (row
+  // length 16) × g8 → scale `[2,2]`. Nibbles are in flat memory order (`[O,Cin,K]` row-major =
+  // `[O, Cin·K]` flat), so the form is chosen so that swapping rows / groups shows directly as a
+  // difference in scale values.
   const shape = [2, 4, 4];
   const groupSize = 8;
   const count = 2 * 4 * 4;
@@ -91,7 +95,8 @@ test("decodeI4: conv1d の rank 3 重みは rank 2 scale で展開できる（�
     return Math.fround(value * scale[row * 2 + group]);
   });
   assertEquals([...decoded], expected);
-  // 旧規則の形（重みと同 rank・最終次元だけ group 数 = `[2,4,1]`）は受理しない
+  // The old rule's shape (same rank as the weight, only the last dimension is the group count =
+  // `[2,4,1]`) is not accepted
   assertThrows(
     () => decodeI4(bytes, shape, Float32Array.from([1, 1, 1, 1, 1, 1, 1, 1]), [2, 4, 1], 4),
     I4Error,
@@ -99,9 +104,10 @@ test("decodeI4: conv1d の rank 3 重みは rank 2 scale で展開できる（�
   );
 });
 
-test("decodeI4: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
-  // 0.1 は f32 で丸められる値（format/i8.ts の同型テストと同じ論証 — q は整数で f32 厳密、
-  // 積は f64 で厳密なので 1 回丸めが f32 乗算の正しい丸めと一致する）。
+test("decodeI4: decoding rounds to f32 exactly once (equal to the GPU's f32 multiply)", () => {
+  // 0.1 is a value that f32 rounds (the same argument as the matching test for format/i8.ts — q is
+  // an integer and exact in f32, and the product is exact in f64, so the single rounding matches
+  // the correct rounding of an f32 multiply).
   const scale = Float32Array.from([0.1]);
   // q = [7, -7] → u = [15, 1] → 0x1F
   const decoded = decodeI4(Uint8Array.from([0x1f]), [1, 2], scale, [1, 1], 2);
@@ -109,34 +115,34 @@ test("decodeI4: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と�
   assertEquals(decoded[1], Math.fround(-7 * scale[0]));
 });
 
-test("decodeI4: バイト長・group 形 scale・整除の違反を拒否する", () => {
+test("decodeI4: rejects violations of byte length, group-shaped scale and divisibility", () => {
   const bytes = new Uint8Array(8);
-  // バイト長 ≠ numel / 2
+  // byte length ≠ numel / 2
   assertThrows(
     () => decodeI4(new Uint8Array(7), [2, 8], Float32Array.from([1, 1]), [2, 1], 8),
     I4Error,
     "bytes",
   );
-  // keepdim broadcast 形（i8 の形）は group 形として拒否 — 黙って通すと group scale が
-  // 1 チャネル 1 値として配られる
+  // The keepdim broadcast shape (the i8 shape) is rejected as a group shape — letting it through
+  // silently would hand out the group scales as one value per channel
   assertThrows(
     () => decodeI4(bytes, [2, 8], Float32Array.from([1, 1]), [2, 1], 4),
     I4Error,
     "group shape",
   );
-  // group が量子化軸を割り切らない
+  // The group does not divide the quantization axis
   assertThrows(
     () => decodeI4(bytes, [2, 8], Float32Array.from([1, 1]), [2, 1], 3),
     I4Error,
     "does not divide",
   );
-  // scale 実体の要素数が shape と合わない
+  // The element count of the scale data does not match its shape
   assertThrows(
     () => decodeI4(bytes, [2, 8], Float32Array.from([1]), [2, 2], 4),
     I4Error,
     "element count",
   );
-  // rank 0（量子化軸が無い）
+  // rank 0 (no quantization axis)
   assertThrows(
     () => decodeI4(new Uint8Array(0), [], Float32Array.from([]), [], 16),
     I4Error,

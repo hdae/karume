@@ -1,21 +1,26 @@
 /**
- * 実行環境の識別（デバイス別の参照値と結果を分けるキー）。
+ * Identifies the execution environment (the key that separates per-device reference values and
+ * results).
  *
- * sha256 の参照門が主張できるのは「**同じ GPU・同じランタイム**なら 1 ビットも動かない」こと
- * だけで、クロスデバイスのビット同一は仕様として保証しない（機序は docs/limitations.md の
- * 「sha256 参照門は参照環境専用」節）。参照値をテストのソースに定数で持つと、機を替えた瞬間に
- * 全門が赤になり「この機での退行を掴む」という門の役目そのものが消える。そこで参照値は
- * **環境ごとの行**で持ち、その行を索くキーをここが作る。
+ * All the sha256 reference check can claim is "on **the same GPU and the same runtime** not a
+ * single bit moves"; bit identity across devices is not guaranteed by the spec (the mechanism is in
+ * the "the sha256 reference check is specific to the reference environment" section of
+ * docs/limitations.md). With the reference values as constants in the test source, every check
+ * would go red the moment the machine changes, and the check's very purpose — "catch a regression
+ * on this machine" — would be gone. So the reference values are kept as **one row per
+ * environment**, and this file builds the key that looks the row up.
  *
- * MUST: キーは「同じ機なら毎回同じ」でなければならない。WebGPU から採れる識別子のうち、
- * 再起動やドライバ更新で揺れない面は `GPUAdapterInfo` の名前だけである（ドライバ版は API から
- * 採れない）。ドライバ更新で数値が動いた場合は**同じキーの行が割れる** = 赤で気づく形になる
- * （キーに版を混ぜて黙って別の行へ逃がさない）。
+ * MUST: the key has to be "the same every time on the same machine". Of the identifiers WebGPU
+ * exposes, the only one that does not shift with a reboot or a driver update is the name in
+ * `GPUAdapterInfo` (the driver version is not available from the API). When a driver update moves
+ * the numbers, **the rows of the same key disagree** = it is noticed as red (the version is not
+ * mixed into the key to divert silently to another row).
  *
- * 実装差: Deno は `description` に GPU 名を入れ `architecture` が空、Chrome は
- * `vendor` / `architecture` に名前を入れ `description` が空。どちらかは必ず埋まるので、
- * 埋まっている側を基底にする。Node（Dawn）は `description` にドライバ版が入るので、`device`
- * （GPU 名）を基底にする（キーに版を混ぜない MUST を守る）。
+ * Implementation differences: Deno puts the GPU name in `description` and leaves `architecture`
+ * empty; Chrome puts names in `vendor` / `architecture` and leaves `description` empty. One of the
+ * two is always filled, so the filled one is the base. Node (Dawn) puts the driver version in
+ * `description`, so `device` (the GPU name) is the base there (keeping the MUST of no version in
+ * the key).
  */
 
 import { createRequire } from "node:module";
@@ -32,12 +37,18 @@ const typescriptVersion = (): string => {
     : "";
 };
 
-/** 参照値を分ける実行系（同じ GPU でもランタイムが違えば数値は動きうる）。 */
+/**
+ * The runtime that separates reference values (on the same GPU, a different runtime can move the
+ * numbers).
+ */
 export type EnvironmentRuntime = "deno" | "chrome" | "node";
 
-/** この実行環境の素性（結果 JSON にそのまま載る）。 */
+/** The identity of this execution environment (written into the result JSON as is). */
 export type Environment = {
-  /** 参照値・結果を索くキー。GPU が無い環境では**持たない**（行を作れないため）。 */
+  /**
+   * The key that looks up reference values and results. An environment without a GPU has **none**
+   * (no row can be made for it).
+   */
   readonly key?: string;
   readonly runtime: {
     readonly name: EnvironmentRuntime;
@@ -57,17 +68,18 @@ export type Environment = {
   };
 };
 
-/** 基底から落とす商標の飾り（`Intel(R) Graphics` → `intel graphics`）。 */
+/** Trademark marks dropped from the base (`Intel(R) Graphics` → `intel graphics`). */
 const TRADEMARKS = ["(r)", "(tm)", "(c)"] as const;
 
 /**
- * 環境キー（`<ランタイム>-<アダプタ名>`）。
+ * The environment key (`<runtime>-<adapter name>`).
  *
- * 例: Deno / `Intel(R) Graphics (BMG G21)` → `deno-intel-graphics-bmg-g21`、
- * Chrome / vendor `apple` + architecture `metal-3` → `chrome-apple-metal-3`。
+ * Examples: Deno / `Intel(R) Graphics (BMG G21)` → `deno-intel-graphics-bmg-g21`;
+ * Chrome / vendor `apple` + architecture `metal-3` → `chrome-apple-metal-3`.
  *
- * MUST: 名前が 1 つも採れない環境では throw する（空キーの行へ黙って混ぜると、別の機の
- * 参照値を「この機の参照値」として突き合わせることになる）。
+ * MUST: throw in an environment where no name at all can be taken (mixing silently into a row with
+ * an empty key would compare against another machine's reference values as "this machine's
+ * reference values").
  */
 export const environmentKey = (runtime: EnvironmentRuntime, info: GPUAdapterInfo): string => {
   const base =
@@ -89,16 +101,19 @@ export const environmentKey = (runtime: EnvironmentRuntime, info: GPUAdapterInfo
 };
 
 /**
- * この実行環境を 1 回だけ確定する（アダプタ情報はテスト登録時点で要るので同期的に持ち回る）。
+ * Settles this execution environment once (the adapter info is needed when the tests are
+ * registered, so it is carried around synchronously).
  *
- * GPU が無い環境では {@link Environment.key} を持たない — 参照値の行も結果の置き場も決め
- * られないためで、そこを空文字などで埋めると別環境の行と混ざる。
+ * An environment without a GPU has no {@link Environment.key} — neither the reference row nor the
+ * place for the results can be decided, and filling it with an empty string or the like would mix
+ * it with another environment's rows.
  */
 export const describeEnvironment = async (): Promise<Environment> => {
   const gpu: GPU | undefined = navigator.gpu;
   const adapter = gpu === undefined ? null : await gpu.requestAdapter();
-  // `readAdapterInfo` は `info` を持たない実装差を空値へ正規化する唯一の読み口。アダプタが
-  // 無い場合も同じ空値を通す（`{}` は `info` 欠落と同じ形）。
+  // `readAdapterInfo` is the one reader that normalizes implementations without `info` to empty
+  // values. Without an adapter the same empty values go through (`{}` has the same shape as a
+  // missing `info`).
   const info = readAdapterInfo(adapter ?? {});
   return {
     ...(adapter === null ? {} : { key: environmentKey("node", info) }),
@@ -118,17 +133,19 @@ export const describeEnvironment = async (): Promise<Environment> => {
   };
 };
 
-/** この実行環境（モジュール評価時に 1 回だけ確定）。 */
+/** This execution environment (settled once, at module evaluation). */
 export const ENVIRONMENT: Environment = await describeEnvironment();
 
 /**
- * 走行が実際に使うアダプタが、環境キーを採ったアダプタと同じであることを確かめる。
+ * Checks that the adapter the run actually uses is the adapter the environment key was taken from.
  *
- * {@link ENVIRONMENT} のキーはモジュール評価時の独立した `requestAdapter()` から作られ、実行側の
- * `acquireGpu` は改めてアダプタを取る。**2 回の要求が同じ物理アダプタを返す保証は WebGPU 仕様に
- * 無い**（`readAdapterLimits` の注記と同じ前提）。複数 GPU の機で取り違えると、`KARUME_REFERENCE`
- * の書き込みが追跡下の fixture へ**別のアダプタの数値を静かに入れる** —— 赤にならず、戻すには
- * 人が行を消すしかない不可逆側の壊れ方なので、進める前に throw する。
+ * The key of {@link ENVIRONMENT} comes from a separate `requestAdapter()` at module evaluation, and
+ * `acquireGpu` on the execution side acquires an adapter again. **The WebGPU spec does not
+ * guarantee that two requests return the same physical adapter** (the same premise as the note on
+ * `readAdapterLimits`). A mix-up on a multi-GPU machine would make a `KARUME_REFERENCE` write
+ * **silently put another adapter's numbers** into a tracked fixture — it does not go red, and only
+ * a person deleting the rows can undo it, an irreversible kind of breakage — so this throws before
+ * going on.
  */
 export const assertAdapterMatchesEnvironment = (
   context: { readonly adapterInfo: GPUAdapterInfo },
@@ -145,15 +162,18 @@ export const assertAdapterMatchesEnvironment = (
 };
 
 /**
- * 実走に使う GPU を {@link assertAdapterMatchesEnvironment} で照合して、そのまま返す
- * （`const gpu = verifyRunningGpu(await acquireTestGpu(…))` の形で、取得の直後に通す）。
+ * Checks the GPU used for the real run with {@link assertAdapterMatchesEnvironment} and returns it
+ * as is (passed right after the acquisition, in the form
+ * `const gpu = verifyRunningGpu(await acquireTestGpu(…))`).
  *
- * 照合は**数値を産む GPU そのもの**に対して行う。検査用に別途取った GPU を照合しても、実走の取得が
- * 別のアダプタを選べばその実体は照合されない（2 回の取得が同じ物理アダプタを返す保証は無い —
- * {@link assertAdapterMatchesEnvironment} の注記）。
+ * The check runs on **the very GPU that produces the numbers**. Checking a GPU acquired separately
+ * for the check leaves the real one unchecked when the real run's acquisition picks another
+ * adapter (two acquisitions are not guaranteed to return the same physical adapter — the note on
+ * {@link assertAdapterMatchesEnvironment}).
  *
- * MUST: 照合に落ちた GPU は破棄してから throw する —— 取得の直後（呼び手の try/finally の外）で
- * 使えるようにするためで、ここで返さないと誰も破棄できない。
+ * MUST: a GPU that fails the check is destroyed before the throw — so that this can be used right
+ * after the acquisition (outside the caller's try/finally); if it is not returned here, nobody can
+ * destroy it.
  */
 export const verifyRunningGpu = <
   Gpu extends { readonly adapterInfo: GPUAdapterInfo; destroy(): void },
@@ -171,14 +191,16 @@ export const verifyRunningGpu = <
 };
 
 /**
- * {@link assertAdapterMatchesEnvironment} を走行に 1 度だけ実行する（参照値を書く経路の入口で呼ぶ）。
+ * Runs {@link assertAdapterMatchesEnvironment} once per run (called at the entry of the paths that
+ * write reference values).
  *
- * 検査用の `GpuContext` を 1 度取って捨て、結果をプロセス内でキャッシュする。1 度きりにするのは、
- * パイプラインが資産を抱えている最中に device を作り直さないため。
+ * It acquires a `GpuContext` for the check once, discards it, and caches the result in the
+ * process. It runs only once so that the device is not recreated while a pipeline holds assets.
  *
- * NOTE: これが照合するのは検査用の取得であって、実走の取得ではない（実走が別のアダプタを選べば
- * 素通りする）。実走の GPU を手に持つ経路は {@link verifyRunningGpu} を使う。これを使うのは、
- * パイプラインが内部で GPU を取る経路だけである。
+ * NOTE: what this checks is the acquisition made for the check, not the real run's acquisition
+ * (it lets a real run that picks another adapter through). A path that holds the real run's GPU
+ * uses {@link verifyRunningGpu}. This one is only for paths where the pipeline acquires the GPU
+ * internally.
  */
 let runningAdapterCheck: Promise<void> | undefined;
 export const assertRunningAdapter = (): Promise<void> => {

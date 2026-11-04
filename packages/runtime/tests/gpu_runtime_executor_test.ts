@@ -1,7 +1,7 @@
-// Session のライフサイクルと fail loudly（実 GPU — createSession が device を要求するため）。
-// GPU に依らない 1 本（IR パーサの束縛検査）は runtime_executor_test.ts に置く。例外は
-// "__proto__" の 2 本で、krm 側の拒否とメモリ経路側の実行が同じ 2 つのフィクスチャを共有する
-// ため片割れ（krm 側）だけがここに GPU 無しで同居する。
+// The Session lifecycle and fail loudly (real GPU — createSession requires a device).
+// The one GPU-independent case (the IR parser's binding check) lives in runtime_executor_test.ts.
+// The exception is the "__proto__" pair: the krm-side rejection and the memory-path execution share
+// the same two fixtures, so only one half (the krm side) sits here without a GPU.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
@@ -36,7 +36,7 @@ const expectedChain = (x: Tensor): ArrayLike<number> => {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "initializer を使う鎖グラフが CPU 参照と一致し、出力はグラフ出力だけ返る（実 GPU）",
+  "a chain graph with initializers matches the CPU reference and returns only the graph outputs (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
@@ -48,7 +48,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const report = allclose(outputs["y"].data, expectedChain(x));
       assertEquals(report.pass, true, formatAllclose(report));
 
-      // 同じ Session で別の T を束縛し直せる
+      // The same Session can rebind T to another value
       const x2 = fill([2, 4], (i) => i - 3);
       const outputs2 = await session.run({ x: x2 });
       assertEquals(outputs2["y"].shape, [2, 3]);
@@ -61,12 +61,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * "__proto__" を名前に使う最小グラフ。入力名 / シンボル名（前者）と出力名（後者）で分ける
- * — IR は 1 つの名前をちょうど 1 箇所でしか宣言できず、1 本のグラフに同居させられない。
+ * Minimal graphs that use "__proto__" as a name, split into input / symbol name (the first) and
+ * output name (the second) — the IR declares a name in exactly one place, so both cannot share one
+ * graph.
  *
- * MUST: `values` に "__proto__" を置くときは計算キー `["__proto__"]` で書く。リテラルの
- * `__proto__:` は own key ではなく [[Prototype]] 指定になり、JSON.stringify に載らないまま
- * テストが検査対象を外す。
+ * MUST: put "__proto__" into `values` with the computed key `["__proto__"]`. A literal
+ * `__proto__:` sets [[Prototype]] instead of an own key, so it never reaches JSON.stringify and the
+ * test misses what it means to check.
  */
 const protoInputGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -92,18 +93,19 @@ const protoOutputGraph = (): DeclarationJson => ({
   nodes: [{ op: "relu", ins: ["x"], outs: ["__proto__"], attrs: {} }],
 });
 
-// krm 経路は記述文書の JSON を `assertJsonSafe` に通すので、"__proto__" が **キー** として
-// 現れる宣言（= 出力名 / 値名）はそこで fail loudly になる — 黙って消えないことの krm 側の形は
-// 「受理されない」であって「名前が届く」ではない。入力名 / シンボル名の側は JSON の値にしか
-// 現れないため krm でも受理され、名前が届くかどうかはメモリ経路と同じ経路で決まる。
-// GPU は要らないので ignore の外に置く。
-test("'__proto__' を値名に持つ宣言は krm が黙って消さずに拒否する", async () => {
+// The krm path runs the descriptor document's JSON through `assertJsonSafe`, so a declaration
+// where "__proto__" appears as a **key** (= an output name / value name) fails loudly there — on
+// the krm side, "not silently dropped" takes the form "rejected", not "the name gets through". An
+// input name / symbol name appears only as a JSON value, so krm accepts it too, and whether the
+// name gets through is decided by the same path as the memory path.
+// It needs no GPU, so it sits outside the ignore.
+test("krm rejects a declaration with '__proto__' as a value name instead of silently dropping it", async () => {
   const error = await assertRejects(() => openGraphModel(protoOutputGraph()), ContainerFormatError);
   assertStringIncludes(error.message, "__proto__");
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "'__proto__' という入力名 / シンボル名 / 出力名がメモリ内容器で黙って消えない（実 GPU）",
+  "'__proto__' as an input name / symbol name / output name is not silently dropped by the in-memory container (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const x = fill([4, 3], (i) => ((i % 7) - 3) * 0.5);
@@ -115,7 +117,8 @@ test.skipIf(!GPU_AVAILABLE)(
         "model",
       );
       try {
-        // 計算キー MUST（上のフィクスチャと同じ理由 — リテラルでは run に名前が届かない）
+        // The computed key is a MUST (same reason as the fixture above — with a literal, the name
+        // never reaches run)
         const outputs = await byInput.run({ ["__proto__"]: x });
         assertEquals(allclose(outputs["y"].data, expected).pass, true);
       } finally {
@@ -129,9 +132,9 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       try {
         const outputs = await byOutput.run({ x });
-        // 素の `{}` に戻すと、ブラウザでは Tensor が [[Prototype]] に化けてこの出力だけ
-        // 消える。Deno では own property が作られてしまい hasOwn / keys では退行を検出
-        // できないため、器が null プロトタイプであることを併せて固定する。
+        // With a plain `{}` again, in the browser the Tensor would turn into [[Prototype]] and only
+        // this output would vanish. In Deno an own property gets created, so hasOwn / keys cannot
+        // detect the regression; pin that the container has a null prototype as well.
         assertEquals(Object.getPrototypeOf(outputs), null);
         assertEquals(Object.hasOwn(outputs, "__proto__"), true);
         assertEquals(Object.keys(outputs), ["__proto__"]);
@@ -146,17 +149,19 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * reshape / 恒等 expand の別名（ADR 0011）を踏む鎖。
+ * A chain that exercises the reshape / identity-expand alias (ADR 0011).
  *
- * - `r` は中間値 `h` の実バッファをそのまま指すグラフ出力（ピン留めが別名越しに効くこと）
- * - `g` の確保は `h` のバッファを掴んではいけない（別名 `r` がまだ生きている）
- * - `q` は別名のまま消費だけされる（消費計数が別名越しに正しく減ること）
+ * - `r` is a graph output that points directly at the real buffer of the intermediate `h` (pinning
+ *   works through the alias)
+ * - the allocation of `g` must not take the buffer of `h` (the alias `r` is still alive)
+ * - `q` is only consumed, as an alias (the consumer count decrements correctly through the alias)
  *
- * 計数を 1 でも取り違えると、`g` の確保がプールから `h` のバッファを受け取り、`r` の中身が
- * 静かに exp(x) に化ける（例外は出ない）。
+ * If the count is off by even one, the allocation of `g` receives the buffer of `h` from the pool
+ * and the contents of `r` silently turn into exp(x) (no exception).
  */
 const aliasGraph = (aliasOp: "reshape" | "expand"): DeclarationJson => {
-  // 恒等 expand は複製軸を持たないので入出力 shape が完全一致する形でしか別名化されない。
+  // An identity expand has no replicated axis, so it is aliased only when the input and output
+  // shapes match exactly.
   const aliasShape = aliasOp === "reshape" ? ["2T", 2] : ["T", 4];
   return {
     format: "karume-ir",
@@ -188,7 +193,7 @@ for (const [aliasOp, expectedShape, identityExpands] of [
   ["expand", [3, 4], 2],
 ] as const) {
   test.skipIf(!GPU_AVAILABLE)(
-    `${aliasOp} の別名がコピー無しで、生きている別名を後続の確保に配り直さない（実 GPU）`,
+    `the ${aliasOp} alias needs no copy and a live alias is not handed out to a later allocation (real GPU)`,
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(
@@ -205,21 +210,30 @@ for (const [aliasOp, expectedShape, identityExpands] of [
 
         const negated = applyReferenceOp("neg", [x]);
         const exponent = applyReferenceOp("exp", [x]);
-        // 別名でもグラフ出力の readback は元の値のまま（reshape なら形だけ [6,2] になる）
-        assertEquals(allclose(outputs["r"].data, negated.data).pass, true, "別名出力の readback");
+        // Even through an alias, the graph output reads back the original values (with reshape,
+        // only the shape becomes [6,2])
+        assertEquals(
+          allclose(outputs["r"].data, negated.data).pass,
+          true,
+          "readback of the alias output",
+        );
         const sum = applyReferenceOp("add", [negated, exponent]);
-        assertEquals(allclose(outputs["s"].data, sum.data).pass, true, "別名を消費した先の値");
+        assertEquals(
+          allclose(outputs["s"].data, sum.data).pass,
+          true,
+          "the value downstream of the alias",
+        );
 
-        // 実体化コピーが出ていないことを実績で固定する。プール管理下（dispatch が書く出力
-        // ストレージ）の生存ピークは h / g / s の 3 本ぶん = 48×3。別名側が確保していれば
-        // r / q のぶんが上乗せされる。
+        // Pin from the recorded stats that no materializing copy was made. The live peak under pool
+        // management (the output storage dispatches write) is h / g / s, three buffers = 48×3. If
+        // the alias side allocated, r / q would add on top.
         assertEquals(session.diagnostics().lastRun?.peakTransientBytes, 144);
-        // dispatch は neg / exp / add の 3 本だけ（reshape / 恒等 expand はどちらも 0 本）
+        // Only three dispatches: neg / exp / add (reshape / identity expand both take none)
         assertEquals(session.diagnostics().submit.dispatchCount, 3);
         assertEquals(
           session.diagnostics().lastRunFusions?.identityExpand,
           identityExpands,
-          "別名化カウンタ",
+          "alias counter",
         );
       } finally {
         await session.dispose();
@@ -230,26 +244,27 @@ for (const [aliasOp, expectedShape, identityExpands] of [
 }
 
 /**
- * 多出力ノードの寿命（ADR 0068 受入条件 ④ — `topk` が最初の入居者）。
+ * Lifetimes of a multi-output node (ADR 0068 acceptance criterion ④ — `topk` is the first user).
  *
- * `topk` の 2 本は**寿命が違う**:
+ * The two outputs of `topk` **have different lifetimes**:
  *
- * - `v`（値）は `neg` に 1 度だけ消費される中間値 → そのステップの後でプールへ返る
- * - `i`（添字）はグラフ出力 → **ピン留めされてプールへ返らない**
- * - `e = exp(neg(v))` の確保は `v` の実体を掴んでよい（`v` は消費済み）が、`i` の実体を
- *   掴んではいけない
+ * - `v` (values) is an intermediate consumed once by `neg` → returns to the pool after that step
+ * - `i` (indices) is a graph output → **pinned, never returned to the pool**
+ * - the allocation of `e = exp(neg(v))` may take the storage of `v` (`v` is consumed) but must not
+ *   take the storage of `i`
  *
- * slot ごとの `uses` / `pinned` を 1 でも取り違えると、`e` の確保がプールから `i` の
- * バッファを受け取り、**添字の readback が静かに exp の f32 ビット列に化ける**（例外は
- * 出ない — 別名テストと同じ形の沈黙故障）。逆に `v` を解放し損ねれば `e` が新しい実体を
- * 掴み、生存ピークが 1 本ぶん増える。
+ * If the per-slot `uses` / `pinned` is off by even one, the allocation of `e` receives the buffer
+ * of `i` from the pool, and **the indices' readback silently turns into exp's f32 bit patterns**
+ * (no exception — the same silent failure as in the alias test). Conversely, if `v` is not
+ * released, `e` takes new storage and the live peak grows by one buffer.
  *
- * 2 本目のグラフは**片方の出力が誰にも消費されない**形（`uses = 0` かつグラフ出力でもない
- * 到達不能な値）。定義ぶんの retain が解放されないと run 末尾の `assertDrained` が落ちる。
+ * The second graph is the shape where **one output is consumed by no one** (an unreachable value
+ * with `uses = 0` that is not a graph output either). If the definition's retain is not released,
+ * `assertDrained` at the end of the run fails.
  *
- * MUST: どちらの形も**同一 Session で 2 回**走らせる。slot backing はヒット run でしか活性化
- * しないので（`Session.#activateBacking`）、1 回ずつでは `bakeBindGroups` の slot 1 束縛・
- * pin 済み出力写像・backed readback の欠落や入れ替わりがアリーナ経路の緑の裏に隠れる。
+ * MUST: run both shapes **twice on the same Session**. The slot backing activates only on a hit run
+ * (`Session.#activateBacking`), so with one run each, a missing or swapped slot-1 binding of
+ * `bakeBindGroups`, pinned output mapping or backed readback hides behind the arena path's green.
  */
 const topkLifetimeGraph = (pinIndices: boolean): DeclarationJson => ({
   format: "karume-ir",
@@ -273,7 +288,7 @@ const topkLifetimeGraph = (pinIndices: boolean): DeclarationJson => ({
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "多出力ノードの slot ごとの uses / pin が正しく、片方だけ消費する形でも値が壊れない（実 GPU）",
+  "a multi-output node's per-slot uses / pin are correct, and values stay intact when only one output is consumed (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -282,7 +297,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const negated = applyReferenceOp("neg", [expected[0]]);
       const exponent = applyReferenceOp("exp", [negated]);
 
-      // ① 添字をグラフ出力にする形（ピン留めが多出力の slot 1 に効くこと）
+      // ① The indices as a graph output (pinning works on slot 1 of a multi-output node)
       const session = await createSessionFromContainer(
         gpu,
         await openGraphModel(topkLifetimeGraph(true)),
@@ -292,34 +307,53 @@ test.skipIf(!GPU_AVAILABLE)(
         const outputs = await session.run({ x });
         assertEquals(Object.keys(outputs).sort(), ["e", "i"]);
         assertEquals(outputs["i"].dtype, "i32");
-        // 添字は 1 語も化けていない（プールから配り直されていれば f32 のビット列が出る）
-        assertEquals([...outputs["i"].data], [...expected[1].data], "添字の readback");
-        assertEquals(allclose(outputs["e"].data, exponent.data).pass, true, "値側を消費した先");
-        // プール管理下の生存ピークは v / i / nv の 3 本ぶん（各 24 バイト）= 72。
-        // `e` は消費済みの `v` の実体を再利用するので上乗せは無く、`i` を掴むこともない。
+        // Not one index word is corrupted (if handed out again from the pool, f32 bit patterns
+        // would appear)
+        assertEquals([...outputs["i"].data], [...expected[1].data], "readback of the indices");
+        assertEquals(
+          allclose(outputs["e"].data, exponent.data).pass,
+          true,
+          "downstream of the values",
+        );
+        // The live peak under pool management is v / i / nv, three buffers (24 bytes each) = 72.
+        // `e` reuses the storage of the consumed `v`, so nothing adds on top, and it never takes
+        // `i`.
         assertEquals(session.diagnostics().lastRun?.peakTransientBytes, 72);
-        // dispatch は topk / neg / exp の 3 本（topk は 1 dispatch で 2 本書く）
+        // Three dispatches: topk / neg / exp (topk writes both outputs in one dispatch)
         assertEquals(session.diagnostics().submit.dispatchCount, 3);
 
-        // 同じ Session の 2 回目 = 導出済み計画にヒットして **slot backing 経路**へ入る
-        // （bind group は構築時に焼き込み済みで、読み戻し先も構築時に確定した写像）。多出力の
-        // slot 1 の束縛・pin 済み出力写像・backed readback のどれが欠けても・入れ替わっても、
-        // アリーナ経路の 1 回目だけなら緑のまま通る。
+        // The second run on the same Session = hits the derived plan and enters the **slot
+        // backing path** (bind groups are baked at build time, and the readback targets are a
+        // mapping fixed at build time). Even if the multi-output slot-1 binding, the pinned output
+        // mapping or the backed readback were missing or swapped, the first run on the arena path
+        // alone would stay green.
         const again = await session.run({ x });
-        assertEquals(session.diagnostics().lastRunPrepared?.hit, true, "2 run 目は導出済み計画");
-        assertEquals(session.diagnostics().planBacking.buildCount, 1, "backing を構築した");
+        assertEquals(
+          session.diagnostics().lastRunPrepared?.hit,
+          true,
+          "run 2 uses the derived plan",
+        );
+        assertEquals(session.diagnostics().planBacking.buildCount, 1, "the backing was built");
         assertEquals(Object.keys(again).sort(), ["e", "i"]);
         assertEquals(again["i"].dtype, "i32");
-        assertEquals([...again["i"].data], [...expected[1].data], "backed 経路の添字 readback");
-        assertEquals(allclose(again["e"].data, exponent.data).pass, true, "backed 経路の値側");
-        // 積むコマンド列はアリーナ経路と同一（3 本 → 累計 6 本）
+        assertEquals(
+          [...again["i"].data],
+          [...expected[1].data],
+          "readback of the indices on the backed path",
+        );
+        assertEquals(
+          allclose(again["e"].data, exponent.data).pass,
+          true,
+          "the values on the backed path",
+        );
+        // The queued command sequence is identical to the arena path (3 → 6 cumulative)
         assertEquals(session.diagnostics().submit.dispatchCount, 6);
       } finally {
         await session.dispose();
       }
 
-      // ② 添字が誰にも消費されない形（到達不能な値 — 定義ぶんの解放が閉じることの確認。
-      // 閉じていなければ run 末尾の assertDrained が落ちる）
+      // ② The indices consumed by no one (an unreachable value — confirms that the definition's
+      // release balances; if not, assertDrained at the end of the run fails)
       const orphan = await createSessionFromContainer(
         gpu,
         await openGraphModel(topkLifetimeGraph(false)),
@@ -328,19 +362,32 @@ test.skipIf(!GPU_AVAILABLE)(
       try {
         const outputs = await orphan.run({ x });
         assertEquals(Object.keys(outputs), ["e"]);
-        assertEquals(allclose(outputs["e"].data, exponent.data).pass, true, "値側は不変");
-        // 消費者ゼロの添字はそのステップの末尾でプールへ戻るので、`nv` がその実体を掴む
-        // （生存ピークは v / i の 2 本ぶん = 48）。
+        assertEquals(
+          allclose(outputs["e"].data, exponent.data).pass,
+          true,
+          "the values are unchanged",
+        );
+        // Indices with zero consumers return to the pool at the end of their step, so `nv` takes
+        // that storage (the live peak is v / i, two buffers = 48).
         assertEquals(orphan.diagnostics().lastRun?.peakTransientBytes, 48);
 
-        // orphan 形の 2 回目も backing 経路。読み戻し先の写像が slot を取り違えれば、`e` が
-        // pin されていない実体を掴む（`Session.#isReadable` が pin 済み slot だけを許すので
-        // 多くは例外で落ち、通ってしまう形はここの値突合が拾う）。
+        // The second run of the orphan shape is on the backing path too. If the readback mapping
+        // mixed up slots, `e` would take unpinned storage (`Session.#isReadable` allows only pinned
+        // slots, so most such cases fail with an exception; the value comparison here catches the
+        // ones that get through).
         const again = await orphan.run({ x });
-        assertEquals(orphan.diagnostics().lastRunPrepared?.hit, true, "2 run 目は導出済み計画");
-        assertEquals(orphan.diagnostics().planBacking.buildCount, 1, "backing を構築した");
+        assertEquals(
+          orphan.diagnostics().lastRunPrepared?.hit,
+          true,
+          "run 2 uses the derived plan",
+        );
+        assertEquals(orphan.diagnostics().planBacking.buildCount, 1, "the backing was built");
         assertEquals(Object.keys(again), ["e"]);
-        assertEquals(allclose(again["e"].data, exponent.data).pass, true, "backed 経路でも不変");
+        assertEquals(
+          allclose(again["e"].data, exponent.data).pass,
+          true,
+          "unchanged on the backed path too",
+        );
       } finally {
         await orphan.dispose();
       }
@@ -351,7 +398,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "同一 Session への並行 run は直列化され、全件が CPU 参照と一致する（実 GPU）",
+  "concurrent runs on one Session are serialized and all match the CPU reference (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
@@ -362,11 +409,12 @@ test.skipIf(!GPU_AVAILABLE)(
         fill([7, 4], (i) => ((i % 7) - 3) * 0.25),
         fill([1, 4], (i) => i + 1),
       ];
-      // await せずまとめて発行する。直列化されていないと device 単位 LIFO の errorScope が
-      // run 同士で交錯し、自分の validation 失敗を取り逃がすか無関係な run が落ちる。
+      // Issue them all without await. Without serialization, the per-device LIFO errorScope would
+      // interleave across runs, and a run would miss its own validation failure or an unrelated run
+      // would fail.
       const outputs = await Promise.all(batch.map((x) => session.run({ x })));
       for (const [index, x] of batch.entries()) {
-        assertEquals(outputs[index]["y"].shape, [x.shape[0], 3], `run ${index} の shape`);
+        assertEquals(outputs[index]["y"].shape, [x.shape[0], 3], `shape of run ${index}`);
         const report = allclose(outputs[index]["y"].data, expectedChain(x));
         assertEquals(report.pass, true, `run ${index}: ${formatAllclose(report)}`);
       }
@@ -379,20 +427,21 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "実行中の run がある間の dispose は run の完了後に重みを破棄する（実 GPU）",
+  "dispose while a run is in flight destroys the weights after the run completes (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       const x = fill([6, 4], (i) => ((i % 9) - 4) * 0.5);
       const running = session.run({ x });
-      // await せずに dispose する。直列化されていないと実行中の run の下から重みバッファが
-      // destroy され、submit がコマンドバッファ丸ごと失敗して誤った値が静かに残る。
+      // Dispose without await. Without serialization, the weight buffers would be destroyed under
+      // the running run, the submit would fail with its whole command buffer, and wrong values
+      // would silently remain.
       const disposing = session.dispose();
       const outputs = await running;
       await disposing;
       assertEquals(allclose(outputs["y"].data, expectedChain(x)).pass, true);
-      // dispose の受理は呼び出し時点で確定する（以後の run は待たずに落ちる）
+      // dispose takes effect at the call (any later run fails without waiting)
       await assertRejects(() => session.run({ x }), ExecutionError);
     } finally {
       gpu.destroy();
@@ -401,10 +450,11 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "submitPolicy でチャンクを 1 に絞ると dispatch ごとに submit される（実 GPU）",
+  "capping the chunk to 1 with submitPolicy submits after every dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // 既定の initialChunkSize=16 では 3 dispatch のグラフがチャンク途中 submit を通らない
+    // With the default initialChunkSize=16, a 3-dispatch graph never goes through a mid-chunk
+    // submit
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model", {
       submitPolicy: {
         timeBudgetMs: DEFAULT_SUBMIT_POLICY.timeBudgetMs,
@@ -418,10 +468,10 @@ test.skipIf(!GPU_AVAILABLE)(
       const outputs = await session.run({ x });
       const submit = session.diagnostics().submit;
       assertEquals(submit.dispatchCount, 3);
-      // 単一フェンス経路（gpuTiming OFF・出力 1 本）では読み戻しの copy も**同じコマンド列**へ
-      // 積まれ、チャンク上限 1 の下では 1 件で 1 チャンクを占める（H-1）。したがって
-      // submit は「3 dispatch + copy 1 件」の 4 本。dispatch 数は 3 のまま。
-      assertEquals(submit.submitCount, 4, "チャンク上限 1 なのでコマンドごとに submit される");
+      // On the single-fence path (gpuTiming OFF, one output) the readback copy is queued into
+      // **the same command sequence** too, and with a chunk cap of 1 it takes a chunk of its own
+      // (H-1). So there are four submits: "3 dispatches + 1 copy". The dispatch count stays 3.
+      assertEquals(submit.submitCount, 4, "the chunk cap is 1, so every command is submitted");
       const report = allclose(outputs["y"].data, expectedChain(x));
       assertEquals(report.pass, true, formatAllclose(report));
     } finally {
@@ -432,20 +482,20 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "診断がパイプライン数と直近 run の中間バッファ再利用を報告する（実 GPU）",
+  "diagnostics report the pipeline count and the latest run's intermediate buffer reuse (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
       assertEquals(session.diagnostics().lastRun, undefined);
-      // 重み 2 本は明示 async ステージでアップロード済み
+      // The two weights were uploaded by the explicit async stage
       assertEquals(session.diagnostics().weights.allocCount, 2);
 
       await session.run({ x: fill([8, 4], (i) => i * 0.25) });
       const stats = session.diagnostics();
       assertEquals(stats.pipelineCount, 3);
       assertEquals(stats.submit.dispatchCount, 3);
-      // h は add のエンコード後に解放され、relu の出力確保で配り直される
+      // h is released after add is encoded and handed out again for relu's output
       assertEquals((stats.lastRun?.reuseCount ?? 0) >= 1, true);
       assertEquals((stats.lastRun?.peakTransientBytes ?? 0) > 0, true);
     } finally {
@@ -456,21 +506,23 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **型の外から来る呼び手**（JS の消費者・改名前の綴りを残した古いビルド）を作る。TS の型は
- * この経路を 1 つも守らないので、受理集合の検査はここでしか撃てない。
+ * Builds **a caller from outside the types** (a JS consumer, an old build that still uses a
+ * spelling from before a rename). The TS types guard none of these paths, so the accepted-set check
+ * can only be exercised here.
  */
 const jsCallerOptions = (options: Readonly<Record<string, string>>): SessionOptions =>
   options as unknown as SessionOptions;
 
 test.skipIf(!GPU_AVAILABLE)(
-  "実行形ノブの union 外の綴りは Session 構築で全件列挙して落ちる（実 GPU）",
+  "spellings outside an execution knob's union fail at Session build with all of them listed (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
-      // `"i8a8"` は 0.5.0 で `"a8"` へ改名した綴り（ADR 0074 決定 3・互換シム無し）。検査が
-      // 無いと下流の等値比較（`=== "a8"`）が全て外れ、opt-in が適用されないまま既定の f32 で
-      // 走る = 「a8 を測った」と読める沈黙。
+      // `"i8a8"` is the spelling renamed to `"a8"` in 0.5.0 (ADR 0074 decision 3, no
+      // compatibility shim). Without the check, every downstream equality test (`=== "a8"`)
+      // misses and the run takes the default f32 without the opt-in applied = a silent failure that
+      // reads as "measured a8".
       const error = await assertRejects(
         () =>
           createSessionFromContainer(
@@ -484,10 +536,11 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assertEquals(error.message.includes(`linearCompute: "i8a8"`), true, error.message);
       assertEquals(error.message.includes(`attentionScoreStorage: "s16"`), true, error.message);
-      // 受理集合そのものを文言に出す（何なら通るのかが診断だけで分かる）。
+      // The message spells out the accepted set itself (the diagnostic alone tells what passes).
       assertEquals(error.message.includes("'f32' / 'a8' / 'f16'"), true, error.message);
 
-      // 対照: union 内の綴りは従来どおり構築が通る（上が「何を渡しても落ちる」ではない証明）。
+      // Control: spellings inside the union still build (proof that the above is not "fails
+      // whatever is passed").
       const session = await createSessionFromContainer(gpu, opened, "model", {
         linearCompute: "a8",
         attentionScoreStorage: "f16",
@@ -500,7 +553,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "GEMV並列加算は不正な綴りと未実装の計算精度の組を構築時に拒否する",
+  "the parallel GEMV reduction rejects an invalid spelling and unimplemented compute precisions at build time",
   async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
@@ -525,14 +578,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "planBackingBudgetBytes は非負の安全な整数だけを受ける（実 GPU）",
+  "planBackingBudgetBytes accepts only non-negative safe integers (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
-      // 予算は「保持集合の上限」（ADR 0095 決定 1）で、見積り（estimate.ts）が勘定側に載せる量
-      // でもある。負 / 非整数 / NaN を黙って受けると、`#evictBackingsFor` の比較が常に偽 /
-      // 常に真になって「毎 run 全退役」か「無制限保持」へ静かに化ける。
+      // The budget is "the cap on the retained set" (ADR 0095 decision 1), and also the amount
+      // the estimate (estimate.ts) books. Silently accepting a negative / non-integer / NaN value
+      // makes the comparison in `#evictBackingsFor` always false / always true, silently turning
+      // into "evict everything every run" or "retain without limit".
       for (const budget of [-1, 1.5, Number.NaN]) {
         await assertRejects(
           () =>
@@ -543,7 +597,8 @@ test.skipIf(!GPU_AVAILABLE)(
           "non-negative safe integer",
         );
       }
-      // 対照: 0（従来の容量 1）と正の整数は通る（上の 3 本が「何を渡しても落ちる」ではない証明）。
+      // Control: 0 (the former capacity of 1) and positive integers pass (proof that the three
+      // above are not "fails whatever is passed").
       for (const budget of [0, 4096]) {
         const session = await createSessionFromContainer(gpu, opened, "model", {
           planBackingBudgetBytes: budget,
@@ -557,14 +612,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "linearGemvRowsThreadTarget は 1 以上の安全な整数だけを受ける（実 GPU）",
+  "linearGemvRowsThreadTarget accepts only safe integers of at least 1 (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const opened = await openChainModel();
     try {
-      // 目標は「スレッド数 = n × y タイル数」がこれに届くまで rows を半分にする限界値
-      // （src/kernels/linear-gemv.ts）。0 / 負 / NaN を黙って受けると比較が常に偽になり、
-      // 「rows が常に天井」という**別の走行**が既定の顔で走る（測った条件が偽られる）。
+      // The target is the threshold: rows is halved until "thread count = n × y tile count"
+      // reaches it (src/kernels/linear-gemv.ts). Silently accepting 0 / a negative / NaN makes the
+      // comparison always false, and **a different run** — "rows always at the ceiling" — runs
+      // looking like the default (the measured condition is misreported).
       for (const target of [0, -1, 1.5, Number.NaN]) {
         await assertRejects(
           () =>
@@ -575,7 +631,8 @@ test.skipIf(!GPU_AVAILABLE)(
           "safe integer of at least 1",
         );
       }
-      // 対照: 正の整数は通る（上の 4 本が「何を渡しても落ちる」ではない証明）。
+      // Control: positive integers pass (proof that the four above are not "fails whatever is
+      // passed").
       for (const target of [1, 2048]) {
         const session = await createSessionFromContainer(gpu, opened, "model", {
           linearGemvRowsThreadTarget: target,
@@ -589,12 +646,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "失敗した run の直後の診断は 1 本前の成功 run の実績を残さない（実 GPU）",
+  "diagnostics right after a failed run keep no stats from the previous successful run (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
-      // 対照: 成功 run の直後は「直近 run」の 4 席が揃って埋まる。
+      // Control: right after a successful run, all four "latest run" fields are filled.
       await session.run({ x: fill([8, 4], (i) => i * 0.25) });
       const success = session.diagnostics();
       assertEquals(success.lastRun !== undefined, true);
@@ -602,17 +659,19 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(success.lastRunFusions !== undefined, true);
       assertEquals(success.lastRunPrepared !== undefined, true);
 
-      // 導出（融合判定まで）は通り、入力検査（宣言 f32 に i32 を渡す）で落ちる run。
+      // A run that passes derivation (up to the fusion decisions) and fails the input validation
+      // (an i32 passed for a declared f32).
       await assertRejects(
         () => session.run({ x: { dtype: "i32", shape: [8, 4], data: new Int32Array(32) } }),
         ExecutionError,
         "declared dtype",
       );
 
-      // 4 席は同じ 1 本の run（= 落ちた run）を映す。融合回数だけは落ちた run 自身の導出結果
-      // なので残り、成功経路でしか埋まらない 3 席は undefined へ倒れる — ここが割れると、
-      // 1 つのスナップショットが「落ちた run の融合回数」と「1 本前の成功 run のアリーナ /
-      // params 実績」を混ぜて語る（失敗の切り分けで最も読みたい瞬間の診断）。
+      // The four fields reflect the same single run (= the failed run). Only the fusion counts
+      // remain, because they are the failed run's own derivation result; the three fields filled
+      // only on the success path fall back to undefined — if this split, one snapshot would mix
+      // "the failed run's fusion counts" with "the previous successful run's arena / params stats"
+      // (the diagnostic most wanted at the moment of isolating a failure).
       const failed = session.diagnostics();
       assertEquals(failed.lastRun, undefined);
       assertEquals(failed.lastRunParams, undefined);
@@ -626,9 +685,10 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * `d` は誰にも読まれずグラフ出力でもない中間出力（IR は到達不能な値を禁じていない）。
- * 消費者ゼロの値はノード境界で解放されないとプール再利用から外れ、確保が 1 本増えて
- * peakTransientBytes が実際より大きく出る。
+ * `d` is an intermediate output that no one reads and that is not a graph output (the IR does not
+ * forbid unreachable values). A value with zero consumers that is not released at the node boundary
+ * drops out of pool reuse, one more allocation is made, and peakTransientBytes comes out larger
+ * than it really is.
  */
 const deadValueGraph = (): DeclarationJson => ({
   ...chainGraph(),
@@ -649,7 +709,7 @@ const deadValueGraph = (): DeclarationJson => ({
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "消費者ゼロの中間出力もノード境界でプールへ戻る（実 GPU）",
+  "an intermediate output with zero consumers also returns to the pool at the node boundary (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
@@ -660,11 +720,12 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const x = fill([8, 4], (i) => ((i % 11) - 5) * 0.5);
       const outputs = await session.run({ x });
-      // 到達不能な d が挟まっても最終結果は鎖グラフと同じ
+      // Even with the unreachable d in between, the final result is the same as the chain graph's
       const report = allclose(outputs["y"].data, expectedChain(x));
       assertEquals(report.pass, true, formatAllclose(report));
 
-      // 中間 4 本（h/d/g/y）は 2 本の実確保で回る。d が居座ると reuse は 1・peak は 3 本分。
+      // The four intermediates (h/d/g/y) run on two real allocations. If d lingered, reuse would be
+      // 1 and the peak three buffers.
       const lastRun = session.diagnostics().lastRun;
       assertEquals(lastRun?.reuseCount, 2);
       assertEquals(lastRun?.peakTransientBytes, 2 * 8 * 3 * 4);
@@ -676,14 +737,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "capability 不足（非対応 op / 非対応 意味論 dtype）は Session 構築で落ちる（実 GPU）",
+  "a missing capability (unsupported op / unsupported semantic dtype) fails at Session build (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // conv_transpose2d は語彙にすら無い op（ADR 0007 の allowlist 凍結）— 契約表に
-      // 載っていないので、出たら capability 不足として列挙で落ちる。
-      // NOTE: conv2d は ADR 0017 で契約表へ入った（Anima の VAE decoder で実測に出た）ので、
-      // 「保存はする / 実行はできない」の代表はこちらが引き継ぐ。
+      // conv_transpose2d is not even in the vocabulary (the allowlist freeze of ADR 0007) — it is
+      // not in the contract table, so if it appears it fails, listed as a missing capability.
+      // NOTE: conv2d entered the contract table in ADR 0017 (it showed up in Anima's VAE decoder),
+      // so this op takes over as the representative of "stored but not executable".
       const foreign = chainGraph();
       foreign.requires.ops = ["matmul", "add", "conv_transpose2d"];
       foreign.nodes[2] = { op: "conv_transpose2d", ins: ["g"], outs: ["y"], attrs: {} };
@@ -693,8 +754,9 @@ test.skipIf(!GPU_AVAILABLE)(
         RuntimeSupportError,
       );
 
-      // NOTE: 非対応の**格納**はもう作れない — 台帳の全 codec が実行できる（f16 は ADR 0018、
-      // bf16 は ADR 0131）。dtype 側の代表は「対応 op が受けない意味論 dtype」（matmul の重みが i32）。
+      // NOTE: an unsupported **storage** can no longer be built — every codec in the ledger is
+      // executable (f16 by ADR 0018, bf16 by ADR 0131). The dtype-side representative is "a
+      // semantic dtype the supporting op does not accept" (an i32 matmul weight).
       const unsupportedDtype = chainGraph();
       unsupportedDtype.values["w"] = { dtype: "i32", shape: [4, 3] };
       const i32Model = await openChainModel(unsupportedDtype, [
@@ -722,11 +784,11 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "契約外のグラフ（非空 attrs / op が受理しない dtype）は Session 構築で落ちる（実 GPU）",
+  "a graph outside the contract (non-empty attrs / a dtype the op does not accept) fails at Session build (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // どちらも capability 突合（op 名 + dtype + attrs）が最初の門で捕まえる
+      // The capability match (op name + dtype + attrs) catches both as the first check
       const withAttrs = chainGraph();
       withAttrs.nodes[2].attrs = { approximate: "tanh" };
       const withAttrsModel = await openChainModel(withAttrs);
@@ -736,7 +798,7 @@ test.skipIf(!GPU_AVAILABLE)(
         "unimplemented attrs (1): nodes[2] (relu): approximate",
       );
 
-      // i32 の転送自体は解禁済み（ADR 0009）だが、matmul は f32 専業なので op 契約で落ちる
+      // Transferring i32 is allowed (ADR 0009), but matmul is f32-only, so the op contract fails it
       const intInput = chainGraph();
       intInput.inputs = [{ name: "x", dtype: "i32", shape: ["T", 4] }];
       const intInputModel = await openChainModel(intInput);
@@ -752,9 +814,9 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 実測グラフ（DeBERTa front）の mask 経路をそのまま縮めたもの:
- * mask 外積 mul(i32) → 真偽化 cast → bitwise_not → 重み化 cast → f32 の重み掛け。
- * 出力に bool を 1 本置いて readback の非 f32 経路も踏む。
+ * The mask path of an observed graph (the DeBERTa front), shrunk as is:
+ * mask outer product mul(i32) → cast to bool → bitwise_not → cast to a weight → f32 weighting.
+ * One bool output also exercises the non-f32 readback path.
  */
 const maskGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -785,7 +847,7 @@ const maskGraph = (): DeclarationJson => ({
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "i32 入力 → bool 中間 → 非 f32 出力の鎖が CPU 参照と厳密一致する（実 GPU）",
+  "a chain of i32 input → bool intermediate → non-f32 output matches the CPU reference exactly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
@@ -805,7 +867,8 @@ test.skipIf(!GPU_AVAILABLE)(
       const weight = applyReferenceOp("cast", [keep], { to: "f32" });
       const masked = applyReferenceOp("mul", [scores, weight]);
 
-      // bool 出力は Uint32Array（u32 の 0/1）で返る — f32 固定の readback では通らない形
+      // A bool output comes back as a Uint32Array (u32 0/1) — a shape an f32-only readback cannot
+      // pass
       assertEquals(outputs["drop"].dtype, "bool");
       assertEquals(outputs["drop"].data.constructor.name, "Uint32Array");
       assertEquals(compareTensors(outputs["drop"], drop).pass, true);
@@ -818,10 +881,11 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// MUST: 要素は全型 4 バイトなので、TypedArray の取り違えは writeBuffer を素通りして
-// ビット列の読み替えになる（例外は出ない）。宣言 dtype との突合が唯一の防波堤。
+// MUST: every element type is 4 bytes, so a TypedArray mix-up passes straight through writeBuffer
+// and reinterprets the bit patterns (no exception). Matching against the declared dtype is the only
+// safeguard.
 test.skipIf(!GPU_AVAILABLE)(
-  "宣言 dtype と食い違う入力テンソルは転送前に落ちる（実 GPU）",
+  "an input tensor that disagrees with the declared dtype fails before upload (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
@@ -832,13 +896,14 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const mrow = fill([1, 4], () => 1, "i32");
       const scores = fill([4, 4], () => 1);
-      // i32 宣言の入力に f32 の Tensor（判別子も配列型も違う）
+      // An f32 Tensor for an input declared i32 (both the discriminant and the array type differ)
       await assertRejects(
         () => session.run({ mcol: fill([4, 1], () => 1), mrow, scores }),
         ExecutionError,
         "declared dtype 'i32'",
       );
-      // 判別子だけ合わせて配列型を偽った形（TS では作れないので明示的に組む）
+      // Only the discriminant matches and the array type is spoofed (TS cannot produce this, so it
+      // is built explicitly)
       const spoofed = {
         dtype: "i32",
         shape: [4, 1],
@@ -857,42 +922,42 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "run の入力不整合と dispose 後の実行は fail loudly（実 GPU）",
+  "inconsistent run inputs and a run after dispose fail loudly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openChainModel(), "model");
     try {
-      // 宣言 [T,4] に対する rank / 数値次元の不一致
+      // A rank / numeric dimension mismatch against the declared [T,4]
       await assertRejects(() => session.run({ x: fill([5], () => 1) }), ExecutionError);
       await assertRejects(() => session.run({ x: fill([5, 3], () => 1) }), ExecutionError);
-      // shape と要素数の食い違い（shape は宣言に合うが data が足りない）
+      // shape and element count disagree (the shape matches the declaration but data is short)
       await assertRejects(
         () =>
           session.run({ x: { dtype: "f32", shape: [5, 4], data: Float32Array.from([1, 2, 3]) } }),
         ExecutionError,
       );
-      // 明示束縛が入力 shape 由来の束縛と衝突
+      // An explicit binding conflicts with the binding from the input shape
       await assertRejects(
         () => session.run({ x: fill([5, 4], () => 1) }, { T: 4 }),
         ExecutionError,
       );
-      // 入力の欠落
+      // A missing input
       await assertRejects(() => session.run({}), ExecutionError);
     } finally {
       await session.dispose();
     }
     await assertRejects(() => session.run({ x: fill([5, 4], () => 1) }), ExecutionError);
-    // dispose は冪等
+    // dispose is idempotent
     await session.dispose();
     gpu.destroy();
   },
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "宣言 shape と計算 shape の食い違いは 1 dispatch も出さずに落ちる（実 GPU）",
+  "a mismatch between the declared shape and the computed shape fails without a single dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // IR は shape を計算しないので、宣言の誤りは実行計画の段で初めて見つかる
+    // The IR does not compute shapes, so a declaration error is first found at execution planning
     const wrong = chainGraph();
     wrong.values.h = { dtype: "f32", shape: ["T", 4] };
     wrong.values.g = { dtype: "f32", shape: ["T", 4] };
@@ -909,15 +974,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "導出相で落ちた run は GPU コマンドを 1 件も積まない（実 GPU）",
+  "a run that fails in the derivation phase queues no GPU command at all (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // 2 ノード目（matmul）が上限超過で throw する。dispatch の発行は**レシピ実行相**にしか
-    // 無く、そこへ入る前に導出相が落ちるので、1 ノード目（relu）のぶんも積まれない
-    // （src/runtime/recipe.ts の 2 相分離 — 失敗が確定した run は GPU の仕事をゼロにする）。
-    // MUST: 上限超過の閾値は matmul の**出力タイル辺**で決まる（`ceil(n / tileN) > 上限`）。
-    // タイル辺は定数ではなく**既定幾何から導く**（辺を変えた瞬間に throw が起きず
-    // assertRejects だけが静かに落ちるドリフトが 16 → 64 → 128 と 2 度起きた形）。
+    // The second node (matmul) throws for exceeding a limit. Dispatches are issued only in the
+    // **recipe execution phase**, and the derivation phase fails before that, so nothing is queued
+    // for the first node (relu) either (the two-phase split of src/runtime/recipe.ts — a run known
+    // to fail does no GPU work).
+    // MUST: the over-limit threshold is set by matmul's **output tile edge**
+    // (`ceil(n / tileN) > limit`). Derive the tile edge **from the default geometry**, not a
+    // constant (a drift where changing the edge stopped the throw and only assertRejects silently
+    // failed happened twice, 16 → 64 → 128).
     const tileN = gemmTileN(defaultGemmGeometry());
     const n = gpu.limits.maxComputeWorkgroupsPerDimension * tileN + tileN;
     const graph: DeclarationJson = {
@@ -948,11 +1015,12 @@ test.skipIf(!GPU_AVAILABLE)(
       );
 
       const stats = session.diagnostics().submit;
-      assertEquals(stats.dispatchCount, 0, "先行ノードのぶんも積まれていない");
-      // 残骸を後始末（arena.destroy → flush）で出すと、ロック解放後・errorScope ゼロ本の
-      // submit になり、その validation エラーが並行する別 Session の区間に帰属する。
-      assertEquals(stats.submitCount, 0, "失敗した run の残骸は 1 度も submit されない");
-      assertEquals(stats.discardedDispatches, 0, "積んでいないので捨てるものも無い");
+      assertEquals(stats.dispatchCount, 0, "nothing was queued for the preceding node either");
+      // Flushing the leftovers in cleanup (arena.destroy → flush) would submit after the lock is
+      // released with no errorScope, and the validation error would be attributed to another
+      // concurrent Session's section.
+      assertEquals(stats.submitCount, 0, "the leftovers of a failed run are never submitted");
+      assertEquals(stats.discardedDispatches, 0, "nothing was queued, so nothing is discarded");
     } finally {
       await session.dispose();
       gpu.destroy();
@@ -960,11 +1028,12 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// 値の総当たり（5 ノブ × 6 値）は tests/runtime_execution_knobs_test.ts が GPU 非依存で回す。
-// ここに残すのは「検査が実構築の経路にも繋がっている」1 本だけ（`createSession` から
-// `assertExecutionKnobs` へ届いていることの証明で、受理集合そのものの検査ではない）。
+// The exhaustive value sweep (5 knobs × 6 values) runs GPU-independently in
+// tests/runtime_execution_knobs_test.ts. Only one case stays here, "the validation is wired into
+// the real build path" (proof that `createSession` reaches `assertExecutionKnobs`, not a check of
+// the accepted set itself).
 test.skipIf(!GPU_AVAILABLE)(
-  "実行形設定の変換可能なオブジェクトは実構築でも文字列として受理されない",
+  "a convertible object for an execution setting is not accepted as a string by the real build either",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -977,7 +1046,7 @@ test.skipIf(!GPU_AVAILABLE)(
         },
         toJSON(): string {
           conversions++;
-          throw new Error("診断で利用者の変換を呼ばない");
+          throw new Error("the diagnostic must not call the caller's conversion");
         },
       };
       const options: SessionOptions = {};
@@ -985,7 +1054,7 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(
         async () => {
           const session = await createSessionFromContainer(gpu, model, "model", options);
-          // 回帰時にも、誤って構築したSessionをテスト側で解放してから失敗させる。
+          // On a regression too, dispose the wrongly built Session in the test before failing.
           await session.dispose();
         },
         ExecutionError,

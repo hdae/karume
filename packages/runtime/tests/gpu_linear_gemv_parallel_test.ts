@@ -23,7 +23,7 @@ import { countDispatches, requireCensus, SEAT_SIGNATURES } from "./helpers/pipel
 
 type Storage = "i2" | "i4" | "i8";
 
-/** 圧縮語の境界、group ごとのscale、符号が揃わない決定的な入力。 */
+/** Deterministic inputs that cross packed-word boundaries, use per-group scales and mix signs. */
 const fixture = (
   storage: Storage,
   n: number,
@@ -65,8 +65,8 @@ const fixture = (
   return { packed, input, bias, scale, reference };
 };
 
-describe.skipIf(!GPU_AVAILABLE)("量子化GEMVの並列加算（実GPU）", () => {
-  it("FP64参照と誤差帯内で一致し、端の列・余るlaneとM1/4/8の同一加算を守る", async () => {
+describe.skipIf(!GPU_AVAILABLE)("parallel accumulation of the quantized GEMV (real GPU)", () => {
+  it("matches the FP64 reference within the error band, and keeps edge columns, spare lanes and identical accumulation for M1/4/8", async () => {
     const gpu = await acquireGpu();
     const device = gpu.device;
     try {
@@ -90,9 +90,11 @@ describe.skipIf(!GPU_AVAILABLE)("量子化GEMVの並列加算（実GPU）", () =
             },
           );
         }
-        // E4B の行（2026-09-26・lanes は E2B から写した未実測）の縮約長 × group。1 出力の算術は
-        // (格納, k, group, lanes) だけで決まり n は dispatch 数しか変えないので、n は上と同じ 36 列
-        // （workgroup の列数で割り切れない端を含む）で全 lanes を回す。i2 は E4B の行を持たない。
+        // The reduction length × group of the E4B rows (2026-09-26; lanes copied from E2B, not
+        // measured). The arithmetic of 1 output depends only on (storage, k, group, lanes) and n
+        // changes only the dispatch count, so every lanes value runs with the same 36 columns as
+        // above (including an edge that the workgroup's column count does not divide). i2 has no
+        // E4B rows.
         if (storage === "i4") {
           shapes.push(
             { k: 2560, group: 32 },
@@ -146,7 +148,7 @@ describe.skipIf(!GPU_AVAILABLE)("量子化GEMVの並列加算（実GPU）", () =
               m: number,
             ): Promise<Uint32Array<ArrayBuffer>> => {
               device.queue.writeBuffer(buffers[0], 0, linearGemvParams(storage, m, n, k, group));
-              // 未書き込みを以前の正常値で隠さない。
+              // Do not let earlier valid values hide unwritten outputs.
               device.queue.writeBuffer(buffers[4], 0, new Uint32Array(8 * n).fill(0x7fc00000));
               const pipeline = await device.createComputePipelineAsync({
                 layout: "auto",
@@ -197,7 +199,8 @@ describe.skipIf(!GPU_AVAILABLE)("量子化GEMVの並列加算（実GPU）", () =
                     `${storage} K${k} L${lanes} M${m} @${i}: ${values[i]} / ${expected}`,
                   );
                   if (i < n) {
-                    // この固定入力では新たな帯を広げず、既存linearの誤差帯内でA/Bも検査する。
+                    // This fixed input does not widen the band; the A/B is also checked within the
+                    // existing linear error band.
                     assert(
                       Math.abs(values[i] - baseline[i]) <= tolerance,
                       `${storage} K${k} L${lanes} @${i}: A/B`,
@@ -221,15 +224,15 @@ describe.skipIf(!GPU_AVAILABLE)("量子化GEMVの並列加算（実GPU）", () =
 
 // Through a session: the `parallel` opt-in reaches only the requested linears (pipeline census).
 
-/** 格納の呼び名 → codec 台帳の登録名（i2 は per-channel の `int2-off`）。 */
+/** Storage name → name registered in the codec ledger (i2 is the per-channel `int2-off`). */
 const CODEC: Readonly<Record<"i2" | "i4" | "i8", CodecName>> = {
   i2: "int2-off",
   i4: "int4-sym-g",
   i8: "int8-sym",
 };
 
-describe.skipIf(!GPU_AVAILABLE)("GEMV並列加算の適用箇所（実GPU）", () => {
-  it("明示指定の対象だけに適用し、M1/4/8で全出力列のu32一致を保つ", async () => {
+describe.skipIf(!GPU_AVAILABLE)("where the parallel GEMV accumulation applies (real GPU)", () => {
+  it("applies only to the explicitly requested targets and keeps every output column u32-identical for M1/4/8", async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of [
@@ -239,8 +242,8 @@ describe.skipIf(!GPU_AVAILABLE)("GEMV並列加算の適用箇所（実GPU）", (
         { storage: "i4", bits: 4, n: 1536, k: 2048, group: 2048 },
         { storage: "i4", bits: 4, n: 1536, k: 4096, group: 4096 },
         { storage: "i8", bits: 8, n: 256, k: 1536, group: undefined },
-        // E4B の行（2026-09-26・lanes は E2B から写した未実測）の代表 — l32 / l4 × g32 / g512 /
-        // g2048 / i8。実寸の n で全出力列を見る。
+        // Representatives of the E4B rows (2026-09-26; lanes copied from E2B, not measured) —
+        // l32 / l4 × g32 / g512 / g2048 / i8. Every output column is checked at the real n.
         { storage: "i4", bits: 4, n: 512, k: 2560, group: 32 },
         { storage: "i4", bits: 4, n: 10240, k: 2560, group: 512 },
         { storage: "i4", bits: 4, n: 2560, k: 10240, group: 2048 },
@@ -251,7 +254,7 @@ describe.skipIf(!GPU_AVAILABLE)("GEMV並列加算の適用箇所（実GPU）", (
           { length: (n * k * bits) / 8 },
           (_, i) => Math.imul(i + 1, 0x9e3779b9) >>> 24,
         );
-        // per-channel（i2 / i8）は groups = 1、group 量子化（i4）は 行長 / group。
+        // Per-channel (i2 / i8) has groups = 1; group quantization (i4) has row length / group.
         const groups = group === undefined ? 1 : k / group;
         const tensors: readonly TensorInput[] = [
           {

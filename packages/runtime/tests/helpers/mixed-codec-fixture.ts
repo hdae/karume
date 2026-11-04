@@ -1,6 +1,7 @@
-// 4 codec 混在（f32 / f16 / int8-sym / int4-sym-g）のモデル素材 — 容器面の共有 fixture。
-// 「どれか 1 codec が経路から欠けても沈黙しない」形を 1 本のモデルで用意する。
-// src/ からは型と合流面だけを引く（バイト列の組み立ては helpers 側に閉じる）。
+// Model material mixing 4 codecs (f32 / f16 / int8-sym / int4-sym-g) — a shared fixture for the
+// container surface. One model provides a shape that "does not stay silent if any one codec drops
+// out of the path". Only types and the join surface come from src/ (assembling the bytes stays
+// inside the helpers).
 
 import type { BoundContainer } from "../../src/format/container/bind.ts";
 import type { TensorInput } from "./container-write.ts";
@@ -29,8 +30,9 @@ export type MixedCodecFixture = {
 };
 
 /**
- * linear 3 段（w1 = int4-sym-g g16 / w2 = f16 / w3 = int8-sym）+ f32 bias 群のモデル素材。
- * 4 つの codec が全て「圧縮のまま常駐」の適格になる形（消費は linear の重みスロットのみ）。
+ * Model material of 3 linear layers (w1 = int4-sym-g g16 / w2 = f16 / w3 = int8-sym) + f32 biases.
+ * A shape in which all 4 codecs qualify for "resident while compressed" (the only consumers are
+ * linear weight slots).
  */
 export const buildFixture = (): MixedCodecFixture => {
   const w1 = fill([16, 32], VARYING);
@@ -69,7 +71,7 @@ export const buildFixture = (): MixedCodecFixture => {
       graph: GRAPH_NAME,
       initializer: "w1",
       bytes: q1.bytes,
-      // group scale は rank 2 `[rows, groups]` の行優先バイト列（container-v1 §6.1）。
+      // The group scale is row-major bytes of rank 2 `[rows, groups]` (container-v1 §6.1).
       encoding: {
         codec: "int4-sym-g",
         groupSize: 16,
@@ -81,7 +83,7 @@ export const buildFixture = (): MixedCodecFixture => {
       graph: GRAPH_NAME,
       initializer: "w3",
       bytes: q3.bytes,
-      // per-channel は groupSize = 行長・groups = 1（scale は rows × 4 バイト）。
+      // Per-channel is groupSize = row length, groups = 1 (the scale is rows × 4 bytes).
       encoding: {
         codec: "int8-sym",
         groupSize: 8,
@@ -96,10 +98,11 @@ export const buildFixture = (): MixedCodecFixture => {
 };
 
 /**
- * 開いた容器を「block を何回取ったか数える」面で包む。
+ * Wraps an opened container in a surface that "counts how many times a block was read".
  *
- * 2 段境界（ADR 0070 決定 5 / graph-first）の主張は「重みの block を 1 つも取る前に admission が
- * 終わる」なので、検出器は**取得の回数**そのものになる。合流（`graphs`）は包まずそのまま通す。
+ * The claim of the two-stage boundary (ADR 0070 decision 5 / graph-first) is "admission finishes
+ * before any weight block is read", so the detector is **the read count** itself. The join
+ * (`graphs`) passes through unwrapped.
  */
 export const countingContainer = (
   opened: BoundContainer,

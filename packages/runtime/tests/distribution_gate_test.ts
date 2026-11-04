@@ -1,38 +1,48 @@
-// ADR 0005「全ケース SKIP は明示 FAIL」の**配布形ミラー**版の門番（実重み系列版は
-// tests/e2e_assets_gate_test.ts・GPU 版は tests/gpu_gate_test.ts）。
+// The **distribution-mirror** version of the ADR 0005 guard "all cases SKIP is an explicit FAIL"
+// (the real-weight series version is tests/e2e_assets_gate_test.ts, the GPU version is
+// tests/gpu_gate_test.ts).
 //
-// 配布形ミラー（`models/karume-<family>/`）を根にする検査 — anima / sbv2 / irodori / gemma4 /
-// QAT / wan の実資産 e2e（packages/models/tests/e2e_*_test.ts と helpers/irodori-assets.ts）・融合ヒット数の
-// 配布形節（anima / anima-extra / irodori / gemma4 / gemma4-qat-mobile / wan — tests/e2e_*_fusion_counts_test.ts）
-// — は、いずれも `karume.json` の有無で `ignore` し `console.warn` だけを残して緑になる。
-// `outputs/series/` だけ持つ機（新しい作業機・worktree を別ホストへ持ち出した場合）では
-// e2e_assets_gate_test.ts が緑のまま実資産検査が丸ごと消えるので、ここで 1 本落とす。
+// The checks rooted at the distribution mirrors (`models/karume-<family>/`) — the real-asset e2e of
+// anima / sbv2 / irodori / gemma4 / QAT / wan (packages/models/tests/e2e_*_test.ts and
+// helpers/irodori-assets.ts) and the distribution sections of the fusion hit counts (anima /
+// anima-extra / irodori / gemma4 / gemma4-qat-mobile / wan — tests/e2e_*_fusion_counts_test.ts) —
+// all `ignore` themselves on the absence of `karume.json` and go green leaving only a
+// `console.warn`. On a machine with only `outputs/series/` (a new work machine, a worktree taken
+// to another host), e2e_assets_gate_test.ts stays green while the real-asset checks vanish
+// entirely, so one test fails here.
 //
-// 欠如の検出（ミラーごと無い形）の射程は**公開済みの全ミラー**（2026-09-25 裁定）。e2e がまだ読まないミラー（siglip2 など）も
-// 載せる — 門番の射程を「今 e2e が読むもの」に合わせると、e2e を足した日に門番の更新を忘れて
-// 無音 SKIP が戻る。未公開の vowel-detector は載せない（配布形を作ってから載せる）。未公開でも
-// e2e（と融合ヒット数の門）が根にするミラー（wan2.1）は載せる。
+// The reach of the absence check (a whole mirror missing) is **every published mirror** (ruling of
+// 2026-09-25). Mirrors that no e2e reads yet (siglip2 and others) are listed too — matching the
+// guard's reach to "what the e2e reads today" would bring the silent SKIP back the day an e2e is
+// added and the guard update is forgotten. The unpublished vowel-detector is not listed (it is
+// listed once its distribution exists). A mirror that the e2e (and the fusion hit-count check)
+// roots on is listed even when unpublished (wan2.1).
 //
-// 見るのは**有無だけではない**（ADR 0108 段 3 検収②）。`karume.json` はあるが中身が旧 major の
-// まま、あるいは宣言された part が 1 本足りない・長さが宣言と違う、という形は上の e2e を
-// 「開けない資産」で落とすか、悪くすると**前回の書き出しの残骸**を今回の期待値で読ませる。
-// どちらも「資産が無い」とは別の壊れ方なので、門番が manifest を parse して part の実在と
-// 長さまで突き合わせる。中身（block の sha256）は読まない — 実バイトの突合は各 e2e が
-// `openContainer` の経路で必ず通る（§7 のハッシュ 3 分離）。
+// It checks **more than presence** (ADR 0108 stage 3, acceptance item ②). A `karume.json` that is
+// present but still of an old major, or that declares a part that is missing or whose length
+// differs from the declaration, either fails the e2e above with "assets that cannot be opened" or,
+// worse, makes it read **leftovers of a previous write** against this run's expected values. Both
+// are failures other than "the assets are missing", so the guard parses the manifest and checks
+// that the parts exist and have the right lengths. It does not read contents (the block sha256) —
+// every e2e matches the actual bytes on the `openContainer` path (§7 keeps the three hashes
+// apart).
 //
 // Since ADR 0139 decision 5 the check covers every model × quant × weights key a manifest
 // declares, not only the default selection, and it also opens each container's two documents
 // through the manifest and checks that its graph is named by the weights key — the graph-name
 // check that the assets gate ran on the series (`series-graphs.ts`) moves here.
 //
-// manifest の parse と既定選択の検査の射程は名簿ではなく**`models/` の配置**から導く（2026-10-11
-// 裁定）。`models/` は配布形だけを置く根（docs/assets-layout.md）なので、子ディレクトリは
-// どれも hub の parser に通す。名簿に頼ると、`karume dist` が焼いたのに名簿へ足していない新しい
-// 配布形（未公開の vowel-detector など）が「焼けたが hub が読めない」まま素通りする。名簿
-// {@link DISTRIBUTIONS} が担うのは「在るべきものが無い」の検出だけで、これは配置からは導けない。
+// The reach of the manifest parse and the default-selection check is derived from **the layout of
+// `models/`**, not from the roster (ruling of 2026-10-11). `models/` is a root that holds only
+// distributions (docs/assets-layout.md), so every child directory goes through hub's parser.
+// Relying on the roster would let a new distribution that `karume dist` built but nobody added to
+// the roster (such as the unpublished vowel-detector) pass as "built but unreadable by hub". The
+// roster {@link DISTRIBUTIONS} is responsible only for detecting "something that should be there is
+// missing", which cannot be derived from the layout.
 //
-// この門番自身は資産がある環境では**通る（緑の 1 件として見える）**。ignore にすると
-// 「門番が効いているのか、門番ごと消えているのか」が区別できなくなるため（他の 2 門番と同じ理由）。
+// On a machine that has the assets, this guard itself **passes (it shows up as one green case)**.
+// Making it ignore would make "is the guard working, or has the guard vanished too" impossible to
+// tell apart (the same reason as the other two guards).
 
 import {
   type DirEntry,
@@ -70,14 +80,19 @@ import { type WrittenContainer, writeModelContainer } from "./helpers/container-
 import { mirrorDirectory } from "../../models/tests/helpers/mirror.ts";
 
 /**
- * 「配布形ミラー無しでの全 SKIP」を明示的に許可する opt-out（`KARUME_ALLOW_NO_ASSETS` と同形）。
+ * The opt-out that explicitly allows "all SKIP without distribution mirrors" (the same form as
+ * `KARUME_ALLOW_NO_ASSETS`).
  *
- * MUST: 既定は fail loudly。配布形を持たない作業機や CI で通すには、意図表明としてこの環境変数を
- * 要求する（実重み系列側の opt-out とは別に持つ — 片方だけ持つ機が実在する）。
+ * MUST: the default is fail loudly. To pass on work machines or CI without distributions, this
+ * environment variable is required as a statement of intent (kept separately from the real-weight
+ * series opt-out — machines that have only one of the two exist).
  */
 const ALLOW_NO_DISTRIBUTION = process.env.KARUME_ALLOW_NO_DISTRIBUTION === "1";
 
-/** 配布形ミラーを置く根（上記の検査が `karume.json` を読む先と同じ URL の組み立て方）。 */
+/**
+ * The root that holds the distribution mirrors (built the same way as the URL the checks above read
+ * `karume.json` from).
+ */
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
 /**
@@ -87,10 +102,12 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * 0.14.0, `karume-moss-image`, first published in 0.15.1, and `karume-gemma4-qat-mobile`,
  * published under this name in 0.16.0) + the unpublished `karume-wan2.1`.
  *
- * 公開済みの 2 本は公開前から門番に載っていた: `karume-umt5-xxl` は Wan の GPU 経路の e2e が越境参照の根にし
- * （ADR 0119 段 10d・無いと欠如が無音の SKIP になる）、`karume-wan2.2` は Wan2.2 の通しの e2e
- * （`e2e_wan_ti2v_pipeline_test.ts`）と DiT の e2e の実用席の記録（`e2e_wan_ti2v_dit_test.ts` — 席の束を manifest から
- * 読む）が根にする（ADR 0121 段 8）。
+ * The two published ones were on the guard's roster before publication: `karume-umt5-xxl` is the
+ * cross-repo reference root of the e2e of Wan's GPU path (ADR 0119 stage 10d — without it the
+ * absence would be a silent SKIP), and `karume-wan2.2` is the root of Wan2.2's end-to-end e2e
+ * (`e2e_wan_ti2v_pipeline_test.ts`) and of the DiT e2e's record of the practical presets
+ * (`e2e_wan_ti2v_dit_test.ts` — it reads the bundle of presets from the manifest) (ADR 0121 stage
+ * 8).
  *
  * `karume-gemma4-qat-mobile` is the mobile QAT distribution first published in 0.15.1 as
  * `karume-gemma4-qat`, renamed on 2026-11-04 and published under the new name in 0.16.0: the
@@ -98,13 +115,13 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
  * holds the q4_0 QAT line (E2B / E4B / 12B with their drafters, published in 0.16.0), which the
  * q4_0 QAT mirror e2e, its sha256 rows and the 12B e2e root on.
  *
- * `karume-wan2.1` は未公開
- * （HF に公開しない — ADR 0118 追記（2026-10-15））だが、Wan の通しの e2e（`e2e_wan_pipeline_test.ts`）と
- * 融合ヒット数の門が根にする（ADR 0118 段 7）。
+ * `karume-wan2.1` is unpublished (not published to HF — ADR 0118 addendum (2026-10-15)), but Wan's
+ * end-to-end e2e (`e2e_wan_pipeline_test.ts`) and the fusion hit-count check root on it (ADR 0118
+ * stage 7).
  *
  * `karume-moss-image` was on the roster before its publication as well (ADR 0138 addendum of
- * 2026-11-01): the pipeline e2e (`packages/e2e/tests/e2e_moss_pipeline_test.ts`) roots on it, so its
- * absence must not be a silent skip.
+ * 2026-11-01): the pipeline e2e (`packages/e2e/tests/e2e_moss_pipeline_test.ts`) roots on it, so
+ * its absence must not be a silent skip.
  */
 const DISTRIBUTIONS = [
   "karume-anima",
@@ -125,28 +142,37 @@ const DISTRIBUTIONS = [
   "karume-umt5-xxl",
 ] as const;
 
-/** この版の読み手が受け付ける配布 manifest の major（旧版は読まない — ADR 0109 決定 1）。 */
+/**
+ * The distribution manifest major this version's reader accepts (older versions are not read — ADR
+ * 0109 decision 1).
+ */
 const MANIFEST_FORMAT = "karume/5";
 
-/** 欠如の検出の名簿（per-mirror の検査で「名簿にあるか」を引く形）。 */
+/**
+ * The roster of the absence check (in the form the per-mirror checks look up "is it on the
+ * roster").
+ */
 const REQUIRED: ReadonlySet<string> = new Set(DISTRIBUTIONS);
 
 /**
- * `karume dist` の作業席の接尾辞（`karume.artifacts.staged_publication` の `.staging` = 書きかけ・
- * `.old` = 据え替え前の退避）。どちらもミラーではないので manifest の検査に掛けない — 書きかけを
- * 読めば焼いている最中に門が赤くなり、退避は次の焼きで回収される。
+ * Suffixes of `karume dist`'s working directories (`.staging` of
+ * `karume.artifacts.staged_publication` = being written, `.old` = set aside before the swap).
+ * Neither is a mirror, so neither goes through the manifest check — reading one being written would
+ * turn the check red mid-build, and the set-aside one is reclaimed by the next build.
  */
 const WORK_SEAT_SUFFIXES = [".staging", ".old"] as const;
 
 const distributionRoot = (models: URL, series: string): URL => new URL(`${series}/`, models);
 
 /**
- * `models` 直下の配布形ミラーを**配置から**列挙する（名前順・作業席とファイルは除く）。
+ * Enumerates the distribution mirrors directly under `models` **from the layout** (in name order,
+ * excluding working directories and files).
  *
- * NOTE: 子はシンボリックリンクでもよい（stat はリンクを辿る）— 資産を別の場所に置いてリンクで
- * 見せる機がある。`models` 自体が無い機は空を返す（欠如は名簿の検査が名指しで落とす）。
- * `models` の一覧での NotFound 以外の I/O 異常は伝播させる（{@link manifestPresent} と同じ理由）。
- * 子の stat の異常は {@link isMirrorCandidate} が一覧に残し、per-mirror の test の中で名指しで落とす。
+ * NOTE: a child may be a symbolic link (stat follows links) — some machines keep the assets
+ * elsewhere and expose them through a link. A machine without `models` itself returns empty (the
+ * roster check names the absence and fails). I/O errors other than NotFound while listing `models`
+ * propagate (the same reason as {@link manifestPresent}). A child whose stat fails is kept in the
+ * list by {@link isMirrorCandidate} and fails by name inside the per-mirror test.
  */
 const discoverDistributions = (models: URL): readonly string[] => {
   let entries: DirEntry[];
@@ -164,12 +190,15 @@ const discoverDistributions = (models: URL): readonly string[] => {
 };
 
 /**
- * `models` 直下の子を manifest の検査に掛けるか（ディレクトリなら掛ける・ファイルなら掛けない）。
+ * Whether a child directly under `models` goes through the manifest check (directories do, files
+ * do not).
  *
- * MUST: stat が投げた子（壊れたシンボリックリンク・辿れないリンク・読めない子）は**掛ける側に
- * 残す**。ここはモジュールのトップレベル（test の登録時）で走るので、投げればファイル全体が
- * どのミラーとも名指しの無いまま落ち、欠如の門も一緒に消える。残せば同じ異常が per-mirror の
- * test の中で、そのミラーの名前の付いた FAIL として出る（例外は握り潰さず、出る場所を移すだけ）。
+ * MUST: a child whose stat throws (a broken symbolic link, a link that cannot be followed, an
+ * unreadable child) **stays on the checked side**. This runs at module top level (at test
+ * registration), so throwing would fail the whole file without naming any mirror and take the
+ * absence check down with it. Keeping it makes the same error show up inside the per-mirror test
+ * as a FAIL carrying that mirror's name (the exception is not swallowed; only where it surfaces
+ * moves).
  */
 const isMirrorCandidate = (child: URL): boolean => {
   try {
@@ -180,11 +209,12 @@ const isMirrorCandidate = (child: URL): boolean => {
 };
 
 /**
- * その系列の manifest が置かれているか。
+ * Whether that series' manifest is in place.
  *
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、門番自身が
- * 環境の壊れを資産の不在として報告する。ここが見るのは `karume.json` がファイルであることだけで、
- * 中身は {@link assertDistributionIntact} が見る。
+ * MUST: anything other than NotFound propagates — reading a permission error or the like as "the
+ * assets are missing" would make the guard itself report a broken environment as absent assets.
+ * This only checks that `karume.json` is a file; {@link assertDistributionIntact} checks the
+ * contents.
  */
 const manifestPresent = (root: URL): boolean => {
   try {
@@ -196,11 +226,12 @@ const manifestPresent = (root: URL): boolean => {
 };
 
 /**
- * 登録時の `ignore` の判定用: manifest が**無いと分かっている**か。
+ * For the `ignore` decision at registration: whether the manifest is **known to be absent**.
  *
- * MUST: NotFound 以外の I/O 異常は「無いとは分からない」（`false`）に倒して test を走らせる —
- * 登録時に投げるとファイル全体が名指し無しで落ちる（{@link isMirrorCandidate} と同じ理由）。
- * 走った test の中の {@link manifestPresent} が同じ異常を、そのミラーの名前の付いた FAIL として投げる。
+ * MUST: an I/O error other than NotFound falls to "not known to be absent" (`false`) and lets the
+ * test run — throwing at registration would fail the whole file without a name (the same reason as
+ * {@link isMirrorCandidate}). {@link manifestPresent} inside the test that runs throws the same
+ * error as a FAIL carrying that mirror's name.
  */
 const manifestKnownAbsent = (root: URL): boolean => {
   try {
@@ -210,7 +241,7 @@ const manifestKnownAbsent = (root: URL): boolean => {
   }
 };
 
-/** ファイル長（不在は `undefined`・それ以外の I/O 異常は伝播させる）。 */
+/** The file length (`undefined` when absent; other I/O errors propagate). */
 const fileBytes = (url: URL): number | undefined => {
   try {
     const stat = statSync(url);
@@ -222,18 +253,19 @@ const fileBytes = (url: URL): number | undefined => {
 };
 
 /**
- * `models` 直下に、`series` の全ミラーの `karume.json` が在ることを断言する（無いものを名指しする）。
+ * Asserts that the `karume.json` of every mirror in `series` is present directly under `models`
+ * (naming the missing ones).
  */
 const assertNoDistributionMissing = (models: URL, series: readonly string[]): void => {
   const missing = series.filter((name) => !manifestPresent(distributionRoot(models, name)));
   assert(
     missing.length === 0,
-    `models/ に配布形ミラーの karume.json が無い系列がある: ${missing.join(", ")}。` +
-      "配布形ミラーが無い機では、それを根にする実資産 e2e と融合ヒット数の検査が無音 SKIP するので、" +
-      "ADR 0005 によりこれは FAIL として扱う。" +
-      "tools/export-recipes の dist.py で作成すること（--pipeline と引数は dist.py 冒頭の用例 — " +
-      "越境参照で焼く karume-anima-extra は docs/release-runbook.md の手順に従う）。" +
-      "配布形の無い環境で意図的に通すには KARUME_ALLOW_NO_DISTRIBUTION=1 を設定すること。",
+    `models/ is missing the karume.json of distribution mirrors: ${missing.join(", ")}. ` +
+      "On a machine without a distribution mirror, the real-asset e2e and the fusion hit-count checks rooted on it SKIP silently, " +
+      "so by ADR 0005 this is treated as a FAIL. " +
+      "Build it with dist.py in tools/export-recipes (--pipeline and the arguments are in the usage examples at the top of dist.py — " +
+      "karume-anima-extra, built with cross-repo references, follows the procedure in docs/release-runbook.md). " +
+      "To pass on purpose in an environment without distributions, set KARUME_ALLOW_NO_DISTRIBUTION=1.",
   );
 };
 
@@ -254,17 +286,19 @@ const assertNoDistributionMissing = (models: URL, series: readonly string[]): vo
  * development machine (2026-11-02), GPU-free.
  */
 const assertDistributionIntact = async (root: URL, series: string): Promise<void> => {
-  // MUST: 名簿に無いミラーの欠如はここでしか見えない — `models/` は配布形だけの根なので、
-  // `karume.json` の無い子ディレクトリは焼きかけか前回の残骸で、e2e が読めば別の壊れ方をする。
+  // MUST: the absence of a mirror that is not on the roster is visible only here — `models/` is a
+  // root for distributions only, so a child directory without `karume.json` is a half-built one or
+  // the leftovers of a previous build, and an e2e reading it would fail in a different way.
   assert(
     manifestPresent(root),
-    `models/${series}/ に karume.json が無い。models/ は配布形だけを置く根なので、` +
-      "これは焼きかけか残骸のディレクトリ。tools/export-recipes の dist.py で作り直すか、取り除くこと。",
+    `models/${series}/ has no karume.json. models/ is a root that holds only distributions, so ` +
+      "this is a half-built or leftover directory. Rebuild it with dist.py in tools/export-recipes, or remove it.",
   );
   const manifest = parseManifest(await readTextFile(new URL("karume.json", root)));
-  // parse 自身も major を見るが、`karume/5` を**名指しで**断言しておく — hub が受ける major を
-  // 増やした日に、この門番が「旧 major のミラーを据えたまま」を素通しするのを防ぐ。
-  assertEquals(manifest.format, MANIFEST_FORMAT, `${series}: manifest の format`);
+  // The parse checks the major itself too, but `karume/5` is asserted **by name** — the day hub
+  // accepts more majors, this keeps the guard from letting "a mirror still on the old major"
+  // through.
+  assertEquals(manifest.format, MANIFEST_FORMAT, `${series}: manifest format`);
   const broken: string[] = [];
   const intact: {
     readonly where: string;
@@ -321,10 +355,16 @@ const assertDistributionIntact = async (root: URL, series: string): Promise<void
   );
 };
 
-/** label / description が在るか（空白だけは無いと数える — モデルカードの表示と同じ扱い）。 */
+/**
+ * Whether label / description is present (whitespace only counts as absent — the same as the model
+ * card display).
+ */
 const hasText = (value: string | undefined): boolean => (value ?? "").trim() !== "";
 
-/** 2 つの weights 写像が同じか（同じ部品の集合に、部品ごとに同じ dtype ラベル）。 */
+/**
+ * Whether two weights maps are the same (the same set of components, with the same dtype label per
+ * component).
+ */
 const sameWeights = (
   left: Readonly<Record<string, string>>,
   right: Readonly<Record<string, string>>,
@@ -340,19 +380,21 @@ const sameWeights = (
 const A8_KNOBS = ["linearCompute", "attentionCompute", "convCompute"] as const;
 
 /**
- * 1 モデルの既定プリセットとプリセット一覧が、配布形の満たすべき 3 制約を破っている箇所を返す
- * （違反ごとに 1 文・プリセットを名指し。満たしていれば空）。DECIDED: ADR 0128 決定 2。
+ * Returns where one model's default preset and preset list break the three constraints a
+ * distribution must satisfy (one sentence per violation, naming the preset; empty when they are
+ * satisfied). DECIDED: ADR 0128 decision 2.
  *
- * - C1: 既定プリセットは素の WebGPU で走る — `quants[defaultQuant].gpuFeatures` が無いか、
- *   true のメンバーを持たない（今日の語彙では `shaderF16` を要求しない）。
+ * - C1: the default preset runs on plain WebGPU — `quants[defaultQuant].gpuFeatures` is absent or
+ *   has no true member (in today's vocabulary: it does not request `shaderF16`).
  * - C2: a preset with any of {@link A8_KNOBS} (`linearCompute`, `attentionCompute`,
  *   `convCompute`) = `"a8"` has a sibling preset under another name with none of the three
  *   and an identical weights map (same roles, same labels = same containers) — the three knobs
  *   since ADR 0128's addendum of 2026-10-29 (amendment 5; `convCompute` is ADR 0133 decision 6).
- *   この兄弟が、dp4a の無い device で runtime が出す警告
- *   （packages/runtime/src/runtime/a8-emulation-warning.ts）の指す逃げ先で、追加の取得が要らない。
- * - C3: プリセットが 2 つ以上あるモデルでは、全プリセットが trim して空でない label と description を
- *   持つ（選択 UI とモデルカードが人に見せる面）。プリセットが 1 つだけのモデルは選ぶものが無いので除く。
+ *   This sibling is the fallback the runtime's warning on devices without dp4a points to
+ *   (packages/runtime/src/runtime/a8-emulation-warning.ts), and it needs no extra download.
+ * - C3: in a model with two or more presets, every preset has a label and a description that are
+ *   non-empty after trim (what the selection UI and the model card show to people). A model with a
+ *   single preset has nothing to choose, so it is excluded.
  */
 const defaultPresetViolations = (entry: ModelEntry): string[] => {
   const violations: string[] = [];
@@ -361,8 +403,8 @@ const defaultPresetViolations = (entry: ModelEntry): string[] => {
     .map(([feature]) => feature);
   if (requested.length > 0) {
     violations.push(
-      `C1: 既定プリセット '${entry.defaultQuant}' が GPU feature を要求している` +
-        `（${requested.join(", ")}）— 既定は素の WebGPU で走らなければならない`,
+      `C1: default preset '${entry.defaultQuant}' requests GPU features` +
+        ` (${requested.join(", ")}) — the default must run on plain WebGPU`,
     );
   }
   const presets = Object.entries(entry.quants);
@@ -379,8 +421,8 @@ const defaultPresetViolations = (entry: ModelEntry): string[] => {
     );
     if (!sibling) {
       violations.push(
-        `C2: プリセット '${name}' は int8 活性（${knobs.join(", ")}）を持つが、` +
-          "同じ weights で活性量子化を持たない兄弟プリセットが無い",
+        `C2: preset '${name}' has int8 activations (${knobs.join(", ")}), but ` +
+          "there is no sibling preset with the same weights and no activation quantization",
       );
     }
   }
@@ -388,7 +430,7 @@ const defaultPresetViolations = (entry: ModelEntry): string[] => {
     for (const [name, quant] of presets) {
       for (const field of ["label", "description"] as const) {
         if (!hasText(quant[field])) {
-          violations.push(`C3: プリセット '${name}' に ${field} が無い（空白だけも無いと数える）`);
+          violations.push(`C3: preset '${name}' has no ${field} (whitespace only counts as none)`);
         }
       }
     }
@@ -396,21 +438,24 @@ const defaultPresetViolations = (entry: ModelEntry): string[] => {
   return violations;
 };
 
-/** manifest の全モデルが ADR 0128 決定 2 の制約（C1〜C3）を満たすことを断言する（系列とモデルを名指し）。 */
+/**
+ * Asserts that every model in the manifest satisfies the constraints of ADR 0128 decision 2
+ * (C1–C3), naming the series and the model.
+ */
 const assertDefaultPresetPolicy = (manifest: Manifest, series: string): void => {
   for (const [model, entry] of Object.entries(manifest.models)) {
     assertEquals(
       defaultPresetViolations(entry),
       [],
-      `models/${series}/ の model '${model}' の既定プリセットとプリセット一覧が ` +
-        "ADR 0128 決定 2 の制約を破っている。karume dist の recipe（tools/export-recipes）の" +
-        "プリセットの宣言を直して焼き直すこと。",
+      `models/${series}/: the default preset and preset list of model '${model}' ` +
+        "break the constraints of ADR 0128 decision 2. Fix the preset declarations in the karume dist recipe (tools/export-recipes) " +
+        "and rebuild.",
     );
   }
 };
 
 test.skipIf(ALLOW_NO_DISTRIBUTION)(
-  "配布門番: 配布形ミラーが欠けた全 SKIP は明示 FAIL（ADR 0005）",
+  "distribution gate: all SKIP with distribution mirrors missing is an explicit FAIL (ADR 0005)",
   () => assertNoDistributionMissing(MODELS_ROOT, DISTRIBUTIONS),
 );
 
@@ -421,7 +466,7 @@ for (const series of discoverDistributions(MODELS_ROOT)) {
     () => assertDistributionIntact(root, series),
   );
   test.skipIf(REQUIRED.has(series) && manifestKnownAbsent(root))(
-    `配布門番: ${series} の既定プリセットとプリセット一覧が ADR 0128 決定 2 の制約（C1〜C3）を満たす`,
+    `distribution gate: the default preset and preset list of ${series} satisfy the constraints of ADR 0128 decision 2 (C1–C3)`,
     async () => {
       const manifest = parseManifest(await readTextFile(new URL("karume.json", root)));
       assertDefaultPresetPolicy(manifest, series);
@@ -429,10 +474,11 @@ for (const series of discoverDistributions(MODELS_ROOT)) {
   );
 }
 
-// 以下は門番の判定そのものの故障注入。一時ディレクトリだけで完結する（実資産も GPU も要らない）
-// ので、opt-out の有無に関わらず走る — 門番が ignore される CI でも判定の退行は見える。
+// What follows is fault injection into the guard's verdict itself. It is self-contained in a
+// temporary directory (no real assets, no GPU), so it runs whether or not the opt-out is set — a
+// regression in the verdict is visible even on CI where the guard is ignored.
 
-/** 一時ディレクトリを根として `run` を引き、後始末する。 */
+/** Calls `run` with a temporary directory as the root and cleans up. */
 const withTemporaryRoot = async (run: (root: URL) => Promise<void> | void): Promise<void> => {
   const root = new URL(`file://${makeTempDirSync({ prefix: "karume-distribution-" })}/`);
   try {
@@ -442,8 +488,8 @@ const withTemporaryRoot = async (run: (root: URL) => Promise<void> | void): Prom
   }
 };
 
-describe("配布門番の判定（表のミラーの karume.json が揃っているか）", () => {
-  /** 表の全ミラーに（中身を問わない）`karume.json` を置いた根を作る。 */
+describe("distribution gate verdict (are the karume.json files of the listed mirrors all present)", () => {
+  /** Builds a root with a `karume.json` (any content) in every listed mirror. */
   const arrangeAll = (models: URL): void => {
     for (const series of DISTRIBUTIONS) {
       const root = distributionRoot(models, series);
@@ -452,14 +498,14 @@ describe("配布門番の判定（表のミラーの karume.json が揃ってい
     }
   };
 
-  it("表の全ミラーが揃っていれば通る", async () => {
+  it("passes when every listed mirror is present", async () => {
     await withTemporaryRoot((models) => {
       arrangeAll(models);
       assertNoDistributionMissing(models, DISTRIBUTIONS);
     });
   });
 
-  it("表のどのミラーが 1 本欠けても、そのミラーを名指しして FAIL する", async () => {
+  it("whichever listed mirror is missing, it fails naming that mirror", async () => {
     await withTemporaryRoot((models) => {
       arrangeAll(models);
       for (const series of DISTRIBUTIONS) {
@@ -469,13 +515,13 @@ describe("配布門番の判定（表のミラーの karume.json が揃ってい
           () => assertNoDistributionMissing(models, DISTRIBUTIONS),
           AssertionError,
         );
-        assertStringIncludes(error.message, `無い系列がある: ${series}。`);
+        assertStringIncludes(error.message, `karume.json of distribution mirrors: ${series}. `);
         writeTextFileSync(manifest, "{}");
       }
     });
   });
 
-  it("karume.json がディレクトリならミラーは無いと判定する", async () => {
+  it("treats the mirror as absent when karume.json is a directory", async () => {
     await withTemporaryRoot((models) => {
       arrangeAll(models);
       const manifest = new URL("karume.json", distributionRoot(models, "karume-lucida"));
@@ -485,13 +531,13 @@ describe("配布門番の判定（表のミラーの karume.json が揃ってい
         () => assertNoDistributionMissing(models, DISTRIBUTIONS),
         AssertionError,
       );
-      assertStringIncludes(error.message, "無い系列がある: karume-lucida。");
+      assertStringIncludes(error.message, "karume.json of distribution mirrors: karume-lucida. ");
     });
   });
 });
 
-describe("配布門番の射程（models/ の配置から導くミラーの一覧）", () => {
-  it("子ディレクトリを名前順に全て拾い、dist の作業席とファイルは拾わない", async () => {
+describe("reach of the distribution gate (the mirror list derived from the layout of models/)", () => {
+  it("picks up every child directory in name order and skips dist working directories and files", async () => {
     await withTemporaryRoot((models) => {
       for (const name of ["karume-b", "karume-a", "karume-a.staging", "karume-b.old"]) {
         mkdirSync(new URL(`${name}/`, models));
@@ -501,16 +547,16 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
     });
   });
 
-  it("名簿に無い新しいミラーも拾う（名簿の更新忘れで manifest の検査から漏れない）", async () => {
+  it("picks up a new mirror that is not on the roster (a forgotten roster update does not drop it from the manifest checks)", async () => {
     await withTemporaryRoot((models) => {
       const unlisted = "karume-vowel-detector";
-      assert(!REQUIRED.has(unlisted), "被験体の前提: 名簿に無い名前");
+      assert(!REQUIRED.has(unlisted), "test precondition: a name that is not on the roster");
       mkdirSync(new URL(`${unlisted}/`, models));
       assertEquals(discoverDistributions(models), [unlisted]);
     });
   });
 
-  it("ディレクトリを指すシンボリックリンクもミラーとして拾う", async () => {
+  it("picks up a symbolic link to a directory as a mirror too", async () => {
     await withTemporaryRoot((root) => {
       const models = new URL("models/", root);
       const target = new URL("elsewhere/", root);
@@ -521,7 +567,7 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
     });
   });
 
-  it("壊れたリンクと辿れないリンクも投げずに拾う（登録時に落ちてファイルごと消えない）", async () => {
+  it("picks up broken links and links that cannot be followed without throwing (the file does not fail at registration and vanish)", async () => {
     await withTemporaryRoot((models) => {
       symlinkSync(new URL("nowhere", models).pathname, new URL("karume-broken", models).pathname);
       symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
@@ -529,18 +575,18 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
     });
   });
 
-  it("壊れたリンクのミラーは、そのディレクトリを名指しして FAIL する", async () => {
+  it("a mirror that is a broken link fails naming that directory", async () => {
     await withTemporaryRoot(async (models) => {
       symlinkSync(new URL("nowhere", models).pathname, new URL("karume-broken", models).pathname);
       await assertRejects(
         () => assertDistributionIntact(distributionRoot(models, "karume-broken"), "karume-broken"),
         AssertionError,
-        "models/karume-broken/ に karume.json が無い",
+        "models/karume-broken/ has no karume.json",
       );
     });
   });
 
-  it("辿れないリンクは ignore の判定で投げずに test を走らせ、test の中でそのパスを名指しして投げる", async () => {
+  it("a link that cannot be followed does not throw in the ignore decision, lets the test run, and throws naming the path inside the test", async () => {
     await withTemporaryRoot(async (models) => {
       symlinkSync("karume-loop", new URL("karume-loop", models).pathname);
       const root = distributionRoot(models, "karume-loop");
@@ -554,18 +600,18 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
     });
   });
 
-  it("models/ 自体が無ければ空（欠如は名簿の検査が名指しで落とす）", async () => {
+  it("returns empty when models/ itself is missing (the roster check names the absence and fails)", async () => {
     await withTemporaryRoot((root) => {
       assertEquals(discoverDistributions(new URL("missing/", root)), []);
     });
   });
 
-  it("karume.json の無いミラーは、そのディレクトリを名指しして FAIL する", async () => {
+  it("a mirror without karume.json fails naming that directory", async () => {
     await withTemporaryRoot(async (root) => {
       await assertRejects(
         () => assertDistributionIntact(root, "karume-half-built"),
         AssertionError,
-        "models/karume-half-built/ に karume.json が無い",
+        "models/karume-half-built/ has no karume.json",
       );
     });
   });
@@ -574,7 +620,9 @@ describe("配布門番の射程（models/ の配置から導くミラーの一�
 describe("distribution gate verdict (every declared container against the mirror's files)", () => {
   const revision = "0123456789abcdef0123456789abcdef01234567";
 
-  /** One real container: the graph `graph` (`linear` with one f32 weight), split into small parts. */
+  /**
+   * One real container: the graph `graph` (`linear` with one f32 weight), split into small parts.
+   */
   const writeContainer = (graph: string): Promise<WrittenContainer> =>
     writeModelContainer(
       {
@@ -799,17 +847,23 @@ describe("distribution gate verdict (every declared container against the mirror
   });
 });
 
-describe("配布門番の判定（既定プリセットとプリセット一覧 — ADR 0128 決定 2）", () => {
+describe("distribution gate verdict (default preset and preset list — ADR 0128 decision 2)", () => {
   const sha256 = "0".repeat(64);
-  /** manifest に書くプリセットの宣言（JSON のまま — 型と値の検査は hub の parser に任せる）。 */
+  /**
+   * A preset declaration written into the manifest (kept as JSON — type and value checks are left
+   * to hub's parser).
+   */
   type FabricatedQuant = {
     readonly weights: Readonly<Record<string, string>>;
     readonly [key: string]: unknown;
   };
   const labelled = { label: "Preset", description: "A preset for the test." };
-  /** 素の WebGPU で走る、活性量子化を持たない i8 のプリセット（C2 の兄弟の雛形）。 */
+  /**
+   * An i8 preset that runs on plain WebGPU with no activation quantization (the template for a C2
+   * sibling).
+   */
   const plainI8 = { weights: { text: "i8", dit: "i8" }, session: {}, ...labelled };
-  /** i8 の重みに int8 活性を載せたプリセット。 */
+  /** A preset with int8 activations on i8 weights. */
   const a8I8 = {
     weights: { text: "i8", dit: "i8" },
     session: { linearCompute: "a8", attentionCompute: "a8" },
@@ -817,8 +871,9 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
   };
 
   /**
-   * `quants` を宣言した 1 モデルの manifest を hub の parser に通し、そのモデルの宣言を返す
-   * （weights の容器は quants が参照する部品 × ラベルから組む — parser の完全写像の検査を通すため）。
+   * Runs a one-model manifest declaring `quants` through hub's parser and returns that model's
+   * declaration (the weights containers are built from the components × labels the quants refer
+   * to — so that it passes the parser's complete-mapping check).
    */
   const entryOf = (
     quants: Readonly<Record<string, FabricatedQuant>>,
@@ -861,7 +916,10 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
     return manifest.models["m"]!;
   };
 
-  /** 違反が 1 件だけで、その文がプリセットを名指しし、制約の記号を含むことを断言する。 */
+  /**
+   * Asserts exactly one violation whose sentence names the preset and contains the constraint's
+   * label.
+   */
   const assertSingleViolation = (entry: ModelEntry, constraint: string, preset: string): void => {
     const violations = defaultPresetViolations(entry);
     assertEquals(violations.length, 1, violations.join("\n"));
@@ -869,11 +927,11 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
     assertStringIncludes(violations[0]!, `'${preset}'`);
   };
 
-  it("label と description を持つ 2 プリセットで、a8 に兄弟があれば違反は無い", () => {
+  it("two presets with label and description, with a sibling for a8, have no violation", () => {
     assertEquals(defaultPresetViolations(entryOf({ a8: a8I8, i8: plainI8 }, "a8")), []);
   });
 
-  it("既定が shaderF16 を要求すれば C1 違反として既定プリセットを名指しする", () => {
+  it("a default that requests shaderF16 is a C1 violation naming the default preset", () => {
     const f16 = {
       weights: { text: "f16", dit: "f16" },
       session: { linearCompute: "f16" },
@@ -885,7 +943,7 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
     assertStringIncludes(defaultPresetViolations(entry)[0]!, "shaderF16");
   });
 
-  it("既定でないプリセットの shaderF16 は C1 違反にしない", () => {
+  it("shaderF16 on a non-default preset is not a C1 violation", () => {
     const f16 = {
       weights: { text: "f16", dit: "f16" },
       session: {},
@@ -895,7 +953,7 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
     assertEquals(defaultPresetViolations(entryOf({ f16, i8: plainI8 }, "i8")), []);
   });
 
-  it("a8 のプリセットに兄弟が無ければ C2 違反として、そのプリセットと a8 のノブを名指しする", () => {
+  it("an a8 preset without a sibling is a C2 violation naming that preset and its a8 knobs", () => {
     const f32 = { weights: { text: "f32", dit: "f32" }, session: {}, ...labelled };
     const entry = entryOf({ a8: a8I8, f32 }, "a8");
     assertSingleViolation(entry, "C2", "a8");
@@ -904,18 +962,18 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
     assertStringIncludes(violation!, `attentionCompute: "a8"`);
   });
 
-  it("兄弟の候補の weights がラベル 1 つでも違えば C2 違反のまま（追加の取得が要る）", () => {
+  it("if the would-be sibling's weights differ in even one label, C2 stays violated (an extra download is needed)", () => {
     const nearly = { weights: { text: "f32", dit: "i8" }, session: {}, ...labelled };
     assertSingleViolation(entryOf({ a8: a8I8, nearly }, "a8"), "C2", "a8");
   });
 
-  it("同じ weights でも、兄弟の候補が片方の a8 を残していれば C2 違反のまま", () => {
+  it("even with the same weights, C2 stays violated if the would-be sibling keeps one of the a8 knobs", () => {
     const attentionOnly = { ...a8I8, session: { attentionCompute: "a8" } };
     const entry = entryOf({ a8: a8I8, attentionOnly }, "a8");
     const violations = defaultPresetViolations(entry);
     assertEquals(violations.length, 2, violations.join("\n"));
-    assertStringIncludes(violations[0]!, "C2: プリセット 'a8'");
-    assertStringIncludes(violations[1]!, "C2: プリセット 'attentionOnly'");
+    assertStringIncludes(violations[0]!, "C2: preset 'a8'");
+    assertStringIncludes(violations[1]!, "C2: preset 'attentionOnly'");
   });
 
   it("a preset whose only a8 knob is convCompute is a C2 violation without a sibling, naming the knob", () => {
@@ -936,24 +994,24 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
     const entry = entryOf({ a8: a8I8, keepsConv8 }, "a8");
     const violations = defaultPresetViolations(entry);
     assertEquals(violations.length, 2, violations.join("\n"));
-    assertStringIncludes(violations[0]!, "C2: プリセット 'a8'");
-    assertStringIncludes(violations[1]!, "C2: プリセット 'keepsConv8'");
+    assertStringIncludes(violations[0]!, "C2: preset 'a8'");
+    assertStringIncludes(violations[1]!, "C2: preset 'keepsConv8'");
   });
 
-  it("description の無いプリセットは C3 違反として、そのプリセットを名指しする", () => {
+  it("a preset without description is a C3 violation naming that preset", () => {
     const withoutDescription = { weights: plainI8.weights, session: {}, label: "Preset" };
     const entry = entryOf({ a8: a8I8, i8: withoutDescription }, "a8");
     assertSingleViolation(entry, "C3", "i8");
     assertStringIncludes(defaultPresetViolations(entry)[0]!, "description");
   });
 
-  it("空白だけの label は無いと数え、C3 違反として、そのプリセットを名指しする", () => {
+  it("a whitespace-only label counts as absent and is a C3 violation naming that preset", () => {
     const entry = entryOf({ a8: { ...a8I8, label: " \t " }, i8: plainI8 }, "a8");
     assertSingleViolation(entry, "C3", "a8");
     assertStringIncludes(defaultPresetViolations(entry)[0]!, "label");
   });
 
-  it("プリセットが 1 つだけのモデルは label と description が無くても C3 の対象外", () => {
+  it("a model with a single preset is outside C3 even without label and description", () => {
     const f32 = { weights: { text: "f32", dit: "f32" }, session: {} };
     assertEquals(defaultPresetViolations(entryOf({ f32 }, "f32")), []);
   });

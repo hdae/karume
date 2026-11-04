@@ -1,12 +1,13 @@
-// golden io の格納規約（tests/helpers/golden-io.ts — ADR 0009 / tools/exporter README）。
+// Storage convention of golden io (tests/helpers/golden-io.ts — ADR 0009 / tools/exporter README).
 //
-// `ioTensor` の「格納 dtype が宣言と食い違ったら落とす」MUST は、全 e2e 門で「golden の格納形と
-// IR の宣言 dtype がずれた」を捕まえる**唯一の**検出器（要素は全型 4 バイトなので、黙って
-// 読み替えるとビット列の再解釈が通ってしまう）。ところがこの 1 行は正常な golden を通す経路
-// でしか実行されず、assert を外しても全門が緑のまま通っていた。
+// The MUST "reject when the storage dtype disagrees with the declaration" in `ioTensor` is the
+// **only** detector across all e2e checks that catches "the storage form of the golden drifted from
+// the IR's declared dtype" (every type has 4-byte elements, so a silent reinterpretation of the
+// bits would pass). Yet that one line only runs on the path that passes a valid golden, and all the
+// checks stayed green with the assert removed.
 //
-// GPU も実資産も要らない（helpers/safetensors.ts の `buildSafetensors` で組んだ最小の
-// safetensors を `parseSafetensors` で読む）。
+// Needs neither a GPU nor real assets (reads a minimal safetensors built with `buildSafetensors` of
+// helpers/safetensors.ts through `parseSafetensors`).
 
 import { test } from "vite-plus/test";
 import { assertEquals, AssertionError, assertStrictEquals, assertThrows } from "@std/assert";
@@ -14,11 +15,14 @@ import { parseSafetensors, type TensorView } from "../src/format/safetensors.ts"
 import { IO_ENCODING, ioTensor } from "./helpers/golden-io.ts";
 import { buildSafetensors, f32Bytes } from "./helpers/safetensors.ts";
 
-/** 4 バイト整数のバイト列（I32 / U32 の実体）。 */
+/** Bytes of 4-byte integers (the content of I32 / U32). */
 const i32Bytes = (values: readonly number[]): Uint8Array =>
   new Uint8Array(Int32Array.from(values).buffer);
 
-/** 意味論 3 dtype をそれぞれ 1 本ずつ持つ golden io（正常な形はここ 1 箇所）。 */
+/**
+ * A golden io holding one tensor of each of the 3 semantic dtypes (the only place with the valid
+ * form).
+ */
 const goldenIo = () =>
   parseSafetensors(
     buildSafetensors([
@@ -30,15 +34,15 @@ const goldenIo = () =>
 
 const viewOf = (file: ReturnType<typeof goldenIo>, name: string): TensorView => {
   const view = file.tensors.get(name);
-  if (view === undefined) throw new Error(`${name} が無い`);
+  if (view === undefined) throw new Error(`${name} is missing`);
   return view;
 };
 
-test("IO_ENCODING は意味論 3 dtype の格納形を全て宣言する（ADR 0009 の写し）", () => {
+test("IO_ENCODING declares the storage form of all 3 semantic dtypes (a copy of ADR 0009)", () => {
   assertEquals(IO_ENCODING, { f32: "F32", i32: "I32", bool: "U32" });
 });
 
-test("ioTensor は宣言 dtype どおりの型で読み、バイト列をコピーしない", () => {
+test("ioTensor reads with the type of the declared dtype and does not copy the bytes", () => {
   const file = goldenIo();
   const f32 = ioTensor(file, viewOf(file, "output.0"), "f32");
   assertEquals([f32.dtype, f32.shape], ["f32", [2]]);
@@ -52,26 +56,27 @@ test("ioTensor は宣言 dtype どおりの型で読み、バイト列をコピ�
   assertEquals([bool.dtype, bool.shape], ["bool", [2]]);
   assertEquals([...bool.data], [0, 1]);
 
-  // view であること = 元バイト列を書き換えると読めた値も動く（コピーしていない検出器）
+  // Being a view = rewriting the original bytes moves the value read too (detects a copy)
   new DataView(file.buffer).setFloat32(viewOf(file, "output.0").byteOffset, 42, true);
   assertStrictEquals(f32.data[0], 42);
 });
 
-test("ioTensor は格納 dtype が宣言と食い違う組を落とす（ビット列の再解釈を通さない）", () => {
+test("ioTensor rejects pairs whose storage dtype disagrees with the declaration (no bit reinterpretation)", () => {
   const file = goldenIo();
-  // 要素は全型 4 バイトなので、この門が無ければ 3 本とも「数値として読めて」しまう
+  // Every type has 4-byte elements, so without this check all 3 would "read as numbers"
   const cases: readonly (readonly ["f32" | "i32" | "bool", string])[] = [
-    ["f32", "output.1"], // I32 を f32 で
-    ["i32", "output.0"], // F32 を i32 で
-    ["bool", "output.0"], // F32 を bool で
+    ["f32", "output.1"], // I32 as f32
+    ["i32", "output.0"], // F32 as i32
+    ["bool", "output.0"], // F32 as bool
   ];
   for (const [dtype, name] of cases) {
     const error = assertThrows(
       () => ioTensor(file, viewOf(file, name), dtype),
       AssertionError,
-      "の dtype",
+      "dtype of golden tensor",
     );
-    // 診断はテンソル名を名乗る MUST（どの出力がずれたか分からないと直せない）
+    // MUST: the diagnostic names the tensor (without knowing which output drifted it cannot be
+    // fixed)
     assertEquals(error.message.includes(`'${name}'`), true, error.message);
   }
 });

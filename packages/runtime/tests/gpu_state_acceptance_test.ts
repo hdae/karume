@@ -1,18 +1,26 @@
-// states 形実行の**受入テスト群**（波 D-5 — ADR 0066 受入条件② / ADR 0067 受入条件⑤ ほか）。
+// **Acceptance tests** for states-form execution (phase D-5 — ADR 0066 acceptance criterion ② /
+// ADR 0067 acceptance criterion ⑤ and others).
 //
-// gpu_state_execution_test.ts（実行結線）と gpu_state_attention_test.ts（カーネル単体）の門は、
-// どちらも **D-2 製の CPU 参照**（src/reference/state-attention.ts）をオラクルにしている。参照と
-// カーネルが同じ誤りを共有すれば全部が恒真になるので、本ファイルはその穴を塞ぐ 5 群を置く:
+// The checks of gpu_state_execution_test.ts (execution wiring) and gpu_state_attention_test.ts
+// (kernels alone) both use **the CPU reference built in D-2** (src/reference/state-attention.ts)
+// as the oracle. If the reference and the kernels shared the same error, all of them would be
+// tautologies, so this file places five groups that close that hole:
 //
-//   1. **交差オラクル** — 波 A 以前から信頼済みの機構（mask 第 4 入力つき 1-shot 融合 attention）
-//      で同じ計算を組み、多 step の states 形と突き合わせる（参照に一切依存しない検証鎖）
-//   2. **ADR 0066 受入条件②** — pad あり / なしで **KV スロットのバイト列が完全一致** + 出力一致
-//   3. **ADR 0067 受入条件⑤** — 空行 → 厳密 0 を `Session.run` 経由で（executor 越しの直接門）
-//   4. **容量非依存** — C=8 と C=4096 で全 step ビット同一（決定 3 の仕事量合格条件の値側の裏）
-//   5. **KV 共有層**（ADR 0067 決定 4 — Gemma 4 E2B の 20 層パターン）の**実行**
+//   1. **Cross oracle** — builds the same computation with a mechanism trusted since before phase A
+//      (one-shot fused attention with the mask as the fourth input) and compares it with the
+//      multi-step states form (a verification chain with no dependence on the reference)
+//   2. **ADR 0066 acceptance criterion ②** — with and without pad, **the KV slot bytes match
+//      exactly** + the outputs match
+//   3. **ADR 0067 acceptance criterion ⑤** — empty row → exactly 0 through `Session.run` (a direct
+//      check through the executor)
+//   4. **Capacity independence** — C=8 and C=4096 are bit-identical at every step (the value-side
+//      flip of decision 3's work acceptance condition)
+//   5. **Execution** of **KV-sharing layers** (ADR 0067 decision 4 — the 20-layer pattern of
+//      Gemma 4 E2B)
 //
-// MUST: 各群は「門が空振りしていない」ことを自前で持つ（期待値の非自明性・対照・故障注入）。
-// states 形は厳密 0 が正規に出る形なので、確認が無いと「何も計算していない」実装が緑で通る。
+// MUST: each group carries its own evidence that "the check fires" (non-trivial expected values,
+// controls, fault injection). The states form legitimately produces exact zeros, so without that
+// evidence an implementation that "computes nothing" would pass green.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -30,32 +38,39 @@ import {
 import { halfScale, seeded } from "./helpers/state-dispatch.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** {@link compareTensors} の戻り（allclose.ts は型を輸出しないので実体から取る）。 */
+/**
+ * The return type of {@link compareTensors} (allclose.ts does not export the type, so take it from
+ * the value).
+ */
 type Report = ReturnType<typeof compareTensors>;
 
-/** 決定的な入力列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic input sequences (no random numbers — a failure would not reproduce). */
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.23;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
 
-/** 1 モデルぶんの形（`B = 1` 固定 — batch 軸は ADR 0066 決定 8 のスコープ外）。 */
+/** One model's shape (`B = 1` fixed — the batch axis is out of scope per ADR 0066 decision 8). */
 type StateModel = {
   readonly heads: number;
   readonly kvHeads: number;
   readonly depth: number;
-  /** スロットの行容量。記号 `"C"` にすると `createGenerationContext(bindings)` が決める。 */
+  /**
+   * The slot's row capacity. With the symbol `"C"`, `createGenerationContext(bindings)` decides it.
+   */
   readonly capacity: number | "C";
-  /** `W`（省略 = 全 context）。 */
+  /** `W` (omitted = the whole context). */
   readonly window?: number;
 };
 
 /**
- * states 形のグラフ（読者 `readers` 本 + `state_append` 2 本）。
+ * The states-form graph (`readers` readers + two `state_append`).
  *
- * ノード配列順は ADR 0067 決定 5b の発行規約どおり「**当該スロットの全読者 → 書き**」。
- * `readers = 2` が KV 共有層（所有層 + 自前 KV を持たない層）の形で、共有層は自層で projection を
- * 計算せず**所有層の k/v 値をそのまま ins に配線**する（決定 4）— それがこのグラフの `k` / `v` を
- * 2 本の attention が共有している形そのもので、共有は「同一スロット名 + 同一値名」で表れる。
+ * The node order follows the issue rule of ADR 0067 decision 5b: "**every reader of the slot →
+ * the write**". `readers = 2` is the shape of a KV-sharing layer (the owning layer + a layer with
+ * no KV of its own); the sharing layer computes no projection of its own and **wires the owning
+ * layer's k/v values straight into ins** (decision 4) — which is exactly two attention nodes
+ * sharing this graph's `k` / `v`, and the sharing shows up as "the same slot name + the same value
+ * name".
  */
 const stateGraph = (model: StateModel, readers = 1): DeclarationJson => {
   const { heads, kvHeads, depth, capacity, window } = model;
@@ -123,18 +138,19 @@ const tensor = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Tens
   data,
 });
 
-/** 1 step ぶんの入力（`M` 行ぶん — 有効なのは先頭 `queryLength` 行）。 */
+/** The inputs of one step (`M` rows — only the first `queryLength` rows are valid). */
 type StepInputs = {
-  /** 読者ごとの q（KV 共有層は層ごとに別の q を持つ）。 */
+  /** One q per reader (KV-sharing layers each have their own q). */
   readonly q: readonly Float32Array<ArrayBuffer>[];
   readonly k: Float32Array<ArrayBuffer>;
   readonly v: Float32Array<ArrayBuffer>;
 };
 
 /**
- * step ごとの入力。`salt` を step で変えることで「前 step の入力を読み直している」実装が値で
- * 落ちるようにする（同じ入力を配ると鎖の誤りが自己相殺しうる）。読者ごとにも salt をずらす
- * （2 本の読者が同じ q を持つと、共有層の配線ミスが値に出ない）。
+ * Per-step inputs. Changing `salt` per step makes an implementation that "re-reads the previous
+ * step's input" fail on the values (handing out the same input could let an error in the chain
+ * cancel itself out). The salt is also shifted per reader (if the two readers had the same q, a
+ * wiring mistake in the sharing layer would not show in the values).
  */
 const stepInputs = (
   model: StateModel,
@@ -149,7 +165,10 @@ const stepInputs = (
   v: seeded(model.kvHeads * chunkRows * model.depth, (i) => VALUE(i + salt)),
 });
 
-/** GPU 側の 1 step（`run` の第 3 引数が generation 面）。返すのは読者ごとの `[1,H,M,D]`。 */
+/**
+ * One step on the GPU side (the third argument of `run` is the generation surface). Returns one
+ * `[1,H,M,D]` per reader.
+ */
 const runStep = async (
   session: Session,
   context: GenerationContext,
@@ -173,7 +192,10 @@ const runStep = async (
   });
 };
 
-/** `[1,H,M,D]` の先頭 `rows` 行を抜き出す（有効行 = 論理座標 `[P, P+Q)` に対応する行）。 */
+/**
+ * Extracts the first `rows` rows of `[1,H,M,D]` (the valid rows = the rows for the logical
+ * coordinates `[P, P+Q)`).
+ */
 const takeRows = (
   data: Float32Array<ArrayBuffer>,
   planes: number,
@@ -195,7 +217,7 @@ const takeRows = (
 const bitsOf = (data: Float32Array<ArrayBuffer>): Uint32Array =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
-/** ビット列の食い違い（先頭 4 件だけ）。 */
+/** Bit-pattern mismatches (the first four only). */
 const mismatches = (actual: ArrayLike<number>, expected: ArrayLike<number>): readonly string[] => {
   const found: string[] = [];
   for (let i = 0; i < actual.length && found.length < 4; i += 1) {
@@ -209,20 +231,21 @@ const assertBitsEqual = (
   expected: ArrayLike<number>,
   where: string,
 ): void => {
-  assertEquals(actual.length, expected.length, `${where}: 長さが違う`);
-  assertEquals(mismatches(actual, expected), [], `${where}: ビット列が一致しない`);
+  assertEquals(actual.length, expected.length, `${where}: the lengths differ`);
+  assertEquals(mismatches(actual, expected), [], `${where}: the bit patterns differ`);
 };
 
 /**
- * state スロットの**生バイト列**を読み戻す（ADR 0066 受入条件②の突合相手）。
+ * Reads back the **raw bytes** of a state slot (what ADR 0066 acceptance criterion ② compares).
  *
- * 実行経路はスロットの内容を 1 度も出力に出さないので、`RUNTIME_INTERNAL` のバッファを直接
- * copyBufferToBuffer + mapAsync で覗く以外に観測点が無い（helpers/state-dispatch.ts の
- * `readFloats` と同じ流儀）。返すのは **`Uint32Array`** — 「バイト列が完全一致」は f32 の値比較
- * では表せない（`-0` と `+0`・NaN の payload が値比較では潰れる）。
+ * The execution path never puts the slot contents into an output, so the only observation point is
+ * peeking at the `RUNTIME_INTERNAL` buffer directly with copyBufferToBuffer + mapAsync (the same
+ * approach as `readFloats` in helpers/state-dispatch.ts). It returns a **`Uint32Array`** — "the
+ * bytes match exactly" cannot be expressed by f32 value comparison (it collapses `-0` and `+0` and
+ * NaN payloads).
  *
- * MUST: 呼ぶのは `run` の解決後（`Session.run` は出力を読み戻して決着するので、その時点で
- * 当該 run の dispatch は全て submit 済み）。
+ * MUST: call it after `run` resolves (`Session.run` settles by reading back the outputs, so by then
+ * every dispatch of that run has been submitted).
  */
 const readSlotBits = async (
   gpu: GpuContext,
@@ -230,7 +253,7 @@ const readSlotBits = async (
   slot: string,
 ): Promise<Uint32Array> => {
   const backing = context[RUNTIME_INTERNAL].slots.get(slot);
-  if (backing === undefined) throw new Error(`state スロット '${slot}' が無い`);
+  if (backing === undefined) throw new Error(`no state slot '${slot}'`);
   const staging = gpu.device.createBuffer({
     size: backing.byteLength,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
@@ -249,28 +272,32 @@ const readSlotBits = async (
 };
 
 // ---------------------------------------------------------------------------
-// 群 1: 交差オラクル（帯 mask つき 1-shot 融合 attention との多 step 突合）
+// Group 1: the cross oracle (multi-step comparison with one-shot fused attention with a band mask)
 // ---------------------------------------------------------------------------
 
 /**
- * 帯 mask の「遮蔽」値。
+ * The "blocked" value of the band mask.
  *
- * MUST: **有限**の大負値（`-inf` を入れない）。融合 attention の mask は加算型で safe_softmax
- * ではない（ADR 0044 決定 3 / names.ts の ATTENTION_OP 契約）ため、`-inf` を入れると
- * 「行 max も `-inf` になる行」が 1 本でも生じた瞬間に `exp(-inf − (-inf)) = NaN` へ落ちる形が
- * 実装の分岐次第で生まれる。有限値なら加算も減算も f32 の有限域に閉じたまま、
- * `exp(-3e38 − max)` は f32 の指数下限（≈ −88）を 36 桁下回るので**厳密に 0** へ潰れる。
- * `-3e38` は f32 の最大有限値 ≈ 3.4028e38 の内側なので、`S + mask` が `-inf` へ溢れることもない。
+ * MUST: a **finite** large negative value (no `-inf`). The fused attention's mask is additive, not
+ * safe_softmax (ADR 0044 decision 3 / the ATTENTION_OP contract in names.ts), so with `-inf`,
+ * depending on the implementation's branches, a single "row whose max is also `-inf`" could fall
+ * into `exp(-inf − (-inf)) = NaN`. With a finite value both addition and subtraction stay within
+ * f32's finite range, and `exp(-3e38 − max)` is 36 orders of magnitude below f32's exponent floor
+ * (≈ −88), so it collapses to **exactly 0**. `-3e38` is inside f32's largest finite value
+ * ≈ 3.4028e38, so `S + mask` cannot overflow to `-inf` either.
  *
- * NOTE: どの行も causal 対角（`col = P + row`）を必ず 1 本含むので「全 −inf 行」は構造的に
- * 生じない — この mask は融合 attention の契約（全 −inf 行は契約違反）を破らない。
+ * NOTE: every row always contains the causal diagonal (`col = P + row`), so an "all −inf row"
+ * cannot occur structurally — this mask does not break the fused attention's contract (an all −inf
+ * row violates it).
  */
 const MASK_BLOCK = -3e38;
 
 /**
- * 論理座標の帯 mask `[1,1,Q,Ntot]`（causal + sliding の**両側**述語 — ADR 0067 決定 4）。
+ * The band mask `[1,1,Q,Ntot]` in logical coordinates (the **two-sided** causal + sliding predicate
+ * — ADR 0067 decision 4).
  *
- * 行 `i` は論理位置 `P + i`。許可は `max(0, P+i−W+1) ≤ col ≤ P+i`（`W = 0` は下限なし）。
+ * Row `i` is logical position `P + i`. Allowed: `max(0, P+i−W+1) ≤ col ≤ P+i` (`W = 0` has no
+ * lower bound).
  */
 const bandMask = (
   past: number,
@@ -290,8 +317,9 @@ const bandMask = (
 };
 
 /**
- * 論理 KV 履歴（1 行 = `[Hkv·D]`）。states 側のスロットとは**別の器**で持つ — 容量も ring も
- * 持たない素の追記列なので、写像（`col % W`）の誤りが交差突合に出る。
+ * The logical KV history (1 row = `[Hkv·D]`). Kept in **a container separate** from the states
+ * side's slots — a plain append-only list with neither capacity nor ring, so an error in the
+ * mapping (`col % W`) shows in the cross comparison.
  */
 type History = Float32Array[];
 
@@ -315,8 +343,9 @@ const appendHistory = (
 };
 
 /**
- * 履歴を `[1,H,N,D]` へ**実体化**する（repeat_kv — GQA 系列の 1-shot 側は整除 broadcast を
- * 使わない形で組む。ADR 0067 決定 2 の受入条件と同じ流儀で、1-shot 側が波 A の変更に依存しない）。
+ * **Materializes** the history into `[1,H,N,D]` (repeat_kv — the one-shot side of a GQA series is
+ * built without divisible broadcasting. The same approach as the acceptance criterion of ADR 0067
+ * decision 2, so the one-shot side does not depend on the changes of phase A).
  */
 const materializeHistory = (history: History, model: StateModel): Float32Array<ArrayBuffer> => {
   const { heads, kvHeads, depth } = model;
@@ -334,7 +363,7 @@ const materializeHistory = (history: History, model: StateModel): Float32Array<A
   return out;
 };
 
-/** 1-shot 側の Session（`M` / `N` を記号にして全 step を 1 本で賄う）。 */
+/** The one-shot side's Session (`M` / `N` are symbols, so one Session covers every step). */
 const oneShotSession = async (gpu: GpuContext, model: StateModel): Promise<Session> => {
   const { heads, depth } = model;
   const graph = singleOpDeclaration(
@@ -352,26 +381,33 @@ const oneShotSession = async (gpu: GpuContext, model: StateModel): Promise<Sessi
 };
 
 /**
- * 交差オラクルの許容誤差。
+ * The tolerance of the cross oracle.
  *
- * 両経路は**別族のカーネル**（states 形は state_qk / state_stats / state_pv の 3 本 — census が
- * 「融合 attention のキーが 1 本も出ない」ことを別途固定している / 1-shot は融合 attention）で、
- * 縮約の分け方も読み出し元も違う（過去は ring 物理順 + current は ins ／ 連結済みの論理順）ため、
- * 一般には丸め列が一致する保証は無い。よって allclose で判定する。
+ * The two paths are **kernels of different families** (the states form is the three kernels
+ * state_qk / state_stats / state_pv — the census separately pins that "no fused attention key
+ * appears" / the one-shot side is fused attention), and they differ in how the reduction is split
+ * and where they read from (the past in ring physical order + current from ins / the concatenated
+ * logical order), so in general nothing guarantees the same rounding sequence. Hence allclose.
  *
- * MUST: `rtol = 0`（states 形は厳密 0 が正解の要素を正規に含み、相対項は 0 近傍で効かない）。
- * MUST: この幅は「窓外 key 1 本の混入」を必ず検出できること — 故障注入（window +1 のグラフ）で
- * 実証する。実測の効きは 0.054〜2.12 で、この幅の 1.8e4〜7e5 倍。
+ * MUST: `rtol = 0` (the states form legitimately contains elements whose correct value is exactly
+ * 0, and a relative term does nothing near 0).
+ * MUST: this width must always detect "one out-of-window key mixed in" — demonstrated by fault
+ * injection (the graph with window +1). The measured effect is 0.054–2.12, 1.8e4–7e5 times this
+ * width.
  *
- * NOTE: 幅の値そのものは**余裕でしかない**。参照機の実測は 4 系列 20 step すべて
- * `maxAbs = 0`（= 両経路がビット同一）で、丸め差は 1 度も観測されていない。「縮約順が違うから
- * 誤差が出るはず」という着手時の想定は実測に反証された — 遮蔽列の寄与が厳密 0
- * （`exp(-3e38 − max)` も `0 · v` も）で、有効列の並びと D 方向の縮約順が両族で一致しているため。
- * MUST: その「ビット同一」を**門に焼かない**（波 D-7 で `worstAbs <= 0` の assert を撤去し、
- * 実測最悪値は stdout へ出すだけにした）。fma の使い方はドライバ依存で、別機では正常に丸め差が
- * 出る — 機材依存のビット挙動を可搬な門にすると、正しい実装がその機でだけ赤くなる
- * （golden io のバイト突合を参照環境専用に分けた 2026-08-16 の裁定と同じ教訓）。判定は
- * {@link CROSS_TOLERANCE} + 故障注入の検出力マージンに一本化する。
+ * NOTE: the width itself is **only headroom**. On the reference machine every step of all four
+ * series (20 steps) measured `maxAbs = 0` (= the two paths are bit-identical); no rounding
+ * difference has ever been observed. The initial assumption that "a different reduction order must
+ * produce error" was refuted by measurement — the contribution of blocked columns is exactly 0
+ * (both `exp(-3e38 − max)` and `0 · v`), and both families agree on the order of the valid columns
+ * and on the reduction order along D.
+ * MUST: do **not bake** that "bit identity" **into a check** (phase D-7 removed the
+ * `worstAbs <= 0` assert and only prints the measured worst value to stdout). How fma is used
+ * depends on the driver, and other machines legitimately show rounding differences — making a
+ * hardware-dependent bit behavior a portable check would turn a correct implementation red on that
+ * machine only (the same lesson as the 2026-08-16 ruling that restricted the byte comparison of the
+ * golden io to the reference environment). The verdict rests solely on {@link CROSS_TOLERANCE} +
+ * the detection margin of the fault injection.
  */
 const CROSS_TOLERANCE: Tolerance = { atol: 3e-6, rtol: 0 };
 
@@ -379,13 +415,13 @@ type CrossSeries = {
   readonly name: string;
   readonly model: StateModel;
   readonly chunkLength: number;
-  /** `[M（物理 chunk 行数）, Q（queryLength）]` の列。 */
+  /** The list of `[M (physical chunk rows), Q (queryLength)]`. */
   readonly steps: readonly (readonly [number, number])[];
 };
 
 const CROSS_SERIES: readonly CrossSeries[] = [
   {
-    // 論理長 0 → 4 → 5 → 6 → 7 → 9（末尾は pad つき chunk）
+    // Logical length 0 → 4 → 5 → 6 → 7 → 9 (the last is a chunk with pad)
     name: "full r=1",
     model: { heads: 4, kvHeads: 4, depth: 4, capacity: 16 },
     chunkLength: 4,
@@ -398,7 +434,7 @@ const CROSS_SERIES: readonly CrossSeries[] = [
     ],
   },
   {
-    // pad つき prefill から始める GQA（0 → 3 → 4 → 5 → 9）
+    // GQA starting from a prefill with pad (0 → 3 → 4 → 5 → 9)
     name: "full r=2 (GQA)",
     model: { heads: 4, kvHeads: 2, depth: 8, capacity: 16 },
     chunkLength: 4,
@@ -410,8 +446,8 @@ const CROSS_SERIES: readonly CrossSeries[] = [
     ],
   },
   {
-    // 0 → 3 → 4 → 5 → 6 → 7 → 9。W=4 の ring は past=4 で一周し、以後 毎 step エビクト
-    name: "sliding W=4 r=1（W 跨ぎエビクション）",
+    // 0 → 3 → 4 → 5 → 6 → 7 → 9. The W=4 ring wraps at past=4 and evicts at every step after that
+    name: "sliding W=4 r=1 (eviction across W)",
     model: { heads: 2, kvHeads: 2, depth: 4, capacity: 4, window: 4 },
     chunkLength: 3,
     steps: [
@@ -424,8 +460,8 @@ const CROSS_SERIES: readonly CrossSeries[] = [
     ],
   },
   {
-    // 0 → 4 → 5 → 6 → 7 → 10。エビクション × GQA × 末尾 pad つき chunk
-    name: "sliding W=6 r=2（GQA × エビクション）",
+    // 0 → 4 → 5 → 6 → 7 → 10. Eviction × GQA × a last chunk with pad
+    name: "sliding W=6 r=2 (GQA × eviction)",
     model: { heads: 4, kvHeads: 2, depth: 4, capacity: 6, window: 6 },
     chunkLength: 4,
     steps: [
@@ -439,11 +475,12 @@ const CROSS_SERIES: readonly CrossSeries[] = [
 ];
 
 /**
- * 1 系列を回して step ごとの突合レポートを返す。
+ * Runs one series and returns the comparison report of each step.
  *
- * `windowDelta` は**故障注入**の口 — states 側だけ窓を広げてグラフを組み直す（1-shot 側の期待値は
- * 常に本来の窓で作る）。窓が 1 広い実装は「窓外 key 1 本を沈黙混入」させる形そのもの
- * （ADR 0067 決定 4 が両側述語を MUST にした理由）。
+ * `windowDelta` is the **fault-injection** hook — it rebuilds the graph with a wider window on the
+ * states side only (the one-shot side's expected values always use the real window). An
+ * implementation with a window one wider is exactly the shape that "silently mixes in one
+ * out-of-window key" (the reason ADR 0067 decision 4 made the two-sided predicate a MUST).
  */
 const crossSeriesReports = async (
   gpu: GpuContext,
@@ -453,7 +490,9 @@ const crossSeriesReports = async (
   const { model, steps } = series;
   const capacity = model.capacity;
   if (windowDelta !== 0 && (model.window === undefined || typeof capacity !== "number")) {
-    throw new Error("故障注入（窓を広げる）は具体容量の sliding 系列にしか適用できない");
+    throw new Error(
+      "fault injection (widening the window) applies only to a sliding series with a concrete capacity",
+    );
   }
   const stateModel: StateModel =
     windowDelta === 0
@@ -488,10 +527,11 @@ const crossSeriesReports = async (
           x3: tensor([1, 1, query, total], bandMask(past, query, total, model.window ?? 0)),
         })
       )["y"].data as Float32Array<ArrayBuffer>;
-      // MUST: 期待値が自明でないこと（両側が ~0 なら突合は恒真）。
+      // MUST: the expected values are not trivial (if both sides were ~0 the comparison would be a
+      // tautology).
       assert(
         expected.some((value) => Math.abs(value) > 1e-3),
-        `${series.name} step ${index}: 1-shot 側の期待出力が自明（全 ~0）`,
+        `${series.name} step ${index}: the one-shot side's expected output is trivial (all ~0)`,
       );
       reports.push(
         compareTensors(
@@ -505,7 +545,11 @@ const crossSeriesReports = async (
       );
       past += query;
     }
-    assertEquals(context.pastLength, past, `${series.name}: 論理長がホスト側の進行とずれた`);
+    assertEquals(
+      context.pastLength,
+      past,
+      `${series.name}: the logical length drifted from the host-side progress`,
+    );
   } finally {
     await context.dispose();
     await states.dispose();
@@ -515,7 +559,7 @@ const crossSeriesReports = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形の多 step が帯 mask つき 1-shot 融合 attention と一致する（交差オラクル・実 GPU）",
+  "multi-step states form matches one-shot fused attention with a band mask (cross oracle, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     let worstAbs = 0;
@@ -534,37 +578,41 @@ test.skipIf(!GPU_AVAILABLE)(
     } finally {
       gpu.destroy();
     }
-    // 実測最悪値は**診断として出すだけ**（判定は CROSS_TOLERANCE 側 — 上の doc）。参照機では
-    // 0（両族ビット同一）が出るが、fma の使い方はドライバ依存なので他機の非ゼロは正常。
+    // The measured worst value is **only printed as a diagnostic** (the verdict is on the
+    // CROSS_TOLERANCE side — the doc above). The reference machine prints 0 (both families
+    // bit-identical), but fma use depends on the driver, so a non-zero value elsewhere is normal.
     console.log(`[states cross-oracle] maxAbs=${worstAbs}`);
   },
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "窓を 1 広げた states 形は交差オラクルと一致しない（故障注入・実 GPU）",
+  "a states form with the window widened by one does not match the cross oracle (fault injection, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // W=4 の系列を W=5（容量も 5）で組み直す。論理長の進行は 0 → 3 → 4 → 5 → 6 → 7 なので、
-      // **step 2 以降**（`past + row ≥ W` になる step）だけが「resident な窓外 key を 1 本余計に
-      // 見る」形になり、正しい帯 mask の期待値から外れる。
+      // Rebuild the W=4 series with W=5 (capacity 5 too). The logical length progresses
+      // 0 → 3 → 4 → 5 → 6 → 7, so only **step 2 onwards** (the steps where `past + row ≥ W`) take
+      // the shape that "sees one extra resident out-of-window key" and deviate from the correct
+      // band-mask expectation.
       const reports = await crossSeriesReports(gpu, CROSS_SERIES[2], 1);
       const failing = reports.map((report) => report.pass);
       assertEquals(
         failing,
         [true, true, false, false, false, false],
-        `窓 +1 の実装が検出されない step がある（突合が空振り）: ${reports
+        `some step does not detect the window +1 implementation (the comparison never fires): ${reports
           .map(formatAllclose)
           .join(" / ")}`,
       );
-      // 検出力の余裕: 混入 1 本の効きが許容幅の 3 桁以上（実測 0.054〜2.12 — 幅を 2 桁緩めても
-      // 残る）。前半 2 step が緑なのは「何でも赤くする注入ではない」ことの裏。
+      // Detection headroom: the effect of one mixed-in key is at least three orders of magnitude
+      // above the tolerance (measured 0.054–2.12 — it survives loosening the width by two orders).
+      // The first two steps staying green is evidence that "the injection does not turn everything
+      // red".
       for (const [index, report] of reports.slice(2).entries()) {
         assert(
           report.maxAbsError > CROSS_TOLERANCE.atol * 1000,
           `step ${
             index + 2
-          }: 窓外 key 混入の効き ${report.maxAbsError} が許容幅 ${CROSS_TOLERANCE.atol} に近すぎる`,
+          }: the effect of the mixed-in out-of-window key ${report.maxAbsError} is too close to the tolerance ${CROSS_TOLERANCE.atol}`,
         );
       }
     } finally {
@@ -574,21 +622,22 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 群 2: ADR 0066 受入条件② — padding 行 no-op の機械証明
+// Group 2: ADR 0066 acceptance criterion ② — mechanical proof that padding rows are a no-op
 // ---------------------------------------------------------------------------
 
 const PAD_CAPACITY = 8;
 const PAD_MODEL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: PAD_CAPACITY };
-/** pad ありの物理 chunk 行数（`M = 8` — 有効は先頭 Q 行だけ）。 */
+/** The physical chunk row count with pad (`M = 8` — only the first Q rows are valid). */
 const PAD_WIDE_ROWS = 8;
-/** pad なし側の prefill 形の物理 chunk 行数（`M = Q = 3`）。 */
+/** The physical chunk row count of the prefill shape on the side without pad (`M = Q = 3`). */
 const PAD_TIGHT_ROWS = 3;
 
 /**
- * `M` 行の入力を作る（先頭 `query` 行は「論理内容」・残りは pad）。
+ * Builds `M` rows of input (the first `query` rows are "the logical content", the rest is pad).
  *
- * `padFill` が `undefined` なら pad 行は **0 埋め**（ADR 0066 追記 6 のホスト側の値契約）。
- * 値を渡すと pad 行に非ゼロのゴミが入る — スロットが pad 行を読まないことの直接証明用。
+ * With `padFill` `undefined`, pad rows are **zero-filled** (the host-side value contract of
+ * ADR 0066 addendum 6). Passing a value puts non-zero garbage into the pad rows — for directly
+ * proving that the slot does not read pad rows.
  */
 const paddedInputs = (
   model: StateModel,
@@ -616,28 +665,29 @@ const paddedInputs = (
   };
 };
 
-/** pad なし（`M = query`）の同一論理内容。 */
+/** The same logical content without pad (`M = query`). */
 const tightInputs = (model: StateModel, query: number, salt: number): StepInputs =>
   paddedInputs(model, query, query, salt);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "pad 行は KV スロットのバイト列にも出力にも現れない（ADR 0066 受入条件②・実 GPU）",
+  "pad rows appear neither in the KV slot bytes nor in the output (ADR 0066 acceptance criterion ②, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, PAD_MODEL);
-    // 3 本の context を同じ Session で回す。pad の有無は物理 chunk 行数 M の違いなので、
-    // 固定 chunk 契約（`M ∈ {chunkLength, 1}` — ADR 0066 決定 4）の下では **chunkLength も
-    // 別**になる（`tight` は M=Q=3 の prefill 形 = chunkLength 3）。主張（KV バイト同一）は
-    // 同じ Session を跨いだ context 間の比較なので、そのまま成立する。
+    // Run three contexts on the same Session. With or without pad is a difference in the physical
+    // chunk row count M, so under the fixed-chunk contract (`M ∈ {chunkLength, 1}` — ADR 0066
+    // decision 4) **chunkLength differs too** (`tight` is the prefill shape M=Q=3 = chunkLength 3).
+    // The claim (identical KV bytes) compares contexts on the same Session, so it holds as is.
     const [wide, tight, garbage] = await Promise.all([
       session.createGenerationContext({ chunkLength: PAD_WIDE_ROWS }),
       session.createGenerationContext({ chunkLength: PAD_TIGHT_ROWS }),
       session.createGenerationContext({ chunkLength: PAD_WIDE_ROWS }),
     ]);
     try {
-      // 2 step 回す（2 本目は過去ありの形 — 論理長が進んだ後も同じ 2 点が成り立つこと）。
-      // 1 本目は prefill 形（tight は M=Q=3）・2 本目は decode 形（tight は M=Q=1）で、
-      // どちらの実行形でも同じ 2 点が成り立つことを併せて見る。
+      // Run two steps (the second has a past — the same two points hold after the logical length
+      // advances). The first is the prefill shape (tight is M=Q=3) and the second the decode shape
+      // (tight is M=Q=1), so this also checks that the same two points hold in both execution
+      // shapes.
       for (const [index, query] of [PAD_TIGHT_ROWS, 1].entries()) {
         const salt = 11 + index * 37;
         const wideOut = (
@@ -660,10 +710,11 @@ test.skipIf(!GPU_AVAILABLE)(
             query,
           )
         )[0];
-        // NOTE: pad 行の 0 埋めは**ホスト側の値契約**（ADR 0066 追記 6 — pad 行の k/v が非有限だと
-        // 「−inf 加算 + exp」経路で valid 行へ NaN が漏れるのを値で遮断する）。KV スロットには
-        // そもそも pad 行が書かれないので、この契約は KV には効いていない — それを示すのが下の
-        // `garbage`（pad 行に非ゼロを詰めても KV のバイト列は 1 ビットも動かない）。
+        // NOTE: zero-filling pad rows is **a host-side value contract** (ADR 0066 addendum 6 — it
+        // blocks, by value, the NaN that non-finite k/v in pad rows would leak into valid rows
+        // through the "add −inf + exp" path). Pad rows are never written into the KV slots in the
+        // first place, so this contract has no effect on KV — the `garbage` context below shows
+        // it (filling pad rows with non-zero values does not move a single bit of the KV bytes).
         const garbageOut = (
           await runStep(
             session,
@@ -682,18 +733,19 @@ test.skipIf(!GPU_AVAILABLE)(
         )[0];
 
         const label = `step ${index}（Q=${query}）`;
-        // ① KV スロットのバイト列が完全一致（pad の有無・pad の中身に依らない）
+        // ① the KV slot bytes match exactly (regardless of pad and of its contents)
         for (const slot of ["kslot", "vslot"]) {
           const expected = await readSlotBits(gpu, tight, slot);
           assertBitsEqual(await readSlotBits(gpu, wide, slot), expected, `${label}: ${slot} / pad`);
           assertBitsEqual(
             await readSlotBits(gpu, garbage, slot),
             expected,
-            `${label}: ${slot} / pad にゴミ`,
+            `${label}: ${slot} / garbage in pad`,
           );
-          // MUST: 突合が空振りでないこと — 書かれた行は非ゼロで、`pastLength` 以降は 0 のまま
-          // （`state_append` が先頭 queryLength 行しか書かない = 受入条件②の直接の言い換え。
-          // full スロットなので論理 col = 物理 row で、境界がそのまま `pastLength` に出る）。
+          // MUST: the comparison fires — the written rows are non-zero, and from `pastLength` on
+          // they stay 0 (`state_append` writes only the first queryLength rows = a direct
+          // restatement of acceptance criterion ②. It is a full slot, so logical col = physical row
+          // and the boundary shows directly at `pastLength`).
           const past = tight.pastLength;
           const rowFloats = PAD_MODEL.depth;
           for (let plane = 0; plane < PAD_MODEL.kvHeads; plane += 1) {
@@ -705,26 +757,37 @@ test.skipIf(!GPU_AVAILABLE)(
             );
             assert(
               written.some((bits) => bits !== 0),
-              `${label}: ${slot} 面 ${plane} の書込み範囲が全 0（空振り）`,
+              `${label}: ${slot} plane ${plane} has an all-0 written range (never fires)`,
             );
             assertEquals(
               beyond.every((bits) => bits === 0),
               true,
-              `${label}: ${slot} 面 ${plane} の論理長より先（行 ${past}..${
+              `${label}: ${slot} plane ${plane} has writes beyond the logical length (rows ${past}..${
                 PAD_CAPACITY - 1
-              }）に書込みがある`,
+              })`,
             );
           }
         }
-        // ② 有効出力行 [0,Q) が Uint32 完全一致
+        // ② the valid output rows [0,Q) match exactly in Uint32
         const valid = (data: Float32Array<ArrayBuffer>, rows: number): Uint32Array =>
           bitsOf(takeRows(data, PAD_MODEL.heads, rows, PAD_MODEL.depth, query));
         const tightBits = valid(tightOut, query);
-        assert(new Set(tightBits).size > 1, `${label}: 出力が定数（ビット一致が恒真）`);
-        assertBitsEqual(valid(wideOut, PAD_WIDE_ROWS), tightBits, `${label}: 出力 / pad`);
-        // 行局所性（追記 6）— pad 行のゴミは valid 行へ 1 ビットも漏れない。
-        assertBitsEqual(valid(garbageOut, PAD_WIDE_ROWS), tightBits, `${label}: 出力 / pad にゴミ`);
-        assertEquals(wide.pastLength, tight.pastLength, `${label}: 論理長が pad の有無で違う`);
+        assert(
+          new Set(tightBits).size > 1,
+          `${label}: the output is constant (bit equality is a tautology)`,
+        );
+        assertBitsEqual(valid(wideOut, PAD_WIDE_ROWS), tightBits, `${label}: output / pad`);
+        // Row locality (addendum 6) — garbage in pad rows leaks not a single bit into valid rows.
+        assertBitsEqual(
+          valid(garbageOut, PAD_WIDE_ROWS),
+          tightBits,
+          `${label}: output / garbage in pad`,
+        );
+        assertEquals(
+          wide.pastLength,
+          tight.pastLength,
+          `${label}: the logical length differs with and without pad`,
+        );
       }
       assertEquals(tight.pastLength, PAD_TIGHT_ROWS + 1);
     } finally {
@@ -736,17 +799,19 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 群 3: ADR 0067 受入条件⑤ — 空行 → 0 の直接門（executor 経由）
+// Group 3: ADR 0067 acceptance criterion ⑤ — the direct check of empty row → 0 (through the
+// executor)
 // ---------------------------------------------------------------------------
 
 const EMPTY_MODEL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: 2, window: 2 };
 
 /**
- * 行 `row` が**空行**か（述語を満たす実在 col が 1 本も無い）。
+ * Whether row `row` is **empty** (no existing col satisfies the predicate).
  *
- * MUST: カーネル側のヘルパ（`stateColumnBase` / `stateLiveColumns`）を使わず論理座標だけで書く —
- * 実装の列範囲の取り方が誤っていても、この判定は誤りに追随しない。実在する col は `[0, P+Q)`
- * （過去 ∪ 今 step）で、許可は `max(0, P+row−W+1) ≤ col ≤ P+row`。
+ * MUST: write it in logical coordinates only, without the kernel-side helpers (`stateColumnBase` /
+ * `stateLiveColumns`) — even if the implementation gets its column range wrong, this verdict does
+ * not follow the error. The existing cols are `[0, P+Q)` (past ∪ this step), and the allowed ones
+ * are `max(0, P+row−W+1) ≤ col ≤ P+row`.
  */
 const isEmptyRow = (past: number, query: number, window: number, row: number): boolean => {
   const limit = past + row;
@@ -755,7 +820,7 @@ const isEmptyRow = (past: number, query: number, window: number, row: number): b
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "pad 行が窓から落ちた出力行は厳密 0（ADR 0067 受入条件⑤・Session.run 経由・実 GPU）",
+  "output rows whose pad rows dropped out of the window are exactly 0 (ADR 0067 acceptance criterion ⑤, through Session.run, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, EMPTY_MODEL);
@@ -763,10 +828,11 @@ test.skipIf(!GPU_AVAILABLE)(
     const { heads, depth, window } = EMPTY_MODEL;
     const chunkRows = 4;
     try {
-      // W=2 に対し M=4 の chunk を Q=1 で回す。row 2 / 3 は causal 上限が届く実在 col が
-      // どれも窓の外（`col + W ≤ P + row`）に落ちるため、正規に空行になる。
+      // Run an M=4 chunk with Q=1 against W=2. For rows 2 / 3, every existing col within the
+      // causal upper bound falls outside the window (`col + W ≤ P + row`), so they are
+      // legitimately empty.
       for (const [index, past] of [0, 1, 2].entries()) {
-        assertEquals(context.pastLength, past, `step ${index}: 前提の論理長がずれた`);
+        assertEquals(context.pastLength, past, `step ${index}: the assumed logical length drifted`);
         const out = (
           await runStep(
             session,
@@ -780,41 +846,44 @@ test.skipIf(!GPU_AVAILABLE)(
         const empties = Array.from({ length: chunkRows }, (_, row) => row).filter((row) =>
           isEmptyRow(past, 1, window ?? 0, row),
         );
-        // MUST: 空行が実在すること（この形で 0 本なら門ごと空振り）。
-        assertEquals(empties, [2, 3], `step ${index}: 空行の想定が崩れている`);
-        // MUST: 空行は pad 行（`row ≥ Q`）の**部分集合**（Q=1 なので pad は 1,2,3）。波 D-7 で
-        // 「空行 → 厳密 0」は「pad 行 → 厳密 0」が構造的に包含する形になったので、包含が崩れて
-        // いないことも併せて見る（valid 行は causal 自己参照で必ず非空）。
+        // MUST: empty rows exist (with none in this shape, the whole check would never fire).
+        assertEquals(empties, [2, 3], `step ${index}: the assumed empty rows no longer hold`);
+        // MUST: empty rows are a **subset** of the pad rows (`row ≥ Q`) (Q=1, so pad is 1,2,3).
+        // Since phase D-7, "pad row → exactly 0" structurally includes "empty row → exactly 0", so
+        // also check that the inclusion still holds (a valid row is never empty thanks to the
+        // causal self-reference).
         assertEquals(
           empties.filter((row) => row < 1),
           [],
-          `step ${index}: 空行が valid 行に出た`,
+          `step ${index}: an empty row appeared among the valid rows`,
         );
         for (let head = 0; head < heads; head += 1) {
-          // pad 行（空行を含む）は厳密 0（ADR 0067 受入条件⑤ / ADR 0066 追記 6 の値契約）。
+          // Pad rows (including empty rows) are exactly 0 (ADR 0067 acceptance criterion ⑤ / the
+          // value contract of ADR 0066 addendum 6).
           for (let row = 1; row < chunkRows; row += 1) {
             for (let d = 0; d < depth; d += 1) {
               const value = out[(head * chunkRows + row) * depth + d];
               assertEquals(
                 Object.is(value, 0),
                 true,
-                `step ${index}: pad 行 (head ${head}, row ${row}, d ${d}) が厳密 0 でない（${value}）`,
+                `step ${index}: pad row (head ${head}, row ${row}, d ${d}) is not exactly 0 (${value})`,
               );
             }
           }
-          // 対照: **valid 行**は非ゼロ（「全部 0 を書く実装」がこの門を通らないことの裏）。
+          // Control: **valid rows** are non-zero (evidence that "an implementation writing all
+          // zeros" does not pass this check).
           const slice = out.subarray(head * chunkRows * depth, (head * chunkRows + 1) * depth);
           assert(
             slice.some((value) => Math.abs(value) > 1e-3),
-            `step ${index}: valid 行 (head ${head}, row 0) まで ~0`,
+            `step ${index}: even the valid row (head ${head}, row 0) is ~0`,
           );
         }
-        // 全出力に NaN が 1 つも無い（空行の構成が「0 ガード」で、`exp(-inf − (-inf))` へ
-        // 落ちていないことの直接の裏 — ADR 0067 決定 6）。
+        // Not a single NaN in the whole output (direct evidence that empty rows go through the
+        // "zero guard" and do not fall into `exp(-inf − (-inf))` — ADR 0067 decision 6).
         assertEquals(
           out.some((value) => Number.isNaN(value)),
           false,
-          `step ${index}: 出力に NaN が居る`,
+          `step ${index}: NaN in the output`,
         );
       }
     } finally {
@@ -826,27 +895,30 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 群 4: 容量非依存（ADR 0066 決定 3 — 仕事量が論理長のみで決まることの値側）
+// Group 4: capacity independence (ADR 0066 decision 3 — the value side of the work being determined
+// by the logical length alone)
 // ---------------------------------------------------------------------------
 
 const SYMBOLIC_MODEL: StateModel = { heads: 2, kvHeads: 2, depth: 4, capacity: "C" };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "容量 C=8 と C=4096 で全 step の出力がビット同一（実 GPU）",
+  "capacities C=8 and C=4096 give bit-identical output at every step (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await stateSession(gpu, SYMBOLIC_MODEL);
     const small = await session.createGenerationContext({ chunkLength: 4, bindings: { C: 8 } });
     const large = await session.createGenerationContext({ chunkLength: 4, bindings: { C: 4096 } });
     try {
-      // MUST: 容量が**実際に効いている**こと（束縛が黙って無視されていれば 2 本は同じ context で、
-      // ビット同一は恒真になる）。容量は計画鍵そのもの（ADR 0066 決定 3）なので、ここが違えば
-      // 2 本は別レシピ・別 S ストライド・別確保サイズで走っている。
+      // MUST: the capacity **really takes effect** (if the binding were silently ignored, the two
+      // would be the same context and bit identity a tautology). The capacity is part of the plan
+      // key itself (ADR 0066 decision 3), so if this differs, the two run with different recipes,
+      // different S strides and different allocation sizes.
       assertEquals(small[RUNTIME_INTERNAL].slots.get("kslot")?.shape, [1, 2, 8, 4]);
       assertEquals(large[RUNTIME_INTERNAL].slots.get("kslot")?.shape, [1, 2, 4096, 4]);
 
-      // prefill（M=4 / Q=4）→ decode ×3。容量は S の列ストライドと確保サイズにしか効かない
-      // ので、同じ論理長の同じ入力なら**丸め列まで含めて**同じでなければならない。
+      // prefill (M=4 / Q=4) → decode ×3. The capacity affects only S's column stride and the
+      // allocation size, so the same input at the same logical length must give the same result
+      // **down to the rounding sequence**.
       for (const [index, [chunkRows, query]] of (
         [
           [4, 4],
@@ -859,8 +931,11 @@ test.skipIf(!GPU_AVAILABLE)(
         const a = (await runStep(session, small, SYMBOLIC_MODEL, inputs, chunkRows, query))[0];
         const b = (await runStep(session, large, SYMBOLIC_MODEL, inputs, chunkRows, query))[0];
         const bits = bitsOf(a);
-        assert(new Set(bits).size > 1, `step ${index}: 出力が定数（ビット一致が恒真）`);
-        assertBitsEqual(bitsOf(b), bits, `step ${index}: 容量で出力が変わった`);
+        assert(
+          new Set(bits).size > 1,
+          `step ${index}: the output is constant (bit equality is a tautology)`,
+        );
+        assertBitsEqual(bitsOf(b), bits, `step ${index}: the output changed with the capacity`);
       }
       assertEquals(small.pastLength, 7);
       assertEquals(large.pastLength, 7);
@@ -873,18 +948,20 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 群 5: KV 共有層の実行（ADR 0067 決定 4 — Gemma 4 E2B の 20 層パターン）
+// Group 5: execution of KV-sharing layers (ADR 0067 decision 4 — the 20-layer pattern of Gemma 4
+// E2B)
 // ---------------------------------------------------------------------------
 
 /**
- * 共有層の突合に使う許容誤差（オラクルは D-2 の CPU 参照鎖 — この群が見るのは**実行**で、
- * 参照の独立性は群 1 が別途担保している）。根拠は gpu_state_execution_test.ts の
- * `STATE_TOLERANCE` と同じ（参照は f64 積算・GPU は f32 逐次累積）。
+ * The tolerance for comparing the sharing layers (the oracle is D-2's CPU reference chain — this
+ * group checks **execution**, and group 1 separately guarantees the reference's independence). The
+ * rationale is the same as `STATE_TOLERANCE` in gpu_state_execution_test.ts (the reference
+ * accumulates in f64, the GPU accumulates sequentially in f32).
  */
 const SHARED_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
 const asF32 = (data: Float32Array | Int32Array | Uint32Array): Float32Array<ArrayBuffer> => {
-  if (!(data instanceof Float32Array)) throw new Error("参照の戻りが f32 でない");
+  if (!(data instanceof Float32Array)) throw new Error("the reference did not return f32");
   return data as Float32Array<ArrayBuffer>;
 };
 
@@ -895,8 +972,10 @@ type SharedSeries = {
   readonly chunkLength: number;
   readonly steps: readonly (readonly [number, number])[];
   /**
-   * 「append が読者より先に走った」オラクルとの差を見る step（省略 = 見ない）。ring の wrap が
-   * 今 step の読者の過去行を潰す形でのみ差が出る（ADR 0067 決定 5b の順序が値に効く唯一の窓）。
+   * The step that checks the difference from the oracle where "append ran before the readers"
+   * (omitted = not checked). A difference appears only where the ring wrap overwrites past rows of
+   * this step's readers (the only window where the order of ADR 0067 decision 5b affects the
+   * values).
    */
   readonly orderProbeStep?: number;
 };
@@ -915,8 +994,9 @@ const SHARED_SERIES: readonly SharedSeries[] = [
     ],
   },
   {
-    // W=4 / C=4 の ring。step 1（past=3 / Q=3）の append は物理 3,0,1 を書くので、読者が先に
-    // 読む物理 0,1,2 のうち 2 行が潰れる = 順序違反が値に出る位置。
+    // A W=4 / C=4 ring. The append of step 1 (past=3 / Q=3) writes physical 3,0,1, so two of the
+    // physical rows 0,1,2 the readers read first get overwritten = where an order violation shows
+    // in the values.
     name: "sliding W=4",
     model: { heads: 2, kvHeads: 2, depth: 4, capacity: 4, window: 4 },
     capacity: 4,
@@ -932,7 +1012,7 @@ const SHARED_SERIES: readonly SharedSeries[] = [
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "KV 共有層（読者 2 本 → append 1 本）が実行できる（ADR 0067 決定 4 / 5b・実 GPU）",
+  "KV-sharing layers (two readers → one append) execute (ADR 0067 decisions 4 / 5b, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -975,13 +1055,14 @@ test.skipIf(!GPU_AVAILABLE)(
                 }).data,
               );
 
-            // MUST: **両読者とも append の前の**スロットを読む（決定 5b の発行規約）。
+            // MUST: **both readers read the slots from before the append** (the issue rule of
+            // decision 5b).
             const expected = inputs.q.map((q) => read(q, slotK, slotV));
             outs.forEach((actual, layer) => {
               const label = `${series.name} step ${index} layer ${layer}`;
               assert(
                 expected[layer].some((value) => Math.abs(value) > 1e-3),
-                `${label}: 期待出力が自明（全 ~0）`,
+                `${label}: the expected output is trivial (all ~0)`,
               );
               const report = compareTensors(
                 { dtype: "f32", data: actual },
@@ -990,15 +1071,17 @@ test.skipIf(!GPU_AVAILABLE)(
               );
               assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
             });
-            // 所有層と共有層は**同じ KV・違う q** なので出力は違う（2 本目が 1 本目の複製に
-            // なっている形＝配線の取り違えを、ここで落とす）。
+            // The owning layer and the sharing layer have **the same KV but different q**, so their
+            // outputs differ (this catches a wiring mix-up where the second is a copy of the
+            // first).
             assertEquals(
               mismatches(bitsOf(outs[0]), bitsOf(outs[1])).length > 0,
               true,
-              `${series.name} step ${index}: 2 層の出力がビット一致（共有層が所有層の複製）`,
+              `${series.name} step ${index}: the two layers' outputs are bit-identical (the sharing layer copies the owner)`,
             );
 
-            // 順序の検出力: 「append を読者より先に走らせた」オラクルとは一致しないこと。
+            // Detection power for the order: no match with the oracle that "ran append before the
+            // readers".
             if (series.orderProbeStep === index) {
               const appendBase = { ...common, kvPlanes: model.kvHeads };
               const wrongK = asF32(
@@ -1016,8 +1099,8 @@ test.skipIf(!GPU_AVAILABLE)(
                 assertEquals(
                   report.pass,
                   false,
-                  `${series.name} step ${index} layer ${layer}: append 先行のオラクルとも一致した` +
-                    "（決定 5b の順序が値に出ない位置を probe に選んでいる = 空振り）",
+                  `${series.name} step ${index} layer ${layer}: also matched the append-first oracle` +
+                    " (the probe picks a position where decision 5b's order does not show in the values = never fires)",
                 );
               });
             }
@@ -1029,7 +1112,7 @@ test.skipIf(!GPU_AVAILABLE)(
             assertEquals(
               context.pastLength,
               past,
-              `${series.name} step ${index}: 論理長がずれた（append 2 本で 2 度進んでいる）`,
+              `${series.name} step ${index}: the logical length drifted (two appends advanced it twice)`,
             );
           }
         } finally {

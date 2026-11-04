@@ -1,58 +1,66 @@
-// attention スコア S の **f16 格納**変種（案 γ 波 1 — `SessionOptions.attentionScoreStorage`）の
-// 実行経路。実装 = src/kernels/score-storage.ts（部品の正本）+ src/kernels/gemm.ts /
-// src/kernels/attention.ts / src/kernels/attention-i8a8.ts（挿入点）+ src/runtime/executor.ts
-// （適格判定と S の確保幅）。設計 = docs/research/2026-08-04-intermediate-f16-design.md §3.4②。
+// The execution path of the **f16 storage** variant of the attention score S (option γ, phase 1 —
+// `SessionOptions.attentionScoreStorage`). Implementation = src/kernels/score-storage.ts (the
+// source of truth for the parts) + src/kernels/gemm.ts / src/kernels/attention.ts /
+// src/kernels/attention-i8a8.ts (insertion points) + src/runtime/executor.ts (eligibility and the
+// allocation width of S). Design = docs/research/2026-08-04-intermediate-f16-design.md §3.4②.
 //
-// ## このファイルが固定する数値契約: atol=0
+// ## The numeric contract this file pins: atol=0
 //
-// s16 は S を `array<u32>` に `pack2x16float` で 2 要素／語詰める。**丸めは格納の 1 回だけ**で
-// 読み側の `unpack2x16float` は厳密なので、
+// s16 packs S into `array<u32>` with `pack2x16float`, 2 elements per word. **Rounding happens only
+// once, at storage**, and the reader's `unpack2x16float` is exact, so
 //
-//     s16 変種の出力 ≡ S をホストで f16 に丸めた f32 変種の出力     … 1 ビットも違わない
+//     s16 output ≡ output of the f32 variant with S rounded to f16 on the host  … no bit differs
 //
-// が成立するはず（演算は f32 のままなので定義上の恒等式 — ADR 0028 の f16 **タイル計算**より
-// 契約が強い）。tolerance で吸収する余地は構造的に無い。
+// should hold (the arithmetic stays f32, so it is an identity by definition — a stronger contract
+// than the f16 **tile compute** of ADR 0028). There is structurally no room to absorb anything in a
+// tolerance.
 //
-// ## オラクルの取り方（丸めだけをホストが担い、f32 の縮約は GPU に任せる）
+// ## How the oracle is built (the host only rounds; the GPU does the f32 reductions)
 //
-// MUST: f32 の縮約を JS で書き直さない（WGSL は `a + b*c` を FFMA へ融合してよく `exp` の実装も
-// 規定されていない — ADR 0028 のオラクル設計と同じ理由）。代わりに**分解経路そのものを
-// オラクルにし、ホストは S の丸め 1 点だけを担う**:
+// MUST: do not rewrite the f32 reductions in JS (WGSL may fuse `a + b*c` into FFMA and the
+// implementation of `exp` is not specified — the same reason as the oracle design of ADR 0028).
+// Instead, **the decomposed path itself is the oracle, and the host does only the one rounding of
+// S**:
 //
-//     ① bmm(q·scale, (k·scale)ᵀ) → S      … 融合 ①QK とビット同一
-//        （tests/gpu_attention_parity_test.ts が固定している経路）
-//     ② softmax(**f16 に丸めた** S) → P   … 融合 ②③ の m / inv / P と同じ式・同じ順
+//     ① bmm(q·scale, (k·scale)ᵀ) → S      … bit-identical to fused ①QK
+//        (the path pinned by tests/gpu_attention_parity_test.ts)
+//     ② softmax(S **rounded to f16**) → P   … same formulas and order as m / inv / P of fused ②③
 //     ③ bmm(P, v) → O
 //
-// ADR 0028 のオラクルとの違いは**丸めの点が 3 つではなく 1 つ**なところだけ。q / k / P / v は
-// 素のまま = 「格納だけを f16 にし、計算は f32 のまま」という案 γ の骨格そのもの。
+// The only difference from the oracle of ADR 0028 is that **there is 1 rounding point instead of
+// 3**. q / k / P / v stay raw = exactly the skeleton of option γ, "only the storage goes f16, the
+// compute stays f32".
 //
-// MUST: 恒真化しないこと。**s16 の出力が f32 変種と違う**ことを毎ケース確かめる
-// （丸めが 1 度も起きていない実装でもオラクル一致は成立してしまうため）。
+// MUST: do not make it tautological. Every case confirms **the s16 output differs from the f32
+// variant** (an implementation where no rounding ever happens would also match the oracle).
 //
-// ## この波で意図的に検証していないもの
+// ## What this iteration deliberately does not verify
 //
-// - grid-stride の縮退ハーネス（tests/gpu_gridstride_test.ts）へは **②行統計の s16 変種**を
-//   足してある（行方向 grid-stride の族が 1 本増えたので族の MUST）。①③ はタイル系で
-//   カテゴリ違い（安全網は `tiledWorkgroups` の fail loudly と full-write の毒値注入）。
-// - スカラ経路（`D % 4 != 0` or `N % 4 != 0`）に s16 は**配線していない**。非適格は f32 格納へ
-//   沈黙で縮退し、検出器は下の「縮退 2 方向」テストのパイプラインキー検査 1 本になる。
+// - **The s16 variant of ② row statistics** has been added to the grid-stride degeneration harness
+//   (tests/gpu_gridstride_test.ts) (the family of row-wise grid-stride kernels grew by one, so the
+//   family's MUST applies). ① and ③ are tiled, a different category (their safety net is the fail
+//   loudly of `tiledWorkgroups` and the poison-value injection of full-write).
+// - s16 is **not wired** into the scalar path (`D % 4 != 0` or `N % 4 != 0`). Ineligible shapes
+//   silently degrade to f32 storage, and the detector is the single pipeline-key check of the
+//   "degradation in 2 directions" test below.
 //
-// ## 検出限界（故障注入で実測 — 2026-08-04）
+// ## Detection limits (measured by fault injection — 2026-08-04)
 //
-// **②行統計のスカラ読み `score_at` の偶奇選択は数値網では検出できない**。`select` の 2 枝を
-// 入れ替える注入（要素 `i` の代わりに `i^1` を読む）を入れても本ファイルも
-// tests/gpu_gridstride_test.ts も緑のまま通る — 適格条件が `N % 4 == 0` を課すので行頭が
-// 必ず偶数添字になり、入れ替えは**行内の対ごとの置換**にしかならないからである（`amax` は
-// 置換不変・`Σexp` も本形状では最終 ulp まで一致した）。ADR 0018 の「行内の相対添字で偶奇を
-// 取る罠」が、s16 では適格条件によって**無害化されている**という形。
-// 実働の検出器は **WGSL スナップショット**（tests/fixtures/wgsl/attention_stats_s16.wgsl）
-// ただ 1 本で、これは意図した構造の固定であって数値の門ではない。
-// 他の 5 件（2 語の詰め順 / quad 読みの 2 語目 / 適格判定の `D % 4` / キーの語 / opt-in の
-// 沈黙失効）は全て本ファイルか E2E が赤で捕まえる。
+// **The even/odd selection of the scalar read `score_at` in ② row statistics cannot be detected by
+// the numeric checks**. An injection that swaps the 2 branches of `select` (reading element `i^1`
+// instead of `i`) leaves both this file and tests/gpu_gridstride_test.ts green — the eligibility
+// condition imposes `N % 4 == 0`, so a row always starts at an even index and the swap is only **a
+// permutation within each pair of a row** (`amax` is permutation-invariant, and `Σexp` also matched
+// to the last ulp on these shapes). ADR 0018's "trap of taking even/odd from the relative index
+// within a row" is, for s16, **made harmless** by the eligibility condition. The working detector
+// is the **WGSL snapshot** (tests/fixtures/wgsl/attention_stats_s16.wgsl) alone, and that pins the
+// intended structure; it is not a numeric check. The other 5 (the packing order of 2 words / the
+// 2nd word of a quad read / `D % 4` of the eligibility / the key's word / silent expiry of the
+// opt-in) are all caught red by this file or the E2E.
 //
-// 資産不要。**`shader-f16` も不要**（core WGSL の pack2x16float — ADR 0030 決定 1 が無傷で
-// あることの実行側の証拠）。アダプタ無し環境は明示 SKIP。
+// No assets needed. **`shader-f16` is not needed either** (core WGSL's pack2x16float — the
+// execution-side evidence that ADR 0030 decision 1 is intact). Environments without an adapter SKIP
+// explicitly.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -105,45 +113,54 @@ import { requireCensus } from "./helpers/pipeline-census.ts";
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
-/** 半スケール（torch math decomp の `√scale_factor`）— ADR 0023 の契約どおりの値。 */
+/**
+ * The half scale (`√scale_factor` of torch's math decomposition) — the value per the contract of
+ * ADR 0023.
+ */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
-/** f32 のビット列（±0 の差も末尾 1 ulp の差も見える形）。 */
+/** The f32 bits (a form in which both a ±0 difference and a 1-ulp difference are visible). */
 const bits = (data: Float32Array): Uint32Array =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
 const assertBitEqual = (actual: Float32Array, expected: Float32Array, where: string): void => {
-  assertEquals(actual.length, expected.length, `${where}: 長さ`);
+  assertEquals(actual.length, expected.length, `${where}: length`);
   const a = bits(actual);
   const e = bits(expected);
   const mismatches: string[] = [];
   for (let i = 0; i < a.length && mismatches.length < 4; i += 1) {
     if (a[i] !== e[i]) mismatches.push(`[${i}] ${actual[i]} vs ${expected[i]}`);
   }
-  assertEquals(mismatches, [], `${where}: ビット列が違う（${mismatches.join(" / ")}）`);
+  assertEquals(mismatches, [], `${where}: bits differ (${mismatches.join(" / ")})`);
 };
 
-/** 2 つの結果が**違う**ことの確認（丸めが実際に効いていることの恒真化対策）。 */
+/**
+ * Confirms 2 results **differ** (guarding against a tautology: the rounding actually takes effect).
+ */
 const assertDiffers = (a: Float32Array, b: Float32Array, where: string): void => {
   const x = bits(a);
   const y = bits(b);
   assert(
     [...x].some((value, index) => value !== y[index]),
-    `${where}: s16 の出力が f32 格納と 1 ビットも違わない（丸めが効いていない）`,
+    `${where}: the s16 output does not differ by a single bit from f32 storage (the rounding has no effect)`,
   );
-  assert(new Set(x).size > 1, `${where}: 出力が定数（比較が恒真になっている）`);
+  assert(new Set(x).size > 1, `${where}: the output is constant (the comparison is a tautology)`);
 };
 
 const roundedCopy = (data: Float32Array): Float32Array<ArrayBuffer> =>
   Float32Array.from(data, roundToF16);
 
-/** S を GPU と同じ格納形（`pack2x16float` 相当の 2 要素／語）へ詰める。 */
+/** Packs S into the same storage form as the GPU (2 elements per word, like `pack2x16float`). */
 const packScores = (scores: Float32Array): Uint32Array<ArrayBuffer> => {
-  assertEquals(scores.length % 2, 0, "s16 の適格形は N % 4 == 0 なので要素数は必ず偶数");
+  assertEquals(
+    scores.length % 2,
+    0,
+    "s16-eligible shapes have N % 4 == 0, so the element count is always even",
+  );
   const words = new Uint32Array(scores.length / 2);
   for (let i = 0; i < words.length; i += 1) {
-    // MUST: 下位半分が偶数添字（`pack2x16float(vec2(x, y))` の x 側）。入れ替えると
-    // GPU の読みと 1 要素ずれ、行の端だけが静かに誤る
+    // MUST: the lower half is the even index (the x side of `pack2x16float(vec2(x, y))`). Swapping
+    // it shifts the GPU's read by 1 element, and only the row edges go quietly wrong
     words[i] =
       (f32ToF16Bits(scores[2 * i]) & 0xffff) | ((f32ToF16Bits(scores[2 * i + 1]) & 0xffff) << 16);
   }
@@ -151,7 +168,7 @@ const packScores = (scores: Float32Array): Uint32Array<ArrayBuffer> => {
 };
 
 // ---------------------------------------------------------------------------
-// 形状群とデータ
+// Shapes and data
 // ---------------------------------------------------------------------------
 
 type AttentionShape = {
@@ -164,39 +181,44 @@ type AttentionShape = {
 };
 
 /**
- * 適格形（`D % 4 == 0 && N % 4 == 0` = 書き手 ①QK が v4 経路を取る条件）。
+ * Eligible shapes (`D % 4 == 0 && N % 4 == 0` = the condition for the writer ①QK to take the v4
+ * path).
  *
- * MUST: **B·H ≥ 2 かつ head ごとにパターンが違う**形を持つ（バッチ base の唯一の検出器 —
- * ADR 0030 の検出限界 5）。
- * MUST: **m / n をタイル辺 64 を跨がせる**形を含む（端タイルの書き出しが 2 語ちょうどで
- * 収まっていることの検出器）。
- * MUST: **N % 16 != 0** を含む（③PV の K タイル 16 の端数 = S 側の 0 埋めが効いている形）。
+ * MUST: include shapes with **B·H ≥ 2 and a different pattern per head** (the only detector of the
+ * batch base — detection limit 5 of ADR 0030).
+ * MUST: include shapes where **m / n cross the tile edge 64** (the detector that the write-out of
+ * an edge tile fits exactly into 2 words).
+ * MUST: include **N % 16 != 0** (a remainder of ③PV's K tile 16 = the shape where the zero fill on
+ * the S side matters).
  */
 const S16_SHAPES: readonly AttentionShape[] = [
-  // B·H = 6 / m は 64 タイル 2 枚 / N=68 は k4=17 で K タイル 5 枚（端数 1 quad）
+  // B·H = 6 / m spans 2 tiles of 64 / N=68 is k4=17, 5 K tiles (remainder of 1 quad)
   { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 },
-  // N=20 は K タイル端数（k4=5）・D=12 で列 quad が 3 本
+  // N=20 leaves a K tile remainder (k4=5), D=12 gives 3 column quads
   { name: "B3 H1 M17 N20 D12", b: 3, h: 1, m: 17, n: 20, d: 12 },
-  // 1 タイルに収まる最小形（ガードが全て真のまま通る経路）
+  // The smallest shape fitting in 1 tile (the path where every guard stays true)
   { name: "B1 H2 M3 N8 D4", b: 1, h: 2, m: 3, n: 8, d: 4 },
-  // n が 64 タイル 2 枚（S の行が複数の workgroup に割れる形）
+  // n spans 2 tiles of 64 (a row of S splits across several workgroups)
   { name: "B2 H2 M9 N132 D8", b: 2, h: 2, m: 9, n: 132, d: 8 },
-  // 実測形（DiT の self-attention を縮めた形）
-  { name: "DiT 形 B1 H4 M64 N64 D128", b: 1, h: 4, m: 64, n: 64, d: 128 },
+  // A measured shape (a shrunk DiT self-attention)
+  { name: "DiT shape B1 H4 M64 N64 D128", b: 1, h: 4, m: 64, n: 64, d: 128 },
 ];
 
-/** 非適格形（s16 は f32 格納へ沈黙で縮退する）。両方向（D 側 / N 側）を持つ。 */
+/**
+ * Ineligible shapes (s16 silently degrades to f32 storage). Both directions (D side / N side) are
+ * covered.
+ */
 const DEGRADED_SHAPES: readonly (AttentionShape & { readonly why: string })[] = [
   { name: "D%4!=0 B1 H2 M17 N20 D13", why: "D", b: 1, h: 2, m: 17, n: 20, d: 13 },
   { name: "N%4!=0 B1 H2 M17 N19 D20", why: "N", b: 1, h: 2, m: 17, n: 19, d: 20 },
 ];
 
 /**
- * 決定的なデータ列（乱数は使わない）。
+ * Deterministic data sequences (no random numbers).
  *
- * MUST: f16 で厳密に表せない刻みにする（表せる値ばかりだと丸めが 1 度も起きず、
- * オラクル一致が恒真になる）。周期を互いに非共約にしてあるので、head 境界（`m·d` 要素）と
- * 揃わず **head ごとにパターンが変わる**。
+ * MUST: use steps not exactly representable in f16 (with only representable values no rounding ever
+ * happens and the oracle match becomes a tautology). The periods are mutually incommensurate, so
+ * they do not align with the head boundary (`m·d` elements) and **the pattern changes per head**.
  */
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.1731 + 0.0271;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.2317 - 0.0139;
@@ -209,13 +231,16 @@ const tensorOf = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Te
 });
 
 // ---------------------------------------------------------------------------
-// Session 経路の実行（診断のパイプラインキーごと拾う）
+// Execution through the Session path (collecting the diagnostics' pipeline keys too)
 // ---------------------------------------------------------------------------
 
 type RunResult = {
   readonly output: Float32Array<ArrayBuffer>;
   readonly entries: readonly { readonly key: string; readonly dispatchCount: number }[];
-  /** 直近 run の中間バッファ実績（S の半減が見える唯一の観測点）。 */
+  /**
+   * The intermediate-buffer record of the last run (the only observation point where halving S is
+   * visible).
+   */
   readonly peakTransientBytes: number;
 };
 
@@ -265,10 +290,11 @@ const runGraph = async (
 };
 
 /**
- * 分解経路 3 段のオラクル。**丸めが起きるのは S の 1 点だけ**（冒頭の設計）。
+ * The oracle of the 3-stage decomposed path. **Rounding happens only at the one point of S** (the
+ * design at the top).
  *
- * `q·scale` / `k·scale` は f32 のまま（半スケール契約は ADR 0023）。k は `[n,d]` → `[d,n]` へ
- * ホストで転置する（カーネル側の「共有メモリで転置」と同じ配置になる）。
+ * `q·scale` / `k·scale` stay f32 (the half-scale contract is ADR 0023). k is transposed `[n,d]` →
+ * `[d,n]` on the host (the same layout as the kernel's "transpose in shared memory").
  */
 const s16Oracle = async (
   gpu: GpuContext,
@@ -301,7 +327,7 @@ const s16Oracle = async (
     ),
     { x0: tensorOf([heads, m, d], qs), x1: tensorOf([heads, d, n], kt) },
   );
-  // ここが唯一の丸め（①QK の書き出し = pack2x16float に対応する）
+  // The only rounding (corresponds to the write-out of ①QK = pack2x16float)
   const probs = await runGraph(
     gpu,
     singleOpDeclaration("softmax", [[heads, m, n]], [[heads, m, n]], { attrs: { dim: 2 } }),
@@ -325,33 +351,34 @@ const s16Oracle = async (
 };
 
 // ---------------------------------------------------------------------------
-// (1) 格納の丸め = pack2x16float が RTE であることの直接の門
+// (1) The direct check that the storage rounding = pack2x16float is RTE
 // ---------------------------------------------------------------------------
 
 /**
- * 丸め境界（f16 の同点）を狙い撃つ f32 の値。`Math.f16round` の正本テスト
- * （tests/gpu_f16_compute_test.ts）と同じ列を使う — あちらは WGSL の `f16()` を、ここは
- * `pack2x16float` を突き合わせる。
+ * f32 values that target the rounding boundaries (f16 ties). The same sequence as the reference
+ * test of `Math.f16round` (tests/gpu_f16_compute_test.ts) — that one compares WGSL's `f16()`, this
+ * one `pack2x16float`.
  *
- * MUST: `Math.fround` 済みにする（f32 で表せない double を渡すと**二重丸め**の差が出る）。
+ * MUST: apply `Math.fround` (passing a double not representable in f32 shows a **double rounding**
+ * difference).
  */
 const TIE_VALUES: readonly number[] = [
   0,
   1,
-  1 + 2 ** -11, // 同点 → 偶数側 1.0
-  1 + 3 * 2 ** -12, // 同点の上側
+  1 + 2 ** -11, // tie → even side 1.0
+  1 + 3 * 2 ** -12, // the upper side of a tie
   -(1 + 2 ** -11),
   0.1,
   -0.1,
   1 / 3,
-  65504, // f16 の最大有限値
-  65519, // まだ 65504 へ落ちる
-  65520, // 同点 → 偶数側（仮数 0）= Inf
+  65504, // the largest finite f16
+  65519, // still drops to 65504
+  65520, // tie → even side (mantissa 0) = Inf
   -65536,
-  2 ** -14, // 最小 normal
-  2 ** -24, // 最小 subnormal
-  2 ** -25, // 半分 → 偶数丸めで 0
-  3 * 2 ** -25, // subnormal の同点の上側
+  2 ** -14, // smallest normal
+  2 ** -24, // smallest subnormal
+  2 ** -25, // half → 0 by round-to-even
+  3 * 2 ** -25, // the upper side of a subnormal tie
   5 * 2 ** -25,
   1e-9,
   1024 + 0.5,
@@ -360,7 +387,9 @@ const TIE_VALUES: readonly number[] = [
   2048 + 3,
 ].map(Math.fround);
 
-/** f16 の 16bit パターン → f32（本番 {@link "../src/format/f16.ts"} と独立の読み戻し）。 */
+/**
+ * f16 16-bit pattern → f32 (a readback independent of production {@link "../src/format/f16.ts"}).
+ */
 const decodeHalf = (pattern: number): number => {
   const sign = (pattern & 0x8000) !== 0 ? -1 : 1;
   const exponent = (pattern >> 10) & 0x1f;
@@ -390,18 +419,22 @@ const readbackBytes = async (
   return new Uint8Array(copy, 0, bytes);
 };
 
-/** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
+/**
+ * The dispatch count of `quantize_rows` (the small-D variants split keys per geometry, so they are
+ * grouped by prefix).
+ */
 const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
   [...byKey]
     .filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY))
     .reduce((sum, [, count]) => sum + count, 0);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "①QK の s16 書き出しは Math.f16round とビット一致する（pack2x16float の丸めが RTE であることの直接の門・実 GPU）",
+  "the s16 write-out of ①QK is bit-identical to Math.f16round (the direct check that pack2x16float rounds RTE, real GPU)",
   async () => {
-    // `scale = 1` かつ k を単位ベクトルにすると `S[m][n] = q[m][n % D]` が**厳密**に出る
-    // （0 との積と 0 の加算しか混ざらないので内積の丸めがゼロ）。したがって S の各要素は
-    // 上の同点値そのもので、書き出された 16bit が Math.f16round と一致するかだけが残る。
+    // With `scale = 1` and k made of unit vectors, `S[m][n] = q[m][n % D]` comes out **exactly**
+    // (only products with 0 and additions of 0 mix in, so the dot product has zero rounding). Each
+    // element of S is therefore one of the tie values above, and all that remains is whether the
+    // written 16 bits match Math.f16round.
     const m = 32;
     const n = 8;
     const d = 4;
@@ -415,8 +448,8 @@ test.skipIf(!GPU_AVAILABLE)(
     for (let col = 0; col < n; col += 1) k[col * d + (col % d)] = 1;
 
     const gpu = await acquireGpu();
-    // MUST: **shader-f16 を要求しない既定の device** で走ること（s16 は core WGSL）
-    assertEquals(gpu.shaderF16Enabled, false, "既定の acquireGpu は shader-f16 を要求しない");
+    // MUST: run on **the default device that does not request shader-f16** (s16 is core WGSL)
+    assertEquals(gpu.shaderF16Enabled, false, "the default acquireGpu does not request shader-f16");
     const scheduler = new SubmitScheduler(gpu);
     const cache = new PipelineCache(gpu.device);
     const arena = new RunArena(gpu.device, () => scheduler.flush());
@@ -444,9 +477,10 @@ test.skipIf(!GPU_AVAILABLE)(
           ],
         }),
         [
-          // 融合 attention ①QK は行数バケットを通さない = 既定幾何固定（executor と同じ導出）
-          tiledWorkgroups(n, gemmTileN(defaultGemmGeometry()), limit, "s16 丸めの門 ①QK"),
-          tiledWorkgroups(m, gemmTileM(defaultGemmGeometry()), limit, "s16 丸めの門 ①QK"),
+          // ①QK of fused attention does not go through the row-count bucket = fixed default
+          // geometry (the same derivation as the executor)
+          tiledWorkgroups(n, gemmTileN(defaultGemmGeometry()), limit, "s16 rounding check ①QK"),
+          tiledWorkgroups(m, gemmTileM(defaultGemmGeometry()), limit, "s16 rounding check ①QK"),
           1,
         ],
         key,
@@ -467,8 +501,8 @@ test.skipIf(!GPU_AVAILABLE)(
         );
         if (!Object.is(got, source)) rounded += 1;
       }
-      // 恒真化の門: 1 要素も丸まっていないなら「一致」は何も検証していない
-      assert(rounded > 0, `丸めが 1 度も起きていない（${rounded} / ${m * n}）`);
+      // Tautology guard: if not a single element is rounded, "equal" verifies nothing
+      assert(rounded > 0, `no rounding happened at all (${rounded} / ${m * n})`);
     } finally {
       await arena.destroy();
       gpu.destroy();
@@ -477,17 +511,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (2) atol=0（s16 変種 ≡ S をホストで f16 に丸めた f32 変種）
+// (2) atol=0 (the s16 variant ≡ the f32 variant with S rounded to f16 on the host)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionScoreStorage:'f16' は「S を f16 に丸めた f32 変種」とビット単位で一致する（v4 / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  "attentionScoreStorage:'f16' is bit-for-bit equal to \"the f32 variant with S rounded to f16\" (v4 / tile edge / K remainder / B·H≥2, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of S16_SHAPES) {
         const { name, b, h, m, n, d } = shape;
-        assert(attentionScoreUsesF16(d, n), `${name}: 適格形のはず`);
+        assert(attentionScoreUsesF16(d, n), `${name}: should be an eligible shape`);
         const scale = halfScale(d);
         const actual = await runAttention(gpu, shape, { attentionScoreStorage: "f16" });
         const plain = await runAttention(gpu, shape, {});
@@ -502,23 +536,25 @@ test.skipIf(!GPU_AVAILABLE)(
 
         assertBitEqual(actual.output, oracle, `attention s16 ${name}`);
         assertDiffers(actual.output, plain.output, `attention s16 ${name}`);
-        // head ごとに値が違うこと（バッチ base の検出器が成立する前提そのもの）
+        // Values differ per head (the very premise for the batch-base detector to hold)
         if (b * h > 1) {
           const head0 = actual.output.slice(0, m * d);
           const head1 = actual.output.slice(m * d, 2 * m * d);
           assert(
             [...head0].some((value, index) => value !== head1[index]),
-            `${name}: head 0 と head 1 の出力が同一（base の取り違えが値に出ない）`,
+            `${name}: the outputs of head 0 and head 1 are identical (a mixed-up base would not show in the values)`,
           );
         }
-        // S の確保が半分になっている（案 γ の本体価値 — RunArena の実測で見える形）。
-        // MUST: 差分比較を条件で包まない（peakTransientBytes は計測 feature に依らず実 run なら
-        // 常に正 — 0 に落ちたらそれ自体が診断面の退行で、門が黙って消える形になる）。
-        assert(plain.peakTransientBytes > 0, `${name}: peakTransient の観測点が空振りしている`);
+        // The allocation of S is halved (the core value of option γ — visible in RunArena's
+        // measurement).
+        // MUST: do not wrap the difference comparison in a condition (peakTransientBytes is always
+        // positive on a real run regardless of the timing feature — dropping to 0 is itself a
+        // regression of the diagnostics, and the check would vanish silently).
+        assert(plain.peakTransientBytes > 0, `${name}: the peakTransient observation is a no-op`);
         assertEquals(
           plain.peakTransientBytes - actual.peakTransientBytes,
           b * h * m * n * 2,
-          `${name}: peakTransient の差が S の半減ぶんと一致しない`,
+          `${name}: the peakTransient difference does not match halving S`,
         );
       }
     } finally {
@@ -528,14 +564,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **census**（ADR 0058 決定 4）。3 カーネルが**同時に** s16 へ切り替わったことをキーで見る。
+ * **census** (ADR 0058 decision 4). Sees through keys that the 3 kernels switched to s16
+ * **together**.
  *
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
- * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
- * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing (runs on machines without
+ * timing too). An empty census FAILs unconditionally (guarding with "if entries is empty, look at
+ * nothing" turns green without a single check running — `requireCensus` in
+ * tests/helpers/pipeline-census.ts).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionScoreStorage:'f16' は ①QK / ②行統計 / ③PV が同時に s16 へ切り替わる（実 GPU）",
+  "attentionScoreStorage:'f16' switches ①QK / ② row statistics / ③PV to s16 together (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -543,22 +581,26 @@ test.skipIf(!GPU_AVAILABLE)(
       for (const shape of S16_SHAPES) {
         const { name, n } = shape;
         const actual = await runAttention(gpu, shape, { attentionScoreStorage: "f16" });
-        assert(actual.entries.length > 0, `${name}: 内訳が空（キー検査が空振りしている）`);
+        assert(
+          actual.entries.length > 0,
+          `${name}: the breakdown is empty (the key check is a no-op)`,
+        );
         const running = new Map(actual.entries.map((entry) => [entry.key, entry.dispatchCount]));
-        // 3 カーネルは**同時に**切り替わる（S の格納形が書き手と読み手で一致する条件）
+        // The 3 kernels switch **together** (the condition for writer and readers to agree on the
+        // storage form of S)
         for (const key of [
           attentionQkKey(true, "f32", "f16", false, false, false, profile.attention.qk),
           attentionStatsKey("f32", "f16", attentionStatsRegCache(n)),
           attentionPvKey(true, "f32", "f16", false, false, profile.attention.pv),
         ]) {
-          assertEquals(running.get(key), 1, `${name}: '${key}' が 1 本走っていない`);
+          assertEquals(running.get(key), 1, `${name}: '${key}' did not run exactly once`);
         }
         for (const key of [
           attentionQkKey(true, "f32", "f32", false, false, false, profile.attention.qk),
           attentionStatsKey("f32", "f32", attentionStatsRegCache(n)),
           attentionPvKey(true, "f32", "f32", false, false, profile.attention.pv),
         ]) {
-          assertEquals(running.has(key), false, `${name}: f32 格納の '${key}' が残っている`);
+          assertEquals(running.has(key), false, `${name}: the f32-storage '${key}' is still there`);
         }
       }
     } finally {
@@ -568,22 +610,27 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (3) 適格判定の 2 方向（適格 → s16 キー / 非適格 → f32 キー + ビット同一）
+// (3) The 2 directions of eligibility (eligible → s16 keys / ineligible → f32 keys + bit identity)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionScoreStorage:'f16' の非適格形（D%4 / N%4）は f32 格納へ沈黙で縮退する（検出器はキー検査・実 GPU）",
+  "ineligible shapes (D%4 / N%4) of attentionScoreStorage:'f16' silently degrade to f32 storage (the detector is the key check, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of DEGRADED_SHAPES) {
         const { name, d, n } = shape;
-        assertEquals(attentionScoreUsesF16(d, n), false, `${name}: 非適格形のはず`);
+        assertEquals(attentionScoreUsesF16(d, n), false, `${name}: should be an ineligible shape`);
         const requested = await runAttention(gpu, shape, { attentionScoreStorage: "f16" });
         const plain = await runAttention(gpu, shape, {});
-        // 縮退は**沈黙**（値は f32 経路とビット同一 — 丸めが 1 度も起きない）
-        assertBitEqual(requested.output, plain.output, `${name}: 縮退が f32 経路と一致しない`);
-        assert(new Set(bits(plain.output)).size > 1, `${name}: 出力が定数`);
+        // The degradation is **silent** (values are bit-identical to the f32 path — no rounding
+        // ever happens)
+        assertBitEqual(
+          requested.output,
+          plain.output,
+          `${name}: the degradation does not match the f32 path`,
+        );
+        assert(new Set(bits(plain.output)).size > 1, `${name}: the output is constant`);
       }
     } finally {
       gpu.destroy();
@@ -591,24 +638,30 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 非適格形の縮退を見る唯一の検出器（キー検査）。無条件 assert の理由は上の census と同じ。 */
+/**
+ * The only detector of the degradation of ineligible shapes (the key check). The reason for the
+ * unconditional assert is the same as the census above.
+ */
 test.skipIf(!GPU_AVAILABLE)(
-  "非適格形は s16 キーを 1 本も出さず f32 格納の ②行統計が走る（実 GPU）",
+  "ineligible shapes emit no s16 key at all and run the f32-storage ② row statistics (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const shape of DEGRADED_SHAPES) {
         const { name, why, n } = shape;
         const requested = await runAttention(gpu, shape, { attentionScoreStorage: "f16" });
-        assert(requested.entries.length > 0, `${name}: 内訳が空（キー検査が空振りしている）`);
+        assert(
+          requested.entries.length > 0,
+          `${name}: the breakdown is empty (the key check is a no-op)`,
+        );
         const keys = new Set(requested.entries.map((entry) => entry.key));
         for (const key of [...keys]) {
-          assertEquals(key.endsWith(":s16"), false, `${name}（${why} 側）: s16 キーが走っている`);
+          assertEquals(key.endsWith(":s16"), false, `${name} (${why} side): an s16 key ran`);
         }
         assertEquals(
           keys.has(attentionStatsKey("f32", "f32", attentionStatsRegCache(n))),
           true,
-          `${name}: f32 格納の ②行統計`,
+          `${name}: ② row statistics with f32 storage`,
         );
       }
     } finally {
@@ -618,11 +671,11 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (4) fail loudly（c16 との併用は黙ってどちらかに解釈しない）
+// (4) fail loudly (the combination with c16 is not silently interpreted as either one)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionScoreStorage 'f16' × attentionCompute 'f16' は Session 構築で落ちる（実 GPU）",
+  "attentionScoreStorage 'f16' × attentionCompute 'f16' fails at Session construction (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -647,10 +700,11 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assert(
         error.message.includes("cannot be given together"),
-        `案内が足りない: ${error.message}`,
+        `the guidance is insufficient: ${error.message}`,
       );
-      // MUST: **s16 単独は shader-f16 無しの device で通る**（ADR 0030 決定 1 と同じ規律 —
-      // ここが落ちると案 γ の「feature 非依存」という前提そのものが崩れる）
+      // MUST: **s16 alone passes on a device without shader-f16** (the same discipline as ADR 0030
+      // decision 1 — if this fails, the very premise of option γ, "independent of the feature",
+      // collapses)
       const session = await createSessionFromContainer(gpu, opened, GRAPH_NAME, {
         attentionScoreStorage: "f16",
       });
@@ -662,13 +716,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (5) 本命の組（i8a8 × s16）— 直交していることのキー検査
+// (5) The main combination (i8a8 × s16) — a key check that they are orthogonal
 // ---------------------------------------------------------------------------
 
 const A8_S16_SHAPE: AttentionShape = { name: "B2 H3 M65 N68 D20", b: 2, h: 3, m: 65, n: 68, d: 20 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionCompute:'a8' × attentionScoreStorage:'f16' は直交して同時に立つ（shader-f16 不要・実 GPU）",
+  "attentionCompute:'a8' × attentionScoreStorage:'f16' are orthogonal and both take effect (no shader-f16 needed, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -678,14 +732,16 @@ test.skipIf(!GPU_AVAILABLE)(
         attentionScoreStorage: "f16",
       });
       const i8a8Only = await runAttention(gpu, shape, { attentionCompute: "a8" });
-      // S の丸めが 1 段増えるので値は動く（opt-in が効いていることの数値側の証拠）
+      // The rounding of S adds one step, so the values move (the numeric-side evidence that the
+      // opt-in takes effect)
       assertDiffers(both.output, i8a8Only.output, "i8a8 × s16");
-      // S が半分になっている（i8a8 でも同じ 1 箇所の確保が効く）。上と同じ理由で無条件。
-      assert(i8a8Only.peakTransientBytes > 0, "peakTransient の観測点が空振りしている");
+      // S is halved (the same single allocation works with i8a8 too). Unconditional for the same
+      // reason as above.
+      assert(i8a8Only.peakTransientBytes > 0, "the peakTransient observation is a no-op");
       assertEquals(
         i8a8Only.peakTransientBytes - both.peakTransientBytes,
         shape.b * shape.h * shape.m * shape.n * 2,
-        "peakTransient の差が S の半減ぶんと一致しない",
+        "the peakTransient difference does not match halving S",
       );
     } finally {
       gpu.destroy();
@@ -693,9 +749,12 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 直交（3 軸が同時に立つ）を見る唯一の検出器。無条件 assert の理由は上の census と同じ。 */
+/**
+ * The only detector of orthogonality (3 axes taking effect together). The reason for the
+ * unconditional assert is the same as the census above.
+ */
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionCompute:'a8' × attentionScoreStorage:'f16' は ①③ が i8a8・② だけ s16 のキーで走る（実 GPU）",
+  "attentionCompute:'a8' × attentionScoreStorage:'f16' runs ①③ as i8a8 and only ② with the s16 key (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -705,24 +764,28 @@ test.skipIf(!GPU_AVAILABLE)(
         attentionCompute: "a8",
         attentionScoreStorage: "f16",
       });
-      assert(both.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      assert(both.entries.length > 0, "the breakdown is empty (the key check is a no-op)");
       const byKey = new Map(both.entries.map((entry) => [entry.key, entry.dispatchCount]));
-      // ①QK / ③PV は i8a8 のまま、S だけが f16 格納（3 つの軸が同時に立つ）
+      // ①QK / ③PV stay i8a8, only S has f16 storage (3 axes take effect together)
       assertEquals(byKey.get(attentionQkI8a8Key(true, true, "f16", profile.i8a8.attentionQk)), 1);
       assertEquals(byKey.get(attentionPvI8a8Key(true, true, "f16", profile.i8a8.attentionPv)), 1);
-      // ②行統計は f32 計算のまま s16 を読む
+      // ② row statistics stays f32 compute and reads s16
       assertEquals(byKey.get(attentionStatsKey("f32", "f16", attentionStatsRegCache(shape.n))), 1);
-      // f32 格納の変種は 1 本も残らない
+      // No f32-storage variant remains
       for (const key of [
         attentionQkI8a8Key(true, true, "f32", profile.i8a8.attentionQk),
         attentionPvI8a8Key(true, true, "f32", profile.i8a8.attentionPv),
         attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n)),
       ]) {
-        assertEquals(byKey.has(key), false, `f32 格納の '${key}' が残っている`);
+        assertEquals(byKey.has(key), false, `the f32-storage '${key}' is still there`);
       }
-      // i8a8 の前段（q / k / Vᵀ の量子化と Vᵀ の permute）は s16 に影響されない
-      assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
-      assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
+      // The i8a8 prologue (quantization of q / k / Vᵀ and the permute of Vᵀ) is unaffected by s16
+      assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows is not the 3 of q / k / v");
+      assertEquals(
+        byKey.get(stridedKey({ dtype: "f32" })),
+        1,
+        "the permute of Vᵀ is not exactly 1",
+      );
     } finally {
       gpu.destroy();
     }
@@ -730,10 +793,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (6) ③PV i8a8 の qP を s16 で再導出（±1 段 + 不一致率の門 — ADR 0030 の門の s16 版）
+// (6) qP of ③PV i8a8 re-derived with s16 (ADR 0030's ±1 step + mismatch-rate check, s16 version)
 // ---------------------------------------------------------------------------
 
-/** P̃ の格子と `1/127`（**観測の算術にだけ使う** — 参照側の定数は src/reference/i8a8.ts が持つ）。 */
+/**
+ * The P̃ grid and `1/127` (**used only for the arithmetic of the observation** — the reference
+ * side's constants live in src/reference/i8a8.ts).
+ */
 const P_ABS_MAX = 127;
 const INV_P_ABS_MAX = Math.fround(1 / P_ABS_MAX);
 
@@ -744,25 +810,27 @@ type QpShape = {
   readonly n: number;
 };
 
-/** MUST: `N % 4 == 0`（③PV i8a8 の適格条件）かつ B·H ≥ 2（バッチ base の検出器）。 */
+/** MUST: `N % 4 == 0` (the eligibility of ③PV i8a8) and B·H ≥ 2 (the batch-base detector). */
 const QP_SHAPES: readonly QpShape[] = [
   { name: "B·H6 M65 N68", batch: 6, m: 65, n: 68 },
   { name: "B·H2 M17 N20", batch: 2, m: 17, n: 20 },
 ];
 
-/** S の素の値（決定的）。行ごとにパターンが変わるので P̃ は 0 から 127 まで広がる。 */
+/** Raw values of S (deterministic). The pattern changes per row, so P̃ spreads from 0 to 127. */
 const scoreAt = (b: number, row: number, col: number): number => {
   const index = col * 7 + row * 3 + b * 5;
   return ((index % 23) - 11) * 0.6373 + ((index * 13) % 11) * 0.1237 - 0.4291;
 };
 
 /**
- * ③PV i8a8 を **1 dispatch だけ**生で流す（S と行統計はテストが与え、Vᵀ の量子化結果は
- * ホストで組む）。V を head ごとの単位行列にすると `vq = 127·I` / `vs = 1/127` に**構造的に**
- * なるので、`O[m,j] = f32(127·qP[m,j]) · (prow · vs[j])` が **qP の読み出し器**になる。
+ * Runs ③PV i8a8 **as a single raw dispatch** (the test supplies S and the row statistics; the
+ * quantized Vᵀ is built on the host). Making V an identity matrix per head **structurally** gives
+ * `vq = 127·I` / `vs = 1/127`, so `O[m,j] = f32(127·qP[m,j]) · (prow · vs[j])` becomes **a reader
+ * of qP**.
  *
- * MUST: 前提（vq が対角 127・vs が 1/127）は tests/gpu_attention_pv_i8a8_test.ts が
- * `quantize_rows` の実走で固定済み。ここはその値をホストで再構成して S の格納形だけを変える。
+ * MUST: the premise (vq diagonal 127, vs 1/127) is pinned by tests/gpu_attention_pv_i8a8_test.ts
+ * through an actual run of `quantize_rows`. Here those values are rebuilt on the host and only the
+ * storage form of S changes.
  */
 const observeQpS16 = async (
   gpu: GpuContext,
@@ -782,7 +850,7 @@ const observeQpS16 = async (
       gpu.device.queue.writeBuffer(buffer, 0, source);
       return buffer;
     };
-    // Vᵀ = 単位行列を量子化した結果（行 = (b, d)・N 連続の i8 を 4 詰め）
+    // Vᵀ = the quantized identity matrix (row = (b, d), N consecutive i8 packed 4 per word)
     const vq = new Int8Array(batch * n * n);
     const vs = new Float32Array(batch * n);
     for (let head = 0; head < batch; head += 1) {
@@ -812,7 +880,8 @@ const observeQpS16 = async (
         ],
       }),
       [
-        // ③PV は i8a8 側の幾何（N = D の 1 タイル化が勝つ既定 — ①QK とは別物）
+        // ③PV uses the i8a8-side geometry (the default where tiling N = D into 1 tile wins —
+        // distinct from ①QK)
         tiledWorkgroups(n, i8a8TileN(pvGeometry), limit, `${shape.name} ③PV i8a8 s16`),
         tiledWorkgroups(m, i8a8TileM(pvGeometry), limit, `${shape.name} ③PV i8a8 s16`),
         tiledWorkgroups(batch, 1, limit, `${shape.name} ③PV i8a8 s16`),
@@ -830,10 +899,11 @@ const observeQpS16 = async (
           const combined = Math.fround(prow * INV_P_ABS_MAX);
           const value = o[(head * m + row) * n + col] / (P_ABS_MAX * combined);
           const nearest = Math.round(value);
-          // MUST: 前提が崩れたまま割ると観測値が静かにずれる（門が恒真化する）
+          // MUST: dividing with the premise broken shifts the observed values quietly (the check
+          // becomes a tautology)
           assert(
             Math.abs(value - nearest) < 1e-3 && nearest >= 0 && nearest <= P_ABS_MAX,
-            `qP の読み出しが整数にならない [${head},${row},${col}]: ${value}`,
+            `the qP readout is not an integer [${head},${row},${col}]: ${value}`,
           );
           qp[(head * m + row) * n + col] = nearest;
         }
@@ -846,7 +916,7 @@ const observeQpS16 = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "③PV i8a8 × s16: qP は「f16 に丸めた S」から作った TS 参照と必ず ±1 段以内で一致する（実 GPU）",
+  '③PV i8a8 × s16: qP always matches within ±1 step the TS reference built from "S rounded to f16" (real GPU)',
   async () => {
     const gpu = await acquireGpu();
     let total = 0;
@@ -854,8 +924,9 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       for (const shape of QP_SHAPES) {
         const { batch, m, n } = shape;
-        // MUST: 参照も**丸め済み** S を読む（S の格納形が変わったのだから、行統計も qP も
-        // 丸めた値から作らないと「s16 の門」ではなく「丸めの検出器」になる）
+        // MUST: the reference also reads the **rounded** S (the storage form of S changed, so
+        // unless the row statistics and qP are built from the rounded values it becomes "a rounding
+        // detector", not "the s16 check")
         const raw = new Float32Array(batch * m * n);
         for (let head = 0; head < batch; head += 1) {
           for (let row = 0; row < m; row += 1) {
@@ -885,45 +956,50 @@ test.skipIf(!GPU_AVAILABLE)(
         const expected = referenceAttentionPvQuant(rounded, rowMax, batch * m, n);
         for (let i = 0; i < qp.length; i += 1) {
           const diff = qp[i] - expected[i];
-          // MUST: ±2 段以上は 1 件でも実装バグ（exp の数 ULP 差では届かない）
+          // MUST: ±2 steps or more is an implementation bug even once (a few-ULP difference of exp
+          // cannot reach it)
           assert(
             Math.abs(diff) <= 1,
-            `${shape.name}: qP[${i}] が GPU ${qp[i]} / 参照 ${expected[i]}（±2 段以上）`,
+            `${shape.name}: qP[${i}] is GPU ${qp[i]} / reference ${expected[i]} (±2 steps or more)`,
           );
           if (diff !== 0) mismatched += 1;
           total += 1;
         }
-        // 恒真化の門: qP が両端に届いていなければ格子を何も検証していない
-        assert([...qp].includes(P_ABS_MAX), `${shape.name}: qP に 127 が無い`);
-        assert([...qp].includes(0), `${shape.name}: qP に 0 が無い`);
+        // Tautology guard: if qP does not reach both ends, the grid is not verified at all
+        assert([...qp].includes(P_ABS_MAX), `${shape.name}: qP has no 127`);
+        assert([...qp].includes(0), `${shape.name}: qP has no 0`);
       }
     } finally {
       gpu.destroy();
     }
-    // 実測の記録（ADR 0030 の門を s16 で再導出した値）。恒真化しないよう上限も置く
+    // A record of the measurement (the value of ADR 0030's check re-derived with s16). An upper
+    // bound is set too so it is not a tautology
     const rate = mismatched / total;
     console.log(
-      `qP（S は f16 格納）の GPU/TS 不一致率: ${mismatched} / ${total} = ${(rate * 100).toFixed(
-        4,
-      )}%（全て ±1 段）`,
+      `GPU/TS mismatch rate of qP (S stored as f16): ${mismatched} / ${total} = ${(
+        rate * 100
+      ).toFixed(4)}% (all ±1 step)`,
     );
-    assert(rate < 0.02, `qP の不一致率 ${rate} が 2% を超えた（exp の実装差にしては大きい）`);
+    assert(
+      rate < 0.02,
+      `the qP mismatch rate ${rate} exceeded 2% (large for an exp implementation difference)`,
+    );
   },
 );
 
 // ---------------------------------------------------------------------------
-// (7) NaN 行の伝播（格納形が変わっても非有限値の扱いが動かない）
+// (7) Propagation of NaN rows (non-finite handling does not move when the storage form changes)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "s16 でも NaN を含む行はそのまま NaN を伝播する（f32 格納と同じ行が NaN になる・実 GPU）",
+  "with s16 too, a row containing NaN propagates NaN as is (the same rows become NaN as with f32 storage, real GPU)",
   async () => {
-    const shape: AttentionShape = { name: "NaN 行 B1 H2 M8 N8 D4", b: 1, h: 2, m: 8, n: 8, d: 4 };
+    const shape: AttentionShape = { name: "NaN row B1 H2 M8 N8 D4", b: 1, h: 2, m: 8, n: 8, d: 4 };
     const { b, h, m, n, d } = shape;
     const q = fill([b, h, m, d], QUERY);
     const k = fill([b, h, n, d], KEY);
     const v = fill([b, h, n, d], VALUE);
-    // head 1 の行 3 だけを NaN にする（S の 1 行が丸ごと NaN になる）
+    // Make only row 3 of head 1 NaN (one whole row of S becomes NaN)
     (q.data as Float32Array)[(1 * m + 3) * d] = Number.NaN;
     const graph = singleOpDeclaration("attention", [q.shape, k.shape, v.shape], [[b, h, m, d]], {
       attrs: { scale: halfScale(d) },
@@ -949,11 +1025,13 @@ test.skipIf(!GPU_AVAILABLE)(
         Array.from({ length: b * h * m }, (_, row) => row).filter((row) =>
           [...data.slice(row * d, (row + 1) * d)].some(Number.isNaN),
         );
-      // 汚染する行は f32 格納と完全に同じ（pack2x16float が NaN を 0 や有限値へ潰していない）
-      assertEquals(nanRows(s16), nanRows(plain), "NaN 行の集合が f32 格納と違う");
-      assertEquals(nanRows(s16), [1 * m + 3], "NaN が 1 行に閉じていない");
-      // 汚染していない行は 1 つも NaN でない（行が全滅していたら比較が恒真になる）
-      assert([...s16].filter(Number.isNaN).length === d, "NaN が 1 行ぶんを超えて広がっている");
+      // The contaminated rows are exactly the same as with f32 storage (pack2x16float does not
+      // squash NaN into 0 or a finite value)
+      assertEquals(nanRows(s16), nanRows(plain), "the set of NaN rows differs from f32 storage");
+      assertEquals(nanRows(s16), [1 * m + 3], "NaN is not confined to 1 row");
+      // No uncontaminated row is NaN (if every row were wiped out, the comparison would be a
+      // tautology)
+      assert([...s16].filter(Number.isNaN).length === d, "NaN spreads beyond one row");
     } finally {
       gpu.destroy();
     }

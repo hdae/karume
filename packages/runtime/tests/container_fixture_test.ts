@@ -1,12 +1,13 @@
 /**
- * 言語横断 fixture — **Python の書き手**（`tools/exporter/src/karume/container.py`）が書いた `krm` を
- * TS の読み手で開く。docs/container-v1.md §7 / §9、docs/ir-v2.md「正準直列化」。
+ * Cross-language fixture — opens with the TS reader a `krm` written by the **Python writer**
+ * (`tools/exporter/src/karume/container.py`). docs/container-v1.md §7 / §9, docs/ir-v2.md
+ * "Canonical serialization".
  *
- * ここが見るのは「TS の書き手と TS の読み手が閉じている」ことではなく、**別実装が書いたバイト列を
- * 開けること**である（`container_format_test.ts` は前者で、往復だけでは 2 実装の食い違いを
- * 検出できない）。
+ * What this checks is not that "the TS writer and the TS reader agree with each other" but that **a
+ * byte stream written by another implementation opens** (`container_format_test.ts` checks the
+ * former, and a round trip alone cannot detect a disagreement between the two implementations).
  *
- * 資産の再生成は exporter 側の 1 コマンド:
+ * The assets are regenerated with one command on the exporter side:
  * `cd tools/exporter && KARUME_FIXTURE=write uv run pytest tests/test_container.py -k fixture`
  */
 
@@ -26,7 +27,7 @@ import { openContainer } from "../src/format/container/open.ts";
 
 const FIXTURE = new URL("./fixtures/container/synthetic.krm", import.meta.url);
 
-/** 分割形 fixture の part 列（part 0 から — const は長さ 0 のファイルとして並ぶ）。 */
+/** Part count of the split-form fixture (from part 0 — const is listed as a zero-length file). */
 const SPLIT_FIXTURE_PARTS = 5;
 const splitFixture = (index: number): URL =>
   new URL(
@@ -48,15 +49,15 @@ const splitParts = async (): Promise<Uint8Array<ArrayBuffer>[]> =>
   );
 
 /**
- * fixture の payload（Python 側 `container_fixture.pattern_bytes` と同じ**単純な**パターン —
- * `seed` から 1 ずつ上がるバイト列）。生成器の写しではなく 1 行で書ける形なので、fixture を
- * 焼き直したときに「ミラーがずれた」で赤くなる余地が無い。
+ * The fixture payload (the same **simple** pattern as `container_fixture.pattern_bytes` on the
+ * Python side — bytes that count up by 1 from `seed`). It is a one-line form, not a copy of the
+ * generator, so regenerating the fixture leaves no room for a red caused by "the mirror drifted".
  */
 const patternBytes = (length: number, seed: number): Uint8Array<ArrayBuffer> =>
   Uint8Array.from({ length }, (_, i) => (seed + i) & 0xff);
 
 describe("container fixture (Python writer)", () => {
-  it("単一形を開き、全 block が sha256 検証つきで戻る", async () => {
+  it("opens the single form and every block comes back with its sha256 verified", async () => {
     const bytes = await fixtureBytes();
     const container = await openContainer({ kind: "bytes", bytes });
 
@@ -69,20 +70,21 @@ describe("container fixture (Python writer)", () => {
       ...container.graph.const.blocks.map((block) => block.id),
       ...(container.model?.blocks ?? []).map((block) => block.id),
     ];
-    assert(ids.length > 0, "block が 1 本も無い");
+    assert(ids.length > 0, "no block at all");
     for (const id of ids) {
-      // readBlock は宣言の sha256 と突き合わせるので、返ってきた時点で検証済み。
+      // readBlock checks against the declared sha256, so a returned block is already verified.
       const block = await container.readBlock(id);
       assertEquals(await sha256Hex(block), container.locate(id).record.sha256, id);
     }
   });
 
-  it("合流層が Python の束縛表から供給計画を出す（piece 列 / rowAxis 1 / const / shared）", async () => {
+  it("the merge layer derives the supply plan from the Python binding table (piece list / rowAxis 1 / const / shared)", async () => {
     const bytes = await fixtureBytes();
     const container = await openContainer({ kind: "bytes", bytes });
     const bound = container.graphs["synthetic"];
 
-    // shared 宣言は束縛表の突合集合の外（供給計画を持たない）。
+    // A shared declaration is outside the set matched against the binding table (it has no supply
+    // plan).
     assertEquals(bound.declaration.initializers["lm_head.weight"], { shared: true });
     assertEquals(bound.supplies.has("lm_head.weight"), false);
 
@@ -93,7 +95,7 @@ describe("container fixture (Python writer)", () => {
     assertEquals(enc?.blocks.length, 1);
     assertEquals(enc?.scale?.payloadBytes, 8 * 4);
 
-    // block 上限（fixture は 256 B）を超えた重みは行境界で 2 本に割れている。
+    // A weight over the block limit (256 B in the fixture) is split in two at a row boundary.
     const big = bound.supplies.get("big.weight");
     assertEquals(
       big?.blocks.map((block) => block.rows),
@@ -102,25 +104,25 @@ describe("container fixture (Python writer)", () => {
         [8, 16],
       ],
     );
-    // 規則③: companion scale は piece 1 と同じ part。
+    // Rule 3: the companion scale is in the same part as piece 1.
     assertEquals(big?.scale?.part, big?.blocks[0].part);
 
-    // conv_transpose1d 形（行の軸が 1）— scale は shape[1] 本。
+    // conv_transpose1d shape (row axis 1) — shape[1] scales.
     const conv = bound.supplies.get("conv.weight");
     assertEquals(conv?.encoding.rowAxis, 1);
     assertEquals(conv?.scale?.payloadBytes, 3 * 4);
 
-    // 末尾の詰め物は書き手が焼く（payload 42 バイト → block 44 バイト）。
+    // The writer bakes the trailing padding (42-byte payload → 44-byte block).
     const dec = bound.supplies.get("dec.weight");
     assertEquals(dec?.blocks[0].payloadBytes, 42);
     assertEquals(dec?.blocks[0].length, 44);
 
-    // const 領域（part 1）から供給される initializer。
+    // An initializer supplied from the const region (part 1).
     assertEquals(bound.supplies.get("const.a1b2c3d4e5f60718")?.origin, "const");
     assertEquals(bound.supplies.get("const.b1b2c3d4e5f6071a")?.encoding.codec, "i32");
   });
 
-  it("2 文書は正準直列化と一致する（parse → serialize でバイト同一）", async () => {
+  it("both documents match the canonical serialization (parse → serialize is byte-identical)", async () => {
     const bytes = await fixtureBytes();
     const header = readHeader(bytes);
     const graphBytes = bytes
@@ -137,7 +139,7 @@ describe("container fixture (Python writer)", () => {
     assertEquals(serializeModelDescriptor(parseModelDescriptor(modelBytes)), modelBytes);
   });
 
-  it("krg 抽出は krm のバイトコピーで成り立ち、グラフ記述はそのまま載る", async () => {
+  it("krg extraction is a byte copy of the krm and carries the graph descriptor unchanged", async () => {
     const bytes = await fixtureBytes();
     const container = await openContainer({ kind: "bytes", bytes });
     const extracted = await container.extractGraph();
@@ -156,17 +158,17 @@ describe("container fixture (Python writer)", () => {
 });
 
 describe("split container fixture (Python writer)", () => {
-  it("part 列を開き、全 block が sha256 検証つきで戻る", async () => {
+  it("opens the part list and every block comes back with its sha256 verified", async () => {
     const parts = await splitParts();
     const container = await openContainer({ kind: "parts", parts });
 
     assertEquals(container.header.kind, "model");
     assertEquals(Object.keys(container.graphs), ["synthetic-split"]);
-    // const が空でも part 1 は 0 バイトのファイルとして並ぶ（§8）。
+    // Even when const is empty, part 1 is listed as a zero-byte file (§8).
     assertEquals(container.graph.const.blocks, []);
     assertEquals(container.model?.parts[0].length, 0);
     assertEquals(parts[1].byteLength, 0);
-    // 重みの part が 2 本 + 資産の part が 1 本（part 0 を除いて 4 本 — 内訳は下のケース）。
+    // Two weight parts + one asset part (4 excluding part 0 — the breakdown is in the case below).
     assertEquals(container.model?.parts.length, SPLIT_FIXTURE_PARTS - 1);
 
     for (const block of container.model?.blocks ?? []) {
@@ -175,7 +177,7 @@ describe("split container fixture (Python writer)", () => {
     }
   });
 
-  it("assets は名前 / 役割 / 論理長を宣言し、block は payload + 0x00 の詰め物になる", async () => {
+  it("assets declare name / role / logical length, and a block is the payload + 0x00 padding", async () => {
     const parts = await splitParts();
     const container = await openContainer({ kind: "parts", parts });
     const assets = container.model?.assets ?? {};
@@ -185,29 +187,32 @@ describe("split container fixture (Python writer)", () => {
       { ple_index: ["ple-index", 64], rope_base: ["rope-base", 37] },
     );
 
-    // 37 バイトの payload は 40 バイトの block になり、末尾 3 バイトは 0x00（§4.1）。
-    // 論理長が宣言に在るので、消費側は末尾の 0x00 を推測で剥がない（ADR 0109 決定 4）。
+    // A 37-byte payload becomes a 40-byte block whose last 3 bytes are 0x00 (§4.1).
+    // The logical length is in the declaration, so a consumer does not guess-strip the trailing
+    // 0x00 bytes (ADR 0109 decision 4).
     const rope = await container.readBlock(assets["rope_base"].block);
     assertEquals(rope.byteLength, 40);
     assertEquals(rope.subarray(0, assets["rope_base"].length), patternBytes(37, 52));
     assertEquals(rope.subarray(assets["rope_base"].length), new Uint8Array([0, 0, 0]));
 
-    // 詰め物の要らない資産は payload ちょうど。
+    // An asset that needs no padding is exactly its payload.
     const index = await container.readBlock(assets["ple_index"].block);
     assertEquals(index, patternBytes(64, 51));
 
-    // 資産の block は重み block と part を共有しない（§4.2 — 区間読みの資産は専用 part）。
+    // Asset blocks do not share a part with weight blocks (§4.2 — assets read by range get their
+    // own part).
     const assetBlocks = new Set(Object.values(assets).map((a) => a.block));
     const blocks = container.model?.blocks ?? [];
     const assetParts = new Set(blocks.filter((b) => assetBlocks.has(b.id)).map((b) => b.part));
     const weightParts = new Set(blocks.filter((b) => !assetBlocks.has(b.id)).map((b) => b.part));
-    // 空振りしない形で固定する: 資産の part が 1 本・重みの part が 2 本（合わせて part 3 本）。
+    // Pinned in a form that cannot pass vacuously: 1 asset part and 2 weight parts (3 parts in
+    // all).
     assertEquals(assetParts.size, 1);
     assertEquals(weightParts.size, 2);
     assertEquals(assetParts.intersection(weightParts).size, 0);
   });
 
-  it("2 文書は正準直列化と一致する（parse → serialize でバイト同一）", async () => {
+  it("both documents match the canonical serialization (parse → serialize is byte-identical)", async () => {
     const parts = await splitParts();
     const header = readHeader(parts[0]);
     const graphBytes = parts[0]

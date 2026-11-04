@@ -1,29 +1,32 @@
-// f16（IEEE 754 binary16）格納の CPU 側展開・丸め・整列（format/f16.ts — ADR 0018 / 0028）。
+// CPU-side decoding, rounding and alignment of f16 (IEEE 754 binary16) storage (format/f16.ts —
+// ADR 0018 / 0028).
 //
-// これまで f16.ts は `gpu_f16_i8_weights_test.ts` / `gpu_f16_compute_test.ts` からしか踏まれず、
-// アダプタ無しの環境では丸ごと SKIP されていた（3 兄弟のうち i4 だけが CPU 単体の門を持つ
-// 非対称）。境界（±0 / subnormal / 最大有限 / ±Inf / NaN / 丸めの同点）の固定を GPU の有無から
-// 独立させるのがこのファイルの役目。
+// Until now f16.ts was exercised only by `gpu_f16_i8_weights_test.ts` / `gpu_f16_compute_test.ts`
+// and was skipped entirely on machines without an adapter (an asymmetry: of the three sibling
+// modules only i4 had a CPU-only check). This file makes the pinning of the boundaries (±0 /
+// subnormal / largest finite / ±Inf / NaN / rounding ties) independent of whether a GPU exists.
 //
-// MUST: 期待値は実装式ではなく IEEE 754 binary16 の定義から書き下す（`2**-24` 刻みの
-// subnormal・65504 の最大有限・65520 のオーバフロー境界）。実装から引くと恒真になる。
+// MUST: expected values are written out from the IEEE 754 binary16 definition, not from the
+// implementation's formulas (subnormals in steps of `2**-24`, 65504 as the largest finite value,
+// 65520 as the overflow boundary). Deriving them from the implementation makes the test a
+// tautology.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertStrictEquals, assertThrows } from "@std/assert";
 import { alignF16Payload, decodeF16, f16BitsToF32, roundToF16 } from "../src/format/f16.ts";
 
-test("f16BitsToF32: 指数 0 は ±0 と subnormal（2**-24 刻み）", () => {
-  // ±0 は符号まで保つ（`Object.is` で区別できる形 = -1 * 0 の符号が消えていない）
+test("f16BitsToF32: exponent 0 is ±0 and subnormals (in steps of 2**-24)", () => {
+  // ±0 keeps its sign (a form `Object.is` can tell apart = the sign of -1 * 0 is not lost)
   assertEquals(Object.is(f16BitsToF32(0x0000), 0), true);
   assertEquals(Object.is(f16BitsToF32(0x8000), -0), true);
-  // 最小 subnormal と最大 subnormal
+  // Smallest and largest subnormal
   assertStrictEquals(f16BitsToF32(0x0001), 2 ** -24);
   assertStrictEquals(f16BitsToF32(0x03ff), 1023 * 2 ** -24);
-  // subnormal の直上が最小 normal（境界で刻みが切り替わる）
+  // Right above the subnormals is the smallest normal (the step size changes at the boundary)
   assertStrictEquals(f16BitsToF32(0x0400), 2 ** -14);
 });
 
-test("f16BitsToF32: 指数 31 は ±Inf と NaN、それ以外は normal の既知値", () => {
+test("f16BitsToF32: exponent 31 is ±Inf and NaN, everything else is a known normal value", () => {
   assertStrictEquals(f16BitsToF32(0x7bff), 65504);
   assertStrictEquals(f16BitsToF32(0x7c00), Number.POSITIVE_INFINITY);
   assertStrictEquals(f16BitsToF32(0xfc00), Number.NEGATIVE_INFINITY);
@@ -32,36 +35,38 @@ test("f16BitsToF32: 指数 31 は ±Inf と NaN、それ以外は normal の既�
   assertStrictEquals(f16BitsToF32(0xc000), -2);
 });
 
-test("f16BitsToF32: 上位 16bit は無視する（下位だけを見る）", () => {
+test("f16BitsToF32: the upper 16 bits are ignored (only the lower bits are read)", () => {
   assertStrictEquals(f16BitsToF32(0xffff0000 | 0x3c00), 1);
 });
 
-test("roundToF16: オーバフロー境界と subnormal の同点は偶数丸め", () => {
-  // 65504（最大有限）と 65536（次の格子）の中点 65520 は上へ倒れて Inf になる
+test("roundToF16: the overflow boundary and subnormal ties round to even", () => {
+  // 65520, the midpoint of 65504 (largest finite) and 65536 (the next grid point), rounds up to Inf
   assertStrictEquals(roundToF16(65520), Number.POSITIVE_INFINITY);
   assertStrictEquals(roundToF16(65519.999), 65504);
-  // subnormal の刻みは 2**-24。0 と 1 刻みの中点（0.5 刻み）は偶数側 = 0 へ
+  // The subnormal step is 2**-24. The midpoint of 0 and 1 step (0.5 step) goes to the even side = 0
   assertStrictEquals(roundToF16(2 ** -25), 0);
-  // 1 刻みと 2 刻みの中点（1.5 刻み）も偶数側 = 2 刻み（= 2**-23）へ上がる。
-  // NOTE: レビューの仕様案は 2**-24 と書いていたが、偶数丸めの行き先は 2 刻み側（実測）。
+  // The midpoint of 1 and 2 steps (1.5 steps) also goes up to the even side = 2 steps (= 2**-23).
+  // NOTE: the review's draft spec said 2**-24, but round-to-even lands on 2 steps (measured).
   assertStrictEquals(roundToF16(3 * 2 ** -25), 2 ** -23);
-  // 2 刻みと 3 刻みの中点（2.5 刻み）は下の偶数側 = 2 刻みへ（同点が両方向へ倒れる対）
+  // The midpoint of 2 and 3 steps (2.5 steps) goes down to the even side = 2 steps (a pair of ties
+  // that round in opposite directions)
   assertStrictEquals(roundToF16(5 * 2 ** -25), 2 ** -23);
 });
 
-test("decodeF16: byteOffset が 2 整列していない view でも正しく読める", () => {
-  // MUST の検出器: `Uint16Array` の view を張る実装はここで RangeError になる。
+test("decodeF16: reads correctly from a view whose byteOffset is not 2-aligned", () => {
+  // MUST detector: an implementation that creates a `Uint16Array` view throws RangeError here.
   const buffer = new ArrayBuffer(8);
   const bytes = new Uint8Array(buffer);
-  // 1 バイトずらした位置に 0x3c00（= 1）と 0xc000（= −2）をリトルエンディアンで置く
+  // Put 0x3c00 (= 1) and 0xc000 (= −2) in little endian at a position shifted by one byte
   bytes.set([0x00, 0x3c, 0x00, 0xc0], 1);
   const decoded = decodeF16(new Uint8Array(buffer, 1, 4));
   assertEquals([...decoded], [1, -2]);
 });
 
-test("alignF16Payload: 4 整列済みはコピーせず、端数 2 バイトはゼロ詰めする", () => {
+test("alignF16Payload: a 4-aligned payload is not copied, and a trailing 2 bytes are zero-padded", () => {
   const aligned = new Uint8Array([1, 2, 3, 4]);
-  // 重みは GB 級なので、整列済みは**同一参照**で返る（無条件コピーは実測に響く）
+  // Weights are GB-sized, so an aligned payload comes back as the **same reference** (an
+  // unconditional copy shows up in measurements)
   assertStrictEquals(alignF16Payload(aligned), aligned);
 
   const odd = new Uint8Array([1, 2, 3, 4, 5, 6]);
@@ -70,9 +75,10 @@ test("alignF16Payload: 4 整列済みはコピーせず、端数 2 バイトは�
   assertEquals([...padded], [1, 2, 3, 4, 5, 6, 0, 0]);
 });
 
-// 展開が受ける形は safetensors の宣言検査が絞っている（要素数 → バイト長）。ここは
-// 「宣言どおりのバイト列なら値が合う」ことだけを見る（f16 → f32 は常に厳密）。
-test("decodeF16: 連続したパターンを宣言どおりの本数だけ展開する", () => {
+// The shapes decoding receives are narrowed by the safetensors declaration check (element count →
+// byte length). This only checks that "bytes as declared give the right values" (f16 → f32 is
+// always exact).
+test("decodeF16: decodes a contiguous pattern into exactly the declared number of values", () => {
   const bytes = new Uint8Array([0x00, 0x00, 0x00, 0x80, 0x00, 0x3c, 0xff, 0x7b]);
   const decoded = decodeF16(bytes);
   assertEquals(decoded.length, 4);
@@ -81,12 +87,13 @@ test("decodeF16: 連続したパターンを宣言どおりの本数だけ展開
   assertEquals([decoded[2], decoded[3]], [1, 65504]);
 });
 
-test("decodeF16: 奇数バイトは末尾の読み出しがはみ出して落ちる（出所不明の RangeError）", () => {
-  // 現状は safetensors の宣言検査（bit 境界門）が上流で塞いでいるので到達しない形。専用 Error
-  // を持たない（i4 / i8 は持つ — 防御の非対称）ことと、落ち方が「DataView が範囲外」という
-  // 出所の分からない診断になることを記録しておく。
-  // NOTE: レビューの仕様案は「非整数長で TypedArray 構築が落ちる」としていたが、
-  // `new Float32Array(1.5)` は長さ 1 へ切り捨てられる（実測）— 実際に落ちるのは読み出し側。
+test("decodeF16: an odd byte count fails when the last read runs past the end (a RangeError of unclear origin)", () => {
+  // Today this shape is unreachable because the safetensors declaration check (the bit-boundary
+  // check) blocks it upstream. This records that f16 has no dedicated Error (i4 / i8 do — an
+  // asymmetry in the defences) and that the failure is a diagnostic of unclear origin, "DataView
+  // out of range".
+  // NOTE: the review's draft spec said "building the TypedArray fails on a non-integer length", but
+  // `new Float32Array(1.5)` truncates to length 1 (measured) — what actually fails is the read.
   assertThrows(
     () => decodeF16(new Uint8Array([1, 2, 3])),
     RangeError,

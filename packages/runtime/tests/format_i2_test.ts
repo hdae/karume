@@ -27,8 +27,8 @@ const bytes = Uint8Array.of(0xe4, 0x1b, 0x72, 0x8d, 0x1b, 0xe4, 0x8d, 0x72);
 const scales = Float32Array.of(0.375, 1.25);
 
 /**
- * `int2-off` の供給 1 本。per-channel なので `groupSize` は行長（16）で、scale は行ごとに
- * 1 本（`[rows, 1]` ぶんの f32 — v1 の keepdim 形と同じバイト列）。
+ * One `int2-off` supply. It is per-channel, so `groupSize` is the row length (16) and there is one
+ * scale per row (`[rows, 1]` worth of f32 — the same bytes as the v1 keepdim shape).
  */
 const i2Weight = (
   scaleBytes: Uint8Array<ArrayBuffer> = new Uint8Array(scales.buffer),
@@ -40,13 +40,14 @@ const i2Weight = (
   encoding: { codec: "int2-off", groupSize, scale: { bytes: scaleBytes, dtype: "f32" } },
 });
 
-test("INT2 の全符号値・byte内位置と行別scaleを解釈する", async () => {
+test("INT2 decodes every code value, every in-byte position and per-row scales", async () => {
   const expected = [
     -2, -1, 0, 1, 1, 0, -1, -2, 0, -2, 1, -1, -1, 1, -2, 0, 1, 0, -1, -2, -2, -1, 0, 1, -1, 1, -2,
     0, 0, -2, 1, -1,
   ].map((q, i) => Math.fround(q * scales[Math.floor(i / 16)]));
   assertEquals(decodeI2(bytes, [2, 16], scales, [2, 1]), new Float32Array(expected));
-  // 容器（`krm`）を 1 往復させて、読み手の側でも i2 の席が立つことを見る。
+  // Round-trip through the container (`krm`) once and check that the reader side also gets the i2
+  // `seat`.
   const loaded = prepareContainer(await openModelBytes(graph(), [i2Weight()]), GRAPH_NAME);
   const buffers = planWeightBuffers(planWeightResidency(loaded.graph));
   assertEquals(
@@ -59,9 +60,10 @@ test("INT2 の全符号値・byte内位置と行別scaleを解釈する", async 
   );
 });
 
-test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
-  // 宣言 shape の門は**合流層**（宣言 shape × codec）— IR v2 の宣言は格納を持たないので、
-  // 「i2 なのに rank 1 / 行長が 16 の倍数でない」は供給と突き合わせて初めて決まる。
+test("INT2 rejects invalid shapes, scales and partial bytes", () => {
+  // The declared-shape check lives in the **merge layer** (declared shape × codec) — an IR v2
+  // declaration carries no storage, so "i2 but rank 1 / row length not a multiple of 16" is decided
+  // only when it is matched against the supply.
   for (const shape of [[32], [2, 15], [2, 20], [0, 16], [2, 0], [1, 2, 16]]) {
     const g = graph();
     g.values.w.shape = shape;
@@ -72,13 +74,14 @@ test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
     );
     assertThrows(() => decodeI2(bytes, shape, scales, [2, 1]), I2Error);
   }
-  // per-channel codec の `groupSize` は行長に等しい MUST（v1 の `group_size` 宣言の行き先）。
+  // A per-channel codec's `groupSize` MUST equal the row length (where v1's `group_size`
+  // declaration went).
   assertThrows(
     () => memoryModel(graph(), [i2Weight(new Uint8Array(scales.buffer), 8)]),
     ContainerFormatError,
     "per-channel",
   );
-  // scale を持たない `int2-off` は供給の時点で落ちる（v1 の `storage.scale` 欠落の行き先）。
+  // An `int2-off` without a scale fails at supply time (where v1's missing `storage.scale` went).
   assertThrows(
     () =>
       memoryModel(graph(), [
@@ -92,9 +95,10 @@ test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
     ContainerFormatError,
     "needs scale and groupSize",
   );
-  // scale のバイト数は `rows × groups × 4` — 行数と合わない列は落ちる（v1 の scale shape 検査）。
-  // 文言はバイト数の突合そのものを名指しする（`"scale"` だけだと「scale の有無」へ門が退行
-  // しても緑のままになる — 上の 2 ケースの文言にも `scale` が入っている）。
+  // The scale byte count is `rows × groups × 4` — a list that does not match the row count fails
+  // (where v1's scale shape check went). The message names the byte-count match itself (with only
+  // `"scale"` the test would stay green even if the check regressed to "is there a scale" — the
+  // messages of the two cases above also contain `scale`).
   assertThrows(
     () => memoryModel(graph(), [i2Weight(new Uint8Array(Float32Array.of(0.375).buffer))]),
     ContainerFormatError,
@@ -104,7 +108,7 @@ test("INT2 は不正な形・scale・端数バイトを拒否する", () => {
   assertThrows(() => decodeI2(bytes, [2, 16], scales, [1, 2]), I2Error, "scale");
 });
 
-test("INT2 と同じ重みを graph 出力へ出すと f32 展開分を見積もる", () => {
+test("INT2: routing the same weight to a graph output estimates the f32 expansion", () => {
   const g = graph();
   g.outputs.push("w");
   const plan = planWeightResidency(

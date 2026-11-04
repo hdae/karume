@@ -1,14 +1,18 @@
-// 常駐プランナ（src/runtime/weight-residency.ts）の門。GPU を一切使わない
-// （容器（golden の `krm` / 合成グラフのメモリ内容器）を開いて、宣言だけから決まる席と
-// バイト数を見る）。
+// The check of the residency planner (src/runtime/weight-residency.ts). No GPU is used at all (it
+// opens containers — the goldens' `krm` / in-memory containers of synthetic graphs — and looks at
+// the residency classes and byte counts decided by the declarations alone).
 //
-// 見るのは 2 点:
-// ① **席**（どの重みが f16 / i8 / i4 常駐・CPU 展開・生バイト常駐のどれに落ちるか）—
-//    期待値は fixture ごとに手書きの定数で置く。プランナと同じ述語で組み直すと恒真化する。
-// ② **宣言由来バイト数 = 容器の供給計画のバイト数**（payload / scale とも）— プランナは
-//    束縛表も目次も見ずに宣言 shape と席だけで数えるので、ここが「宣言と現物が同じ数を指す」
-//    唯一の突合になる。i8 の scale は**チャネル軸の取り違えが即バイト数の違いになる**
-//    （conv_transpose1d の `[Cin,Cout,K]` は軸 1 — 軸 0 と読むと golden の実 scale と一致しない）。
+// Two things are checked:
+// ① **The residency class** (whether each weight lands on f16 / i8 / i4 residency, CPU expansion
+//    or raw-byte residency) — the expected values are hand-written constants per fixture.
+//    Rebuilding them with the planner's own predicates would make the test a tautology.
+// ② **Byte counts from the declarations = byte counts of the container's supply plan** (both
+//    payload and scale) — the planner counts from the declared shapes and the residency classes
+//    alone, without looking at the binding table or the table of contents, so this is the only
+//    comparison showing that "the declarations and the real data point to the same numbers". For
+//    the i8 scale, **a swapped channel axis immediately shows up as a different byte count** (the
+//    `[Cin,Cout,K]` of conv_transpose1d is axis 1 — read as axis 0 it does not match the golden's
+//    real scale).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -21,123 +25,138 @@ import { autoTensors, type StorageMap } from "./helpers/merged-graph.ts";
 import { type DeclarationJson, GRAPH_NAME, memoryModel } from "./helpers/model-fixture.ts";
 
 const GOLDEN_ROOT = new URL("./fixtures/golden/", import.meta.url);
-/** golden 1 件の容器の代表 path（`goldens.py` の `MODEL_FILE`）。 */
+/** The representative path of one golden's container (`MODEL_FILE` of `goldens.py`). */
 const MODEL_FILE = "model.krm";
 
-/** 席とバイト数の突合に要るぶんだけの面（合流後のグラフと供給計画）。 */
+/**
+ * Just the surface needed to compare residency classes and byte counts (the merged graph and the
+ * supply plan).
+ */
 type ResidencyTarget = {
   readonly graph: IrGraph;
   readonly supplies: ReadonlyMap<string, InitializerSupply>;
 };
 
 /**
- * golden 1 件の**容器**を開き、合流後のグラフと供給計画を返す（グラフ名 = 置き場の
- * ディレクトリ名 — `goldens.py` の `graph_name=spec.name`）。
+ * Opens one golden's **container** and returns the merged graph and the supply plan (graph name =
+ * the name of its directory — `graph_name=spec.name` of `goldens.py`).
  *
- * ここは GPU も Session も通さないので、`prepareContainer` ではなく素の合流面で開く。
- * 読むのはヘッダと 2 文書だけで、block へは 1 バイトも進まない。
+ * This goes through neither the GPU nor a Session, so it opens with the bare merge surface instead
+ * of `prepareContainer`. Only the header and the 2 documents are read; not a single byte of a
+ * block.
  */
 const openGoldenContainer = async (model: string): Promise<ResidencyTarget> => {
   const opened = await openSeriesContainer(new URL(`${model}/${MODEL_FILE}`, GOLDEN_ROOT));
   const bound = opened.graphs[model];
   assert(
     bound !== undefined,
-    `容器にグラフ '${model}' が無い（在るのは ${Object.keys(opened.graphs).join(" / ")}）`,
+    `the container has no graph '${model}' (it has ${Object.keys(opened.graphs).join(" / ")})`,
   );
   return { graph: mergedGraph(bound, model), supplies: bound.supplies };
 };
 
 /**
- * 合成グラフを**メモリ内容器**で開く（`krm` を書かずに同じ合流面を得る）。供給の中身は
- * 見ないので、宣言 shape と codec から決まる長さの 0 埋めでよい（helpers/merged-graph.ts）。
+ * Opens a synthetic graph as an **in-memory container** (the same merge surface without writing a
+ * `krm`). The supplies' contents are not looked at, so zeros of the length decided by the declared
+ * shape and the codec suffice (helpers/merged-graph.ts).
  */
 const openGraph = (graph: DeclarationJson, storage: StorageMap = {}): ResidencyTarget => {
   const bound = memoryModel(graph, autoTensors(graph, storage)).graphs[GRAPH_NAME];
   return { graph: mergedGraph(bound, GRAPH_NAME), supplies: bound.supplies };
 };
 
-/** 名前 → 席（期待値との突合は席だけを見る — バイト数は現物との突合が別に見る）。 */
+/**
+ * Name → residency class (the comparison with the expected values looks only at the class — the
+ * byte counts are checked separately against the real data).
+ */
 const seats = (model: { readonly graph: IrGraph }): Record<string, WeightResidency["seat"]> =>
   Object.fromEntries(
     [...planWeightResidency(model.graph)].map(([name, plan]) => [name, plan.seat]),
   );
 
 /**
- * 宣言由来のバイト数を**容器の供給計画**と突き合わせる（payload と scale の両方）。
+ * Compares the byte counts from the declarations with **the container's supply plan** (both
+ * payload and scale).
  *
- * 常駐プランナ（`weight-residency.ts`）と容器の合流層（`format/container/bind.ts`）は同じ量を
- * **別々に**導く — 前者は IR の宣言 shape と席から、後者は束縛表の encoding と目次から。
- * したがってここは 2 実装の突合であって恒真ではない。チャネル軸の取り違え
- * （conv_transpose1d の `[Cin,Cout,K]` は行軸 1）は scale のバイト数の違いとして出る。
+ * The residency planner (`weight-residency.ts`) and the container's merge layer
+ * (`format/container/bind.ts`) derive the same quantities **independently** — the former from the
+ * IR's declared shapes and the residency classes, the latter from the binding table's encoding and
+ * the table of contents. So this compares 2 implementations and is not a tautology. A swapped
+ * channel axis (the `[Cin,Cout,K]` of conv_transpose1d has row axis 1) shows up as a different
+ * scale byte count.
  *
- * NOTE: ただしチャネル軸の主張が効くのは **golden の側だけ**。合成グラフの供給を作る
- * `autoTensors` は消費側 op を見ずに rowAxis 0 固定で scale 長を決めるので、合成側の突合は
- * 「宣言 shape から同じ軸で 2 度数えた」形にしかならない。
+ * NOTE: the channel-axis claim holds **only on the golden side**, though. `autoTensors`, which
+ * builds the synthetic graphs' supplies, fixes rowAxis 0 for the scale length without looking at
+ * the consuming op, so the synthetic-side comparison only amounts to "counted twice with the same
+ * axis from the declared shape".
  */
 const assertDeclaredBytesMatchContainer = (golden: ResidencyTarget): void => {
   const { graph, supplies } = golden;
   const plan = planWeightResidency(graph);
   for (const [name, initializer] of Object.entries(graph.initializers)) {
     const seat = plan.get(name);
-    assert(seat !== undefined, `initializer '${name}' の席が無い`);
-    // 共有宣言（借り物 — ADR 0096 段 2 §1.3）は実体を容器に持たないので、この助手の対象外
-    // （対象の資産に 1 本も無いことを門にする）。
-    assert(initializer.shared === undefined, `initializer '${name}' が共有宣言`);
-    assert(seat.seat !== "shared", `initializer '${name}' の席が shared`);
+    assert(seat !== undefined, `initializer '${name}' has no residency class`);
+    // A shared declaration (borrowed — ADR 0096 stage 2 §1.3) has no data in the container, so it
+    // is outside this helper (the check is that the assets it covers have none).
+    assert(initializer.shared === undefined, `initializer '${name}' is a shared declaration`);
+    assert(seat.seat !== "shared", `initializer '${name}' has the residency class shared`);
     const supply = supplies.get(name);
-    assert(supply !== undefined, `initializer '${name}' の供給計画が無い`);
-    // piece 分割された実体は block 列で来る（container-v1 §5）ので payload は足し合わせる。
+    assert(supply !== undefined, `initializer '${name}' has no supply plan`);
+    // Data split into pieces arrives as a sequence of blocks (container-v1 §5), so the payloads are
+    // summed.
     const payloadBytes = supply.blocks.reduce((total, block) => total + block.payloadBytes, 0);
-    assertEquals(seat.payloadBytes, payloadBytes, `${name} の payload バイト数`);
+    assertEquals(seat.payloadBytes, payloadBytes, `payload byte count of ${name}`);
     if (seat.seat !== "i8" && seat.seat !== "i4") continue;
-    assert(supply.scale !== undefined, `initializer '${name}' に scale の供給が無い`);
-    assertEquals(seat.scaleBytes, supply.scale.payloadBytes, `${name} の scale バイト数`);
+    assert(supply.scale !== undefined, `initializer '${name}' has no scale supply`);
+    assertEquals(seat.scaleBytes, supply.scale.payloadBytes, `scale byte count of ${name}`);
   }
 };
 
 // ---------------------------------------------------------------------------
-// 既存 fixture（実エクスポータが書いた配布形）との突合
+// Comparison with the existing fixtures (distribution forms written by the real exporter)
 // ---------------------------------------------------------------------------
 
-test("golden `mlp`: 圧縮しない格納は全て生バイト常駐の席", async () => {
+test("golden `mlp`: every uncompressed storage gets the raw-byte residency class", async () => {
   const model = await openGoldenContainer("mlp");
   assertEquals(seats(model), { w1: "raw", b1: "raw", w2: "raw", b2: "raw" });
   assertDeclaredBytesMatchContainer(model);
 });
 
-test("golden `i8_weights`: 重みスロット消費の i8 は全て i8 常駐（bias は f32 のまま）", async () => {
+test("golden `i8_weights`: every i8 consumed through a weight slot is i8-resident (bias stays f32)", async () => {
   const model = await openGoldenContainer("i8_weights");
   assertEquals(seats(model), {
-    // embedding / linear / conv1d / conv_transpose1d / conv2d の重みスロット
+    // the weight slots of embedding / linear / conv1d / conv_transpose1d / conv2d
     "table.weight": "i8",
     "dense.weight": "i8",
     "conv.weight": "i8",
     "up.weight": "i8",
     "image.weight": "i8",
-    // bias は適格判定に載らないスロット（ADR 0006 が名指しした「bias が weight を道連れに
-    // 降格させる」形を作らない）ので、f32 のまま生バイト常駐
+    // bias is a slot outside the eligibility test (so the "bias drags the weight down into
+    // demotion" case that ADR 0006 named does not arise), so it stays f32 with raw-byte residency
     "dense.bias": "raw",
     "conv.bias": "raw",
     "up.bias": "raw",
     "image.bias": "raw",
   });
-  // conv_transpose1d の `up.weight` は `[Cin,Cout,K]` = [5,2,3] でチャネル軸が **1**。
-  // 軸 0 と取り違えると scale が 5 要素（20 バイト）になり、容器側の 2 要素（8 バイト）と外れる。
+  // conv_transpose1d's `up.weight` is `[Cin,Cout,K]` = [5,2,3], with channel axis **1**.
+  // Mistaken for axis 0, the scale becomes 5 elements (20 bytes) and misses the container side's 2
+  // elements (8 bytes).
   assertDeclaredBytesMatchContainer(model);
 });
 
-test("golden `conv_transpose` / `embedding_lookup`: 宣言由来バイト数が容器と一致", async () => {
+test("golden `conv_transpose` / `embedding_lookup`: byte counts from the declarations match the container", async () => {
   assertDeclaredBytesMatchContainer(await openGoldenContainer("conv_transpose"));
   assertDeclaredBytesMatchContainer(await openGoldenContainer("embedding_lookup"));
 });
 
 // ---------------------------------------------------------------------------
-// 席の分岐（適格 / 適格外）
+// Residency-class branches (eligible / ineligible)
 // ---------------------------------------------------------------------------
 
 /**
- * linear の重み（適格）と mul の被演算子（適格外）に**同じ格納**を置ける形のグラフ。
- * IR v2 の宣言は格納を持たないので、`w` / `g` の codec は供給側（`openGraph` の第 2 引数）が決める。
+ * A graph that can put **the same storage** on a linear weight (eligible) and a mul operand
+ * (ineligible). IR v2 declarations carry no storage, so the codec of `w` / `g` is decided by the
+ * supply side (the second argument of `openGraph`).
  */
 const twoPathGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -164,20 +183,22 @@ const twoPathGraph = (): DeclarationJson => ({
   ],
 });
 
-test("f16: 重みスロットだけの消費は f16 席・重みスロット以外の消費は CPU 展開の席", () => {
+test("f16: consumption through weight slots only gets the f16 class, other consumption the CPU-expansion class", () => {
   const model = openGraph(twoPathGraph(), { w: "f16", g: "f16" });
   const plan = planWeightResidency(model.graph);
   assertEquals(seats(model), { w: "f16", b: "raw", g: "expanded" });
-  // f16 の payload は numel×2（整列の詰め物は転送側の責務なので席には現れない）
+  // The f16 payload is numel×2 (alignment padding is the upload side's business, so it does not
+  // appear in the residency class)
   assertEquals(plan.get("w"), { seat: "f16", payloadBytes: 18 });
-  // 展開後は f32 の numel×4 — 宣言由来の payload（6 バイト）とは別欄で持つ
+  // After expansion it is f32 numel×4 — held in a field separate from the declared payload (6
+  // bytes)
   assertEquals(plan.get("g"), { seat: "expanded", payloadBytes: 6, expandedBytes: 12 });
   assertDeclaredBytesMatchContainer(model);
 });
 
-test("i8: 席は scale のバイト数とチャネル軸を伴う", () => {
+test("i8: the residency class carries the scale byte count and the channel axis", () => {
   const model = openGraph(twoPathGraph(), { w: "int8-sym", g: "f16" });
-  // linear の重みは `[out,in]` なので行の軸 0 → scale は 3 要素 = 12 バイト
+  // A linear weight is `[out,in]`, so the row axis is 0 → the scale is 3 elements = 12 bytes
   assertEquals(planWeightResidency(model.graph).get("w"), {
     seat: "i8",
     payloadBytes: 9,
@@ -187,7 +208,7 @@ test("i8: 席は scale のバイト数とチャネル軸を伴う", () => {
   assertDeclaredBytesMatchContainer(model);
 });
 
-/** `conv1d(x, w, b)` 1 本のグラフ（w は i4 + rank 2 の group scale）。 */
+/** A graph of a single `conv1d(x, w, b)` (w is i4 + a rank-2 group scale). */
 const i4Conv1dGraph = (groups: number): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -200,7 +221,7 @@ const i4Conv1dGraph = (groups: number): DeclarationJson => ({
     b: {},
   },
   values: {
-    // 行長 = Cin/groups · K（groups == 1 なら 32·2 = 64 = g16 が 4 つ）
+    // row length = Cin/groups · K (with groups == 1, 32·2 = 64 = four g16 groups)
     w: { dtype: "f32", shape: [4, 32 / groups, 2] },
     b: { dtype: "f32", shape: [4] },
     y: { dtype: "f32", shape: [1, 4, 5] },
@@ -218,9 +239,9 @@ const i4Conv1dGraph = (groups: number): DeclarationJson => ({
 const i4Conv1dModel = (groups: number): ResidencyTarget =>
   openGraph(i4Conv1dGraph(groups), { w: { codec: "int4-sym-g", groupSize: 16 } });
 
-test("i4: 展開経路のある conv1d(groups==1) は i4 席・groups>1 は CPU 展開の席", () => {
+test("i4: conv1d(groups==1), which has a dequantizing path, gets the i4 class; groups>1 gets the CPU-expansion class", () => {
   const direct = i4Conv1dModel(1);
-  // numel 256 → packed 128 バイト / group scale は [4, 4] の 16 要素 = 64 バイト
+  // numel 256 → packed 128 bytes / the group scale is [4, 4], 16 elements = 64 bytes
   assertEquals(planWeightResidency(direct.graph).get("w"), {
     seat: "i4",
     payloadBytes: 128,
@@ -229,9 +250,10 @@ test("i4: 展開経路のある conv1d(groups==1) は i4 席・groups>1 は CPU 
   });
   assertDeclaredBytesMatchContainer(direct);
 
-  // groups > 1 は直接カーネルへ流れる = 展開経路が無いので CPU 展開へ落ちる
+  // groups > 1 goes to the direct kernel = there is no dequantizing path, so it falls back to CPU
+  // expansion
   const grouped = i4Conv1dModel(2);
-  // numel 128 → packed 64 バイト・展開後は 128×4 = 512 バイト
+  // numel 128 → packed 64 bytes, 128×4 = 512 bytes after expansion
   assertEquals(planWeightResidency(grouped.graph).get("w"), {
     seat: "expanded",
     payloadBytes: 64,
@@ -240,7 +262,7 @@ test("i4: 展開経路のある conv1d(groups==1) は i4 席・groups>1 は CPU 
   assertDeclaredBytesMatchContainer(grouped);
 });
 
-test("グラフ出力に載った initializer は圧縮常駐しない（readback が f32 を仮定する）", () => {
+test("an initializer that is a graph output is not resident in compressed form (readback assumes f32)", () => {
   const graph = twoPathGraph();
   const model = openGraph({ ...graph, outputs: ["y", "w"] }, { w: "f16", g: "f16" });
   assertEquals(seats(model)["w"], "expanded");
@@ -250,7 +272,7 @@ test("グラフ出力に載った initializer は圧縮常駐しない（readbac
 // fail loudly
 // ---------------------------------------------------------------------------
 
-test("チャネル軸が消費側で食い違う i8 は席を決めずに落ちる", () => {
+test("an i8 whose consumers disagree on the channel axis fails without getting a residency class", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -262,7 +284,7 @@ test("チャネル軸が消費側で食い違う i8 は席を決めずに落ち�
     ],
     outputs: ["h", "u"],
     initializers: {
-      // linear は軸 0・conv_transpose1d は軸 1 を要求する（ADR 0019）
+      // linear requires axis 0, conv_transpose1d axis 1 (ADR 0019)
       w: {},
       b: {},
       c: {},
@@ -284,8 +306,9 @@ test("チャネル軸が消費側で食い違う i8 は席を決めずに落ち�
       },
     ],
   };
-  // チャネル軸は消費側 op から導くので、常駐計画が席を決める前に落ちる（合流層は消費側を
-  // 見ないので、落ちるのは `openGraph` ではなく `planWeightResidency` の側）。
+  // The channel axis is derived from the consuming ops, so it fails before the residency plan
+  // decides the class (the merge layer does not look at the consumers, so the failure comes from
+  // `planWeightResidency`, not `openGraph`).
   const model = openGraph(graph, { w: "int8-sym" });
   assertThrows(
     () => planWeightResidency(model.graph),

@@ -1,9 +1,11 @@
-// 保存した表の JSON の unknown 境界 parseGeometryProfileJson（src/tune/profile-json.ts — ADR 0117 決定 7）の門。
-// 関数と失敗の型は公開面（../tune.ts）から引く。GPU を使わない。
+// The check of parseGeometryProfileJson, the unknown boundary of a saved table's JSON
+// (src/tune/profile-json.ts — ADR 0117 decision 7). The function and the failure type come from the
+// public surface (../tune.ts). No GPU is used.
 //
-// 固定するのは ① geometryProfileJson との往復で構造が一致する（末尾の Infinity を含む）② 未知の欄を全ての
-// 階層で拒む ③ 型の誤り・欠落・末尾の null（Infinity の欠落）・runtime の門に落ちる表を、欄の path を名指す
-// GeometryProfileParseError で拒む。
+// What this pins: ① the structure survives a round trip with geometryProfileJson (the trailing
+// Infinity included) ② unknown fields are rejected at every level ③ type errors, missing fields, a
+// trailing null (a lost Infinity) and tables that fail the runtime's check are rejected with a
+// GeometryProfileParseError that names the field's path.
 
 import {
   assert,
@@ -27,7 +29,10 @@ import { SOURCES, SPEC } from "./helpers/sweep-records.ts";
 
 const BASE = APPLE_METAL_3;
 
-/** parse が GeometryProfileParseError で拒み、文言が `parts` を全て含むこと。 */
+/**
+ * Asserts that parsing rejects with a GeometryProfileParseError whose message contains every one of
+ * `parts`.
+ */
 const rejects = (text: string, ...parts: readonly string[]): GeometryProfileParseError => {
   const error = assertThrows(() => parseGeometryProfileJson(text), GeometryProfileParseError);
   assertEquals(error.name, "GeometryProfileParseError");
@@ -35,10 +40,13 @@ const rejects = (text: string, ...parts: readonly string[]): GeometryProfilePars
   return error;
 };
 
-/** 表の値を JSON にする（Infinity は 1e999 — 書き手と同じ綴りで、壊したい欄だけを壊す）。 */
+/**
+ * Turns a table value into JSON (Infinity as 1e999 — the writer's spelling, so only the field meant
+ * to be broken is broken).
+ */
 const json = (value: unknown): string => infinityJson(value);
 
-describe("parseGeometryProfileJson: geometryProfileJson との往復", () => {
+describe("parseGeometryProfileJson: round trip with geometryProfileJson", () => {
   const optIn = buildGeometryProfile(
     { id: "opt-in", optIn: true },
     SOURCES,
@@ -46,11 +54,11 @@ describe("parseGeometryProfileJson: geometryProfileJson との往復", () => {
   );
   const generated = buildGeometryProfile(SPEC, SOURCES, deriveProfile(SOURCES, SPEC));
   const cases: readonly (readonly [string, GeometryProfile])[] = [
-    ["埋め込みの表（provenance 付き・description の match）", APPLE_METAL_3],
-    ["埋め込みの表（vendor / architecture の match）", NVIDIA_BLACKWELL],
-    ["既定の表（provenance 無し・空の match・3 段）", DEFAULT_GEOMETRY_PROFILE],
-    ["生成器の表", generated],
-    ["注入専用の表（match 無し）", optIn],
+    ["a built-in table (with provenance, description match)", APPLE_METAL_3],
+    ["a built-in table (vendor / architecture match)", NVIDIA_BLACKWELL],
+    ["the default table (no provenance, empty match, 3 segments)", DEFAULT_GEOMETRY_PROFILE],
+    ["a generated table", generated],
+    ["an injection-only table (no match)", optIn],
   ];
   it("i8a8.conv3d survives the round trip with its own value (not the default)", () => {
     const conv3d = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
@@ -59,7 +67,7 @@ describe("parseGeometryProfileJson: geometryProfileJson との往復", () => {
   });
 
   for (const [name, profile] of cases) {
-    it(`${name}は同じ構造に戻り、末尾の maxRows は Infinity`, () => {
+    it(`${name} comes back with the same structure, and the trailing maxRows is Infinity`, () => {
       const parsed = parseGeometryProfileJson(geometryProfileJson(profile));
       assertEquals(parsed, profile);
       assertEquals(parsed.gemmRows.at(-1)?.maxRows, Number.POSITIVE_INFINITY);
@@ -69,7 +77,7 @@ describe("parseGeometryProfileJson: geometryProfileJson との往復", () => {
   }
 });
 
-describe("parseGeometryProfileJson: 未知の欄は全ての階層で拒む", () => {
+describe("parseGeometryProfileJson: unknown fields are rejected at every level", () => {
   const rows = (index: number, change: (rule: GeometryProfile["gemmRows"][number]) => unknown) =>
     BASE.gemmRows.map((rule, at) => (at === index ? change(rule) : rule));
   const provenance = BASE.provenance;
@@ -118,7 +126,7 @@ describe("parseGeometryProfileJson: 未知の欄は全ての階層で拒む", ()
     ],
   ];
   for (const [path, value, key] of cases) {
-    it(`${path} の未知の欄 ${key}`, () => {
+    it(`${path}: unknown field ${key}`, () => {
       rejects(
         json(value),
         `${path} has unknown fields ${key}`,
@@ -127,7 +135,7 @@ describe("parseGeometryProfileJson: 未知の欄は全ての階層で拒む", ()
     });
   }
 
-  it("前の形の provenance（adapter が連結文字列・指紋とケース集合の版が無い）は欠落で拒む（移行しない）", () => {
+  it("rejects a provenance of the earlier form (adapter as a joined string, no fingerprint or case-set version) as missing fields (no migration)", () => {
     const { candidateSet: _c, kernels: _k, caseSet: _s, ...older } = provenance;
     rejects(
       json({ ...BASE, provenance: { ...older, adapter: "apple / metal-3 / Apple M2" } }),
@@ -140,26 +148,26 @@ describe("parseGeometryProfileJson: 未知の欄は全ての階層で拒む", ()
   });
 });
 
-describe("parseGeometryProfileJson: 型の誤りと欠落", () => {
+describe("parseGeometryProfileJson: type errors and missing fields", () => {
   const provenance = BASE.provenance;
   assert(provenance !== undefined);
   const cases: readonly (readonly [string, unknown, string])[] = [
-    ["最上位が配列", [BASE], "top level is not an object"],
-    ["id が数", { ...BASE, id: 3 }, "id is not a string (3)"],
-    ["match.vendor が数", { ...BASE, match: { vendor: 1 } }, "match.vendor is not a string"],
-    ["gemmRows が配列でない", { ...BASE, gemmRows: {} }, "gemmRows is not an array"],
+    ["the top level is an array", [BASE], "top level is not an object"],
+    ["id is a number", { ...BASE, id: 3 }, "id is not a string (3)"],
+    ["match.vendor is a number", { ...BASE, match: { vendor: 1 } }, "match.vendor is not a string"],
+    ["gemmRows is not an array", { ...BASE, gemmRows: {} }, "gemmRows is not an array"],
     [
-      "幾何の欄が小数",
+      "a geometry field is fractional",
       { ...BASE, attention: { ...BASE.attention, qk: { ...BASE.attention.qk, regM: 1.5 } } },
       "attention.qk.regM is not an integer (1.5)",
     ],
     [
-      "幾何の欄が文字列",
+      "a geometry field is a string",
       { ...BASE, i8a8: { ...BASE.i8a8, linear: { ...BASE.i8a8.linear, tileK: "16" } } },
       'i8a8.linear.tileK is not an integer ("16")',
     ],
     [
-      "末尾以外の maxRows が文字列",
+      "a non-trailing maxRows is a string",
       {
         ...BASE,
         gemmRows: BASE.gemmRows.map((rule, at) => (at === 0 ? { ...rule, maxRows: "16" } : rule)),
@@ -167,37 +175,37 @@ describe("parseGeometryProfileJson: 型の誤りと欠落", () => {
       "gemmRows[0].maxRows is not a number",
     ],
     [
-      "provenance.kernels が数",
+      "provenance.kernels is a number",
       { ...BASE, provenance: { ...provenance, kernels: 1 } },
       "provenance.kernels is not a string",
     ],
     [
-      "provenance.userAgent が { deno } のまま（文字列化していない）",
+      "provenance.userAgent is still { deno } (not turned into a string)",
       { ...BASE, provenance: { ...provenance, userAgent: { deno: "2.9.6" } } },
       'provenance.userAgent is not an array ({"deno":"2.9.6"})',
     ],
     [
-      "provenance.userAgent が連結した文字列（配列でない）",
+      "provenance.userAgent is a joined string (not an array)",
       { ...BASE, provenance: { ...provenance, userAgent: "Chrome/153, Chrome/154" } },
       'provenance.userAgent is not an array ("Chrome/153, Chrome/154")',
     ],
     [
-      "provenance.userAgent の要素が文字列でない",
+      "an element of provenance.userAgent is not a string",
       { ...BASE, provenance: { ...provenance, userAgent: ["Chrome/154", { deno: "2.9.6" }] } },
       'provenance.userAgent[1] is not a string ({"deno":"2.9.6"})',
     ],
     [
-      "provenance.userAgent が空の配列",
+      "provenance.userAgent is an empty array",
       { ...BASE, provenance: { ...provenance, userAgent: [] } },
       "provenance.userAgent is an empty array",
     ],
     [
-      "provenance.adapter.device が null",
+      "provenance.adapter.device is null",
       { ...BASE, provenance: { ...provenance, adapter: { ...provenance.adapter, device: null } } },
       "provenance.adapter.device is not a string (null)",
     ],
     [
-      "i8a8 の欄が無い",
+      "i8a8 fields are missing",
       { ...BASE, i8a8: { linear: BASE.i8a8.linear } },
       "i8a8 is missing fields attentionQk, attentionPv",
     ],
@@ -214,7 +222,7 @@ describe("parseGeometryProfileJson: 型の誤りと欠落", () => {
       "i8a8 is missing fields conv3d",
     ],
     [
-      "表の欄が無い",
+      "table fields are missing",
       { id: "x", gemmRows: BASE.gemmRows },
       "top level is missing fields attention, conv2d, i8a8",
     ],
@@ -225,14 +233,14 @@ describe("parseGeometryProfileJson: 型の誤りと欠落", () => {
     });
   }
 
-  it("JSON として読めない文字列は JSON.parse の理由を添えて拒む", () => {
+  it("rejects a string that cannot be read as JSON, with JSON.parse's reason attached", () => {
     const error = rejects("{ id: ", "cannot be parsed as JSON");
     assertInstanceOf(error.cause, SyntaxError);
   });
 });
 
-describe("parseGeometryProfileJson: gemmRows の末尾の Infinity", () => {
-  it("末尾の maxRows が null（素の JSON.stringify で書いた表）は Infinity の欠落と名指す", () => {
+describe("parseGeometryProfileJson: the trailing Infinity of gemmRows", () => {
+  it("names a trailing maxRows of null (a table written with plain JSON.stringify) as a lost Infinity", () => {
     rejects(
       JSON.stringify(BASE),
       "gemmRows[6].maxRows is null (a lost Infinity",
@@ -240,7 +248,7 @@ describe("parseGeometryProfileJson: gemmRows の末尾の Infinity", () => {
     );
   });
 
-  it("末尾の maxRows が有限の数なら拒む（どの行数にも当たる規則が無い）", () => {
+  it("rejects a finite trailing maxRows (no rule would match every row count)", () => {
     rejects(
       json({
         ...BASE,
@@ -250,17 +258,17 @@ describe("parseGeometryProfileJson: gemmRows の末尾の Infinity", () => {
     );
   });
 
-  it("1e999 と書いた末尾は Infinity に戻る（geometryProfileJson の綴り）", () => {
+  it("a trailing value written as 1e999 comes back as Infinity (geometryProfileJson's spelling)", () => {
     const text = geometryProfileJson(BASE);
     assertStringIncludes(text, '"maxRows": 1e999');
     assertEquals(parseGeometryProfileJson(text).gemmRows[6].maxRows, Number.POSITIVE_INFINITY);
   });
 });
 
-describe("parseGeometryProfileJson: 最後に runtime の注入の門（assertGeometryProfile）を通す", () => {
+describe("parseGeometryProfileJson: finally runs the runtime's injection check (assertGeometryProfile)", () => {
   const cases: readonly (readonly [string, unknown, string])[] = [
     [
-      "gemmRows が狭義昇順でない",
+      "gemmRows is not strictly ascending",
       {
         ...BASE,
         gemmRows: BASE.gemmRows.map((rule, at) => (at === 1 ? { ...rule, maxRows: 16 } : rule)),
@@ -268,16 +276,16 @@ describe("parseGeometryProfileJson: 最後に runtime の注入の門（assertGe
       "is not strictly increasing",
     ],
     [
-      "整除条件を満たさない幾何",
+      "a geometry that fails the divisibility conditions",
       { ...BASE, attention: { ...BASE.attention, qk: { regM: 3, regN: 4, wgX: 16, wgY: 16 } } },
       "attention.qk",
     ],
     [
-      "description だけの match",
+      "a match with description only",
       { ...BASE, match: { description: "Apple M2" } },
       "description must be given together with both vendor and architecture",
     ],
-    ["空の id", { ...BASE, id: "" }, "id is empty"],
+    ["an empty id", { ...BASE, id: "" }, "id is empty"],
     [
       "a conv3d geometry that breaks the divisibility conditions",
       { ...BASE, i8a8: { ...BASE.i8a8, conv3d: { regM: 8, regN: 6, wgX: 16, wgY: 8, tileK: 16 } } },
@@ -285,7 +293,7 @@ describe("parseGeometryProfileJson: 最後に runtime の注入の門（assertGe
     ],
   ];
   for (const [name, value, message] of cases) {
-    it(`${name}は門の文言のまま GeometryProfileParseError で拒む（cause は門の CodegenError）`, () => {
+    it(`${name} is rejected with a GeometryProfileParseError carrying the check's wording (cause is the check's CodegenError)`, () => {
       const error = rejects(json(value), message);
       assertInstanceOf(error.cause, CodegenError);
     });

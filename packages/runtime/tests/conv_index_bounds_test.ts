@@ -1,10 +1,12 @@
 /**
- * 畳み込みの params が「WGSL の 32 bit 整数の添字・座標で表せない形」を拒否すること（GPU 不要）。
+ * Convolution params reject shapes "whose indices and coordinates do not fit WGSL's 32-bit
+ * integers" (no GPU needed).
  *
- * uniform の各値が u32 に収まっても、WGSL 側で掛けた・足した結果（i32 の入力座標）は
- * 折り返しうる。折り返した座標は「範囲外なら 0」の判定を実在する別の画素として通り抜け、
- * 例外の出ない誤値になる。direct 版と暗黙 GEMM 版は同じ座標式を持つので GPU の parity
- * テストでは検出できず、params の受理集合をここで固定する。
+ * Even when every uniform value fits in a u32, the products and sums on the WGSL side (the i32
+ * input coordinates) can wrap around. A wrapped coordinate passes the "out of range reads 0" test
+ * as another, existing pixel and yields a wrong value with no exception. The direct and the
+ * implicit-GEMM variants share the same coordinate expression, so a GPU parity test cannot detect
+ * this; the accepted set of params is pinned here instead.
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
@@ -16,8 +18,8 @@ import { convTranspose1dParams } from "../src/kernels/conv-transpose1d.ts";
 import { type Conv3dDims, conv3dIgemmParams } from "../src/kernels/conv3d.ts";
 
 const U32_MAX = 0xffff_ffff;
-// 境界の形: 長さ L・K 1・stride 1・dilation 1 で、L + 2·padding = 2^31 − 1 + (L − 1)。
-// 出力長は shapes.ts の式どおり（K = 1・stride 1 なので L + 2·padding）に揃える。
+// Boundary shape: length L, K 1, stride 1, dilation 1, with L + 2·padding = 2^31 − 1 + (L − 1).
+// The output length follows the formula in shapes.ts (K = 1 and stride 1 give L + 2·padding).
 const EDGE_PADDING = 2 ** 30 - 1;
 
 const conv1dParamBuilders = [
@@ -62,10 +64,11 @@ const unit2d: Conv2dDims = {
   groups: 1,
 };
 
-describe("conv1d の params: 入力座標が i32 に収まらない形", () => {
-  it("padding と dilation が u32 の最大の形（CPU 参照 [14,21] に対し GPU は [29,43]）を拒否する", () => {
-    // 入力長 2・K 3・stride 1 で出力長の式は Lout = 2 + 2·(2^32 − 1) − (2^32 − 1)·2 = 2 で成り立つが、
-    // WGSL の i32(k·dilation) − i32(padding) が折り返して範囲外 0 のはずの読みが実在の画素を拾う。
+describe("conv1d params: shapes whose input coordinates do not fit in i32", () => {
+  it("rejects the shape with padding and dilation at the u32 maximum (CPU reference [14,21], GPU [29,43])", () => {
+    // With input length 2, K 3 and stride 1 the output-length formula holds with
+    // Lout = 2 + 2·(2^32 − 1) − (2^32 − 1)·2 = 2, but WGSL's i32(k·dilation) − i32(padding) wraps
+    // and a read that should be an out-of-range 0 picks up an existing pixel.
     const dims: Conv1dDims = {
       ...unit1d,
       lengthIn: 2,
@@ -79,7 +82,7 @@ describe("conv1d の params: 入力座標が i32 に収まらない形", () => {
     }
   });
 
-  it("入力長 + 2·padding = 2^31 − 1 は受理し、2^31 は拒否する（両カーネルで同じ受理集合）", () => {
+  it("accepts input length + 2·padding = 2^31 − 1 and rejects 2^31 (same accepted set in both kernels)", () => {
     const withLength = (length: number): Conv1dDims => ({
       ...unit1d,
       lengthIn: length,
@@ -87,14 +90,19 @@ describe("conv1d の params: 入力座標が i32 に収まらない形", () => {
       padding: EDGE_PADDING,
     });
     for (const [name, build] of conv1dParamBuilders) {
-      assertEquals(build(withLength(1)).length, 12, `${name} 境界`);
-      assertThrows(() => build(withLength(2)), CodegenError, "the i32 maximum", `${name} 境界 + 1`);
+      assertEquals(build(withLength(1)).length, 12, `${name} boundary`);
+      assertThrows(
+        () => build(withLength(2)),
+        CodegenError,
+        "the i32 maximum",
+        `${name} boundary + 1`,
+      );
     }
   });
 });
 
-describe("conv2d の params: 入力座標が i32 に収まらない形", () => {
-  it("padding と dilation が u32 の最大の形を H 軸・W 軸のどちらでも拒否する", () => {
+describe("conv2d params: shapes whose input coordinates do not fit in i32", () => {
+  it("rejects the shape with padding and dilation at the u32 maximum on both the H and the W axis", () => {
     const huge = (axis: "h" | "w"): Conv2dDims =>
       axis === "h"
         ? {
@@ -113,7 +121,7 @@ describe("conv2d の params: 入力座標が i32 に収まらない形", () => {
     }
   });
 
-  it("入力長 + 2·padding = 2^31 − 1 は受理し、2^31 は拒否する（H 軸・W 軸とも）", () => {
+  it("accepts input length + 2·padding = 2^31 − 1 and rejects 2^31 (on both the H and the W axis)", () => {
     const withLength = (axis: "h" | "w", length: number): Conv2dDims =>
       axis === "h"
         ? {
@@ -135,15 +143,15 @@ describe("conv2d の params: 入力座標が i32 に収まらない形", () => {
           () => build(withLength(axis, 2)),
           CodegenError,
           "the i32 maximum",
-          `${name} ${axis} 境界 + 1`,
+          `${name} ${axis} boundary + 1`,
         );
       }
     }
   });
 });
 
-describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まらない形", () => {
-  // 契約（shapes.ts）は 2·padding == K − stride かつ出力長 = 入力長·stride。
+describe("conv_transpose1d params: shapes whose valid tap range does not fit in i32", () => {
+  // The contract (shapes.ts) is 2·padding == K − stride and output length = input length·stride.
   const transpose = (lengthIn: number, kernel: number, stride: number, padding: number) => ({
     batch: 1,
     channelsIn: 1,
@@ -155,7 +163,7 @@ describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まら�
     padding,
   });
 
-  it("kernel > 2^31 の形（tap の終端が負に折り返し、期待 6 に対して bias だけを返す）を拒否する", () => {
+  it("rejects kernel > 2^31 (the tap end wraps negative and only the bias comes back instead of the expected 6)", () => {
     assertThrows(
       () => convTranspose1dParams(transpose(1, 2 ** 31 + 1, 1, 2 ** 30)),
       CodegenError,
@@ -163,7 +171,7 @@ describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まら�
     );
   });
 
-  it("kernel = 2^31 − 1 は受理し、2^31 は拒否する", () => {
+  it("accepts kernel = 2^31 − 1 and rejects 2^31", () => {
     assertEquals(convTranspose1dParams(transpose(1, 2 ** 31 - 1, 1, 2 ** 30 - 1)).length, 12);
     assertThrows(
       () => convTranspose1dParams(transpose(1, 2 ** 31, 2, 2 ** 30 - 1)),
@@ -172,8 +180,9 @@ describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まら�
     );
   });
 
-  it("出力座標 + padding が u32 を超える形（末尾の出力が 0 番の入力を読む）を拒否する", () => {
-    // 3·stride = 2^32 − 1 で出力長は u32 に収まるが、WGSL の ox + padding が 2^32 で 0 に折り返す。
+  it("rejects shapes where output coordinate + padding exceeds u32 (the last output reads input 0)", () => {
+    // With 3·stride = 2^32 − 1 the output length fits in u32, but WGSL's ox + padding wraps to 0 at
+    // 2^32.
     const stride = (2 ** 32 - 1) / 3;
     assertThrows(
       () => convTranspose1dParams(transpose(3, stride + 4, stride, 2)),
@@ -183,12 +192,13 @@ describe("conv_transpose1d の params: 有効 tap の範囲が i32 に収まら�
   });
 });
 
-describe("畳み込みの params: 入力・出力・重みの平坦添字が u32 に収まらない形", () => {
-  // 2^32 + 2^16 要素（各テンソルのデータは確保しない — params の受理集合だけを見る）。
+describe("convolution params: shapes whose flat input, output or weight index does not fit in u32", () => {
+  // 2^32 + 2^16 elements (no tensor data is allocated — only the accepted set of params is
+  // checked).
   const OVER = 65537;
   const PLANE = 65536;
 
-  it("conv3d: Cin·T·H·W が 2^32 を超える形（最後のチャネルの先頭添字が 0 に折り返す）を拒否する", () => {
+  it("conv3d: rejects Cin·T·H·W over 2^32 (the first index of the last channel wraps to 0)", () => {
     const unit3d: Conv3dDims = {
       channelsIn: 1,
       channelsOut: 1,
@@ -214,7 +224,7 @@ describe("畳み込みの params: 入力・出力・重みの平坦添字が u32
     };
     const input = { ...unit3d, channelsIn: OVER, widthIn: PLANE, widthOut: PLANE };
     assertThrows(() => conv3dIgemmParams(input), CodegenError, "input element count");
-    // 2^32 − 2^16 は受理する（門は u32 の域の端）
+    // 2^32 − 2^16 is accepted (the check sits at the edge of the u32 range)
     assertEquals(conv3dIgemmParams({ ...input, channelsIn: PLANE - 1 }).length, 24);
     const output = { ...unit3d, channelsOut: OVER, widthIn: PLANE, widthOut: PLANE };
     assertThrows(() => conv3dIgemmParams(output), CodegenError, "output element count");
@@ -222,10 +232,11 @@ describe("畳み込みの params: 入力・出力・重みの平坦添字が u32
     assertThrows(() => conv3dIgemmParams(weight), CodegenError, "weight element count");
   });
 
-  it("conv1d: 入力・出力（バッチ込み）・重みのどれかが 2^32 を超える形を direct 版・暗黙 GEMM 版とも拒否する", () => {
+  it("conv1d: rejects any of input, output (batch included) or weight over 2^32 in both the direct and the implicit-GEMM variant", () => {
     const cases: readonly (readonly [string, Conv1dDims])[] = [
       ["input element count", { ...unit1d, channelsIn: OVER, lengthIn: PLANE, lengthOut: PLANE }],
-      // 入力を小さく保つため、出力長は padding で伸ばす（K 1・stride 1 で Lout = 2 + 2·32767）
+      // To keep the input small, padding stretches the output length (K 1, stride 1: Lout = 2 +
+      // 2·32767)
       [
         "output element count",
         { ...unit1d, batch: OVER, lengthIn: 2, padding: 32767, lengthOut: PLANE },
@@ -239,7 +250,7 @@ describe("畳み込みの params: 入力・出力・重みの平坦添字が u32
     }
   });
 
-  it("conv2d: 入力・出力（バッチ込み）・重みのどれかが 2^32 を超える形を direct 版・暗黙 GEMM 版とも拒否する", () => {
+  it("conv2d: rejects any of input, output (batch included) or weight over 2^32 in both the direct and the implicit-GEMM variant", () => {
     const cases: readonly (readonly [string, Conv2dDims])[] = [
       ["input element count", { ...unit2d, channelsIn: OVER, widthIn: PLANE, widthOut: PLANE }],
       [
@@ -255,7 +266,7 @@ describe("畳み込みの params: 入力・出力・重みの平坦添字が u32
     }
   });
 
-  it("conv_transpose1d: 入力・重みが 2^32 を超える形を拒否する", () => {
+  it("conv_transpose1d: rejects input or weight over 2^32", () => {
     const base = {
       batch: 1,
       channelsIn: 1,

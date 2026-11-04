@@ -1,12 +1,14 @@
-// 2 段境界（ADR 0070 決定 5 / graph-first）の prepare 相 — 開いた容器の**宣言だけ**で admission が
-// 完結すること。GPU も重みの block も要らない層だけをここで見る（実 GPU の門は
-// gpu_prepared_model_test.ts）。
+// The prepare phase of the two-stage boundary (ADR 0070 decision 5 / graph-first) — admission
+// completes with **only the declarations** of the opened container. Only the layer that needs
+// neither a GPU nor weight blocks is checked here (the real-GPU check is
+// gpu_prepared_model_test.ts).
 //
-// 検出したいのは 2 つ:
-// ①見積りが「重みの block を 1 つも取らないまま」出ること（= 重み DL 前に必要側が分かるという
-//   2 段境界の存在理由そのもの）。取得の回数を数えて言う。
-// ②実行できないモデルは prepareContainer の時点で落ちること — 落ちた時点で重みの block に
-//   1 つも触れていないことを、同じ取得回数で言う。
+// Two things to detect:
+// ① the estimate comes out "without fetching a single weight block" (= the very reason the
+//   two-stage boundary exists: the requirements are known before downloading weights). Shown by
+//   counting fetches.
+// ② a model that cannot run fails at prepareContainer — shown by the same fetch count that no
+//   weight block had been touched when it failed.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -22,34 +24,38 @@ import {
   openModelBytes,
 } from "./helpers/model-fixture.ts";
 
-test("prepareContainer の見積りは重みの block を 1 つも取らずに出る", async () => {
+test("prepareContainer's estimate comes out without fetching a single weight block", async () => {
   const fixture = buildFixture();
   const counted = countingContainer(await openModelBytes(fixture.declaration, fixture.tensors));
   const prepared = prepareContainer(counted.container, GRAPH_NAME);
   const estimate = prepared.estimate();
-  assertEquals(counted.reads(), 0, "見積りが重みの block を取っている");
+  assertEquals(counted.reads(), 0, "the estimate fetches weight blocks");
 
-  // 供給元が違っても同じ数（krm 経路 / メモリ内容器 — 見積りは宣言だけで決まる）
+  // The same numbers from different sources (the krm path / an in-memory container — the estimate
+  // depends only on declarations)
   assertEquals(
     estimate,
     prepareContainer(memoryModel(fixture.declaration, fixture.tensors), GRAPH_NAME).estimate(),
   );
-  // 恒真化の防波堤: 4 codec 混在の fixture なので圧縮常駐と非圧縮常駐がどちらも 0 でない
-  // （全欄 0 どうしの一致で通ってしまう形を塞ぐ）。
+  // A guard against tautology: the fixture mixes 4 codecs, so both compressed and uncompressed
+  // residency are non-zero (closing off a pass from all fields matching at 0).
   const { weights } = estimate.resident;
-  assert(weights.compressedBytes > 0, "圧縮常駐が 0（fixture が壊れている）");
-  assert(weights.uncompressedBytes > 0, "非圧縮常駐が 0（fixture が壊れている）");
+  assert(weights.compressedBytes > 0, "compressed residency is 0 (the fixture is broken)");
+  assert(weights.uncompressedBytes > 0, "uncompressed residency is 0 (the fixture is broken)");
   assert(
     estimate.peakAccountedBytes > weights.totalBytes,
-    "ピークが重み常駐だけになっている（シナリオ側が乗っていない）",
+    "the peak is weight residency alone (the scenario part is not added)",
   );
-  // 同じ PreparedModel から何度呼んでも同じ（prepare 相は消費されない）
+  // The same no matter how many times it is called on the same PreparedModel (the prepare phase is
+  // not consumed)
   assertEquals(prepared.estimate(), estimate);
 });
 
-test("prepareContainer は capability 不足・契約違反を重みの block を取る前に落とす", async () => {
-  // 対応 op でも実行できない意味論 dtype（matmul は f32 だけ — i32 の重みは capability 不足で列挙）。
-  // NOTE: 格納 codec の側では作れない — 台帳の全 codec が実行できる（bf16 は ADR 0131 で開いた）。
+test("prepareContainer rejects missing capabilities and contract violations before fetching weight blocks", async () => {
+  // A semantic dtype that cannot run even for a supported op (matmul is f32 only — an i32 weight is
+  // listed as a missing capability).
+  // NOTE: this cannot be built on the storage codec side — every codec in the ledger can run (bf16
+  // was opened by ADR 0131).
   const unsupportedDtype = baseDeclaration();
   unsupportedDtype.values["w"] = { dtype: "i32", shape: [4, 3] };
   const unsupportedCodec = countingContainer(
@@ -68,12 +74,13 @@ test("prepareContainer は capability 不足・契約違反を重みの block �
     RuntimeSupportError,
     "i32",
   );
-  assertEquals(unsupportedCodec.reads(), 0, "capability 門の前に重みの block を取っている");
+  assertEquals(unsupportedCodec.reads(), 0, "weight blocks fetched before the capability check");
 
   const badArity = baseDeclaration();
-  // add に 3 本目の入力（capability 表は slot dtype しか見ないのでアリティは契約検査の担当）
+  // A third input to add (the capability table looks only at slot dtypes, so arity is the contract
+  // check's job)
   badArity.nodes[1].ins = ["h", "b", "b"];
   const contractViolation = countingContainer(await openModelBytes(badArity, baseTensors()));
   assertThrows(() => prepareContainer(contractViolation.container, GRAPH_NAME), OpContractError);
-  assertEquals(contractViolation.reads(), 0, "契約検査の前に重みの block を取っている");
+  assertEquals(contractViolation.reads(), 0, "weight blocks fetched before the contract check");
 });

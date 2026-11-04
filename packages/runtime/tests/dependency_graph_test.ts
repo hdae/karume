@@ -1,63 +1,71 @@
-// パッケージの依存グラフの門。GPU も実資産も要らない（ソースを oxc-parser で読んで辺を辿るだけ）。
+// The package dependency-graph check. No GPU and no real assets are needed (it only reads the
+// sources with oxc-parser and follows the edges).
 //
-// 守る不変条件は CLAUDE.md の「ランタイム依存は Web 標準 API のみ（依存パッケージも Web 標準 API
-// のみで構成されたものに限る）」。型検査ではこれを守れない —— ワークスペースでは、メンバーの
-// `package.json` の `dependencies` が宣言していないパッケージでも、devDependencies やワークスペースの
-// 根に入っていれば手元の解決は通る（`packages/*` のソースが裸の指定子 `import "jpeg-js"` を書いても
-// 型検査は緑）。公開したパッケージに付いていくのはそのパッケージの `dependencies` だけなので、
-// 壊れるのは利用者の手元になってから。
+// The invariant it protects is CLAUDE.md's "runtime dependencies are Web standard APIs only
+// (dependency packages are limited to ones built only on Web standard APIs)". Type checking cannot
+// protect it — in a workspace, a package that a member's `package.json` `dependencies` does not
+// declare still resolves locally if it is in devDependencies or the workspace root (the type check
+// is green even if a source under `packages/*` writes the bare specifier `import "jpeg-js"`). Only
+// a published package's `dependencies` travel with it, so the breakage surfaces only on the user's
+// machine.
 //
-// メンバーは `pnpm-workspace.yaml` の `packages` と各 `packages/*/package.json` から導く（`private`
-// のメンバー = 公開しないテスト用の足場は門の対象にしない。辺の行き先としてはメンバーに数える）。
-// 見るのは各メンバーの公開の入口（その `package.json` の `exports` の全ての値）から辿ったモジュール
-// グラフ（`@karume/test-support/module-graph` が oxc-parser でソースから採る静的な辺）の全ての辺。
-// 許すのは次の 3 つだけ:
+// Members are derived from `packages` in `pnpm-workspace.yaml` and each `packages/*/package.json`
+// (`private` members = test scaffolding that is not published are not subject to the check; they
+// still count as members as edge targets). What it looks at is every edge of the module graph
+// (static edges that `@karume/test-support/module-graph` takes from the sources with oxc-parser)
+// followed from each member's public entries (every value of its `package.json` `exports`). Only
+// these three are allowed:
 //
-// - **同じメンバーの根の内側のファイル**（相対 import、または自分自身の名前での自己参照）。
-// - **他のメンバーの公開の入口のファイル**を、`@karume/*` の裸の指定子で、かつ import を書いた
-//   メンバーの `dependencies` が宣言したうえで引くもの。根をまたぐ相対 import（`../../hub/src/x.ts`）
-//   は入口を指していても落とし、どのメンバーにも属さないファイル（リポジトリ根・`examples/`・`tools/`
-//   など）への import も落とす —— どれも公開したパッケージの外を指すので、利用者の手元では解決
-//   できない。
-// - **辺の出どころのメンバー自身の `package.json` の `dependencies` が宣言した外部のパッケージ**
-//   （名前の一致。版は見ない —— `catalog:` の宣言は版をワークスペースの catalog に預けるだけで、
-//   宣言したことに変わりはない。devDependencies は数えない）。どのメンバーの宣言で許すかは、import を
-//   書いたファイルの置き場で決める —— models が hub 経由で `@hdae/fetch-cache` を引くのは hub の
-//   宣言で許すが、models のファイルが直に書けば models の宣言が要る。
+// - **Files inside the same member's root** (a relative import, or a self-reference by the
+//   member's own name).
+// - **Files that are public entries of another member**, pulled in with a bare `@karume/*`
+//   specifier that the importing member's `dependencies` declares. A relative import that crosses
+//   roots (`../../hub/src/x.ts`) fails even when it points at an entry, and so does an import of a
+//   file that belongs to no member (the repository root, `examples/`, `tools/` and so on) — all of
+//   them point outside the published package, so they cannot resolve on the user's machine.
+// - **External packages declared by the `dependencies` of the `package.json` of the member the
+//   edge comes from** (matched by name. Versions are not checked — a `catalog:` declaration only
+//   leaves the version to the workspace catalog and is a declaration all the same. devDependencies
+//   do not count). Which member's declaration allows it is decided by where the importing file
+//   lives — models pulling in `@hdae/fetch-cache` through hub is allowed by hub's declaration, but
+//   a models file writing it directly needs a declaration in models.
 //
-// `node:` の組み込みモジュールは Web 標準 API でないので落とす。例外は下の
-// `NODE_BUILTINS_ALLOWED_FROM` に書いたファイルだけ（hub の `./node` サブパス = Node の利用者が
-// 明示的に選ぶ入口）。`npm:` / `jsr:` などスキームつきの指定子はソースに 1 つでも出たら落とす
-// （公開したパッケージを Node やバンドラで読むと解決できない綴り）。許可の一覧はテストに書き
-// 写さず、各 `package.json` から導く。
+// `node:` built-in modules are not Web standard APIs, so they fail. The only exceptions are the
+// files listed in `NODE_BUILTINS_ALLOWED_FROM` below (hub's `./node` subpath = the entry that Node
+// users choose explicitly). A specifier with a scheme such as `npm:` / `jsr:` fails as soon as one
+// appears in the sources (a spelling that does not resolve when the published package is loaded by
+// Node or a bundler). The allow list is not copied into the test; it is derived from each
+// `package.json`.
 //
-// NOTE: Deno 版の門にあった「外部のパッケージが別の外部のパッケージを引く辺（推移的な依存）を
-// 落とす」規則はここに無い。外部のパッケージの中身を辿るには node_modules を歩く必要があるが、この門は
-// ワークスペースのソースだけを読むので、その規則は検査できない。
+// NOTE: the rule of the Deno version of this check that "an edge from one external package to
+// another external package (a transitive dependency) fails" is not here. Following the contents of
+// external packages would require walking node_modules, but this check reads only the workspace
+// sources, so that rule cannot be checked.
 //
-// 門が見るのは静的な辺（リテラルの import / import type / `export … from` / リテラルの動的
-// import / 型の位置の `import("…")` / `import x = require("…")` / `/// <reference path|types>`）に
-// 限る。`new Worker(new URL(...))` の先・リテラルでない動的 import・`import.meta.resolve` の先は
-// グラフに載らないので、この門の外である。
+// The check looks only at static edges (literal import / import type / `export … from` / literal
+// dynamic import / `import("…")` in type positions / `import x = require("…")` / `/// <reference
+// path|types>`). The target of `new Worker(new URL(...))`, non-literal dynamic imports and the
+// target of `import.meta.resolve` are not in the graph, so they are outside this check.
 //
-// MUST: 読めない形は推測せず throw する —— 「読めなかった辺」を「外部の辺が無い」と読み替えると、
-// この門は違反を緑で隠す（構文を読めないソース・読めないファイル・知らない形の宣言や exports・
-// 入口に無い `@karume/*` のサブパスは、違反としてではなく throw で赤にする）。
+// MUST: a form that cannot be read throws instead of being guessed — reading "an edge that could
+// not be read" as "no external edge" would make this check hide violations as green (sources whose
+// syntax cannot be parsed, unreadable files, declarations or exports of an unknown form, and
+// `@karume/*` subpaths that are not entries go red by throwing, not as violations).
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { readDir, readTextFile } from "@karume/test-support/fs";
 import { type ModuleEdge, walkModuleGraph } from "@karume/test-support/module-graph";
 import { describe, it } from "vite-plus/test";
 
-/** リポジトリ根（`pnpm-workspace.yaml` の置き場）。 */
+/** The repository root (where `pnpm-workspace.yaml` lives). */
 const REPO_ROOT = new URL("../../../", import.meta.url);
 
 /**
- * `node:` の組み込みモジュールを引いてよいファイル（明示の許可の一覧）。
+ * Files that may import `node:` built-in modules (the explicit allow list).
  *
- * hub の `./node` サブパスは Node のファイルシステムで配布形を読む入口で、Node の利用者が明示的に
- * import する（`mod.ts` からは辿れない）。不変条件の、文書化した唯一の切り出しである —— 理由は
- * `packages/hub/node.ts` の冒頭。
+ * hub's `./node` subpath is the entry that reads distributions through the Node file system, and
+ * Node users import it explicitly (it cannot be reached from `mod.ts`). It is the one documented
+ * carve-out from the invariant — the reason is at the top of `packages/hub/node.ts`.
  */
 const NODE_BUILTINS_ALLOWED_FROM: ReadonlySet<string> = new Set([
   new URL("packages/hub/node.ts", REPO_ROOT).href,
@@ -67,43 +75,49 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 const record = (value: unknown, what: string): Record<string, unknown> => {
-  if (!isRecord(value)) throw new Error(`依存グラフの門: ${what} がオブジェクトでない`);
+  if (!isRecord(value)) throw new Error(`dependency graph check: ${what} is not an object`);
   return value;
 };
 
 const text = (value: unknown, what: string): string => {
-  if (typeof value !== "string") throw new Error(`依存グラフの門: ${what} が文字列でない`);
+  if (typeof value !== "string") throw new Error(`dependency graph check: ${what} is not a string`);
   return value;
 };
 
-/** ワークスペースのメンバー 1 つ。 */
+/** One workspace member. */
 type Member = {
   readonly name: string;
-  /** メンバーの根（末尾 `/` 付きの `file:` URL）。 */
+  /** The member's root (a `file:` URL with a trailing `/`). */
   readonly root: string;
-  /** `private: true`（公開しない）のメンバー。門の対象にしない。 */
+  /** A `private: true` member (not published). Not subject to the check. */
   readonly private: boolean;
-  /** 公開の入口（`exports` のサブパス → 絶対 URL）。 */
+  /** Public entries (`exports` subpath → absolute URL). */
   readonly exports: ReadonlyMap<string, string>;
-  /** 公開の入口（`exports` の全ての値を絶対 URL にしたもの）。 */
+  /** Public entries (every value of `exports` as an absolute URL). */
   readonly entries: readonly string[];
-  /** `dependencies` が宣言したパッケージの名前（ワークスペースのメンバーも外部も）。 */
+  /** Names of the packages `dependencies` declares (workspace members and external ones alike). */
   readonly declared: ReadonlySet<string>;
 };
 
-/** 指定子のパッケージ名（`@scope/name/sub` → `@scope/name`、`name/sub` → `name`）とサブパス。 */
+/**
+ * The package name of a specifier (`@scope/name/sub` → `@scope/name`, `name/sub` → `name`) and its
+ * subpath.
+ */
 const packageOf = (specifier: string): { readonly name: string; readonly subpath: string } => {
   const parts = specifier.split("/");
   const length = specifier.startsWith("@") ? 2 : 1;
   const head = parts.slice(0, length);
   if (head.length < length || head.some((part) => part === "")) {
-    throw new Error(`依存グラフの門: パッケージの指定子を読めない: ${specifier}`);
+    throw new Error(`dependency graph check: cannot read the package specifier: ${specifier}`);
   }
   const rest = parts.slice(length);
   return { name: head.join("/"), subpath: rest.length === 0 ? "." : `./${rest.join("/")}` };
 };
 
-/** 指定子のスキーム（`node:` / `npm:` / `jsr:` / `https:` …）。スキームが無ければ `undefined`。 */
+/**
+ * The scheme of a specifier (`node:` / `npm:` / `jsr:` / `https:` …). `undefined` when there is
+ * none.
+ */
 const schemeOf = (specifier: string): string | undefined =>
   /^([a-z][a-z0-9+.-]*):/i.exec(specifier)?.[1]?.toLowerCase();
 
@@ -111,18 +125,20 @@ const isRelative = (specifier: string): boolean =>
   specifier.startsWith("./") || specifier.startsWith("../") || specifier.startsWith("/");
 
 /**
- * `package.json` の `dependencies` から宣言の一覧（名前）を導く。`workspace:` はメンバー、
- * `catalog:` は版をワークスペースの catalog に預けた外部の宣言で、どちらも名前で数える。
+ * Derives the list of declarations (names) from a `package.json`'s `dependencies`. `workspace:` is
+ * a member and `catalog:` is an external declaration that leaves its version to the workspace
+ * catalog; both are counted by name.
  *
- * MUST: ローカルのパスの宣言（`file:` / `link:` / `portal:` / 相対・絶対パス）は推測せず throw
- * する —— 公開したパッケージでは利用者の手元を指すので、この門が許してよい形でない。
+ * MUST: a local path declaration (`file:` / `link:` / `portal:` / a relative or absolute path)
+ * throws instead of being guessed — in a published package it points into the user's machine, so it
+ * is not a form this check may allow.
  */
 const declaredPackagesOf = (dependencies: Readonly<Record<string, string>>): Set<string> => {
   const declared = new Set<string>();
   for (const [name, value] of Object.entries(dependencies)) {
     if (/^(file|link|portal):/.test(value) || /^(\.{1,2})?\//.test(value)) {
       throw new Error(
-        `依存グラフの門: ローカルのパスの宣言である（dependencies["${name}"] = ${value}）`,
+        `dependency graph check: a local path declaration (dependencies["${name}"] = ${value})`,
       );
     }
     declared.add(name);
@@ -131,32 +147,38 @@ const declaredPackagesOf = (dependencies: Readonly<Record<string, string>>): Set
 };
 
 /**
- * `pnpm-workspace.yaml` の `packages` の並び（ブロック形式の `- glob`）を読む。
+ * Reads the `packages` list of `pnpm-workspace.yaml` (block-style `- glob` items).
  *
- * MUST: YAML の全体は読まない —— 読めない形（流れ形式・`!` の除外・末尾の `/*` 1 段以外の glob）は
- * 推測せず throw する。
+ * MUST: it does not read the whole YAML — a form it cannot read (flow style, `!` exclusions, globs
+ * other than a single trailing `/*` level) throws instead of being guessed.
  */
 const workspaceGlobsOf = (yaml: string): string[] => {
   const lines = yaml.split("\n");
   const start = lines.findIndex((line) => /^packages:\s*$/.test(line));
-  if (start < 0) throw new Error("依存グラフの門: pnpm-workspace.yaml に packages の並びが無い");
+  if (start < 0)
+    throw new Error("dependency graph check: pnpm-workspace.yaml has no packages list");
   const globs: string[] = [];
   for (const line of lines.slice(start + 1)) {
     if (/^\s*(#.*)?$/.test(line)) continue;
     if (!/^\s/.test(line)) break;
     const glob = /^\s+-\s+(["']?)([^"'#\s]+)\1\s*(#.*)?$/.exec(line)?.[2];
     if (glob === undefined || !/^[^!*]+(\/\*)?$/.test(glob)) {
-      throw new Error(`依存グラフの門: pnpm-workspace.yaml の packages の項目を読めない: ${line}`);
+      throw new Error(
+        `dependency graph check: cannot read an item of packages in pnpm-workspace.yaml: ${line}`,
+      );
     }
     globs.push(glob);
   }
   if (globs.length === 0) {
-    throw new Error("依存グラフの門: pnpm-workspace.yaml の packages が空である");
+    throw new Error("dependency graph check: packages in pnpm-workspace.yaml is empty");
   }
   return globs;
 };
 
-/** glob 1 つをメンバーの根（末尾 `/` 付き）へ展開する（`package.json` の無いディレクトリは数えない — pnpm と同じ）。 */
+/**
+ * Expands one glob into member roots (with a trailing `/`; directories without a `package.json` do
+ * not count — the same as pnpm).
+ */
 const memberRootsOf = async (glob: string): Promise<URL[]> => {
   if (!glob.endsWith("/*")) return [new URL(`${glob.replace(/\/+$/, "")}/`, REPO_ROOT)];
   const parent = new URL(glob.slice(0, -1), REPO_ROOT);
@@ -178,29 +200,30 @@ const readMember = async (memberRoot: URL): Promise<Member> => {
     JSON.parse(await readTextFile(new URL("package.json", memberRoot))),
     `${memberRoot.href}package.json`,
   );
-  const name = text(config.name, `${memberRoot.href}package.json の name`);
+  const name = text(config.name, `name in ${memberRoot.href}package.json`);
   const isPrivate = config.private === true;
-  // 条件つきの exports（`{ "import": …, "types": … }`）は text が throw する —— 読めない形は推測しない。
-  // exports の無い private のメンバー（テストだけの置き場）は入口 0 本 —— 門の対象でなく、他の
-  // メンバーからそこへ入る辺は「公開の入口でない」で落ちる。
+  // Conditional exports (`{ "import": …, "types": … }`) make text throw — a form that cannot be
+  // read is not guessed. A private member without exports (a test-only home) has zero entries — it
+  // is not subject to the check, and an edge from another member into it fails as "not a public
+  // entry".
   const declaredExports: [string, unknown][] =
     typeof config.exports === "string"
       ? [[".", config.exports]]
       : config.exports === undefined && isPrivate
         ? []
-        : Object.entries(record(config.exports, `${name} の exports`));
+        : Object.entries(record(config.exports, `exports of ${name}`));
   if (declaredExports.length === 0 && !isPrivate) {
-    throw new Error(`依存グラフの門: ${name} の exports が空である`);
+    throw new Error(`dependency graph check: the exports of ${name} are empty`);
   }
   const exports = new Map(
     declaredExports.map(([subpath, entry]) => [
       subpath,
-      new URL(text(entry, `${name} の exports["${subpath}"]`), memberRoot).href,
+      new URL(text(entry, `${name} exports["${subpath}"]`), memberRoot).href,
     ]),
   );
   const dependencies = Object.fromEntries(
-    Object.entries(record(config.dependencies ?? {}, `${name} の dependencies`)).map(
-      ([key, value]) => [key, text(value, `${name} の dependencies["${key}"]`)],
+    Object.entries(record(config.dependencies ?? {}, `dependencies of ${name}`)).map(
+      ([key, value]) => [key, text(value, `${name} dependencies["${key}"]`)],
     ),
   );
   return {
@@ -220,21 +243,27 @@ const readMembers = async (): Promise<Member[]> => {
   return members.sort((a, b) => a.name.localeCompare(b.name));
 };
 
-/** グラフの辺 1 本（出どころのモジュール → 書かれた指定子 → 解決先）。 */
+/** One graph edge (the source module → the written specifier → the resolved target). */
 type Edge = ModuleEdge;
 
-/** 判定の結果。`external` は許した外部の辺の数（形が変わって外部の辺を 1 本も読めない門を見分ける）。 */
+/**
+ * The verdict. `external` is the number of allowed external edges (to tell apart a check that,
+ * after a change of form, can read no external edge at all).
+ */
 type Verdict = {
   readonly violations: readonly string[];
   readonly external: number;
 };
 
-/** 判定に要るメンバーの面（判定の単体テストが根の無い模型を渡せるよう `root` は含めない）。 */
+/**
+ * The member surface the verdict needs (`root` is left out so that unit tests of the verdict can
+ * pass rootless models).
+ */
 type Owner = Pick<Member, "name" | "entries" | "declared">;
 
 /**
- * 辺を 1 本ずつ判じる。`ownerOf` はファイルが属するメンバーを返す（どのメンバーにも属さない
- * ファイルは `undefined`）。
+ * Judges the edges one by one. `ownerOf` returns the member a file belongs to (`undefined` for a
+ * file that belongs to no member).
  */
 const judgeEdges = (
   edges: readonly Edge[],
@@ -245,36 +274,36 @@ const judgeEdges = (
   for (const { from, written, resolved } of edges) {
     const label = `${from} → "${written}"（${resolved}）`;
     const source = ownerOf(from);
-    const sourceName = source?.name ?? "どのメンバーにも属さないファイル";
+    const sourceName = source?.name ?? "a file that belongs to no member";
     const scheme = schemeOf(written);
     if (scheme === "node") {
       if (!NODE_BUILTINS_ALLOWED_FROM.has(from)) {
-        violations.push(`node: の組み込みモジュールである（Web 標準 API でない）: ${label}`);
+        violations.push(`node: built-in module (not a Web standard API): ${label}`);
       }
       continue;
     }
     if (scheme !== undefined) {
-      violations.push(`${scheme}: の指定子である（宣言の有無によらず禁止）: ${label}`);
+      violations.push(`${scheme}: specifier (forbidden whether declared or not): ${label}`);
       continue;
     }
     if (resolved.startsWith("file:")) {
       const target = ownerOf(resolved);
       if (target === undefined) {
-        violations.push(`どのメンバーにも属さないファイルへの import である: ${label}`);
+        violations.push(`import of a file that belongs to no member: ${label}`);
       } else if (target.name === source?.name) {
-        // 同じメンバーの内側（相対 import か、自分自身の名前での自己参照）。
+        // Inside the same member (a relative import, or a self-reference by its own name).
       } else if (!target.entries.includes(resolved)) {
         violations.push(
-          `${target.name} の公開の入口でないファイルへの、メンバーをまたぐ import である: ${label}`,
+          `cross-member import of a file that is not a public entry of ${target.name}: ${label}`,
         );
       } else if (isRelative(written)) {
         violations.push(
-          `メンバーをまたぐ相対 import である（${target.name} の入口へは "${target.name}" の` +
-            `指定子で入る）: ${label}`,
+          `cross-member relative import (an entry of ${target.name} is reached through the "${target.name}" ` +
+            `specifier): ${label}`,
         );
       } else if (source === undefined || !source.declared.has(target.name)) {
         violations.push(
-          `${sourceName} の package.json の dependencies が宣言していないメンバーへの依存である: ` +
+          `dependency on a member not declared in the dependencies of the package.json of ${sourceName}: ` +
             label,
         );
       }
@@ -285,17 +314,19 @@ const judgeEdges = (
       continue;
     }
     violations.push(
-      `${sourceName} の package.json の dependencies が宣言していない外部の依存である: ${label}`,
+      `external dependency not declared in the dependencies of the package.json of ${sourceName}: ${label}`,
     );
   }
   return { violations, external };
 };
 
 /**
- * 相対でない指定子の解決先。メンバーの名前の指定子（`@karume/hub/node` など）はそのメンバーの
- * `exports` の入口のファイルへ、それ以外（外部・スキームつき）は書かれたままを返す（辿らない）。
+ * The resolved target of a non-relative specifier. A specifier with a member's name
+ * (`@karume/hub/node` and so on) resolves to that member's `exports` entry file; anything else
+ * (external, with a scheme) is returned as written (not followed).
  *
- * MUST: メンバーの `exports` に無いサブパスは推測せず throw する（Node の解決でも失敗する形）。
+ * MUST: a subpath missing from the member's `exports` throws instead of being guessed (a form that
+ * Node's resolution would fail on too).
  */
 const resolverOf =
   (members: readonly Member[]) =>
@@ -307,14 +338,14 @@ const resolverOf =
     const entry = member.exports.get(subpath);
     if (entry === undefined) {
       throw new Error(
-        `依存グラフの門: 解決できない import がある: ${from} → ${written}` +
-          `（${name} の exports に ${subpath} が無い）`,
+        `dependency graph check: an import that cannot be resolved: ${from} → ${written}` +
+          ` (${name} has no ${subpath} in its exports)`,
       );
     }
     return entry;
   };
 
-/** メンバー 1 つの全ての入口のグラフを判じる。 */
+/** Judges the graph of every entry of one member. */
 const judgeMember = async (member: Member, members: readonly Member[]): Promise<Verdict> => {
   const ownerOf = (file: string): Member | undefined =>
     members.find((candidate) => file.startsWith(candidate.root));
@@ -324,30 +355,33 @@ const judgeMember = async (member: Member, members: readonly Member[]): Promise<
 
 const members = await readMembers();
 
-describe("パッケージの依存グラフの門", () => {
+describe("package dependency-graph check", () => {
   for (const member of members.filter((candidate) => !candidate.private)) {
-    it(`${member.name} の公開の入口から辿った外部の依存は、出どころのパッケージが宣言したものだけである`, async () => {
+    it(`the external dependencies reached from the public entries of ${member.name} are only those its source package declares`, async () => {
       const { violations } = await judgeMember(member, members);
       assertEquals(
         violations,
         [],
-        "ワークスペースでは宣言していない依存も手元で解決できるので型検査は通るが、" +
-          "公開したパッケージでは解決できない（または Web 標準 API だけで閉じない）依存がある",
+        "in the workspace undeclared dependencies still resolve locally, so the type check passes, " +
+          "but there are dependencies that do not resolve in the published package (or are not closed over Web standard APIs alone)",
       );
     });
   }
 
-  it("対照: hub が宣言した @hdae/fetch-cache の辺を許した外部の辺として数える", async () => {
-    // 辺の採り方が変わって外部の辺を 1 本も読めなくなると、上の門は無音で緑になる。hub は
-    // `@hdae/fetch-cache` を実際に使うので、その辺を読めていることをここで見る。
+  it("control: counts hub's declared @hdae/fetch-cache edge as an allowed external edge", async () => {
+    // If a change in how edges are taken left no external edge readable, the check above would go
+    // silently green. hub really uses `@hdae/fetch-cache`, so this checks that the edge is read.
     const hub = members.find((member) => member.name === "@karume/hub");
-    assert(hub !== undefined, "ワークスペースに @karume/hub が無い");
+    assert(hub !== undefined, "the workspace has no @karume/hub");
     const { external } = await judgeMember(hub, members);
-    assert(external > 0, "hub のグラフに許した外部の辺が 1 本も無い（ソースの辺を読めていない）");
+    assert(
+      external > 0,
+      "hub's graph has no allowed external edge at all (the source edges are not being read)",
+    );
   });
 });
 
-describe("依存グラフの門の判定", () => {
+describe("verdicts of the dependency-graph check", () => {
   const owner = {
     name: "@karume/example",
     entries: ["file:///repo/packages/example/mod.ts"],
@@ -366,7 +400,7 @@ describe("依存グラフの門の判定", () => {
         : undefined;
   const file = "file:///repo/packages/example/src/a.ts";
 
-  it("同じメンバーの内側のファイルと、他のメンバーの公開の入口は許す", () => {
+  it("allows files inside the same member and public entries of other members", () => {
     const verdict = judgeEdges(
       [
         { from: file, written: "./b.ts", resolved: "file:///repo/packages/example/src/b.ts" },
@@ -377,7 +411,7 @@ describe("依存グラフの門の判定", () => {
     assertEquals(verdict, { violations: [], external: 0 });
   });
 
-  it("他のメンバーの入口でないファイルへの、根をまたぐ相対 import は落とす", () => {
+  it("rejects a root-crossing relative import of a file that is not another member's entry", () => {
     const { violations } = judgeEdges(
       [
         {
@@ -389,28 +423,28 @@ describe("依存グラフの門の判定", () => {
       ownerOf,
     );
     assertEquals(violations.length, 1);
-    assert(violations[0]?.includes("@karume/other の公開の入口でない"), violations[0]);
+    assert(violations[0]?.includes("not a public entry of @karume/other"), violations[0]);
   });
 
-  it("どのメンバーにも属さないワークスペース内のファイルへの import は落とす", () => {
+  it("rejects an import of a workspace file that belongs to no member", () => {
     const { violations } = judgeEdges(
       [{ from: file, written: "../../../shared.ts", resolved: "file:///repo/shared.ts" }],
       ownerOf,
     );
     assertEquals(violations.length, 1);
-    assert(violations[0]?.includes("どのメンバーにも属さない"), violations[0]);
+    assert(violations[0]?.includes("belongs to no member"), violations[0]);
   });
 
-  it("ローカルのパスの宣言（file: / link:）は許可の一覧に入れず throw する", () => {
+  it("a local path declaration (file: / link:) is not put on the allow list and throws", () => {
     assertEquals(
       declaredPackagesOf({ "@karume/other": "workspace:*", "@x/y": "catalog:", z: "^1.2.0" }),
       new Set(["@karume/other", "@x/y", "z"]),
     );
-    assertThrows(() => declaredPackagesOf({ util: "file:../util" }), Error, "ローカルのパス");
-    assertThrows(() => declaredPackagesOf({ util: "link:../util" }), Error, "ローカルのパス");
+    assertThrows(() => declaredPackagesOf({ util: "file:../util" }), Error, "local path");
+    assertThrows(() => declaredPackagesOf({ util: "link:../util" }), Error, "local path");
   });
 
-  it("宣言した外部のパッケージはサブパスでも許す", () => {
+  it("allows a declared external package even through a subpath", () => {
     const verdict = judgeEdges(
       [{ from: file, written: "@x/y/sub", resolved: "@x/y/sub" }],
       () => owner,
@@ -418,7 +452,7 @@ describe("依存グラフの門の判定", () => {
     assertEquals(verdict, { violations: [], external: 1 });
   });
 
-  it("宣言していない外部のパッケージと、宣言していないメンバーへの依存は落とす", () => {
+  it("rejects an undeclared external package and a dependency on an undeclared member", () => {
     const { violations } = judgeEdges(
       [
         { from: file, written: "jpeg-js", resolved: "jpeg-js" },
@@ -431,11 +465,11 @@ describe("依存グラフの門の判定", () => {
       ownerOf,
     );
     assertEquals(violations.length, 2);
-    assert(violations[0]?.includes("宣言していない外部の依存"), violations[0]);
-    assert(violations[1]?.includes("宣言していないメンバーへの依存"), violations[1]);
+    assert(violations[0]?.includes("external dependency not declared"), violations[0]);
+    assert(violations[1]?.includes("dependency on a member not declared"), violations[1]);
   });
 
-  it("npm: / jsr: の指定子は宣言の有無によらず落とす", () => {
+  it("rejects npm: / jsr: specifiers whether declared or not", () => {
     const { violations } = judgeEdges(
       [
         { from: file, written: "npm:jpeg-js@^0.4.4", resolved: "npm:jpeg-js@^0.4.4" },
@@ -444,11 +478,11 @@ describe("依存グラフの門の判定", () => {
       () => owner,
     );
     assertEquals(violations.length, 2);
-    assert(violations[0]?.includes("npm: の指定子"), violations[0]);
-    assert(violations[1]?.includes("jsr: の指定子"), violations[1]);
+    assert(violations[0]?.includes("npm: specifier"), violations[0]);
+    assert(violations[1]?.includes("jsr: specifier"), violations[1]);
   });
 
-  it("node: は許可の一覧のファイル（hub の node.ts）からだけ許し、ほかのファイルからは落とす", () => {
+  it("allows node: only from the allow-listed file (hub's node.ts) and rejects it from any other file", () => {
     const hubNode = new URL("packages/hub/node.ts", REPO_ROOT).href;
     const { violations } = judgeEdges(
       [
@@ -461,8 +495,8 @@ describe("依存グラフの門の判定", () => {
     assert(violations[0]?.includes(`${file} → "node:fs"`), violations[0]);
   });
 
-  describe("ソースから採る辺（型だけの辺 / 型の位置の import / 動的 import）", () => {
-    // 辺は oxc-parser でソースから採る。ファイルの読み出しは模型に差し替える。
+  describe("edges taken from the sources (type-only edges / imports in type positions / dynamic imports)", () => {
+    // Edges are taken from the sources with oxc-parser. File reads are replaced with a stub.
     const impl = "file:///repo/packages/example/src/impl.ts";
     const graphOf = (sources: Readonly<Record<string, string>>) =>
       walkModuleGraph([impl], resolverOf([]), (url) => {
@@ -472,14 +506,14 @@ describe("依存グラフの門の判定", () => {
           : Promise.resolve(source);
       });
 
-    it("npm の型パッケージを指していれば落とす", async () => {
+    it("rejects an edge that points at an npm type package", async () => {
       const edges = await graphOf({ [impl]: `import type { X } from "npm:@types/x";\n` });
       const { violations } = judgeEdges(edges, ownerOf);
       assertEquals(violations.length, 1);
       assert(violations[0]?.includes("npm:@types/x"), violations[0]);
     });
 
-    it("同じメンバーの内側のファイルを指していれば辺として読んだうえで許す", async () => {
+    it("reads an edge that points at a file inside the same member and allows it", async () => {
       const edges = await graphOf({
         [impl]:
           `export type { T } from "./types.ts";\n` +
@@ -498,7 +532,7 @@ describe("依存グラフの門の判定", () => {
       assertEquals(judgeEdges(edges, ownerOf), { violations: [], external: 0 });
     });
 
-    it("構文を読めなければ throw する", async () => {
+    it("throws when the syntax cannot be parsed", async () => {
       await assertRejects(
         () => graphOf({ [impl]: "import { from './x.ts'\n" }),
         Error,
@@ -506,18 +540,18 @@ describe("依存グラフの門の判定", () => {
       );
     });
 
-    it("どのメンバーにも属さない型ファイルを指していれば落とす", async () => {
-      // 型の位置の `import("…")` がメンバーの外を指す形。
+    it("rejects an edge that points at a type file belonging to no member", async () => {
+      // An `import("…")` in a type position that points outside the members.
       const edges = await graphOf({
         [impl]: `export type U = import("../../../outside/types.ts").U;\n`,
         "file:///repo/outside/types.ts": "export type U = string;\n",
       });
       const { violations } = judgeEdges(edges, ownerOf);
       assertEquals(violations.length, 1);
-      assert(violations[0]?.includes("どのメンバーにも属さない"), violations[0]);
+      assert(violations[0]?.includes("belongs to no member"), violations[0]);
     });
 
-    it("辺の先のファイルを読めなければ推測せず throw する", async () => {
+    it("throws instead of guessing when the target file of an edge cannot be read", async () => {
       await assertRejects(
         () => graphOf({ [impl]: `export { y } from "./missing.ts";\n` }),
         Error,

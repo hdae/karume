@@ -1,13 +1,16 @@
 /**
- * ランタイム対応表との突合門（`assertRuntimeSupport`）— `PreparedModel` が**重みの block を
- * 1 つも取る前に**通す capability 門（ADR 0070 決定 5 の 2 段境界）。
+ * The check against the runtime support table (`assertRuntimeSupport`) — the capability check that
+ * `PreparedModel` runs **before fetching a single weight block** (the two-stage boundary of ADR
+ * 0070 decision 5).
  *
- * ここで固定するのは「非対応は**全件列挙して** 1 回で落とす」という設計主張そのもの:
- * 件数（重複除去の単位 = 宣言）・軸（op / 意味論 dtype / attrs / 格納）・スロット別の受理集合が
- * 崩れると、モデル作者は対応表を埋めるたびに次の 1 本が現れる形に戻る。
+ * What this file pins is the design claim itself, "unsupported items are **all enumerated** and
+ * fail at once": if the count (deduplicated per declaration), the axes (op / semantic dtype / attrs
+ * / storage) or the per-slot accepted sets break, model authors are back to a loop where filling in
+ * the support table only reveals the next item.
  *
- * グラフは**合流後**（`IrGraph`）でなければならないので、メモリ内容器の供給面から
- * `mergedGraph` で組む（`krm` 経路と同じ 1 本 — 供給元は主題ではないので容器を書かない）。
+ * The graph must be **merged** (`IrGraph`), so it is built with `mergedGraph` from the supply side
+ * of the in-memory container (the same single path as `krm` — the source is not the subject here,
+ * so no container is written).
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
@@ -32,7 +35,9 @@ import {
   memoryModel,
 } from "./helpers/model-fixture.ts";
 
-/** M0 と同形（f32 のみ・attrs 無し・二項・単一出力）の最小対応表。 */
+/**
+ * The minimal support table with the same shape as M0 (f32 only, no attrs, binary, single output).
+ */
 const f32Only: OpSupport = {
   dtypes: new Set<IrDtype>(["f32"]),
   slotDtypes: [new Set<IrDtype>(["f32"]), new Set<IrDtype>(["f32"])],
@@ -49,21 +54,21 @@ const M0_SUPPORT: RuntimeSupport = {
   io: new Set<IrDtype>(["f32"]),
 };
 
-/** 宣言 + 供給 → 合流後のグラフ（`assertRuntimeSupport` が受ける形）。 */
+/** Declaration + supply → the merged graph (the form `assertRuntimeSupport` takes). */
 const graphOf = (
   declaration: DeclarationJson,
   tensors: readonly TensorInput[] = baseTensors(),
 ): IrGraph => mergedGraph(memoryModel(declaration, tensors).graphs[GRAPH_NAME], GRAPH_NAME);
 
-/** 重みを持たない宣言（gather / topk のようにグラフ側だけを問うケース）。 */
+/** A declaration without weights (cases that ask only about the graph side, like gather / topk). */
 const weightless = (): DeclarationJson => {
   const graph = baseDeclaration();
   graph.initializers = {};
   return graph;
 };
 
-describe("assertRuntimeSupport: op の軸", () => {
-  it("非対応 op を列挙して落とす", () => {
+describe("assertRuntimeSupport: the op axis", () => {
+  it("enumerates unsupported ops and fails", () => {
     const graph = baseDeclaration();
     graph.requires.ops = ["gelu", "matmul", "tanh"];
     graph.nodes[1] = { op: "gelu", ins: ["h"], outs: ["y"], attrs: {} };
@@ -78,8 +83,8 @@ describe("assertRuntimeSupport: op の軸", () => {
     assertEquals(error.message.includes("gelu, tanh"), true, error.message);
   });
 
-  // op 名だけの突合は「対応表にはあるのに実行時に落ちる」を作る（recon §3-9）。
-  it("対応 op でも実行できない意味論 dtype を宣言ごとに列挙する", () => {
+  // Matching by op name alone gives "in the support table but fails at run time" (recon §3-9).
+  it("enumerates, per declaration, semantic dtypes a supported op cannot run", () => {
     const graph = baseDeclaration();
     graph.inputs = [{ name: "x", dtype: "i32", shape: ["T", 4] }];
     graph.values["h"] = { dtype: "bool", shape: ["T", 3] };
@@ -87,15 +92,16 @@ describe("assertRuntimeSupport: op の軸", () => {
     const error = assertThrows(
       () => assertRuntimeSupport(graphOf(graph), M0_SUPPORT),
       RuntimeSupportError,
-      // 件数は「直すべき宣言の本数」— h は matmul の outs と add の ins の 2 箇所に現れるが 1 件
+      // The count is "the number of declarations to fix" — h appears twice (matmul outs and add
+      // ins) but counts once
       "unsupported semantic dtype (2)",
     );
     assertEquals(error.message.includes("value 'x': i32"), true, error.message);
     assertEquals(error.message.includes("value 'h': bool"), true, error.message);
   });
 
-  // エイリアス入力（同じ値を 2 回取るノード）で件数が水増しされないこと。
-  it("同一宣言の dtype 違反を重複列挙しない", () => {
+  // An aliased input (a node that takes the same value twice) does not inflate the count.
+  it("does not enumerate a dtype violation of the same declaration twice", () => {
     const graph = baseDeclaration();
     graph.values["h"] = { dtype: "bool", shape: ["T", 3] };
     graph.values["y"] = { dtype: "f32", shape: ["T", 3] };
@@ -109,9 +115,10 @@ describe("assertRuntimeSupport: op の軸", () => {
     assertEquals(error.message.includes("value 'h': bool"), true, error.message);
   });
 
-  // ノード起点の突合だけでは、どのノードも消費しない入力の dtype 違反が門を素通りする
-  // （実行器は全 graph.inputs を転送するので、転送層の制約は使用の有無と無関係に実在する）。
-  it("どのノードも使わない入力の dtype 違反も列挙する", () => {
+  // Matching only from the nodes lets a dtype violation of an input no node consumes slip through
+  // the check (the executor transfers every graph.inputs, so the constraints of the transfer layer
+  // are real whether or not the input is used).
+  it("also enumerates a dtype violation of an input no node uses", () => {
     const graph = baseDeclaration();
     graph.inputs.push({ name: "z", dtype: "i32", shape: ["T"] });
 
@@ -124,14 +131,17 @@ describe("assertRuntimeSupport: op の軸", () => {
   });
 });
 
-describe("assertRuntimeSupport: スロット別の受理集合", () => {
-  // スロット別 dtype 契約（gather / embedding / masked_fill）は、受理集合の**和**で突き合わせると
-  // 「値と添字を逆に渡した形」がどちらも和に入るため列挙門を素通りする。契約検査（plan.ts）まで
-  // 落ちて 1 件ずつ止まると、「非対応は全件列挙して一度に見せる」という門の意図が壊れる。
-  it("スロットを取り違えた perSlot op を列挙する", () => {
+describe("assertRuntimeSupport: per-slot accepted sets", () => {
+  // If the per-slot dtype contracts (gather / embedding / masked_fill) are matched against the
+  // **union** of the accepted sets, "values and indices passed the wrong way round" is in the union
+  // either way and slips through the enumerating check. Falling through to the contract check
+  // (plan.ts), which stops at one item at a time, breaks the check's intent of "enumerate every
+  // unsupported item and show them at once".
+  it("enumerates a perSlot op whose slots are mixed up", () => {
     const graph = weightless();
     graph.requires = { ops: ["gather"] };
-    // 値 f32 と添字 i32 を**逆に**渡した形。和（{f32, i32}）だけの突合では両方通ってしまう。
+    // Values f32 and indices i32 passed **the wrong way round**. Matching against the union ({f32,
+    // i32}) alone lets both through.
     graph.inputs = [
       { name: "src", dtype: "i32", shape: ["T", 4] },
       { name: "idx", dtype: "f32", shape: ["T", 3] },
@@ -149,8 +159,9 @@ describe("assertRuntimeSupport: スロット別の受理集合", () => {
     assertEquals(error.message.includes("value 'idx': f32"), true, error.message);
   });
 
-  // 出力もスロット 0（値の側）と同型でなければ実行できない — 和で見ると gather の i32 出力が通る。
-  it("perSlot op の出力 dtype も値の側の受理集合で見る", () => {
+  // The output must also have the same type as slot 0 (the values side) to run — seen through the
+  // union, gather's i32 output would pass.
+  it("checks a perSlot op's output dtype against the accepted set of the values side", () => {
     const graph = weightless();
     graph.requires = { ops: ["gather"] };
     graph.inputs = [
@@ -169,18 +180,21 @@ describe("assertRuntimeSupport: スロット別の受理集合", () => {
     assertEquals(error.message.includes("value 'y': i32"), true, error.message);
   });
 
-  // 多出力 op（topk）の出力宣言を slot 間で**入れ替えた**形。全出力を slot 0 の受理集合で見る
-  // 退行（= 出力 slot 別の列を潰した実装）だと、値の側の f32 と添字の側の i32 がどちらも「slot 0 の
-  // 集合」に照らして判定され、片方しか列挙されない（あるいは両方素通りする）。
-  // MUST: tools/exporter/tests/test_verify.py の
-  // `test_swapped_output_slots_of_a_multi_output_op_are_enumerated` と**同形**に保つ（同じ退行を
-  // 両側で検出できることがこの門の対称性）。
-  it("多出力 op の出力 slot を取り違えた形を両宣言とも列挙する", () => {
+  // The output declarations of a multi-output op (topk) **swapped** between slots. With a
+  // regression that checks every output against slot 0's accepted set (= an implementation that
+  // collapsed the per-output-slot columns), both the f32 of the values side and the i32 of the
+  // indices side are judged against "slot 0's set", and only one of them is enumerated (or both
+  // slip through).
+  // MUST: keep this **the same shape** as
+  // `test_swapped_output_slots_of_a_multi_output_op_are_enumerated` in
+  // tools/exporter/tests/test_verify.py (detecting the same regression on both sides is this
+  // check's symmetry).
+  it("enumerates both declarations when a multi-output op's output slots are mixed up", () => {
     const graph = weightless();
     graph.requires = { ops: ["topk"] };
     graph.inputs = [{ name: "x", dtype: "f32", shape: ["T", 4] }];
     graph.outputs = ["v", "i"];
-    // slot 0 は値（f32）・slot 1 は添字（i32）なので、この 2 本は**どちらも**非対応
+    // Slot 0 is values (f32) and slot 1 is indices (i32), so **both** of these are unsupported
     graph.values = {
       v: { dtype: "i32", shape: ["T", 2] },
       i: { dtype: "f32", shape: ["T", 2] },
@@ -197,8 +211,8 @@ describe("assertRuntimeSupport: スロット別の受理集合", () => {
   });
 });
 
-describe("assertRuntimeSupport: attrs と格納の軸", () => {
-  it("対応 op に付いた未実装 attrs をノードごとに列挙する", () => {
+describe("assertRuntimeSupport: the attrs and storage axes", () => {
+  it("enumerates, per node, unimplemented attrs on a supported op", () => {
     const graph = baseDeclaration();
     graph.nodes[1].attrs = { alpha: 1, approximate: "tanh" };
 
@@ -210,8 +224,9 @@ describe("assertRuntimeSupport: attrs と格納の軸", () => {
     assertEquals(error.message.includes("nodes[1] (add): alpha, approximate"), true, error.message);
   });
 
-  it("非対応の格納を initializer 名つきで列挙する", () => {
-    // 意味論 dtype は f32 のまま、格納 codec だけを f16 / bf16 にする（展開経路は layout で見る）。
+  it("enumerates unsupported storage with the initializer name", () => {
+    // The semantic dtype stays f32; only the storage codec is f16 / bf16 (the expansion path is
+    // seen through layout).
     const tensors: readonly TensorInput[] = [
       {
         graph: GRAPH_NAME,
@@ -236,7 +251,7 @@ describe("assertRuntimeSupport: attrs と格納の軸", () => {
     assertEquals(error.message.includes("unsupported storage 'f16' (1): w"), true, error.message);
   });
 
-  it("対応表に載っている格納なら通る（門が恒真でないことの対照）", () => {
+  it("passes storage listed in the support table (the control showing the check is not a tautology)", () => {
     const tensors: readonly TensorInput[] = [
       {
         graph: GRAPH_NAME,

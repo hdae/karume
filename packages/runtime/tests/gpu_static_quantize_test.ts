@@ -1,4 +1,5 @@
-// static_quantize の実 GPU 突合（CPU 参照側の門は static_quantize_test.ts）。
+// Real-GPU comparison of static_quantize (the CPU reference side's check is
+// static_quantize_test.ts).
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -70,7 +71,7 @@ const direct = async (gpu: GpuContext, c: Case): Promise<Uint32Array<ArrayBuffer
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "static_quantize は Session と grid-stride の複数巡回で公式 CPU とビット一致する（実 GPU）",
+  "static_quantize matches the formula's CPU version bit for bit through the Session and over several grid-stride passes (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -98,7 +99,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "static_quantize はスカラ・空軸・多次元の shape を保つ（実 GPU）",
+  "static_quantize keeps scalar, empty-axis and multi-dimensional shapes (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {

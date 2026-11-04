@@ -1,5 +1,6 @@
 /**
- * IR v2 の宣言パーサと正準直列化（docs/ir-v2.md「正準直列化」）— 同じグラフは同じバイト列になる。
+ * The IR v2 declaration parser and canonical serialization (docs/ir-v2.md "Canonical
+ * serialization") — the same graph becomes the same bytes.
  */
 
 import { readTextFileSync } from "@karume/test-support/fs";
@@ -41,7 +42,7 @@ const canonical = (graph: Json): string =>
   canonicalIrJson(parseIrDeclaration(JSON.stringify(graph)));
 
 describe("parseIrDeclaration", () => {
-  it("v2 の最小グラフを受理し、initializer は {} か {shared:true} だけ", () => {
+  it("accepts the minimal v2 graph, with initializers only {} or {shared:true}", () => {
     const graph = parseIrDeclaration(JSON.stringify(baseGraph()));
     assertEquals(graph.version, 2);
     assertEquals(graph.initializers, { "enc.w": { shared: false }, b: { shared: false } });
@@ -50,7 +51,7 @@ describe("parseIrDeclaration", () => {
     assertEquals(parseIrDeclaration(JSON.stringify(shared)).initializers["b"], { shared: true });
   });
 
-  it("v1 の形（version 1・tensor / storage）と shared:false・未知キーを拒否する", () => {
+  it("rejects the v1 form (version 1, tensor / storage), shared:false and unknown keys", () => {
     const v1 = { ...baseGraph(), version: 1 };
     assertThrows(() => parseIrDeclaration(JSON.stringify(v1)), IrError, "version");
     const withStorage = baseGraph();
@@ -67,9 +68,9 @@ describe("parseIrDeclaration", () => {
 });
 
 describe("canonicalIrJson", () => {
-  it("キーはスキーマ順、名前キーの map と集合は code point 順、空の states は書かない", () => {
+  it("keys in schema order, name-keyed maps and sets in code point order, empty states not written", () => {
     const graph = baseGraph();
-    // わざと逆順・散らした順で与える。
+    // Given deliberately in reverse and scrambled order.
     const shuffled: Json = {
       nodes: graph.nodes,
       values: {
@@ -98,7 +99,7 @@ describe("canonicalIrJson", () => {
     assertEquals(text.includes('"states"'), false);
   });
 
-  it("数値の綴りは ECMAScript Number::toString（整数は小数点なし・1e-6 は指数にしない・1e-7 と 1e21 は指数）", () => {
+  it("numbers are spelled by ECMAScript Number::toString (integers without a decimal point, 1e-6 not as an exponent, 1e-7 and 1e21 as exponents)", () => {
     const graph = baseGraph();
     (graph.nodes as Json[])[1].attrs = {
       eps: 0.000001,
@@ -117,35 +118,36 @@ describe("canonicalIrJson", () => {
     );
   });
 
-  it("attrs のキーは再帰的に code point 順（配列の順序は保つ）", () => {
+  it("attrs keys are in code point order recursively (array order is kept)", () => {
     const graph = baseGraph();
     (graph.nodes as Json[])[0].attrs = { z: 1, a: { y: [3, 1, 2], b: true }, é: "e", B: 0 };
     const text = canonical(graph);
-    // ASCII 大文字 < 小文字 < 非 ASCII（code point 順）。
+    // ASCII uppercase < lowercase < non-ASCII (code point order).
     assertEquals(text.includes('"attrs":{"B":0,"a":{"b":true,"y":[3,1,2]},"z":1,"é":"e"}'), true);
   });
 
-  it('数字だけの名前も code point 順（"10" < "2"）で、Python の書き手と同じバイト列になる', () => {
-    // JS のオブジェクトは整数に見えるキーを先に昇順で列挙するので、並べた順に代入して
-    // JSON.stringify へ渡すと "0","2","10" の順に戻る。期待値は Python の書き手
-    // （tools/exporter の test_container.py）と共有する fixture。
+  it('names made only of digits are in code point order too ("10" < "2"), giving the same bytes as the Python writer', () => {
+    // JS objects enumerate integer-like keys first in ascending order, so assigning them in sorted
+    // order and passing the object to JSON.stringify brings back the order "0","2","10". The
+    // expected value is a fixture shared with the Python writer (test_container.py in
+    // tools/exporter).
     const expected = readTextFileSync(
       new URL("./fixtures/ir/canonical-name-order.txt", import.meta.url),
     );
     assertEquals(canonicalIrJson(parseIrDeclaration(expected)), expected);
   });
 
-  it("parse → canonical → parse → canonical は不動点（冪等）", () => {
+  it("parse → canonical → parse → canonical is a fixed point (idempotent)", () => {
     const first = canonical(baseGraph());
     assertEquals(canonical(JSON.parse(first)), first);
   });
 
-  it("正準形の文書を JSON.stringify で綴ろうとすると落ちる（別物の JSON を黙って出さない）", () => {
+  it("spelling a canonical document with JSON.stringify fails (no silently different JSON)", () => {
     const document = canonicalIrDocument(parseIrDeclaration(JSON.stringify(baseGraph())));
     assertThrows(() => JSON.stringify(document), ContainerFormatError, "canonicalJsonText");
   });
 
-  it("states スロットとノードの states 欄・external は書くときだけ現れる", () => {
+  it("state slots, the states field of nodes and external appear only when set", () => {
     const graph = baseGraph();
     graph.symbols = ["T", "C"];
     graph.states = {
@@ -164,10 +166,10 @@ describe("canonicalIrJson", () => {
   });
 });
 
-describe("容器 descriptor の正準直列化（docs/container-v1.md §0・ir-v2.md「正準直列化」）", () => {
-  it("const 束縛は (graph, initializer) の code point 順に並ぶ（UTF-16 単位の順ではない）", async () => {
-    // U+FFFF と U+1F600 は code point 順なら U+FFFF が先、UTF-16 単位の順（サロゲート 0xD83D が
-    // 0xFFFF より小さい）なら U+1F600 が先になる — 並びが割れる最小の組。
+describe('canonical serialization of the container descriptor (docs/container-v1.md §0, ir-v2.md "Canonical serialization")', () => {
+  it("const bindings are ordered by (graph, initializer) in code point order (not UTF-16 unit order)", async () => {
+    // In code point order U+FFFF comes first; in UTF-16 unit order (the surrogate 0xD83D is smaller
+    // than 0xFFFF) U+1F600 comes first — the smallest pair on which the two orders disagree.
     const emoji = "\u{1F600}";
     const last = "￿";
     const graph = parseIrDeclaration(
@@ -212,7 +214,7 @@ describe("容器 descriptor の正準直列化（docs/container-v1.md §0・ir-v
     );
   });
 
-  it("キー __proto__ は書き手の側でも拒否する（読み手が拒否する名前を書かない）", () => {
+  it("the key __proto__ is rejected on the writer side too (no writing a name the reader rejects)", () => {
     assertThrows(() => sortedObject({ ["__proto__"]: 1 }), ContainerFormatError, "__proto__");
   });
 });

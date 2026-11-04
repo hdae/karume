@@ -1,6 +1,7 @@
-// 公式 Torch CPU の期待ビット列（fixtures/static-quantize-oracle.safetensors）の読み出し。
-// CPU 参照側（static_quantize_test.ts）と実 GPU 側（gpu_static_quantize_test.ts）が**同じ
-// oracle**に突き合わせるため、読み出しはこの 1 本に置く。
+// Reads the expected bits from official Torch on CPU (fixtures/static-quantize-oracle.safetensors).
+// The CPU reference side (static_quantize_test.ts) and the real-GPU side
+// (gpu_static_quantize_test.ts) compare against **the same oracle**, so the reading lives in this
+// one file.
 import { assert } from "@std/assert";
 import { readFile } from "@karume/test-support/fs";
 import { parseSafetensors } from "../../src/format/safetensors.ts";

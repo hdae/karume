@@ -1,12 +1,14 @@
 /**
- * レシピの**確保プログラム**（src/runtime/recipe.ts の `buildTransientProgram` → `planRecipes`）と
- * **宣言の静的検査**（同 `validateStepRecipe`）の構造テスト。GPU を 1 つも触らないので、
- * アダプタ無し環境でも走る。
+ * Structural tests of the recipes' **allocation program** (`buildTransientProgram` →
+ * `planRecipes` of src/runtime/recipe.ts) and of the **static validation of declarations**
+ * (`validateStepRecipe` of the same file). They touch no GPU at all, so they run in an environment
+ * without an adapter.
  *
- * 見ているのは「{@link StepRecipe.outputs} の列と dispatch の束縛から、確保・retain・解放と
- * 読み書きの役割が計画（src/runtime/transient-plan.ts — ADR 0093）へ正しく写るか」— 実 GPU の
- * footprint 門（tests/gpu_plan_backing_test.ts が「backed の領域総和 = ミス run の領域確保」を
- * 突き合わせる）とは別の角度で、**期待値を手計算で固定する**。
+ * What is checked is "whether allocation, retain, release and the read / write roles carry over
+ * correctly from the {@link StepRecipe.outputs} sequence and the dispatch bindings into the plan
+ * (src/runtime/transient-plan.ts — ADR 0093)" — from a different angle than the real-GPU footprint
+ * check (tests/gpu_plan_backing_test.ts compares "the backed region total = the region allocation
+ * of a miss run"), **pinning the expected values by hand calculation**.
  * The placement rule itself (least region growth in two orders, usage scope in separate regions,
  * limits) is covered by tests/runtime_transient_plan_test.ts. The hand derivations here follow it:
  * each slot (real size descending) goes to the conflict-free region it grows least (equal growth ->
@@ -14,7 +16,8 @@
  * and of the two orders (equal sizes by allocation start / by longer lifetime) the smaller total wins
  * (order 1 on a tie).
  *
- * ADR 0068 決定 1 の受入条件「単一出力ノードのレシピ表現は列化前と同値」がここの 1 本目。
+ * The first test here is the acceptance condition of ADR 0068 decision 1, "the recipe form of a
+ * single-output node is equivalent to the form before outputs became a sequence".
  */
 
 import { test } from "vite-plus/test";
@@ -42,7 +45,10 @@ import {
 } from "../src/runtime/recipe.ts";
 import { CORE_TRANSIENT_LIMITS } from "../src/runtime/transient-plan.ts";
 
-/** 出力列だけのステップ（dispatch と一時は確保簿記の別軸なので空で足りる）。 */
+/**
+ * A step with only an output sequence (dispatches and temporaries are a separate axis of the
+ * allocation bookkeeping, so empty suffices).
+ */
 const step = (outputs: readonly StepOutput[], releases: readonly string[] = []): StepRecipe => ({
   outputs,
   temps: [],
@@ -51,7 +57,10 @@ const step = (outputs: readonly StepOutput[], releases: readonly string[] = []):
   writesState: false,
 });
 
-/** 領域から確保する出力（`byteLength` は 4 の倍数 = サイズクラスと同値にしておく）。 */
+/**
+ * An output allocated from a region (`byteLength` is kept a multiple of 4 = equal to its size
+ * class).
+ */
 const alloc = (name: string, byteLength: number, uses: number, pinned = false): StepOutput => ({
   kind: "alloc",
   byteLength,
@@ -60,7 +69,10 @@ const alloc = (name: string, byteLength: number, uses: number, pinned = false): 
   pinned,
 });
 
-/** 別名の出力（入力実体をそのまま出力にする reshape / 恒等 expand — ADR 0011）。 */
+/**
+ * An alias output (a reshape / identity expand that makes the input's data the output as is — ADR
+ * 0011).
+ */
 const alias = (name: string, source: string, uses: number): StepOutput => ({
   kind: "alias",
   source: { kind: "value", name: source },
@@ -69,19 +81,22 @@ const alias = (name: string, source: string, uses: number): StepOutput => ({
   pinned: false,
 });
 
-/** `DispatchRecipe` は非公開型なので、レシピ列の要素型として引く。 */
+/**
+ * `DispatchRecipe` is a non-exported type, so it is taken as the element type of the recipe
+ * sequence.
+ */
 type Dispatch = StepRecipe["dispatches"][number];
 
-/** WGSL の宣言から採る役割のスタブ（binding 番号 → 読み / 読み書き）。 */
+/** A stub of the roles taken from the WGSL declarations (binding number → read / read-write). */
 const roles = (reads: readonly number[], writes: readonly number[]): StorageRoles => ({
   reads: new Set(reads),
   writes: new Set(writes),
 });
 
 /**
- * dispatch のスタブ。宣言の静的検査と確保プログラムが読むのは `key` / `bindings` / `roles`
- * だけで、パイプラインと bind group layout は GPU 資源なので持たせない（型を満たすためだけの
- * 実体化を避ける）。
+ * A dispatch stub. The static validation of declarations and the allocation program read only
+ * `key` / `bindings` / `roles`; the pipeline and the bind group layout are GPU resources, so the
+ * stub does not carry them (avoiding instantiation just to satisfy the type).
  */
 const dispatch = (
   key: string,
@@ -89,14 +104,14 @@ const dispatch = (
   access: StorageRoles = roles([], []),
 ): Dispatch => ({ key, bindings, roles: access }) as unknown as Dispatch;
 
-test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）が確保プログラムへ写る", () => {
+test("the allocation bookkeeping of single-output steps (alloc / alias / pin / consumption) carries over into the allocation program", () => {
   const program = buildTransientProgram([
     step([alloc("a", 64, 1)]),
     step([alloc("b", 64, 0)], []),
     step([alloc("c", 64, 0, true)], ["a"]),
-    // 別名は根の名前を持ち、確保を出さない。
+    // An alias carries its root's name and allocates nothing.
     step([alias("d", "c", 0)]),
-    // 別名元が常駐（重み）なら根なし（slot を持たない値）。
+    // If the alias source is resident (a weight), there is no root (a value without a slot).
     step([
       {
         kind: "alias",
@@ -151,18 +166,18 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
     ],
   );
   assertEquals(plan.pinned, new Set([2]));
-  assertEquals(plan.sharedSlots, 1, "c が b のバイトを配り直されている");
+  assertEquals(plan.sharedSlots, 1, "c is handed b's bytes again");
 });
 
 /**
- * `topk` の実形（ADR 0068 決定 3 の最初の入居者）。実 GPU 側の寿命門
- * （tests/runtime_executor_test.ts の「多出力ノードの slot ごとの uses / pin」）と**同じグラフ**
- * の計画を、GPU に触らない純関数の側から手計算で固定する:
+ * The real shape of `topk` (the first occupant of ADR 0068 decision 3). Pins by hand calculation,
+ * from the pure-function side that touches no GPU, the plan of **the same graph** as the real-GPU
+ * lifetime check ("per-slot uses / pin of a multi-output node" in tests/runtime_executor_test.ts):
  *
  * ```
- * topk(x[3,8], k=2) → v[3,2] f32（neg が 1 度消費）+ i[3,2] i32（グラフ出力）
- * neg(v) → nv[3,2]（exp が 1 度消費）
- * exp(nv) → e[3,2]（グラフ出力）
+ * topk(x[3,8], k=2) → v[3,2] f32 (consumed once by neg) + i[3,2] i32 (graph output)
+ * neg(v) → nv[3,2] (consumed once by exp)
+ * exp(nv) → e[3,2] (graph output)
  * ```
  *
  * MUST: the two outputs have the **same byte count** (both 3·2 words of 4-byte elements = 24) — the
@@ -170,7 +185,7 @@ test("単一出力ステップの確保簿記（alloc / alias / pin / 消費）�
  * each slot takes** (`e` takes the range of the consumed `v`, not the range of the pinned index
  * `i`).
  */
-test("topk の実形（値 + 添字・同一サイズ）の計画が手計算どおり", () => {
+test("the plan of topk's real shape (values + indices, the same size) matches the hand calculation", () => {
   const bytes = 3 * 2 * 4;
   const plan = planRecipes(
     [
@@ -201,11 +216,11 @@ test("topk の実形（値 + 添字・同一サイズ）の計画が手計算ど
     [[0, 1], [2], [3]],
   );
   assertEquals(plan.pinned, new Set([1, 3]));
-  // 生存ピーク = v / i / nv の 3 本ぶん（実 GPU 側の `peakTransientBytes` 72 と一致する）。
+  // Live peak = v / i / nv together (matches the real-GPU side's `peakTransientBytes` of 72).
   assertEquals(plan.peakLiveBytes, 72);
 });
 
-test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独立して retain / pin する", () => {
+test("a multi-output step allocates in ascending output-slot order and retains / pins each slot independently", () => {
   const plan = planRecipes(
     [step([alloc("v", 64, 1), alloc("i", 32, 0, true)]), step([alloc("y", 64, 0, true)], ["v"])],
     CORE_TRANSIENT_LIMITS,
@@ -223,10 +238,10 @@ test("多出力ステップは出力 slot 昇順に確保し、slot ごとに独
 });
 
 // ---------------------------------------------------------------------------
-// 読み書きの役割（WGSL 宣言 → 計画）
+// Read / write roles (WGSL declarations → plan)
 // ---------------------------------------------------------------------------
 
-test("dispatch の読み / 書きは WGSL の役割から採り、常駐・state・論理長は計画に現れない", () => {
+test("a dispatch's reads / writes come from the WGSL roles, and resident values, state and logical lengths do not appear in the plan", () => {
   const program = buildTransientProgram([
     {
       outputs: [alloc("y", 64, 0, true)],
@@ -260,7 +275,7 @@ test("dispatch の読み / 書きは WGSL の役割から採り、常駐・state
   ]);
 });
 
-test("役割の無い束縛（WGSL に storage 宣言が無い binding）は fail loudly", () => {
+test("a binding without a role (a binding with no storage declaration in the WGSL) fails loudly", () => {
   const recipes = [
     {
       outputs: [alloc("y", 64, 0, true)],
@@ -279,7 +294,7 @@ test("役割の無い束縛（WGSL に storage 宣言が無い binding）は fai
   );
 });
 
-test("同じ dispatch で読む入力と書く出力は別領域に置かれる（計画まで通した形）", () => {
+test("an input read and an output written by the same dispatch go to different regions (taken through to the plan)", () => {
   const plan = planRecipes(
     [
       step([alloc("h", 64, 1)]),
@@ -310,10 +325,13 @@ test("同じ dispatch で読む入力と書く出力は別領域に置かれる�
 });
 
 // ---------------------------------------------------------------------------
-// 宣言の静的検査（validateStepRecipe）と計画の閉包検査
+// Static validation of declarations (validateStepRecipe) and the plan's closure check
 // ---------------------------------------------------------------------------
 
-/** 一時と dispatch だけを差し替えるステップ（出力簿記は宣言検査の別軸なので固定）。 */
+/**
+ * A step in which only the temporaries and the dispatches vary (the output bookkeeping is a
+ * separate axis of the declaration check, so it is fixed).
+ */
 const tempStep = (temps: readonly TempRecipe[], dispatches: readonly Dispatch[]): StepRecipe => ({
   outputs: [alloc("y", 64, 0)],
   temps,
@@ -322,40 +340,43 @@ const tempStep = (temps: readonly TempRecipe[], dispatches: readonly Dispatch[])
   writesState: false,
 });
 
-test("dispatch 列の内側で閉じていない一時の寿命宣言は宣言の受け口で落ちる", () => {
+test("a temporary's lifetime declaration that does not close inside the dispatch sequence fails at the declaration entry", () => {
   const two = [dispatch("k0"), dispatch("k1")];
   const broken: readonly (readonly [TempRecipe, string])[] = [
-    // 解放が来ないまま組み上がった一時（`releaseTemp` の呼び忘れ = 実行相で漏れる）。
+    // A temporary built without a release (a forgotten `releaseTemp` = leaks in the execution
+    // phase).
     [
       { byteLength: 64, allocBefore: 0, releaseAfter: -1 },
       "temporary 0 has a declared lifetime [0, -1]",
     ],
-    // 確保より前の dispatch で解放する形（束ねる dispatch が確保前に並ぶ）。
+    // Released at a dispatch before its allocation (the binding dispatch comes before the
+    // allocation).
     [
       { byteLength: 64, allocBefore: 1, releaseAfter: 0 },
       "temporary 0 has a declared lifetime [1, 0]",
     ],
-    // allocBefore が列の外（負）。
+    // allocBefore outside the sequence (negative).
     [
       { byteLength: 64, allocBefore: -1, releaseAfter: 1 },
       "temporary 0 has a declared lifetime [-1, 1]",
     ],
-    // releaseAfter が列の外（dispatch 2 本に対する添字 2）。
+    // releaseAfter outside the sequence (index 2 for 2 dispatches).
     [
       { byteLength: 64, allocBefore: 0, releaseAfter: 2 },
       "temporary 0 has a declared lifetime [0, 2]",
     ],
-    // 確保仕様として意味を成さないバイト数。
+    // A byte count that makes no sense as an allocation spec.
     [{ byteLength: 0, allocBefore: 0, releaseAfter: 1 }, "(0B)"],
   ];
   for (const [temp, message] of broken) {
     assertThrows(() => validateStepRecipe(tempStep([temp], two)), ExecutionError, message);
   }
-  // 対照: 列の内側で閉じた宣言は通る（上の 5 本は寿命宣言だけが違う）。
+  // Control: a declaration closed inside the sequence passes (the 5 above differ only in the
+  // lifetime declaration).
   validateStepRecipe(tempStep([{ byteLength: 64, allocBefore: 0, releaseAfter: 1 }], two));
 });
 
-test("宣言外の一時を束ねる dispatch は宣言の受け口で落ちる", () => {
+test("a dispatch that binds an undeclared temporary fails at the declaration entry", () => {
   const temps: readonly TempRecipe[] = [{ byteLength: 64, allocBefore: 0, releaseAfter: 0 }];
   const bind = (id: number): readonly Dispatch[] => [
     dispatch("gemm", [{ binding: 1, source: { kind: "temp", id } }]),
@@ -365,15 +386,16 @@ test("宣言外の一時を束ねる dispatch は宣言の受け口で落ちる"
     ExecutionError,
     "dispatch 'gemm' binding 1 points to temporary 1, but 1 are declared",
   );
-  // 対照: 宣言済みの添字なら通る（束縛の並びは同じで添字だけが違う）。
+  // Control: a declared index passes (the same bindings, only the index differs).
   validateStepRecipe(tempStep(temps, bind(0)));
 });
 
-test("生存区間の外で一時を束ねる dispatch は宣言の受け口で落ちる", () => {
+test("a dispatch that binds a temporary outside its live interval fails at the declaration entry", () => {
   const read = (id: number): BindingRecipe => ({ binding: 1, source: { kind: "temp", id } });
   const write = (id: number): BindingRecipe => ({ binding: 2, source: { kind: "temp", id } });
-  // A を dispatch 0 で書いて解放し、B を dispatch 1 で書いて解放したあと、dispatch 2 が A を
-  // 読む形。計画は A と B を同じバイトに重ねるので、通すと B が上書きした値を読む。
+  // A is written and released at dispatch 0, B is written and released at dispatch 1, and then
+  // dispatch 2 reads A. The plan overlays A and B on the same bytes, so letting it pass would read
+  // the value B overwrote.
   const afterRelease = tempStep(
     [
       { byteLength: 64, allocBefore: 0, releaseAfter: 0 },
@@ -386,7 +408,8 @@ test("生存区間の外で一時を束ねる dispatch は宣言の受け口で�
     ExecutionError,
     "dispatch 2 'r2' binding 1 references temporary 0 outside its live range [0, 0]",
   );
-  // 確保より前の dispatch が束ねる形（同じ領域の前の持ち主の値を読む）。
+  // A dispatch before the allocation binds it (it would read the value of the region's previous
+  // owner).
   const beforeAlloc = tempStep(
     [{ byteLength: 64, allocBefore: 1, releaseAfter: 1 }],
     [dispatch("r0", [read(0)]), dispatch("w1", [write(0)])],
@@ -396,7 +419,8 @@ test("生存区間の外で一時を束ねる dispatch は宣言の受け口で�
     ExecutionError,
     "dispatch 0 'r0' binding 1 references temporary 0 outside its live range [1, 1]",
   );
-  // 対照: 区間の内側だけで束ねれば通る（上の 1 本目から dispatch 2 の読みを B へ移した形）。
+  // Control: binding only inside the interval passes (the first case above with dispatch 2's read
+  // moved to B).
   validateStepRecipe(
     tempStep(
       [
@@ -408,9 +432,10 @@ test("生存区間の外で一時を束ねる dispatch は宣言の受け口で�
   );
 });
 
-test("整数でない寿命境界と一時の添字は宣言の受け口で落ちる", () => {
+test("non-integer lifetime boundaries and temporary indices fail at the declaration entry", () => {
   const two = [dispatch("k0"), dispatch("k1")];
-  // 比較だけでは素通りする値（小数は区間の内側に見え、NaN はどの大小比較も偽）。
+  // Values that comparisons alone let through (a fraction looks inside the interval, and NaN is
+  // false in every ordering comparison).
   const broken: readonly (readonly [TempRecipe, string])[] = [
     [
       { byteLength: 64, allocBefore: 0.5, releaseAfter: 1 },
@@ -441,21 +466,22 @@ test("整数でない寿命境界と一時の添字は宣言の受け口で落�
   }
 });
 
-test("消費計数が実際の解放より多いレシピ列は計画の閉包検査で落ちる", () => {
+test("a recipe sequence whose consumer count exceeds the actual releases fails the plan's closure check", () => {
   assertThrows(
-    // 消費者 1 本を宣言しながら、その値を解放するステップがどこにも無い形。
+    // One consumer is declared, but no step anywhere releases the value.
     () => planRecipes([step([alloc("a", 64, 1)])], CORE_TRANSIENT_LIMITS),
     ExecutionError,
     "intermediates are left unreleased",
   );
-  // 対照: 消費者ぶんの解放が来れば閉じる（同じ列に消費ステップを 1 本足すだけ）。
+  // Control: it closes once the consumers' releases come (just one consuming step added to the
+  // same sequence).
   assertEquals(
     planRecipes([step([alloc("a", 64, 1)]), step([], ["a"])], CORE_TRANSIENT_LIMITS).regions,
     [64],
   );
 });
 
-test("同じ値を二重に解放するレシピ列は参照カウントが負で落ちる", () => {
+test("a recipe sequence that releases the same value twice fails on a negative reference count", () => {
   assertThrows(
     () => planRecipes([step([alloc("a", 64, 0)]), step([], ["a", "a"])], CORE_TRANSIENT_LIMITS),
     ExecutionError,
@@ -464,16 +490,16 @@ test("同じ値を二重に解放するレシピ列は参照カウントが負�
 });
 
 // ---------------------------------------------------------------------------
-// 一時（temps）の区間と配り直し
+// Intervals and reuse of temporaries (temps)
 // ---------------------------------------------------------------------------
 
 /**
- * 一時を持つステップ（`dispatches` は境界の本数だけが効くのでスタブで足りる）。
+ * A step with temporaries (only the number of `dispatches` boundaries matters, so stubs suffice).
  *
- * `steps[].temps` は `bakeGroups` が bind group の実体解決にそのまま使うので、temp → slot の
- * 対応が 1 つずれると**同一サイズの別区間を束ねる**（layout は満たすので validation を通り、
- * 値だけが静かに変わる）。上の topk のコメントが出力側について書いている論法を、そのまま
- * 一時側へ当てる。
+ * `bakeGroups` uses `steps[].temps` as is to resolve the bind groups' resources, so a temp → slot
+ * mapping off by one **binds a different interval of the same size** (the layout is satisfied, so
+ * it passes validation, and only the values change silently). The argument the topk comment above
+ * makes for outputs is applied to temporaries as is.
  */
 const tempSlotsStep = (
   temps: readonly TempRecipe[],
@@ -488,8 +514,9 @@ const tempSlotsStep = (
   writesState: false,
 });
 
-test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴む", () => {
-  // i8a8 attention と同型の「ループ外一時（0 と 2）がループ内一時（1）を挟む」形。
+test("temporaries with nested lifetimes that are live at the same time each take a separate interval", () => {
+  // The same shape as i8a8 attention: "temporaries outside the loop (0 and 2) enclose a temporary
+  // inside the loop (1)".
   const plan = planRecipes(
     [
       tempSlotsStep(
@@ -504,11 +531,12 @@ test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴�
     CORE_TRANSIENT_LIMITS,
   );
 
-  // 3 本とも同時生存するので配り直しが起きない（生存ピーク = 3 本ぶん・共有 0）。
+  // All 3 are live at the same time, so no reuse happens (live peak = all 3, sharing 0).
   assertEquals(plan.peakLiveBytes, 192);
   assertEquals(plan.sharedSlots, 0);
-  // 確保順は「境界ごとに宣言順」— 境界 0 で id 0 / id 2 が区間 0 / 1 を取り、境界 1 で
-  // 生える id 1 が区間 2 になる（宣言順 = 区間順ではない）。
+  // The allocation order is "declaration order per boundary" — at boundary 0, id 0 / id 2 take
+  // intervals 0 / 1, and id 1, born at boundary 1, gets interval 2 (declaration order is not
+  // interval order).
   assertEquals(plan.steps[0].temps, [0, 2, 1]);
   // Intervals [0, 5) / [1, 4) / [2, 3): stacking on a live slot grows a region by 256 + 64 - 64 =
   // 256 >= 64, so each slot opens its own region (192 = the live peak, so the second order does not run).
@@ -523,7 +551,7 @@ test("同時生存する入れ子寿命の一時は 3 本とも別区間を掴�
   );
 });
 
-test("同一境界で解放された一時のバイトは、次のステップの一時が配り直される", () => {
+test("the bytes of temporaries released at the same boundary are handed to the next step's temporaries", () => {
   const plan = planRecipes(
     [
       tempSlotsStep(
@@ -538,7 +566,7 @@ test("同一境界で解放された一時のバイトは、次のステップ�
     CORE_TRANSIENT_LIMITS,
   );
 
-  // 2 本目のステップは新しいバイトを生やさない（領域は 2 本ぶんのまま）。
+  // The second step adds no new bytes (the region stays the size of 2).
   // Intervals [0, 3) / [1, 2) / [4, 5): the second temporary of step 0 overlaps the first (stacking
   // grows by 256 >= 64) and opens region 1; step 1's temporary overlaps neither, both regions give
   // growth 0 and the lower index wins. 128 = the live peak, so the second order does not run.
@@ -553,8 +581,9 @@ test("同一境界で解放された一時のバイトは、次のステップ�
   assertEquals(plan.sharedSlots, 1);
 });
 
-test("出力と一時は同じ領域を共有し、pin された区間だけが配り直されない", () => {
-  // 消費者ゼロの出力はステップ末尾で生存を終えるので、次のステップの一時がそのバイトを掴む。
+test("outputs and temporaries share the same region, and only pinned intervals are not handed out again", () => {
+  // An output with zero consumers stops living at the end of its step, so the next step's
+  // temporary takes its bytes.
   const shared = planRecipes(
     [
       tempSlotsStep([], 0, [alloc("a", 64, 0)]),
@@ -566,7 +595,7 @@ test("出力と一時は同じ領域を共有し、pin された区間だけが�
   assertEquals(shared.steps[1].temps, [1]);
   assertEquals(shared.slots[1].offset, 0);
 
-  // pin（グラフ出力）は refs が 0 になっても生存を終えない。
+  // A pin (graph output) keeps living even when refs reaches 0.
   const pinnedPlan = planRecipes(
     [
       tempSlotsStep([], 0, [alloc("y", 64, 0, true)]),
@@ -582,17 +611,22 @@ test("出力と一時は同じ領域を共有し、pin された区間だけが�
 });
 
 // ---------------------------------------------------------------------------
-// generation 面を欠いた実行の fail loudly（GPU 資源を 1 つも作らない）
+// Fail loudly on execution without the generation surface (no GPU resource is created)
 // ---------------------------------------------------------------------------
 
-/** 実行相まで届くスタブ dispatch（`workgroups` は焼き込み実行が読む欄）。 */
+/**
+ * A stub dispatch that reaches the execution phase (`workgroups` is the field the baked execution
+ * reads).
+ */
 const runnableDispatch = (
   key: string,
   workgroups: DispatchWorkgroups,
   bindings: readonly BindingRecipe[] = [],
 ): Dispatch => ({ key, bindings, workgroups, roles: roles([1], []) }) as unknown as Dispatch;
 
-/** dispatch だけのステップ（出力も一時も持たないので簿記は動かない）。 */
+/**
+ * A step with dispatches only (it has no outputs or temporaries, so the bookkeeping does not move).
+ */
 const dispatchStep = (dispatches: readonly Dispatch[]): StepRecipe => ({
   outputs: [],
   temps: [],
@@ -601,7 +635,7 @@ const dispatchStep = (dispatches: readonly Dispatch[]): StepRecipe => ({
   writesState: false,
 });
 
-/** 積まれた dispatch を記録するだけのスケジューラ（GPU 資源を持たない）。 */
+/** A scheduler that only records the enqueued dispatches (it holds no GPU resources). */
 const recordingScheduler = (log: string[]): SubmitScheduler =>
   ({
     dispatch: (
@@ -616,7 +650,7 @@ const recordingScheduler = (log: string[]): SubmitScheduler =>
 
 const stubGroup = (): GPUBindGroup => ({}) as unknown as GPUBindGroup;
 
-test("焼き込み経路は context 側の焼き込みを経ていない dispatch で落ちる", () => {
+test("the baked path fails on a dispatch that has not been through the context-side baking", () => {
   const recipes = [dispatchStep([runnableDispatch("attn.qk", [1, 1, 1])])];
   const log: string[] = [];
 
@@ -628,12 +662,13 @@ test("焼き込み経路は context 側の焼き込みを経ていない dispatc
   assert(error.message.includes("ADR 0066 decision 5"), error.message);
   assertEquals(log, []);
 
-  // 対照: 穴が埋まっていれば throw せず 1 本積まれる（上が空振りでない証明）。
+  // Control: with the hole filled, it does not throw and one dispatch is enqueued (proof that the
+  // case above is not a false negative).
   executeBakedPlan(recipes, [[stubGroup()]], recordingScheduler(log));
   assertEquals(log, ["attn.qk [1,1,1]"]);
 });
 
-test("workgroup 数を論理長から算出する dispatch は GenerationContext 無しで落ちる", () => {
+test("a dispatch that computes its workgroup count from the logical length fails without a GenerationContext", () => {
   const log: string[] = [];
   const derived = [dispatchStep([runnableDispatch("state.pv", (past, query) => [past, query, 1])])];
 
@@ -644,8 +679,9 @@ test("workgroup 数を論理長から算出する dispatch は GenerationContext
   );
   assert(error.message.includes("dispatch 'state.pv'"), error.message);
 
-  // 対照: 静的な 3 つ組は generation 無しでも積まれる。**0 でも積む**のが既存契約
-  // （0 要素テンソルの経路は要素数 0 の dispatch を黙って飛ばさない）。
+  // Control: a static triple is enqueued even without generation. **Enqueueing even 0** is the
+  // existing contract (the path of 0-element tensors does not silently skip a dispatch with 0
+  // elements).
   executeBakedPlan(
     [dispatchStep([runnableDispatch("elementwise", [0, 1, 1])])],
     [[stubGroup()]],
@@ -654,7 +690,7 @@ test("workgroup 数を論理長から算出する dispatch は GenerationContext
   assertEquals(log, ["elementwise [0,1,1]"]);
 });
 
-test("論理長から算出した workgroup 数が 0 の軸を持つ dispatch だけは積まれない", () => {
+test("only a dispatch with an axis of 0 workgroups computed from the logical length is not enqueued", () => {
   const log: string[] = [];
   const recipes = [dispatchStep([runnableDispatch("state.pv", (past, query) => [past, query, 1])])];
   const generation = (past: number, query: number): BakedGeneration => ({
@@ -668,17 +704,17 @@ test("論理長から算出した workgroup 数が 0 の軸を持つ dispatch �
     onStep: () => {},
   });
 
-  // 有効行ゼロ（この行ブロックが丸ごと pad 行）は積まない。
+  // Zero valid rows (this row block is entirely pad rows) is not enqueued.
   executeBakedPlan(recipes, [[stubGroup()]], recordingScheduler(log), generation(0, 4));
   assertEquals(log, []);
-  // 対照: 有効行があれば同じレシピが積まれる。
+  // Control: with valid rows, the same recipe is enqueued.
   executeBakedPlan(recipes, [[stubGroup()]], recordingScheduler(log), generation(2, 4));
   assertEquals(log, ["state.pv [2,4,1]"]);
 });
 
 /**
- * 積まれた dispatch のキーを記録し、`backpressure` は与えた列の順に返すスケジューラ
- * （送り込みの先行の上限の待ち — ADR 0123）。
+ * A scheduler that records the keys of enqueued dispatches and returns `backpressure` in the order
+ * of the given sequence (the wait of the in-flight submit bound — ADR 0123).
  */
 const pacedScheduler = (
   log: string[],
@@ -693,7 +729,7 @@ const pacedScheduler = (
   } as unknown as SubmitScheduler;
 };
 
-test("run の焼き込み実行は送り込みの待ちの間、次のステップの dispatch を積まない", async () => {
+test("a run's baked execution does not enqueue the next step's dispatches while waiting on the submit bound", async () => {
   const log: string[] = [];
   const gate = Promise.withResolvers<void>();
   const recipes = [
@@ -706,18 +742,20 @@ test("run の焼き込み実行は送り込みの待ちの間、次のステッ�
     [[stubGroup()], [stubGroup()]],
     pacedScheduler(log, [gate.promise]),
   );
-  assert(running !== undefined, "待ちが要ったら Promise を返す");
+  assert(running !== undefined, "returns a Promise when a wait is needed");
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assertEquals(log, ["a"], "待ちが解けるまで次のステップを積まない");
+  assertEquals(log, ["a"], "does not enqueue the next step until the wait resolves");
 
   gate.resolve();
   await running;
   assertEquals(log, ["a", "b"]);
 });
 
-test("run の焼き込み実行は送り込みの待ちが reject したら、次のステップを積まずに reject を返す", async () => {
+test("a run's baked execution returns the rejection without enqueueing the next step when the submit-bound wait rejects", async () => {
   const log: string[] = [];
-  const lost = new GpuDeviceLostError("模擬: 印の待ちの間の消失");
+  const lost = new GpuDeviceLostError(
+    "simulated: device lost while waiting on a completion marker",
+  );
   const recipes = [
     dispatchStep([runnableDispatch("a", [1, 1, 1])]),
     dispatchStep([runnableDispatch("b", [1, 1, 1])]),
@@ -728,24 +766,27 @@ test("run の焼き込み実行は送り込みの待ちが reject したら、�
     [[stubGroup()], [stubGroup()]],
     pacedScheduler(log, [Promise.reject(lost)]),
   );
-  assert(running !== undefined, "待ちが要ったら Promise を返す");
+  assert(running !== undefined, "returns a Promise when a wait is needed");
   const error = await assertRejects(() => running);
-  // 待ちの失敗は包まずに返す（run の catch が消失の型で後始末を分ける）。
+  // A failed wait is returned unwrapped (the run's catch picks the cleanup by the loss error type).
   assertStrictEquals(error, lost);
-  assertEquals(log, ["a"], "待ちが落ちた後に次のステップを積んだ");
+  assertEquals(log, ["a"], "enqueued the next step after the wait failed");
 });
 
-test("run の焼き込み実行は待ちの後の継続の throw を、返す Promise の reject として届け、次のステップを積まない", async () => {
+test("a run's baked execution delivers a throw in the continuation after the wait as a rejection of the returned Promise, and enqueues no next step", async () => {
   const log: string[] = [];
   const recipes = [
     dispatchStep([runnableDispatch("a", [1, 1, 1])]),
     dispatchStep([runnableDispatch("b", [1, 1, 1])]),
   ];
 
-  // 2 本目のステップの bind group が無い（generation 面も無い）— 待ちの後の継続の中で throw する。
-  // 縛るのは、その throw が呼び手へ返した Promise の reject として届くこと（継続を返り値の鎖から切り離せば
-  // 未処理の reject になってここが赤）と、throw の後に何も積まないこと。継続は待ちの後に走るので、
-  // 下の catch（同期の throw）は今の形では届かない — 継続を待ちの前へ繰り上げる退行の保険でしかない。
+  // The second step has no bind group (and no generation surface) — it throws inside the
+  // continuation after the wait. What this pins is that the throw arrives as a rejection of the
+  // Promise returned to the caller (detaching the continuation from the returned chain would make
+  // it an unhandled rejection and turn this red) and that nothing is enqueued after the throw. The
+  // continuation runs after the wait, so the catch below (a synchronous throw) is not reached in
+  // the current form — it only guards against a regression that moves the continuation before the
+  // wait.
   let running: Promise<void> | undefined;
   try {
     running = executeBakedPlanPaced(
@@ -754,14 +795,14 @@ test("run の焼き込み実行は待ちの後の継続の throw を、返す Pr
       pacedScheduler(log, [Promise.resolve()]),
     );
   } catch (cause) {
-    throw new Error(`待ちの後の throw が呼び出しから同期に投げられた: ${cause}`);
+    throw new Error(`the throw after the wait was thrown synchronously from the call: ${cause}`);
   }
-  assert(running !== undefined, "待ちが要ったら Promise を返す");
+  assert(running !== undefined, "returns a Promise when a wait is needed");
   await assertRejects(() => running, ExecutionError, "dispatch 'b'");
   assertEquals(log, ["a"]);
 });
 
-test("run の焼き込み実行は上限の内なら待ちを挟まず、同期の実行と同じ列を積む", () => {
+test("a run's baked execution within the bound inserts no wait and enqueues the same sequence as the synchronous execution", () => {
   const recipes = [
     dispatchStep([runnableDispatch("a", [1, 1, 1]), runnableDispatch("b", [1, 1, 1])]),
     dispatchStep([runnableDispatch("c", [1, 1, 1])]),
@@ -770,24 +811,26 @@ test("run の焼き込み実行は上限の内なら待ちを挟まず、同期�
   const paced: string[] = [];
   const plain: string[] = [];
 
-  // 待ちが要らない run は Promise を返さない（呼び手の await が 1 マイクロタスクも譲らない）。
+  // A run that needs no wait returns no Promise (the caller's await does not yield even one
+  // microtask).
   assertEquals(executeBakedPlanPaced(recipes, groups, pacedScheduler(paced, [])), undefined);
-  assertEquals(paced, ["a", "b", "c"], "呼び出しから戻った時点で積み終わっている");
+  assertEquals(paced, ["a", "b", "c"], "everything is enqueued by the time the call returns");
 
-  // enqueue の経路（同期の実行）は送り込みの待ちを 1 度も問わない（ADR 0123 決定 4）。
+  // The enqueue path (synchronous execution) never asks about the submit-bound wait (ADR 0123
+  // decision 4).
   const neverAsked = {
     dispatch: (_pipeline: unknown, _group: unknown, _workgroups: unknown, key: string) => {
       plain.push(key);
     },
     backpressure: () => {
-      throw new Error("enqueue の経路が backpressure を呼んだ");
+      throw new Error("the enqueue path called backpressure");
     },
   } as unknown as SubmitScheduler;
   executeBakedPlan(recipes, groups, neverAsked);
   assertEquals(paced, plain);
 });
 
-/** bind group の実体解決だけを走らせる（GPU 資源を持たない device スタブ）。 */
+/** Runs only the resolution of bind group resources (a device stub that holds no GPU resources). */
 const bakeOne = (
   source: BindingSource,
   generation?: { readonly slots: ReadonlyMap<string, GPUBuffer> },
@@ -814,7 +857,7 @@ const bakeOne = (
   );
 };
 
-test("generation 面を欠いた実行は state / 論理長の束縛で fail loudly", () => {
+test("execution without the generation surface fails loudly on state / logical-length bindings", () => {
   const lengths = assertThrows(() => bakeOne({ kind: "lengths" }), ExecutionError);
   assert(
     lengths.message.includes(
@@ -832,7 +875,7 @@ test("generation 面を欠いた実行は state / 論理長の束縛で fail lou
   );
 });
 
-test("GenerationContext が持たないスロット名は実体解決で fail loudly", () => {
+test("a slot name the GenerationContext does not have fails loudly at resource resolution", () => {
   const error = assertThrows(
     () =>
       bakeOne(
@@ -850,41 +893,43 @@ test("GenerationContext が持たないスロット名は実体解決で fail lo
 });
 
 /**
- * 実行形の門（`assertGenerationRun` — ADR 0066 決定 4 / 追記〈バケット〉）。
+ * The check of the run shape (`assertGenerationRun` — ADR 0066 decision 4 / addendum on buckets).
  *
- * 第 2 引数は context が構築済みの**許可集合** `{1} ∪ chunkBuckets ∪ {chunkLength}` で、
- * ここは「集合に入っていれば通す・入っていなければ落とす」だけを見る（集合の作り方は
- * runtime_generation_context_test.ts の `assertChunkBuckets`、実 GPU の結線は
- * gpu_state_execution_test.ts）。
+ * The second argument is the **allowed set** `{1} ∪ chunkBuckets ∪ {chunkLength}` the context has
+ * already built, and this checks only "pass if in the set, fail if not" (how the set is built is
+ * `assertChunkBuckets` in runtime_generation_context_test.ts; the real-GPU wiring is
+ * gpu_state_execution_test.ts).
  */
 const chunkLimits = (rows: readonly number[]): GenerationLimits => ({
   chunkRows: new Set(rows),
   fullCapacities: new Map(),
 });
 
-test("assertGenerationRun は許可集合の物理 chunk 行数だけを通す", () => {
-  // chunkLength=8 / バケット [2,4] の context が作る集合。
+test("assertGenerationRun passes only physical chunk row counts in the allowed set", () => {
+  // The set a context with chunkLength=8 / buckets [2,4] builds.
   const allowed = new Set([1, 2, 4, 8]);
 
-  // decode 形・バケット 2 本・prefill 形の 4 つがそのまま通る。
+  // The 4 of the decode shape, the 2 buckets and the prefill shape pass as they are.
   for (const rows of [1, 2, 4, 8]) {
     assertGenerationRun(chunkLimits([rows]), allowed, 0, 1);
   }
-  // 同一 run に複数の state ノードが居ても、全ノードが集合の中なら通る。
+  // Even with several state nodes in one run, it passes when every node is in the set.
   assertGenerationRun(chunkLimits([4]), allowed, 3, 4);
 
-  // 集合外は落ちる（バケットの隙間 3 / バケットより上の 5 / chunkLength 超の 9）。
+  // Outside the set fails (3 in the gap between buckets / 5 above the buckets / 9 over
+  // chunkLength).
   for (const rows of [3, 5, 9]) {
     const error = assertThrows(
       () => assertGenerationRun(chunkLimits([rows]), allowed, 0, 1),
       ExecutionError,
     );
     assert(error.message.includes("fixed chunk contract"), error.message);
-    // 診断は許可集合を列挙する（何が許されているのかを呼び出し点で見せる）。
+    // The diagnostic lists the allowed set (showing what is allowed at the call site).
     assert(error.message.includes("{2, 4, 8}"), error.message);
   }
 
-  // バケット無しの集合では、同じ 2 / 4 が落ちる（許可がバケット由来であることの裏）。
+  // With a set without buckets, the same 2 / 4 fail (the converse showing the permission comes from
+  // the buckets).
   const plain = new Set([1, 8]);
   for (const rows of [2, 4]) {
     const error = assertThrows(
@@ -895,9 +940,9 @@ test("assertGenerationRun は許可集合の物理 chunk 行数だけを通す",
   }
 });
 
-test("assertGenerationRun は queryLength が物理 chunk 行数を超える run を拒否する", () => {
+test("assertGenerationRun rejects a run whose queryLength exceeds the physical chunk row count", () => {
   const allowed = new Set([1, 4, 8]);
-  // バケット行（4）の上限は 4 まで — chunkLength の 8 ではない。
+  // The limit of the bucket rows (4) is 4 — not chunkLength's 8.
   assertGenerationRun(chunkLimits([4]), allowed, 0, 4);
   const error = assertThrows(
     () => assertGenerationRun(chunkLimits([4]), allowed, 0, 5),
@@ -906,7 +951,7 @@ test("assertGenerationRun は queryLength が物理 chunk 行数を超える run
   assert(error.message.includes("exceeds the physical chunk row count 4"), error.message);
 });
 
-test("assertGenerationRun は full スロットの容量超過を許可集合に依らず拒否する", () => {
+test("assertGenerationRun rejects exceeding a full slot's capacity regardless of the allowed set", () => {
   const limits: GenerationLimits = {
     chunkRows: new Set([4]),
     fullCapacities: new Map([["kslot", 6]]),

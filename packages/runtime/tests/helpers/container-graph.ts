@@ -1,11 +1,14 @@
 /**
- * 配布形ミラー（`krm`）の part 0 から 1 グラフの IR を読む（グラフ記述 × 束縛表の合流まで）。
+ * Reads one graph's IR from part 0 of a distribution mirror (`krm`) (up to merging the graph
+ * descriptor with the binding table).
  *
- * 実資産の門（融合ヒット数など）はグラフ宣言だけを見るので、重みの block へは進まない —
- * ヘッダ（24 B）と 2 文書だけを読む。グラフ名 = 配布 manifest の weights キー（container-v1 §2.1）。
+ * The real-asset checks (fusion hit counts and the like) look only at the graph declaration, so
+ * this never reads into the weight blocks — only the header (24 B) and the two documents. The
+ * graph name = the weights key of the distribution manifest (container-v1 §2.1).
  *
- * MUST: 名指しのグラフが無ければ在るグラフを並べて落とす（黙って 1 本目を採ると、部品名と
- * グラフ名がずれた容器で「別の部品を数えた表」が静かに出る）。
+ * MUST: when the named graph is missing, fail and list the graphs that are there (silently taking
+ * the first one would quietly produce "a table that counted a different component" for a
+ * container whose component and graph names have drifted apart).
  */
 
 import { readRange } from "@karume/test-support/fs";
@@ -18,7 +21,10 @@ import { readHeader } from "../../src/format/container/header.ts";
 import { HEADER_BYTES } from "../../src/format/container/limits.ts";
 import type { IrGraph } from "../../src/format/ir.ts";
 
-/** `karume/5` の manifest のうち、ここが引く欄だけ（綴りを持つのは配布形）。 */
+/**
+ * Only the fields of a `karume/5` manifest that this file reads (the distribution form carries
+ * the spellings).
+ */
 export type ContainerManifest = {
   readonly defaultModel: string;
   readonly models: Readonly<
@@ -40,7 +46,10 @@ export type PartRef = { readonly path: string; readonly repo?: string };
 const readPrefix = (source: URL, length: number): Promise<Uint8Array<ArrayBuffer>> =>
   readRange(source, 0, length);
 
-/** 容器の part 0（`…-00001-of-NNNNN.krm` または単一形）から `graphName` の合流済み IR を読む。 */
+/**
+ * Reads the merged IR of `graphName` from a container's part 0 (`…-00001-of-NNNNN.krm` or the
+ * single form).
+ */
 export const readContainerGraph = async (part0: URL, graphName: string): Promise<IrGraph> => {
   const header = readHeader(await readPrefix(part0, HEADER_BYTES));
   const documents = await readPrefix(
@@ -57,17 +66,17 @@ export const readContainerGraph = async (part0: URL, graphName: string): Promise
   const bound = bindGraphs(graph, model)[graphName];
   if (bound === undefined) {
     throw new Error(
-      `${part0.pathname}: 容器にグラフ '${graphName}' が無い（在るのは ${Object.keys(
+      `${part0.pathname}: the container has no graph '${graphName}' (it has ${Object.keys(
         graph.graphs,
-      ).join(" / ")}）`,
+      ).join(" / ")})`,
     );
   }
   return mergedGraph(bound, graphName);
 };
 
 /**
- * manifest から (model, component, dtype) の容器の part 0 を引く。越境参照（`repo` 付き）は
- * 呼び手が別のミラーへ振り分けるので、ここでは path をそのまま返す。
+ * Looks up part 0 of the (model, component, dtype) container in the manifest. The caller routes a
+ * cross-repository reference (one with `repo`) to another mirror, so the path is returned as is.
  */
 export const containerPart0 = (
   manifest: ContainerManifest,
@@ -77,7 +86,7 @@ export const containerPart0 = (
 ): PartRef => {
   const entry = manifest.models[model]?.weights[component]?.[dtype];
   if (entry === undefined) {
-    throw new Error(`manifest に ${model} / ${component} / ${dtype} の容器が無い`);
+    throw new Error(`the manifest has no container for ${model} / ${component} / ${dtype}`);
   }
   return entry.container.parts[0];
 };

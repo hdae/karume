@@ -1,22 +1,29 @@
-// GEMM 幾何のプロファイル（src/kernels/geometry-profile.ts — ADR 0115）の選択と既定の同一性（GPU 不要）。
+// Selection of GEMM geometry profiles (src/kernels/geometry-profile.ts — ADR 0115) and identity of
+// the defaults (no GPU needed).
 //
-// 検証の眼目は 3 点:
+// The focus of the checks is 3 points:
 //
-// 1. **選択が決定的**（description まで完全一致 > (vendor, architecture) > vendor だけ > 既定・
-//    同順位 2 本は adapter に依らず落ちる・`match` を省いた表は選ばれず注入でだけ使われる）。
-//    一覧の並び順や他機の都合で選択が揺れると、環境キーごとの参照 sha の行と「どの幾何で
-//    走ったか」の対応が崩れる。
-// 2. **既定プロファイルは既存の選択と同じ値**で、導出相がそれを明示で渡してもキーと WGSL が
-//    省略時とバイト同一（= 既定の機では 1 バイトも動かない）。
-// 3. **壊れた表は Session 構築の門で落ちる**（昇順でない規則・最後が Infinity でない規則・
-//    整除の破れた幾何）。`acquireGpu({ geometryProfile })` で注入した表は **device を作る前に**
-//    落ちる（navigator.gpu を差し替えて requestDevice に届かないことを見る）。コールバック形
-//    （ADR 0117 決定 6）は adapter の情報で 1 度だけ呼ばれ、戻りが同じ門を通り、投げた例外と Promise の
-//    戻りでも device を作らない。
-// 4. **門は unknown を表へ絞る型述語**で、欄の欠け・型違いを TypeError ではなく門のエラーで名指す。
-// 5. **注入の表は device の workgroup の上限で落ちる**（スレッド数・`@workgroup_size` の成分・共有メモリ —
-//    adapter の limits に対して device を作る前に）。共有メモリの導出（純関数）は codegen が書く
-//    `var<workgroup>` の宣言から数えた総量と突き合わせ、埋め込みの表と既定の表は WebGPU の既定の上限で通る。
+// 1. **Selection is deterministic** (an exact match down to description > (vendor, architecture) >
+//    vendor only > default; 2 tables of the same rank fail regardless of the adapter; a table
+//    without `match` is never selected and is only used by injection). If the selection wobbles
+//    with the order of the list or the needs of other machines, the correspondence between the
+//    reference sha rows per environment key and "which geometry it ran with" breaks.
+// 2. **The default profile has the same values as the existing selection**, and even when the
+//    derivation phase passes it explicitly, keys and WGSL are byte-identical to omitting it (= not
+//    a single byte moves on a default machine).
+// 3. **A broken table fails at the check of Session construction** (rules not in ascending order, a
+//    last rule that is not Infinity, a geometry that breaks exact division). A table injected
+//    through `acquireGpu({ geometryProfile })` fails **before the device is created**
+//    (navigator.gpu is swapped to see that requestDevice is never reached). The callback form (ADR
+//    0117 decision 6) is called exactly once with the adapter's information, its return goes
+//    through the same check, and neither a thrown exception nor a Promise return creates a device.
+// 4. **The check is a type predicate that narrows unknown to a table**, and names a missing field
+//    or a wrong type with the check's error instead of a TypeError.
+// 5. **An injected table fails against the device's workgroup limits** (thread count, the
+//    components of `@workgroup_size`, shared memory — against the adapter's limits, before the
+//    device is created). The derivation of shared memory (a pure function) is compared with the
+//    total counted from the `var<workgroup>` declarations codegen writes, and the embedded tables
+//    and the default table pass under WebGPU's default limits.
 
 import { platformObject } from "@karume/test-support/webgpu";
 import {
@@ -28,7 +35,8 @@ import {
   assertThrows,
 } from "@std/assert";
 import { describe, it } from "vite-plus/test";
-// テスト専用: 別 realm の Promise を作る手段（runtime の本体は Web 標準 API だけ — ここは tests の依存）
+// Test only: a way to create a Promise of another realm (the runtime body uses only Web standard
+// APIs — this is a dependency of the tests)
 import { createContext, runInContext } from "node:vm";
 import { CodegenError } from "../src/codegen/errors.ts";
 import {
@@ -91,13 +99,17 @@ import {
   attentionQkI8a8Wgsl,
 } from "../src/kernels/attention-i8a8.ts";
 
-/** 既定と見分けのつく幾何（M2 の掃引で勝った `reg64x32r4x4w8` / `reg64x64r8x4w16`）。 */
+/**
+ * A geometry distinguishable from the default (`reg64x32r4x4w8` / `reg64x64r8x4w16`, which won the
+ * M2 sweep).
+ */
 const M64N32: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 16 };
 const M64N64: GemmGeometry = { regM: 8, regN: 4, wgX: 16, wgY: 8 };
 
 /**
- * 既定プロファイルから id と match だけ差し替えた表（幾何の中身は選択の検査に効かない）。
- * `match` が undefined なら**キーごと省く**（`match: undefined` の欄を持つ表ではなく、注入専用の表の形）。
+ * A table that replaces only id and match of the default profile (the geometry's content does not
+ * matter for the selection checks). If `match` is undefined, **the key itself is omitted** (the
+ * shape of an injection-only table, not a table with a `match: undefined` field).
  */
 const profileOf = (
   id: string,
@@ -117,20 +129,23 @@ const APPLE_M2 = profileOf("apple-m2", {
   architecture: "metal-3",
   description: "Apple M2",
 });
-/** `match` を省いた注入専用の表（自動選択の対象外）。 */
+/** An injection-only table without `match` (outside automatic selection). */
 const OPT_IN = profileOf("opt-in", undefined);
 
-/** 表の代表点（バケットごとに「境界ちょうど」と「境界を 1 越えた側」を持つ）。 */
+/**
+ * Representative points of the table (for each bucket, "exactly on the boundary" and "1 past the
+ * boundary").
+ */
 const BUCKET_ROWS = [1, 64, 65, 512, 513, 4096] as const;
 
-describe("selectGeometryProfile の選択順", () => {
-  it("(vendor, architecture) の完全一致が vendor だけの規則より先に当たり、一覧の並び順に依らない", () => {
+describe("selection order of selectGeometryProfile", () => {
+  it("an exact (vendor, architecture) match wins over a vendor-only rule, regardless of the list order", () => {
     const adapter = { vendor: "apple", architecture: "metal-3" };
     assertStrictEquals(selectGeometryProfile(adapter, [APPLE, APPLE_METAL3]), APPLE_METAL3);
     assertStrictEquals(selectGeometryProfile(adapter, [APPLE_METAL3, APPLE]), APPLE_METAL3);
   });
 
-  it("vendor だけの規則は architecture の違う adapter（空文字 = Deno を含む）に当たる", () => {
+  it("a vendor-only rule matches adapters with a different architecture (including the empty string = Deno)", () => {
     const profiles = [APPLE, APPLE_METAL3];
     assertStrictEquals(
       selectGeometryProfile({ vendor: "apple", architecture: "metal-2" }, profiles),
@@ -142,14 +157,14 @@ describe("selectGeometryProfile の選択順", () => {
     );
   });
 
-  it("architecture を持つ規則は vendor が一致しても architecture が違えば当たらない", () => {
+  it("a rule with an architecture does not match a different architecture even if the vendor matches", () => {
     assertStrictEquals(
       selectGeometryProfile({ vendor: "apple", architecture: "metal-2" }, [APPLE_METAL3]),
       DEFAULT_GEOMETRY_PROFILE,
     );
   });
 
-  it("どれにも当たらない adapter は既定プロファイルへ落ちる（照合は完全一致で、大小文字も揃えない）", () => {
+  it("an adapter matching nothing falls back to the default profile (matching is exact, with no case folding)", () => {
     const profiles = [APPLE, APPLE_METAL3];
     for (const adapter of [
       { vendor: "32902", architecture: "" },
@@ -168,8 +183,9 @@ describe("selectGeometryProfile の選択順", () => {
     );
   });
 
-  it("同じ順位に 2 本当たる一覧は、その match の機でなくても fail loudly", () => {
-    // 他の機（ここでは intel）で選択しても落ちる — 衝突する機の CI でしか見えない形にしない
+  it("a list with 2 matches at the same rank fails loudly even on a machine other than that match", () => {
+    // It fails even when selecting on another machine (intel here) — not something visible only in
+    // the CI of the colliding machine
     const unrelated = { vendor: "intel", architecture: "xe2" };
     assertThrows(
       () =>
@@ -187,22 +203,26 @@ describe("selectGeometryProfile の選択順", () => {
     );
   });
 
-  it("全 adapter に当たる表・vendor の無い architecture・空文字の match・重複 id は fail loudly", () => {
+  it("a table matching every adapter, an architecture without a vendor, an empty-string match and a duplicate id fail loudly", () => {
     const adapter = { vendor: "apple", architecture: "metal-3" };
     const cases: readonly (readonly [string, GeometryProfile, string])[] = [
-      ["match 空", profileOf("everything", {}), "only the default profile"],
+      ["empty match", profileOf("everything", {}), "only the default profile"],
       [
-        "architecture だけ",
+        "architecture only",
         profileOf("arch-only", { architecture: "metal-3" }),
         "together with vendor",
       ],
-      ["vendor が空文字", profileOf("empty-vendor", { vendor: "" }), "must not be an empty string"],
       [
-        "architecture が空文字",
+        "empty-string vendor",
+        profileOf("empty-vendor", { vendor: "" }),
+        "must not be an empty string",
+      ],
+      [
+        "empty-string architecture",
         profileOf("empty-arch", { vendor: "apple", architecture: "" }),
         "must not be an empty string",
       ],
-      ["既定と同じ id", profileOf("default", { vendor: "apple" }), "duplicate id"],
+      ["same id as the default", profileOf("default", { vendor: "apple" }), "duplicate id"],
     ];
     for (const [name, profile, message] of cases) {
       assertThrows(() => selectGeometryProfile(adapter, [profile]), CodegenError, message, name);
@@ -214,39 +234,47 @@ describe("selectGeometryProfile の選択順", () => {
     );
   });
 
-  it("埋め込みの一覧は全て門を通り、既定を含まず、match のある各表は自分の match の adapter で選ばれる", () => {
-    // 空の adapter（古い Chromium の adapter.info 欠落）では既定に落ちる
+  it("every embedded table passes the check, the default is not included, and each table with a match is selected on its own match's adapter", () => {
+    // An empty adapter (missing adapter.info in old Chromium) falls back to the default
     assertStrictEquals(
       selectGeometryProfile({ vendor: "", architecture: "", description: "" }),
       DEFAULT_GEOMETRY_PROFILE,
     );
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
       assertGeometryProfile(profile);
-      assert(profile.id !== DEFAULT_GEOMETRY_PROFILE.id, `${profile.id}: 既定が一覧に入っている`);
-      // match を省いた表は注入専用（自動選択の対象外 — 選ばれないことは選択順の検査が見る）
+      assert(
+        profile.id !== DEFAULT_GEOMETRY_PROFILE.id,
+        `${profile.id}: the default is in the list`,
+      );
+      // A table without match is injection-only (outside automatic selection — that it is never
+      // selected is checked by the selection-order tests)
       const { match } = profile;
       if (match === undefined) continue;
       const vendor = match.vendor;
-      assertEquals(typeof vendor, "string", `${profile.id}: vendor 未指定の埋め込み表`);
-      // architecture 未指定の表は、architecture を返さない adapter（Deno）で当たる
+      assertEquals(typeof vendor, "string", `${profile.id}: an embedded table without a vendor`);
+      // A table without an architecture matches adapters that return no architecture (Deno)
       const adapter = {
         vendor: vendor ?? "",
         architecture: match.architecture ?? "",
         description: match.description ?? "",
       };
       assertStrictEquals(selectGeometryProfile(adapter), profile, profile.id);
-      // description で照合する表は、description の取れない adapter（フラグ無しの Chrome）に当たらない
+      // A table matched by description does not match adapters whose description is unavailable
+      // (Chrome without the flag)
       if (match.description !== undefined) {
         assert(
           selectGeometryProfile({ ...adapter, description: "" }) !== profile,
-          `${profile.id}: description の無い adapter に当たった`,
+          `${profile.id}: matched an adapter without a description`,
         );
       }
     }
   });
 });
 
-/** 値と、そこから辿れる全てのオブジェクト / 配列が凍結されているか（凍結されていない最初の path）。 */
+/**
+ * Whether the value and every object / array reachable from it is frozen (the first path that is
+ * not frozen).
+ */
 const unfrozenPath = (value: unknown, path: string): string | undefined => {
   if (typeof value !== "object" || value === null) return undefined;
   if (!Object.isFrozen(value)) return path;
@@ -257,8 +285,8 @@ const unfrozenPath = (value: unknown, path: string): string | undefined => {
   return undefined;
 };
 
-describe("公開の一覧 BUILTIN_GEOMETRY_PROFILES は深く凍結した複製", () => {
-  it("一覧と各表の全ての入れ子が凍結され、書き換えは TypeError で落ちる", () => {
+describe("the public list BUILTIN_GEOMETRY_PROFILES is a deeply frozen copy", () => {
+  it("the list and every nesting of each table are frozen, and writes fail with TypeError", () => {
     assertEquals(unfrozenPath(BUILTIN_GEOMETRY_PROFILES, "BUILTIN_GEOMETRY_PROFILES"), undefined);
     const [first] = BUILTIN_GEOMETRY_PROFILES;
     assertThrows(() => {
@@ -269,18 +297,22 @@ describe("公開の一覧 BUILTIN_GEOMETRY_PROFILES は深く凍結した複製"
     }, TypeError);
   });
 
-  it("値は生成物の定数と同じで、定数そのものは凍結しない（読み込み時に他の module の値を書き換えない）", () => {
-    // 欄の落ちた複製（凍結の複製が型の新しい欄を写し忘れた形）もここで落ちる
+  it("the values equal the generated constants, and the constants themselves are not frozen (loading does not rewrite another module's values)", () => {
+    // A copy missing a field (the frozen copy forgetting to copy a new field of the type) also
+    // fails here
     assertEquals(BUILTIN_GEOMETRY_PROFILES, [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]);
     for (const profile of [APPLE_METAL_3, NVIDIA_AMPERE, NVIDIA_BLACKWELL]) {
-      assert(!Object.isFrozen(profile), `${profile.id}: 生成物の定数が凍結された`);
-      assert(!Object.isFrozen(profile.gemmRows[0].geometry), `${profile.id}: 幾何が凍結された`);
+      assert(!Object.isFrozen(profile), `${profile.id}: the generated constant was frozen`);
+      assert(
+        !Object.isFrozen(profile.gemmRows[0].geometry),
+        `${profile.id}: the geometry was frozen`,
+      );
     }
   });
 });
 
-describe("description の照合と match を省いた注入専用の表", () => {
-  it("description まで一致する規則が (vendor, architecture) だけの規則より先に当たり、一覧の並び順に依らない", () => {
+describe("matching by description and injection-only tables without match", () => {
+  it("a rule matching down to description wins over a rule of (vendor, architecture) only, regardless of the list order", () => {
     const adapter = { vendor: "apple", architecture: "metal-3", description: "Apple M2" };
     for (const profiles of [
       [APPLE, APPLE_METAL3, APPLE_M2],
@@ -291,13 +323,13 @@ describe("description の照合と match を省いた注入専用の表", () => 
     }
   });
 
-  it("description の規則は description が空・無い・違う adapter に当たらず、次の順位へ落ちる", () => {
+  it("a description rule does not match adapters whose description is empty, missing or different, and falls to the next rank", () => {
     const profiles = [APPLE, APPLE_METAL3, APPLE_M2];
     for (const adapter of [
       { vendor: "apple", architecture: "metal-3", description: "" },
       { vendor: "apple", architecture: "metal-3" },
       { vendor: "apple", architecture: "metal-3", description: "Apple M5" },
-      // 前方一致・部分一致・大小文字の揃えはしない
+      // No prefix match, no substring match, no case folding
       { vendor: "apple", architecture: "metal-3", description: "Apple M2 Pro" },
       { vendor: "apple", architecture: "metal-3", description: "apple m2" },
     ]) {
@@ -307,11 +339,12 @@ describe("description の照合と match を省いた注入専用の表", () => 
         JSON.stringify(adapter),
       );
     }
-    // (vendor, architecture) の規則が無ければ vendor だけの規則 → 既定の順に落ちる
+    // Without a (vendor, architecture) rule it falls to the vendor-only rule → the default, in that
+    // order
     const m5 = { vendor: "apple", architecture: "metal-3", description: "Apple M5" };
     assertStrictEquals(selectGeometryProfile(m5, [APPLE, APPLE_M2]), APPLE);
     assertStrictEquals(selectGeometryProfile(m5, [APPLE_M2]), DEFAULT_GEOMETRY_PROFILE);
-    // description が同じでも architecture が違えば当たらない
+    // Even with the same description, a different architecture does not match
     assertStrictEquals(
       selectGeometryProfile({ vendor: "apple", architecture: "metal-2", description: "Apple M2" }, [
         APPLE_M2,
@@ -320,9 +353,10 @@ describe("description の照合と match を省いた注入専用の表", () => 
     );
   });
 
-  it("match を省いた表はどの adapter にも当たらない（照合する欄が全て一致しても既定へ落ちる）", () => {
-    assert(!Object.hasOwn(OPT_IN, "match"), "検査対象の表が match のキーを持っている");
-    // 省いた表の中身が他の規則の表と同じでも、選択の対象に入らないことを見る
+  it("a table without match matches no adapter (it falls to the default even if every field it would compare matches)", () => {
+    assert(!Object.hasOwn(OPT_IN, "match"), "the table under test has the match key");
+    // Even if the omitted table's content equals another rule's table, it stays outside the
+    // selection
     const adapters = [
       { vendor: "apple", architecture: "metal-3", description: "Apple M2" },
       { vendor: "", architecture: "", description: "" },
@@ -335,11 +369,11 @@ describe("description の照合と match を省いた注入専用の表", () => 
         JSON.stringify(adapter),
       );
     }
-    // 他の規則と並べても選択は他の規則だけで決まる
+    // Even placed next to other rules, the selection is decided by the other rules alone
     assertStrictEquals(selectGeometryProfile(adapters[0], [OPT_IN, APPLE]), APPLE);
   });
 
-  it("match を省いた表も門と id の重複検査は受ける（一覧に置いたまま壊れた表に気づけない形にしない）", () => {
+  it("a table without match still goes through the check and the duplicate-id check (a broken table left in the list must not go unnoticed)", () => {
     const adapter = { vendor: "apple", architecture: "metal-3" };
     assertThrows(
       () => selectGeometryProfile(adapter, [OPT_IN, profileOf("opt-in", { vendor: "apple" })]),
@@ -352,33 +386,34 @@ describe("description の照合と match を省いた注入専用の表", () => 
       CodegenError,
       "gemmRows is empty",
     );
-    // 省いた表は同順位の衝突に数えない（match を持たない表同士は照合で競合しない）
+    // Omitted tables do not count as same-rank collisions (tables without match never compete in
+    // matching)
     assertStrictEquals(
       selectGeometryProfile(adapter, [OPT_IN, profileOf("opt-in-2", undefined)]),
       DEFAULT_GEOMETRY_PROFILE,
     );
   });
 
-  it("description だけ・vendor と description だけ・空文字の description の match は門で落ちる", () => {
+  it("a match of description only, of vendor and description only, or with an empty-string description fails the check", () => {
     const adapter = { vendor: "apple", architecture: "metal-3", description: "Apple M2" };
     const cases: readonly (readonly [string, GeometryProfile, string])[] = [
       [
-        "description だけ",
+        "description only",
         profileOf("desc-only", { description: "Apple M2" }),
         "together with both vendor and architecture",
       ],
       [
-        "vendor と description だけ",
+        "vendor and description only",
         profileOf("vendor-desc", { vendor: "apple", description: "Apple M2" }),
         "together with both vendor and architecture",
       ],
       [
-        "architecture と description だけ",
+        "architecture and description only",
         profileOf("arch-desc", { architecture: "metal-3", description: "Apple M2" }),
         "together with vendor",
       ],
       [
-        "description が空文字",
+        "empty-string description",
         profileOf("empty-desc", { vendor: "apple", architecture: "metal-3", description: "" }),
         "must not be an empty string",
       ],
@@ -389,7 +424,7 @@ describe("description の照合と match を省いた注入専用の表", () => 
     }
   });
 
-  it("同じ (vendor, architecture, description) の 2 本は、その機でなくても fail loudly・description が違えば並べられる", () => {
+  it("2 tables with the same (vendor, architecture, description) fail loudly even on another machine, and can sit side by side if the description differs", () => {
     const unrelated = { vendor: "intel", architecture: "xe2", description: "Intel Arc B570" };
     assertThrows(
       () =>
@@ -421,15 +456,15 @@ describe("description の照合と match を省いた注入専用の表", () => 
   });
 });
 
-describe("DEFAULT_GEOMETRY_PROFILE は既存の選択と同じ値", () => {
-  it("match は空・id は default で、自身の門を通る", () => {
+describe("DEFAULT_GEOMETRY_PROFILE has the same values as the existing selection", () => {
+  it("match is empty, id is default, and it passes its own check", () => {
     assertEquals(DEFAULT_GEOMETRY_PROFILE.id, "default");
     assertEquals(DEFAULT_GEOMETRY_PROFILE.match, {});
     assertEquals(DEFAULT_GEOMETRY_PROFILE.provenance, undefined);
     assertGeometryProfile(DEFAULT_GEOMETRY_PROFILE);
   });
 
-  it("行数バケットは rows 1 / 64 / 65 / 512 / 513 / 4096 で gemmGeometryForRows と一致する", () => {
+  it("the row-count buckets match gemmGeometryForRows at rows 1 / 64 / 65 / 512 / 513 / 4096", () => {
     for (const rows of [0, ...BUCKET_ROWS, 0xffff_ffff]) {
       assertEquals(
         gemmRowsGeometry(DEFAULT_GEOMETRY_PROFILE, rows),
@@ -439,7 +474,7 @@ describe("DEFAULT_GEOMETRY_PROFILE は既存の選択と同じ値", () => {
     }
   });
 
-  it("attention / conv2d / i8a8 の欄は既存の既定（defaultGemmGeometry / gemmMTileGeometry / defaultI8a8Geometry）と一致する", () => {
+  it("the attention / conv2d / i8a8 fields match the existing defaults (defaultGemmGeometry / gemmMTileGeometry / defaultI8a8Geometry)", () => {
     assertEquals(DEFAULT_GEOMETRY_PROFILE.attention, {
       qk: defaultGemmGeometry(),
       pv: defaultGemmGeometry(),
@@ -545,14 +580,15 @@ describe("i8a8.conv3d: the conv3d w8a8 geometry is a required profile field", ()
   });
 });
 
-// 導出相（src/runtime/recipe-builders/）は幾何をプロファイルから引いて**明示で**渡すようになった。
-// 既定の機で 1 バイトも動かないことの単体版は「既定プロファイルの値を明示で渡したキー・WGSL が、
-// 導入前の呼び方（省略）とバイト同一」。codegen スナップショットは省略形を固定しているので、
-// ここが両者を繋ぐ。
-describe("既定プロファイルの幾何を明示で渡しても、キーと WGSL は省略時とバイト同一", () => {
+// The derivation phase (src/runtime/recipe-builders/) now reads the geometry from the profile and
+// passes it **explicitly**. The unit version of "not a single byte moves on a default machine" is
+// "keys and WGSL with the default profile's values passed explicitly are byte-identical to the call
+// before its introduction (omitted)". The codegen snapshots pin the omitted form, so this connects
+// the two.
+describe("passing the default profile's geometry explicitly keeps keys and WGSL byte-identical to omitting it", () => {
   const profile = DEFAULT_GEOMETRY_PROFILE;
 
-  it("matmul / bmm / linear（行数バケット）", () => {
+  it("matmul / bmm / linear (row-count buckets)", () => {
     for (const rows of BUCKET_ROWS) {
       const geometry = gemmRowsGeometry(profile, rows);
       for (const v4 of [true, false]) {
@@ -590,7 +626,7 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
     }
   });
 
-  it("融合 attention f32 の ①QK / ③PV（変種の軸を跨いで）", () => {
+  it("①QK / ③PV of fused attention f32 (across the variant axes)", () => {
     const { qk, pv } = profile.attention;
     for (const [v4, compute, score, mask, gqa, rowWindow] of [
       [true, "f32", "f32", false, false, false],
@@ -623,7 +659,7 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
     }
   });
 
-  it("conv2d の implicit GEMM（m タイルの 64 行 / 32 行クラス）", () => {
+  it("implicit GEMM of conv2d (the 64-row / 32-row classes of the m tile)", () => {
     for (const mTile of [64, 32]) {
       const geometry = conv2dProfileGeometry(profile, mTile);
       for (const [weight, v4] of [
@@ -645,7 +681,7 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
     }
   });
 
-  it("i8a8 の linear / 融合 attention ①QK / ③PV", () => {
+  it("i8a8 linear / fused attention ①QK / ③PV", () => {
     const { linear, attentionQk, attentionPv } = profile.i8a8;
     for (const [v4, dp4a] of [
       [true, true],
@@ -657,7 +693,7 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
         linearI8a8Key(v4, dp4a, linear, "i4", 32),
         linearI8a8Key(v4, dp4a, undefined, "i4", 32),
       );
-      // S の f16 格納（s16）は v4 経路専用（生成の門が落とす）
+      // f16 storage of S (s16) is v4-path only (the generation check rejects it)
       for (const score of v4 ? (["f32", "f16"] as const) : (["f32"] as const)) {
         assertEquals(
           attentionQkI8a8Key(v4, dp4a, score, attentionQk),
@@ -680,60 +716,72 @@ describe("既定プロファイルの幾何を明示で渡しても、キーと 
   });
 });
 
-// skinny-M 向けタイル幾何の選択（src/kernels/gemm-geometry.ts の `gemmGeometryForRows`）と、
-// それが matmul / bmm / linear のキー・生成物へどう流れるか（GPU 不要）。
+// Selection of the tile geometry for skinny M (`gemmGeometryForRows` of
+// src/kernels/gemm-geometry.ts) and how it flows into the keys and generated code of matmul / bmm /
+// linear (no GPU needed).
 //
-// 検証の眼目は 3 点:
+// The focus of the checks is 3 points:
 //
-// 1. **バケット境界**が表のとおりで、M ≥ 128 は既定幾何のまま（Anima / SBV2 の既存キーと
-//    既存性能を動かさない境界）。
-// 2. **キーと生成物が同じ幾何**から出る。片方だけ行数を渡し忘れると、キャッシュに載った別幾何の
-//    WGSL が executor の dispatch 数と噛み合わず、出力タイルが例外なしに欠ける。
-// 3. **幾何を変えても数値契約は動かない**（K タイル 16・外側 t 昇順・内側 kk 昇順・積和の字面）。
-//    ここは字面の固定で、値のビット一致そのものは tests/gpu_gemm_skinny_test.ts が実 GPU で見る。
+// 1. **The bucket boundaries** follow the table, and M ≥ 128 stays on the default geometry (the
+//    boundary that does not move the existing keys and existing performance of Anima / SBV2).
+// 2. **Keys and generated code come from the same geometry**. If only one of them forgets to pass
+//    the row count, the WGSL of another geometry in the cache does not mesh with the executor's
+//    dispatch count, and output tiles go missing without an exception.
+// 3. **Changing the geometry does not move the numeric contract** (K tile 16, outer t ascending,
+//    inner kk ascending, the text of the multiply-add). This pins the text; the bit equality of the
+//    values itself is checked on a real GPU by tests/gpu_gemm_skinny_test.ts.
 
-/** 表の代表点（バケットごとに「境界の内側」と「境界を 1 越えた側」を持つ）。 */
+/**
+ * Representative points of the table (for each bucket, "inside the boundary" and "1 past the
+ * boundary").
+ */
 const ROW_SAMPLES = [1, 4, 16, 17, 64, 65, 128, 4096] as const;
 
 describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
-  it("gemmGeometryForRows のバケット境界は 64 / 512 で、M >= 513 は既定幾何へ落ちる", () => {
-    // 小 M バケット（2026-08-11 掃引: M=1/4/64 とも M16N16 が対既定 ×3.0〜3.2 の最良。
-    // M=64 は行タイル 4 枚 = 重みを 4 回読み直してもなお workgroup 数の勝ち）
+  it("the bucket boundaries of gemmGeometryForRows are 64 / 512, and M >= 513 falls to the default geometry", () => {
+    // Small-M bucket (2026-08-11 sweep: M16N16 was best at ×3.0–3.2 against the default for
+    // M=1/4/64. M=64 is 4 row tiles = still a win in workgroup count even reading the weights 4
+    // times)
     for (const rows of [0, 1, 2, 4, 16, 17, 32, 63, 64]) {
       assertEquals(gemmGeometryForRows(rows), { regM: 1, regN: 4, wgX: 4, wgY: 16 }, `M=${rows}`);
     }
-    // 中 M バケット（掃引 M=318 ×1.67 / M=512 ×1.28。波①で Anima/SBV2 の E2E A/B とセット採用）
+    // Medium-M bucket (sweep M=318 ×1.67 / M=512 ×1.28. Adopted together with the E2E A/B of
+    // Anima/SBV2 in iteration ①)
     for (const rows of [65, 127, 128, 129, 318, 512]) {
       assertEquals(gemmGeometryForRows(rows), { regM: 4, regN: 4, wgX: 8, wgY: 16 }, `M=${rows}`);
     }
-    // MUST: ここから上は既定のまま（掃引の実測点の外 — DiT の 2026-08-10 実測選定を動かさない）
+    // MUST: above this stays default (outside the sweep's measured points — do not move the DiT
+    // selection measured on 2026-08-10)
     for (const rows of [513, 1024, 4096, 65536]) {
       assertEquals(gemmGeometryForRows(rows), defaultGemmGeometry(), `M=${rows}`);
     }
   });
 
-  it("バケットの幾何は全て充填の整除条件を満たす（穴の空くタイル形を表に置けない）", () => {
+  it("every bucket geometry meets the exact-division condition of the fill (a tile shape with holes cannot be put in the table)", () => {
     for (const rows of ROW_SAMPLES) {
       const geometry = gemmGeometryForRows(rows);
-      // 落ちる組み合わせは「充填が届かない語が 0 のまま内積へ入る」= 例外の出ない誤値
+      // A failing combination is "words the fill never reaches enter the dot product as 0" = a
+      // wrong value without an exception
       assertGemmGeometry(geometry, `M=${rows}`);
-      // 共有メモリは WebGPU 既定上限 16,384 B（sa = tileM·16 f32 + sb = 16·(tileN/4) vec4）
+      // Shared memory is within the WebGPU default limit of 16,384 B (sa = tileM·16 f32 + sb =
+      // 16·(tileN/4) vec4)
       const shared =
         gemmTileM(geometry) * GEMM_TILE_K * 4 + GEMM_TILE_K * (gemmTileN(geometry) / 4) * 16;
-      assertEquals(shared <= 16384, true, `M=${rows}: 共有 ${shared} B`);
-      // 小 M バケットは行タイル 4 枚（= 重みの読み直し 4 回）以内。掃引の結論は「読み直しを
-      // 増やしてでも workgroup を増やす方が勝つ」だが、際限なく増えると転送律速へ戻る
+      assertEquals(shared <= 16384, true, `M=${rows}: shared ${shared} B`);
+      // The small-M bucket stays within 4 row tiles (= reading the weights 4 times). The sweep's
+      // conclusion is "adding workgroups wins even at the cost of more re-reads", but growing
+      // without bound goes back to being transfer-bound
       if (rows <= 64) {
         assertEquals(
           Math.ceil(Math.max(rows, 1) / gemmTileM(geometry)) <= 4,
           true,
-          `M=${rows}: 行タイルが 5 枚以上になる`,
+          `M=${rows}: 5 or more row tiles`,
         );
       }
     }
   });
 
-  it("gemmGeometryForRows は非負整数以外を fail loudly にする", () => {
+  it("gemmGeometryForRows fails loudly on anything but a non-negative integer", () => {
     for (const rows of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       assertThrows(
         () => gemmGeometryForRows(rows),
@@ -743,20 +791,21 @@ describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
     }
   });
 
-  it("行数はキーに載り、バケットが違えば別パイプラインになる", () => {
-    // 幾何判別子 `r{regM}x{regN}w{wgX}` はタイル辺と併せて幾何を一意に決める（wgY は tileM/regM）
+  it("the row count goes into the key, and different buckets make different pipelines", () => {
+    // The geometry discriminator `r{regM}x{regN}w{wgX}` determines the geometry uniquely together
+    // with the tile edges (wgY is tileM/regM)
     assertEquals(linearKey("f32", true, "f32", 4), "linear:v2:f32:reg16x16r1x4w4v4");
     assertEquals(linearKey("f32", true, "f32", 64), "linear:v2:f32:reg16x16r1x4w4v4");
     assertEquals(linearKey("f32", true, "f32", 318), "linear:v2:f32:reg64x32r4x4w8v4");
     assertEquals(matmulKey(false, 4), "matmul:v2:f32:reg16x16r1x4w4");
     assertEquals(bmmKey(true, 17), "bmm:v2:f32:reg16x16r1x4w4v4");
-    // 3 バケットのキーは互いに衝突しない
+    // The keys of the 3 buckets do not collide with each other
     const keys = [4, 318, 4096].map((rows) => linearKey("f32", true, "f32", rows));
     assertEquals(new Set(keys).size, keys.length, keys.join(", "));
   });
 
-  it("行数を渡さない呼び出しと M >= 513 は既存のキー・生成物をバイト単位で保つ", () => {
-    // 融合 attention とスナップショットが通る経路（行数を持たない）
+  it("calls without a row count and M >= 513 keep the existing keys and generated code byte for byte", () => {
+    // The path fused attention and the snapshots go through (no row count)
     assertEquals(linearKey("f32", true), "linear:v2:f32:reg128x128r8x8w16v4");
     assertEquals(matmulKey(true), "matmul:v2:f32:reg128x128r8x8w16v4");
     assertEquals(bmmKey(false), "bmm:v2:f32:reg128x128r8x8w16");
@@ -768,7 +817,7 @@ describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
     }
   });
 
-  it("生成物の workgroup 形・共有タイル・出力タイル原点はキーの幾何と一致する", () => {
+  it("the workgroup shape, shared tiles and output tile origin of the generated code match the key's geometry", () => {
     for (const rows of ROW_SAMPLES) {
       const geometry = gemmGeometryForRows(rows);
       const tileM = gemmTileM(geometry);
@@ -783,40 +832,46 @@ describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
         assertEquals(
           wgsl.includes(`@compute @workgroup_size(${geometry.wgX}, ${geometry.wgY})`),
           true,
-          `${where}: workgroup 形`,
+          `${where}: workgroup shape`,
         );
         assertEquals(
           wgsl.includes(`var<workgroup> sa: array<f32, ${tileM * GEMM_TILE_K}>;`),
           true,
-          `${where}: 共有 A タイル`,
+          `${where}: shared A tile`,
         );
         assertEquals(
           wgsl.includes(`var<workgroup> sb: array<vec4<f32>, ${GEMM_TILE_K * (tileN / 4)}>;`),
           true,
-          `${where}: 共有 B タイル`,
+          `${where}: shared B tile`,
         );
         assertEquals(
           wgsl.includes(`let orow0 = wid.y * ${tileM}u + lid.y * ${geometry.regM}u;`),
           true,
-          `${where}: 出力タイルの行原点`,
+          `${where}: row origin of the output tile`,
         );
-        // acc は regM × (regN/4) 本ちょうど（1 本多い / 少ないは静的展開の取り違え）
+        // acc is exactly regM × (regN/4) variables (one more / fewer is a mistake in the static
+        // unrolling)
         assertEquals(
           wgsl.includes(`var acc${geometry.regM - 1}_${quads - 1} = vec4<f32>(`),
           true,
-          `${where}: acc の右下`,
+          `${where}: bottom-right acc`,
         );
-        assertEquals(wgsl.includes(`var acc${geometry.regM}_0 =`), false, `${where}: acc の行超過`);
-        assertEquals(wgsl.includes(`var acc0_${quads} =`), false, `${where}: acc の列超過`);
+        assertEquals(
+          wgsl.includes(`var acc${geometry.regM}_0 =`),
+          false,
+          `${where}: acc rows overflow`,
+        );
+        assertEquals(wgsl.includes(`var acc0_${quads} =`), false, `${where}: acc columns overflow`);
       }
     }
   });
 
-  it("幾何を変えても K 縮約の刻みと積和の字面は動かない（ADR 0022 の数値契約）", () => {
+  it("changing the geometry does not move the K reduction step or the text of the multiply-add (the numeric contract of ADR 0022)", () => {
     for (const rows of ROW_SAMPLES) {
       const wgsl = linearWgsl("f32", true, "f32", rows);
       const where = `linear M=${rows}`;
-      // 外側 t 昇順 / 内側 kk 昇順 / K タイル 16 — 1 出力要素あたりの加算順序そのもの
+      // Outer t ascending / inner kk ascending / K tile 16 — the very order of additions per output
+      // element
       assertEquals(wgsl.includes(`let tiles = (dims.k + 15u) / ${GEMM_TILE_K}u;`), true, where);
       assertEquals(wgsl.includes("for (var t = 0u; t < tiles; t = t + 1u) {"), true, where);
       assertEquals(
@@ -824,19 +879,20 @@ describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
         true,
         where,
       );
-      // MUST: 積和は `acc = acc + a * b` の字面のまま（fma を明示しない）
+      // MUST: the multiply-add stays the text `acc = acc + a * b` (no explicit fma)
       assertEquals(wgsl.includes("acc0_0 = acc0_0 + "), true, where);
-      assertEquals(wgsl.includes("fma("), false, `${where}: fma の明示`);
+      assertEquals(wgsl.includes("fma("), false, `${where}: explicit fma`);
     }
   });
 
-  it("同じ行数からは常にバイト単位で同じ WGSL が出る（決定性）", () => {
+  it("the same row count always produces byte-identical WGSL (determinism)", () => {
     for (const rows of ROW_SAMPLES) {
       assertEquals(linearWgsl("f32", true, "f32", rows), linearWgsl("f32", true, "f32", rows));
       assertEquals(matmulWgsl(false, rows), matmulWgsl(false, rows));
     }
-    // バケットが違えば生成物も違い（キーだけ分かれて中身が同じ = 幾何が流れていない）、
-    // 同じバケットなら行数が違っても生成物は同じ（キーの基数が M の値ぶん爆発しない）
+    // Different buckets give different generated code (keys split while the content is the same =
+    // the geometry is not flowing), and within the same bucket a different row count gives the same
+    // generated code (the key's cardinality does not explode with the value of M)
     assertNotEquals(matmulWgsl(true, 64), matmulWgsl(true, 65));
     assertNotEquals(matmulWgsl(true, 512), matmulWgsl(true, 513));
     assertEquals(matmulWgsl(true, 4), matmulWgsl(true, 32));
@@ -844,17 +900,18 @@ describe("gemmGeometryForRows buckets and the keys / WGSL they produce", () => {
   });
 });
 
-// 明示の幾何（src/kernels/gemm.ts の `GemmSpec.geometry` — tools/geometry-sweep の計測用の差し替え点）。
-// 守るのは 2 点: 省略時の生成物が 1 バイトも動かないこと（本番の経路は渡さない）と、渡したときに
-// キーと WGSL が**同じ幾何**を名乗ること（片方だけ読み落とすとキャッシュに載った別幾何の WGSL が
-// dispatch 数と噛み合わずタイルが欠ける）。
-// The byte-identity half is covered by the default-profile describe above; this block keeps the
-// override half (a non-default geometry wins over the per-op resolution in both key and WGSL).
+// Explicit geometry (`GemmSpec.geometry` of src/kernels/gemm.ts — the override point for
+// measurement in tools/geometry-sweep). It protects 2 points: the generated code without it does
+// not move by a single byte (the production path does not pass it), and when passed, keys and WGSL
+// name **the same geometry** (if only one of them misses it, the WGSL of another geometry in the
+// cache does not mesh with the dispatch count and tiles go missing). The byte-identity half is
+// covered by the default-profile describe above; this block keeps the override half (a non-default
+// geometry wins over the per-op resolution in both key and WGSL).
 describe("an explicit geometry overrides the per-op resolution", () => {
-  it("明示の幾何は op 別の解決より優先し、キーと WGSL が同じ幾何を名乗る", () => {
+  it("an explicit geometry wins over the per-op resolution, and keys and WGSL name the same geometry", () => {
     const explicit: GemmGeometry = { regM: 4, regN: 4, wgX: 8, wgY: 8 };
     const workgroup = `@compute @workgroup_size(${explicit.wgX}, ${explicit.wgY})`;
-    // linear: M=4096 のバケット（既定 128×128）を上書きする
+    // linear: overrides the M=4096 bucket (default 128×128)
     assertEquals(
       linearKey("f16", true, "f32", 4096, undefined, explicit),
       "linear:v2:f32:reg32x32r4x4w8v4:wf16",
@@ -863,7 +920,7 @@ describe("an explicit geometry overrides the per-op resolution", () => {
       linearWgsl("f16", true, "f32", 4096, undefined, explicit).includes(workgroup),
       true,
     );
-    // 融合 attention: 既定固定を上書きする
+    // Fused attention: overrides the fixed default
     assertEquals(
       attentionQkKey(true, "f32", "f32", false, false, false, explicit),
       "attention_qk:v1:f32:reg32x32r4x4w8v4",
@@ -872,13 +929,14 @@ describe("an explicit geometry overrides the per-op resolution", () => {
       attentionPvWgsl(true, "f32", "f32", false, false, explicit).includes(workgroup),
       true,
     );
-    // conv2d: m タイルの解決を上書きする（辺と workgroup 形で幾何が決まる綴り）
+    // conv2d: overrides the m-tile resolution (the spelling where the edges and the workgroup shape
+    // determine the geometry)
     assertEquals(
       conv2dIgemmKey("f16", true, 64, explicit),
       "conv2d:v3:f32:igemm32x32v4:wg8x8:wf16",
     );
     assertEquals(conv2dIgemmWgsl("f16", true, 64, explicit).includes(workgroup), true);
-    // 門は明示でも同じ（穴の空くタイル形は生成時に落ちる）
+    // The check is the same when explicit (a tile shape with holes fails at generation)
     assertThrows(
       () => linearWgsl("f16", true, "f32", 4096, undefined, { regM: 3, regN: 4, wgX: 8, wgY: 8 }),
       CodegenError,
@@ -897,7 +955,7 @@ describe("gemmRowsGeometry", () => {
     );
   const small = gemmGeometryForRows(1);
 
-  it("maxRows ちょうどはその規則・1 越えると次の規則（最後の Infinity は u32 の上端まで当たる）", () => {
+  it("exactly maxRows takes that rule, 1 past takes the next rule (the final Infinity matches up to the top of u32)", () => {
     const profile = rules([10, small], [100, M64N32], [Number.POSITIVE_INFINITY, M64N64]);
     const expected: readonly (readonly [number, GemmGeometry])[] = [
       [0, small],
@@ -912,21 +970,21 @@ describe("gemmRowsGeometry", () => {
     }
   });
 
-  it("規則が狭義昇順でない・最後が Infinity でない・空の表は、選択でも引く側でも fail loudly", () => {
+  it("rules not strictly ascending, a last rule that is not Infinity, and an empty table fail loudly both at selection and at lookup", () => {
     const adapter = { vendor: "test", architecture: "" };
     const broken: readonly (readonly [string, GeometryProfile, string])[] = [
       [
-        "降順",
+        "descending",
         rules([100, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]),
         "strictly increasing",
       ],
       [
-        "同値",
+        "equal values",
         rules([10, small], [10, M64N32], [Number.POSITIVE_INFINITY, M64N64]),
         "strictly increasing",
       ],
-      ["最後が有限", rules([10, small], [100, M64N32]), "Infinity"],
-      ["空", rules(), "empty"],
+      ["finite last rule", rules([10, small], [100, M64N32]), "Infinity"],
+      ["empty", rules(), "empty"],
     ];
     for (const [name, profile, message] of broken) {
       assertThrows(() => gemmRowsGeometry(profile, 1), CodegenError, message, name);
@@ -934,15 +992,15 @@ describe("gemmRowsGeometry", () => {
     }
   });
 
-  it("行数は u32 の非負整数以外を fail loudly にする（gemmGeometryForRows と同じ門）", () => {
+  it("the row count fails loudly on anything but a non-negative u32 integer (the same check as gemmGeometryForRows)", () => {
     for (const rows of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       assertThrows(() => gemmRowsGeometry(DEFAULT_GEOMETRY_PROFILE, rows), CodegenError);
     }
   });
 });
 
-describe("conv2dProfileGeometry と幾何の門", () => {
-  it("m タイルのクラス 64 / 32 は rows64 / rows32 を引き、それ以外は fail loudly", () => {
+describe("conv2dProfileGeometry and the geometry check", () => {
+  it("m-tile classes 64 / 32 look up rows64 / rows32, and anything else fails loudly", () => {
     const profile = profileOf(
       "conv",
       { vendor: "test" },
@@ -955,7 +1013,7 @@ describe("conv2dProfileGeometry と幾何の門", () => {
     assertThrows(() => conv2dProfileGeometry(profile, 16), CodegenError, "no class matches");
   });
 
-  it("整除の破れた幾何を持つ表は、その op に当たる前（選択の時点）で落ちる", () => {
+  it("a table holding a geometry that breaks exact division fails before reaching that op (at selection time)", () => {
     const adapter = { vendor: "test", architecture: "" };
     const hole: GemmGeometry = { regM: 3, regN: 4, wgX: 8, wgY: 8 };
     const broken: readonly (readonly [string, GeometryProfile])[] = [
@@ -997,15 +1055,16 @@ describe("conv2dProfileGeometry と幾何の門", () => {
   });
 });
 
-/** requestDevice に届いたことを示す番兵（実 device は作らない）。 */
+/** A sentinel showing requestDevice was reached (no real device is created). */
 class DeviceRequested extends Error {
   override readonly name = "DeviceRequested";
 }
 
 /**
- * `navigator.gpu` を、requestDevice の呼び出し回数を数えて番兵で落ちる偽物に差し替えて `body` を
- * 走らせる（GPU 不要・実機があっても device を作らない）。差し替えは finally で必ず外す。adapter の limits は
- * 全て 1 << 20 で、`limits` の欄だけ上書きする（上限の門の検査用）。
+ * Runs `body` with `navigator.gpu` swapped for a fake that counts requestDevice calls and fails
+ * with the sentinel (no GPU needed; no device is created even on a real machine). The swap is
+ * always removed in finally. The adapter's limits are all 1 << 20, and only the fields of `limits`
+ * are overridden (for the limit checks).
  */
 const withCountingGpu = async (
   body: () => Promise<void>,
@@ -1017,7 +1076,7 @@ const withCountingGpu = async (
     features: new Set<string>(),
     requestDevice: (): Promise<never> => {
       deviceRequests += 1;
-      return Promise.reject(new DeviceRequested("requestDevice に届いた"));
+      return Promise.reject(new DeviceRequested("requestDevice was reached"));
     },
   };
   Object.defineProperty(navigator, "gpu", {
@@ -1032,8 +1091,8 @@ const withCountingGpu = async (
   return deviceRequests;
 };
 
-describe("acquireGpu の幾何プロファイル注入口", () => {
-  it("正しい表（match を省いた注入専用の表・description 付きの表を含む）は門を通って requestDevice まで進む（差し替えが経路に乗っていることの対照）", async () => {
+describe("the geometry profile injection point of acquireGpu", () => {
+  it("a valid table (including an injection-only table without match and a table with a description) passes the check and proceeds to requestDevice (the control showing the swap is on the path)", async () => {
     for (const profile of [APPLE_METAL3, OPT_IN, APPLE_M2]) {
       const requests = await withCountingGpu(async () => {
         await assertRejects(
@@ -1047,7 +1106,7 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
     }
   });
 
-  it("公開の一覧の凍結した表もそのまま注入でき、保持する複製（structuredClone）は凍結を持ち越さない", async () => {
+  it("a frozen table from the public list can be injected as is, and the copy it keeps (structuredClone) does not carry the freeze over", async () => {
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
       const requests = await withCountingGpu(async () => {
         await assertRejects(
@@ -1058,22 +1117,22 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
         );
       });
       assertEquals(requests, 1, profile.id);
-      // 注入経路の複製は structuredClone（acquire.ts）— 凍結は複製に写らない
+      // The copy on the injection path is structuredClone (acquire.ts) — the freeze is not copied
       assertEquals(unfrozenPath(structuredClone(profile), profile.id), profile.id);
     }
   });
 
-  it("壊れた表（id が空・整除の破れた幾何）は device を作る前に fail loudly", async () => {
+  it("a broken table (empty id, a geometry breaking exact division) fails loudly before the device is created", async () => {
     const hole: GemmGeometry = { regM: 3, regN: 4, wgX: 8, wgY: 8 };
     const broken: readonly (readonly [string, GeometryProfile, string])[] = [
-      ["id が空", profileOf("", { vendor: "test" }), "id is empty"],
+      ["empty id", profileOf("", { vendor: "test" }), "id is empty"],
       [
-        "description だけの match",
+        "match of description only",
         profileOf("desc-only", { description: "Apple M2" }),
         "together with both vendor and architecture",
       ],
       [
-        "gemmRows の幾何",
+        "geometry of gemmRows",
         profileOf(
           "rows",
           { vendor: "test" },
@@ -1084,12 +1143,12 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
         "gemmRows",
       ],
       [
-        "attention.pv の幾何",
+        "geometry of attention.pv",
         profileOf("pv", { vendor: "test" }, { attention: { qk: M64N64, pv: hole } }),
         "attention.pv",
       ],
       [
-        "i8a8.linear の幾何",
+        "geometry of i8a8.linear",
         profileOf(
           "i8a8",
           { vendor: "test" },
@@ -1112,12 +1171,15 @@ describe("acquireGpu の幾何プロファイル注入口", () => {
           name,
         );
       });
-      assertEquals(requests, 0, `${name}: 壊れた表で requestDevice に届いた`);
+      assertEquals(requests, 0, `${name}: a broken table reached requestDevice`);
     }
   });
 });
 
-/** 偽の adapter が返す情報（apple-metal-3 が当たる 4 欄 — 自動選択の結果が既定と見分けられる）。 */
+/**
+ * The information the fake adapter returns (the 4 fields apple-metal-3 matches — the result of
+ * automatic selection is distinguishable from the default).
+ */
 const FAKE_INFO: GPUAdapterInfo = platformObject<GPUAdapterInfo>({
   vendor: "apple",
   architecture: "metal-3",
@@ -1129,9 +1191,10 @@ const FAKE_INFO: GPUAdapterInfo = platformObject<GPUAdapterInfo>({
 });
 
 /**
- * `navigator.gpu` を、requestDevice の呼び出し回数を数え、limits を満たす偽の device を返す偽物に
- * 差し替えて `body` を走らせる（GPU 不要 — GpuContext は本物で組まれる）。`info` を省くと `adapter.info`
- * の無い adapter（古い Chromium）になる。差し替えは finally で必ず外す。
+ * Runs `body` with `navigator.gpu` swapped for a fake that counts requestDevice calls and returns a
+ * fake device meeting the limits (no GPU needed — the GpuContext is built for real). Omitting
+ * `info` gives an adapter without `adapter.info` (old Chromium). The swap is always removed in
+ * finally.
  */
 const withFakeAdapter = async (
   info: GPUAdapterInfo | undefined,
@@ -1160,15 +1223,19 @@ const withFakeAdapter = async (
   return deviceRequests;
 };
 
-/** コールバックの戻りの型を外れて来る値（JS の呼び手・async 関数）を、型検査を経ずに渡すための口。 */
+/**
+ * A gate for passing values that fall outside the callback's return type (JS callers, async
+ * functions) without going through type checking.
+ */
 const untypedCallback = (
   returned: unknown,
 ): ((adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined) =>
-  // テスト専用の境界: 型が拒む戻り（Promise など）を、型の外から来る値として再現する
+  // Test-only boundary: reproduces a return the type rejects (a Promise and the like) as a value
+  // coming from outside the type
   (() => returned) as unknown as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined;
 
-describe("acquireGpu の幾何プロファイル注入口（コールバック形 — ADR 0117 決定 6）", () => {
-  it("adapter の情報（GpuContext.adapterInfo と同じ値）で 1 度だけ呼ばれ、表を返すとその複製が注入される", async () => {
+describe("the geometry profile injection point of acquireGpu (callback form — ADR 0117 decision 6)", () => {
+  it("is called exactly once with the adapter's information (the same value as GpuContext.adapterInfo), and a returned table is injected as a copy", async () => {
     const seen: GPUAdapterInfo[] = [];
     const requests = await withFakeAdapter(FAKE_INFO, async () => {
       const gpu = await acquireGpu({
@@ -1183,7 +1250,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
         assertStrictEquals(seen[0], FAKE_INFO);
         const injected = gpu[RUNTIME_INTERNAL].geometryProfile;
         assertEquals(injected, OPT_IN);
-        assert(injected !== OPT_IN, "注入した表が複製されていない");
+        assert(injected !== OPT_IN, "the injected table was not copied");
       } finally {
         gpu.destroy();
       }
@@ -1191,7 +1258,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
     assertEquals(requests, 1);
   });
 
-  it("undefined を返すと注入しない（Session の構築が adapter から埋め込みの表を選ぶ — 指定無しと同じ）", async () => {
+  it("returning undefined injects nothing (Session construction selects an embedded table from the adapter — the same as not specifying one)", async () => {
     await withFakeAdapter(FAKE_INFO, async () => {
       let calls = 0;
       const gpu = await acquireGpu({
@@ -1203,7 +1270,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       try {
         assertEquals(calls, 1);
         assertEquals(gpu[RUNTIME_INTERNAL].geometryProfile, undefined);
-        // 自動選択の対照: この adapter には埋め込みの表が当たる（既定ではない）
+        // Control for automatic selection: an embedded table matches this adapter (not the default)
         assertEquals(selectGeometryProfile(gpu.adapterInfo).id, APPLE_METAL_3.id);
       } finally {
         gpu.destroy();
@@ -1211,7 +1278,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
     });
   });
 
-  it("adapter.info の無い adapter では空値に正規化した情報で呼ばれる", async () => {
+  it("an adapter without adapter.info calls it with the information normalized to empty values", async () => {
     const seen: GPUAdapterInfo[] = [];
     await withFakeAdapter(undefined, async () => {
       const gpu = await acquireGpu({
@@ -1232,7 +1299,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
     });
   });
 
-  it("壊れた表を返すと device を作る前に GpuFeatureError（直接渡した表と同じ門）", async () => {
+  it("returning a broken table gives GpuFeatureError before the device is created (the same check as a table passed directly)", async () => {
     const broken = profileOf("", { vendor: "test" });
     const requests = await withFakeAdapter(FAKE_INFO, async () => {
       await assertRejects(
@@ -1241,12 +1308,12 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
         "geometryProfile (callback return value): ",
       );
     });
-    assertEquals(requests, 0, "壊れた表で requestDevice に届いた");
+    assertEquals(requests, 0, "a broken table reached requestDevice");
   });
 
-  it("コールバックが投げた例外はそのまま伝わり、device を作らない", async () => {
+  it("an exception thrown by the callback propagates as is, and no device is created", async () => {
     class AppError extends Error {}
-    const thrown = new AppError("保存した表が読めない");
+    const thrown = new AppError("the saved table cannot be read");
     const requests = await withFakeAdapter(FAKE_INFO, async () => {
       const caught = await assertRejects(() =>
         acquireGpu({
@@ -1257,10 +1324,10 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       );
       assertStrictEquals(caught, thrown);
     });
-    assertEquals(requests, 0, "コールバックが投げたのに requestDevice に届いた");
+    assertEquals(requests, 0, "requestDevice was reached although the callback threw");
   });
 
-  it("Promise（thenable）を返すと await せずに GpuFeatureError で拒み、device を作らない", async () => {
+  it("returning a Promise (thenable) is rejected with GpuFeatureError without awaiting it, and no device is created", async () => {
     let awaited = false;
     const thenable = {
       // oxlint-disable-next-line unicorn/no-thenable -- a fake thenable is the input under test
@@ -1277,20 +1344,22 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
           "the callback returned a Promise",
         );
       });
-      assertEquals(requests, 0, "Promise を返したのに requestDevice に届いた");
+      assertEquals(requests, 0, "requestDevice was reached although a Promise was returned");
     }
-    assertEquals(awaited, false, "thenable を await した");
+    assertEquals(awaited, false, "the thenable was awaited");
   });
 
-  it("async 関数が reject しても GpuFeatureError で拒み、その reject は unhandled rejection にならない", async () => {
+  it("an async function that rejects is refused with GpuFeatureError, and its rejection does not become an unhandled rejection", async () => {
     const unhandled: unknown[] = [];
     // Node reports unhandled rejections through process events (no globalThis event target).
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason);
     };
-    // async 関数そのものをコールバックにする（呼ばれた時点で reject 済みの Promise が生まれる — JS の呼び手の形）。
-    // テスト専用の境界: 型が拒む async 関数を、型の外から来る値として渡す
-    // deno-lint-ignore require-await -- await の無い async 関数の reject が検査の対象そのもの
+    // The async function itself is the callback (a Promise already rejected at call time is born —
+    // the shape of a JS caller).
+    // Test-only boundary: passes an async function the type rejects as a value coming from outside
+    // the type
+    // deno-lint-ignore require-await -- the rejection without await is what is under test
     const asyncCallback = (async () => {
       throw new Error("x");
     }) as unknown as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined;
@@ -1303,23 +1372,29 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
           "the callback returned a Promise",
         );
       });
-      assertEquals(requests, 0, "Promise を返したのに requestDevice に届いた");
-      // unhandled rejection の判定はマイクロタスクを捌き切った後のタスク境界で走る — 1 タスク待ってから見る
+      assertEquals(requests, 0, "requestDevice was reached although a Promise was returned");
+      // The unhandled-rejection decision runs at the task boundary after microtasks are drained —
+      // wait 1 task before looking
       await new Promise((resolve) => setTimeout(resolve, 0));
-      assertEquals(unhandled, [], "async コールバックの reject が unhandled rejection になった");
+      assertEquals(
+        unhandled,
+        [],
+        "the rejection of the async callback became an unhandled rejection",
+      );
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
   });
 
-  it("別 realm（iframe・node:vm）の async 関数・reject 済みの Promise も GpuFeatureError で拒み、その reject は unhandled rejection にならない", async () => {
+  it("an async function and an already rejected Promise from another realm (iframe, node:vm) are also refused with GpuFeatureError, and their rejection does not become an unhandled rejection", async () => {
     const unhandled: unknown[] = [];
     // Node reports unhandled rejections through process events (no globalThis event target).
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason);
     };
     const realm = createContext({});
-    // 別 realm の Promise はこの realm の Promise の instance ではない（instanceof では見分けられない形）
+    // A Promise of another realm is not an instance of this realm's Promise (instanceof cannot tell
+    // them apart)
     const foreignAsync: unknown = runInContext(
       "(async () => { throw new Error('foreign async'); })",
       realm,
@@ -1332,12 +1407,13 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
     process.on("unhandledRejection", onUnhandled);
     try {
       for (const [name, callback] of [
-        // テスト専用の境界: 型が拒む async 関数を、型の外から来る値として渡す
+        // Test-only boundary: passes an async function the type rejects as a value coming from
+        // outside the type
         [
-          "async 関数",
+          "async function",
           foreignAsync as (adapterInfo: GPUAdapterInfo) => GeometryProfile | undefined,
         ],
-        ["reject 済みの Promise", untypedCallback(foreignRejected)],
+        ["already rejected Promise", untypedCallback(foreignRejected)],
       ] as const) {
         const requests = await withFakeAdapter(FAKE_INFO, async () => {
           await assertRejects(
@@ -1347,24 +1423,33 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
             name,
           );
         });
-        assertEquals(requests, 0, `${name}: Promise を返したのに requestDevice に届いた`);
+        assertEquals(
+          requests,
+          0,
+          `${name}: requestDevice was reached although a Promise was returned`,
+        );
       }
-      // unhandled rejection の判定はマイクロタスクを捌き切った後のタスク境界で走る — 1 タスク待ってから見る
+      // The unhandled-rejection decision runs at the task boundary after microtasks are drained —
+      // wait 1 task before looking
       await new Promise((resolve) => setTimeout(resolve, 0));
-      assertEquals(unhandled, [], "別 realm の Promise の reject が unhandled rejection になった");
+      assertEquals(
+        unhandled,
+        [],
+        "the rejection of a Promise from another realm became an unhandled rejection",
+      );
     } finally {
       process.off("unhandledRejection", onUnhandled);
     }
   });
 
-  it("Promise を名乗る自作の thenable（getter の then・toStringTag の偽装）も then を呼ばずに拒む", async () => {
+  it("a hand-made thenable posing as a Promise (a then getter, a faked toStringTag) is also refused without calling then", async () => {
     let called = 0;
     const then = (): void => {
       called += 1;
     };
     const thenables: readonly (readonly [string, unknown])[] = [
       [
-        "getter の then",
+        "then getter",
         {
           // oxlint-disable-next-line unicorn/no-thenable -- a fake thenable is the input under test
           get then() {
@@ -1373,7 +1458,7 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
         },
       ],
       // oxlint-disable-next-line unicorn/no-thenable -- a fake thenable is the input under test
-      ["toStringTag が Promise", { [Symbol.toStringTag]: "Promise", then }],
+      ["toStringTag of Promise", { [Symbol.toStringTag]: "Promise", then }],
     ];
     for (const [name, thenable] of thenables) {
       const requests = await withFakeAdapter(FAKE_INFO, async () => {
@@ -1384,12 +1469,16 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
           name,
         );
       });
-      assertEquals(requests, 0, `${name}: Promise を返したのに requestDevice に届いた`);
+      assertEquals(
+        requests,
+        0,
+        `${name}: requestDevice was reached although a Promise was returned`,
+      );
     }
-    assertEquals(called, 0, "自作の thenable の then を呼んだ");
+    assertEquals(called, 0, "then of the hand-made thenable was called");
   });
 
-  it("adapter.info の無い adapter で渡る空値の情報は凍結されている（共有値をコールバックが書き換えられない）", async () => {
+  it("the empty-value information passed for an adapter without adapter.info is frozen (the callback cannot rewrite the shared value)", async () => {
     const seen: GPUAdapterInfo[] = [];
     await withFakeAdapter(undefined, async () => {
       const gpu = await acquireGpu({
@@ -1400,10 +1489,10 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
       });
       gpu.destroy();
     });
-    assert(Object.isFrozen(seen[0]), "空値の adapter 情報が凍結されていない");
+    assert(Object.isFrozen(seen[0]), "the empty-value adapter information is not frozen");
   });
 
-  it("直接渡した表は従来どおり adapter を取る前に門を通る（コールバック形の追加で順序が動いていない）", async () => {
+  it("a table passed directly still goes through the check before the adapter is requested (adding the callback form did not move the order)", async () => {
     let adapterRequests = 0;
     Object.defineProperty(navigator, "gpu", {
       value: {
@@ -1427,50 +1516,54 @@ describe("acquireGpu の幾何プロファイル注入口（コールバック�
   });
 });
 
-describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
-  it("型の無い値（unknown）も門を通れば GeometryProfile として読める", () => {
+describe("assertGeometryProfile is a type predicate narrowing unknown to a table", () => {
+  it("an untyped value (unknown) that passes the check can be read as a GeometryProfile", () => {
     const value: unknown = structuredClone(APPLE_M2);
     assertGeometryProfile(value);
-    // 型述語の絞りが効いていなければここで型検査が落ちる
+    // If the type predicate's narrowing did not work, type checking would fail here
     const profile: GeometryProfile = value;
     assertEquals(profile, APPLE_M2);
   });
 
-  it("欄の欠け・型違いは TypeError ではなく CodegenError で欄を名指す", () => {
+  it("a missing field or a wrong type names the field with CodegenError instead of TypeError", () => {
     const { gemmRows: _gemmRows, ...withoutRows } = OPT_IN;
     const cases: readonly (readonly [string, unknown, string])[] = [
       ["null", null, "table is not an object"],
-      ["id が数", { ...OPT_IN, id: 5 }, "id is not a string"],
-      ["match.vendor が数", { ...OPT_IN, match: { vendor: 1 } }, "match.vendor is not a string"],
-      ["gemmRows の欠け", withoutRows, "gemmRows is not an array"],
+      ["id is a number", { ...OPT_IN, id: 5 }, "id is not a string"],
       [
-        "gemmRows の規則に geometry が無い",
+        "match.vendor is a number",
+        { ...OPT_IN, match: { vendor: 1 } },
+        "match.vendor is not a string",
+      ],
+      ["gemmRows missing", withoutRows, "gemmRows is not an array"],
+      [
+        "a gemmRows rule without geometry",
         { ...OPT_IN, gemmRows: [{ maxRows: Number.POSITIVE_INFINITY }] },
         "gemmRows[0].geometry is not an object",
       ],
       [
-        "maxRows が文字列",
+        "maxRows is a string",
         { ...OPT_IN, gemmRows: [{ maxRows: "64", geometry: M64N64 }] },
         "maxRows of gemmRows[0] is not a number",
       ],
-      ["attention の欠け", { ...OPT_IN, attention: undefined }, "attention is not an object"],
+      ["attention missing", { ...OPT_IN, attention: undefined }, "attention is not an object"],
       [
-        "幾何の欄が文字列",
+        "a geometry field is a string",
         { ...OPT_IN, attention: { qk: { ...M64N64, wgX: "16" }, pv: M64N64 } },
         "attention.qk: geometry wgX must be a positive integer (16)",
       ],
       [
-        "i8a8 の tileK の欠け",
+        "tileK of i8a8 missing",
         { ...OPT_IN, i8a8: { ...OPT_IN.i8a8, linear: M64N64 } },
         "i8a8.linear: geometry tileK must be a positive integer (undefined)",
       ],
       [
-        "provenance の欄の欠け",
+        "a provenance field missing",
         { ...OPT_IN, provenance: {} },
         "provenance.sweep is not a string (missing)",
       ],
       [
-        "provenance.userAgent が文字列",
+        "provenance.userAgent is a string",
         {
           ...OPT_IN,
           provenance: {
@@ -1492,8 +1585,11 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
     }
   });
 
-  it("疎な配列の穴（gemmRows・provenance.userAgent の先頭・途中・末尾）は TypeError ではなく CodegenError で添字を名指す", () => {
-    /** `length` の配列の `entries` の添字だけを埋めた疎な配列（JS の呼び手が `new Array(n)` で組む形）。 */
+  it("holes of a sparse array (head, middle and tail of gemmRows and provenance.userAgent) name the index with CodegenError instead of TypeError", () => {
+    /**
+     * A sparse array of `length` with only the indices of `entries` filled (the shape a JS caller
+     * builds with `new Array(n)`).
+     */
     const sparse = (length: number, entries: Readonly<Record<number, unknown>>): unknown[] => {
       const array: unknown[] = new Array(length);
       for (const [index, value] of Object.entries(entries)) array[Number(index)] = value;
@@ -1511,32 +1607,32 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
     };
     const cases: readonly (readonly [string, unknown, string])[] = [
       [
-        "gemmRows が new Array(1)",
+        "gemmRows is new Array(1)",
         { ...OPT_IN, gemmRows: sparse(1, {}) },
         "gemmRows[0] is missing",
       ],
       [
-        "gemmRows の先頭の穴",
+        "hole at the head of gemmRows",
         { ...OPT_IN, gemmRows: sparse(4, { 1: r64, 2: r512, 3: rest }) },
         "gemmRows[0] is missing",
       ],
       [
-        "gemmRows の途中の穴",
+        "hole in the middle of gemmRows",
         { ...OPT_IN, gemmRows: sparse(4, { 0: r64, 1: r512, 3: rest }) },
         "gemmRows[2] is missing",
       ],
       [
-        "gemmRows の末尾の穴",
+        "hole at the tail of gemmRows",
         { ...OPT_IN, gemmRows: sparse(4, { 0: r64, 1: r512, 2: rest }) },
         "gemmRows[3] is missing",
       ],
       [
-        "userAgent が new Array(1)",
+        "userAgent is new Array(1)",
         { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(1, {}) } },
         "provenance.userAgent[0] is missing",
       ],
       [
-        "userAgent の途中の穴",
+        "hole in the middle of userAgent",
         { ...OPT_IN, provenance: { ...provenance, userAgent: sparse(3, { 0: "a", 2: "b" }) } },
         "provenance.userAgent[1] is missing",
       ],
@@ -1546,7 +1642,7 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
     }
   });
 
-  it("acquireGpu に型の外から来た疎な配列の表は device を作る前に GpuFeatureError（TypeError にならない）", async () => {
+  it("a table with a sparse array coming into acquireGpu from outside the type gives GpuFeatureError before the device is created (not a TypeError)", async () => {
     const holed: unknown[] = new Array(3);
     holed[0] = DEFAULT_GEOMETRY_PROFILE.gemmRows[0];
     holed[2] = DEFAULT_GEOMETRY_PROFILE.gemmRows[2];
@@ -1557,10 +1653,10 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
         "geometryProfile (callback return value): Geometry profile 'opt-in': gemmRows[1] is missing",
       );
     });
-    assertEquals(requests, 0, "疎な配列の表で requestDevice に届いた");
+    assertEquals(requests, 0, "a table with a sparse array reached requestDevice");
   });
 
-  it("acquireGpu に型の外から来た欠けた表は device を作る前に GpuFeatureError（TypeError にならない）", async () => {
+  it("an incomplete table coming into acquireGpu from outside the type gives GpuFeatureError before the device is created (not a TypeError)", async () => {
     const requests = await withCountingGpu(async () => {
       await assertRejects(
         () => acquireGpu({ geometryProfile: untypedCallback({ id: "broken" }) }),
@@ -1568,11 +1664,14 @@ describe("assertGeometryProfile は unknown を表へ絞る型述語", () => {
         "geometryProfile (callback return value): Geometry profile 'broken': gemmRows is not an array",
       );
     });
-    assertEquals(requests, 0, "欠けた表で requestDevice に届いた");
+    assertEquals(requests, 0, "an incomplete table reached requestDevice");
   });
 });
 
-/** WebGPU の既定の上限（どの device も最低これを出す — 仕様の limits の既定値）。 */
+/**
+ * WebGPU's default limits (every device offers at least these — the default values of the spec's
+ * limits).
+ */
 const WEBGPU_DEFAULT_LIMITS: WorkgroupLimits = {
   maxComputeInvocationsPerWorkgroup: 256,
   maxComputeWorkgroupSizeX: 256,
@@ -1580,16 +1679,22 @@ const WEBGPU_DEFAULT_LIMITS: WorkgroupLimits = {
   maxComputeWorkgroupStorageSize: 16_384,
 };
 
-/** スレッド数 512（wgX 32 × wgY 16）— 整除は満たし、共有メモリは 16,384 B ちょうど。 */
+/** 512 threads (wgX 32 × wgY 16) — meets exact division, with shared memory at exactly 16,384 B. */
 const THREADS_512: GemmGeometry = { regM: 8, regN: 4, wgX: 32, wgY: 16 };
-/** 共有メモリ 20,480 B（M64N256 — 64 · (64 + 256)）— スレッド数は 256。 */
+/** 20,480 B of shared memory (M64N256 — 64 · (64 + 256)) — 256 threads. */
 const STORAGE_20K: GemmGeometry = { regM: 8, regN: 8, wgX: 32, wgY: 8 };
-/** i8a8 の共有メモリ 32,768 B（tileK 128 · (128 + 128)）— スレッド数は 256。 */
+/** 32,768 B of i8a8 shared memory (tileK 128 · (128 + 128)) — 256 threads. */
 const I8A8_STORAGE_32K: I8a8Geometry = { regM: 8, regN: 8, wgX: 16, wgY: 16, tileK: 128 };
-/** 変数ごとの 16 バイト切り上げが効く極小の i8a8 幾何（sa は 4 B → 16 B）。 */
+/**
+ * A tiny i8a8 geometry where the per-variable round-up to 16 bytes matters (sa goes from 4 B to 16
+ * B).
+ */
 const I8A8_TINY: I8a8Geometry = { regM: 1, regN: 4, wgX: 1, wgY: 1, tileK: 4 };
 
-/** WGSL の要素型のバイト数（共有タイルが使う型だけ — 知らない型は数え漏れにせず落とす）。 */
+/**
+ * Bytes per WGSL element type (only the types the shared tiles use — an unknown type fails instead
+ * of being left uncounted).
+ */
 const WGSL_TYPE_BYTES: Readonly<Record<string, number>> = {
   f32: 4,
   f16: 2,
@@ -1599,8 +1704,9 @@ const WGSL_TYPE_BYTES: Readonly<Record<string, number>> = {
 };
 
 /**
- * 生成された WGSL の `var<workgroup>` 宣言から、WebGPU が上限と比べる量（変数ごとの `roundUp(16, SizeOf(T))` の
- * 総和）を数える。読めない宣言が 1 本でもあれば落とす（数え漏れで一致したことにしない）。
+ * Counts, from the `var<workgroup>` declarations of the generated WGSL, the quantity WebGPU
+ * compares against the limit (the sum of `roundUp(16, SizeOf(T))` per variable). Fails if even one
+ * declaration cannot be read (an uncounted declaration must not pass as a match).
  */
 const declaredWorkgroupBytes = (wgsl: string): number => {
   const declarations = [
@@ -1609,17 +1715,20 @@ const declaredWorkgroupBytes = (wgsl: string): number => {
   assertEquals(
     declarations.length,
     wgsl.match(/var<workgroup>/g)?.length ?? 0,
-    "読めない var<workgroup> の宣言がある",
+    "there is a var<workgroup> declaration that cannot be read",
   );
-  assert(declarations.length > 0, "var<workgroup> の宣言が無い");
+  assert(declarations.length > 0, "no var<workgroup> declaration");
   return declarations.reduce((total, [, type, count]) => {
     const bytes = WGSL_TYPE_BYTES[type];
-    assert(bytes !== undefined, `知らない要素型 ${type}`);
+    assert(bytes !== undefined, `unknown element type ${type}`);
     return total + Math.ceil((bytes * Number(count)) / 16) * 16;
   }, 0);
 };
 
-/** 突き合わせる f32 / f16 GEMM の幾何（既定・埋め込みの表の全欄・上限を超える持ち込みの幾何）。 */
+/**
+ * The f32 / f16 GEMM geometries to compare (the default, every field of the embedded tables,
+ * brought-in geometries exceeding the limits).
+ */
 const gemmGeometriesOf = (profile: GeometryProfile): GemmGeometry[] => [
   ...profile.gemmRows.map((rule) => rule.geometry),
   profile.attention.qk,
@@ -1637,26 +1746,26 @@ const SAMPLE_I8A8 = [
 
 const label = (geometry: GemmGeometry | I8a8Geometry): string => JSON.stringify(geometry);
 
-describe("共有メモリの導出（純関数）は codegen の var<workgroup> 宣言の総量と一致する", () => {
-  it("f32 / f16 GEMM 骨格（linear・融合 attention ①QK / ③PV・conv2d・matmul）", () => {
+describe("the derivation of shared memory (a pure function) matches the total of codegen's var<workgroup> declarations", () => {
+  it("f32 / f16 GEMM skeletons (linear, fused attention ①QK / ③PV, conv2d, matmul)", () => {
     for (const geometry of SAMPLE_GEMM) {
       const cases: readonly (readonly [string, GemmCompute, string])[] = [
         ["matmul", "f32", matmulWgsl(true, 128, geometry)],
         ["linear f32", "f32", linearWgsl("f32", true, "f32", 128, undefined, geometry)],
-        ["linear f16 計算", "f16", linearWgsl("f32", true, "f16", 128, undefined, geometry)],
+        ["linear f16 compute", "f16", linearWgsl("f32", true, "f16", 128, undefined, geometry)],
         [
           "attention_qk f32",
           "f32",
           attentionQkWgsl(true, "f32", "f32", false, false, false, geometry),
         ],
         [
-          "attention_qk f16 計算",
+          "attention_qk f16 compute",
           "f16",
           attentionQkWgsl(true, "f16", "f32", false, false, false, geometry),
         ],
         ["attention_pv f32", "f32", attentionPvWgsl(true, "f32", "f32", false, false, geometry)],
         [
-          "attention_pv f16 計算",
+          "attention_pv f16 compute",
           "f16",
           attentionPvWgsl(true, "f16", "f32", false, false, geometry),
         ],
@@ -1687,20 +1796,21 @@ describe("共有メモリの導出（純関数）は codegen の var<workgroup> 
         );
       }
     }
-    // 切り上げの対照: 要素数 × 4 の素朴な和（4 + 16 = 20）とは違う値になる
+    // Control for the round-up: a value different from the naive sum of element count × 4 (4 + 16 =
+    // 20)
     assertEquals(i8a8WorkgroupStorageBytes(I8A8_TINY), 32);
   });
 });
 
-describe("注入の表の上限の門（device の workgroup の上限 — adapter の limits に対して device を作る前に）", () => {
-  it("既定の表と埋め込みの表は全て WebGPU の既定の上限で通る（自動選択の経路が上限の門を通らなくてよい根拠）", () => {
+describe("the limit check of injected tables (the device's workgroup limits — against the adapter's limits, before the device is created)", () => {
+  it("the default table and every embedded table pass under WebGPU's default limits (the reason the automatic selection path need not go through the limit check)", () => {
     assert(BUILTIN_GEOMETRY_PROFILES.length > 0);
     for (const profile of SAMPLE_PROFILES) {
       assertGeometryProfileWithinLimits(profile, WEBGPU_DEFAULT_LIMITS);
     }
   });
 
-  it("上限ちょうど（256 スレッド・16,384 B の既定幾何）の表は requestDevice まで進む", async () => {
+  it("a table exactly at the limits (the default geometry with 256 threads, 16,384 B) proceeds to requestDevice", async () => {
     const profile = profileOf("at-limit", undefined);
     const requests = await withCountingGpu(async () => {
       await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
@@ -1708,7 +1818,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     assertEquals(requests, 1);
   });
 
-  it("スレッド数 wgX × wgY が上限超え → GpuFeatureError（欄・幾何・上限を名指す）で requestDevice 0 回", async () => {
+  it("thread count wgX × wgY over the limit → GpuFeatureError (naming the field, the geometry and the limit) with 0 requestDevice calls", async () => {
     const profile = profileOf("threads", undefined, {
       attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
     });
@@ -1720,8 +1830,9 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
           " (regM=8 regN=4 wgX=32 wgY=16): thread count wgX × wgY 512 exceeds maxComputeInvocationsPerWorkgroup 256)",
       );
     }, WEBGPU_DEFAULT_LIMITS);
-    assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
-    // 対照: 上限は定数ではなく adapter の limits — 1024 invocation の adapter では通る
+    assertEquals(requests, 0, "a table over the limit reached requestDevice");
+    // Control: the limit is not a constant but the adapter's limits — it passes on an adapter with
+    // 1024 invocations
     const allowed = await withCountingGpu(
       async () => {
         await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
@@ -1731,7 +1842,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     assertEquals(allowed, 1);
   });
 
-  it("@workgroup_size の成分が上限超え（スレッド数は収まる）→ GpuFeatureError で成分の上限を名指す", async () => {
+  it("a component of @workgroup_size over the limit (thread count fits) → GpuFeatureError naming the component's limit", async () => {
     const profile = profileOf("size-x", undefined, {
       attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
     });
@@ -1752,7 +1863,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     assertEquals(requests, 0);
   });
 
-  it("@workgroup_size の Y 成分だけが上限超え → GpuFeatureError で Y の上限を名指す", async () => {
+  it("only the Y component of @workgroup_size over the limit → GpuFeatureError naming the Y limit", async () => {
     const profile = profileOf("size-y", undefined, {
       attention: { qk: THREADS_512, pv: defaultGemmGeometry() },
     });
@@ -1773,7 +1884,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     assertEquals(requests, 0);
   });
 
-  it("共有メモリが上限超え → GpuFeatureError（gemmRows の段と i8a8 の欄を全て名指す）で requestDevice 0 回", async () => {
+  it("shared memory over the limit → GpuFeatureError (naming every gemmRows step and i8a8 field) with 0 requestDevice calls", async () => {
     const profile = profileOf("storage", undefined, {
       gemmRows: [
         DEFAULT_GEOMETRY_PROFILE.gemmRows[0],
@@ -1795,7 +1906,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
         error.message,
       );
     }, WEBGPU_DEFAULT_LIMITS);
-    assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
+    assertEquals(requests, 0, "a table over the limit reached requestDevice");
     const allowed = await withCountingGpu(
       async () => {
         await assertRejects(() => acquireGpu({ geometryProfile: profile }), DeviceRequested);
@@ -1805,7 +1916,7 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
     assertEquals(allowed, 1);
   });
 
-  it("コールバックの戻りにも同じ門が効く（構造の門を通った後・device を作る前）", async () => {
+  it("the same check applies to the callback's return (after the structural check, before the device is created)", async () => {
     const profile = profileOf("callback", undefined, {
       conv2d: { rows64: STORAGE_20K, rows32: gemmMTileGeometry(32) },
     });
@@ -1824,10 +1935,10 @@ describe("注入の表の上限の門（device の workgroup の上限 — adapt
       );
     }, WEBGPU_DEFAULT_LIMITS);
     assertEquals(calls, 1);
-    assertEquals(requests, 0, "上限超えの表で requestDevice に届いた");
+    assertEquals(requests, 0, "a table over the limit reached requestDevice");
   });
 
-  it("構造の門が先（壊れていて上限も超える表は構造の文言で落ちる）", async () => {
+  it("the structural check comes first (a table that is broken and also over the limits fails with the structural wording)", async () => {
     const hole: GemmGeometry = { regM: 3, regN: 4, wgX: 32, wgY: 16 };
     const profile = profileOf("order", undefined, { attention: { qk: hole, pv: THREADS_512 } });
     const requests = await withCountingGpu(async () => {

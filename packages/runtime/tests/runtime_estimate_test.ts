@@ -1,5 +1,5 @@
-// 見積りの中間バッファ規則（`src/runtime/estimate.ts` の `transientSlotBytes`）の門。
-// GPU を 1 つも触らない純関数テスト。
+// The check of the estimate's intermediate-buffer rule (`transientSlotBytes` in
+// `src/runtime/estimate.ts`). Pure-function tests that touch no GPU.
 //
 // It pins one point: the intermediate total is the **sum of the plan's regions** (ADR 0093:
 // live-interval packing — each slot, largest first, goes to the conflict-free region it grows least,
@@ -26,8 +26,8 @@ const workspaceBytes = (model: PreparedModel): number => {
 };
 
 /**
- * `x[1,2] → matmul(w1[2,2]) → h1[1,2] → matmul(w2[2,3]) → h2[1,3] → matmul(w3[3,1]) → h3[1,1]`
- * の 3 段。中間は 8 / 12 / 4 バイトで、**同時に生きるのは高々 2 本**（8+12 = 20）。
+ * `x[1,2] → matmul(w1[2,2]) → h1[1,2] → matmul(w2[2,3]) → h2[1,3] → matmul(w3[3,1]) → h3[1,1]`,
+ * 3 steps. The intermediates are 8 / 12 / 4 bytes, and **at most 2 are live at once** (8+12 = 20).
  */
 const chainModel = (): PreparedModel =>
   openGraph(
@@ -95,7 +95,7 @@ const reluChainModel = (): PreparedModel =>
     ],
   });
 
-test("生存を終えた区間は配り直され、総量が増えない", () => {
+test("ranges whose lifetime has ended are handed out again, and the total does not grow", () => {
   // Three 8 B intermediates; intervals h1 [0,2), h2 [1,4), h3 [3,end). h2 overlaps h1, and behind
   // it would grow region 0 by 256 + 8 - 8 = 256, not less than its own 8 B, so it opens region 1.
   // h3 reads h2 and takes h1's dead range in region 0 (growth 0) = 2 regions × 8 = 16.
@@ -134,7 +134,7 @@ const pinnedNeighbourModel = (): PreparedModel =>
     ],
   });
 
-test("グラフ出力（pinned）は生存を終えず、後続は整列した次の区間へ回る", () => {
+test("graph outputs (pinned) never end their lifetime, and later slots move to the next aligned range", () => {
   // Slots by allocation clock, [start, end): b 260 B [0, 2), a 8 B [1, 4), h1 8 B [3, end) pinned,
   // h2 8 B [5, 7), h3 8 B [6, end) pinned. Read / write pairs (never in one region): b–a, a–h1,
   // h1–h2, h2–h3.
@@ -152,7 +152,7 @@ test("グラフ出力（pinned）は生存を終えず、後続は整列した�
   assertEquals(workspaceBytes(pinnedNeighbourModel()), 272);
 });
 
-test("渡された maxBufferSize を中間の領域の上限に使う（実行相と同じ granted 値 — ADR 0093 決定 4）", () => {
+test("the given maxBufferSize is the limit for intermediate regions (the same granted value as the execution phase — ADR 0093 decision 4)", () => {
   // The same graph as above. Without maxBufferSize the region limit is the larger of the binding
   // limit and the core default (256 MiB), so h3 sits at offset 256 of region 0 = 272. With
   // maxBufferSize 260, offset 256 + 8 = 264 exceeds the region limit; region 1 holds h2, which h3

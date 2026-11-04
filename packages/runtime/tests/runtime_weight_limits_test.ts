@@ -1,19 +1,23 @@
-// 重み・state の確保寸法を device の絶対上限と突き合わせる門（確保の**前**に落とす）。
+// The check that compares the allocation sizes of weights and state with the device's absolute
+// limits (failing **before** allocation).
 //
-// 動機は「確保失敗の検出は block 単位 errorScope に全面依存」（ADR 0070 決定 4）の弱点 —
-// errorScope の網は実装の報告品質に依存し（out-of-memory scope が黙る device が実在する —
-// docs/known-issues.md の Metal 節）、捕まえても診断は block 粒度で、数 GiB 転送した後にしか
-// 出ない。無効バッファへの writeBuffer は警告も出さない no-op なので、網が抜けた先は
-// 「重みが空のまま走り出す」になる。
+// The motivation is the weakness of "detecting allocation failures relies entirely on per-block
+// errorScopes" (ADR 0070 decision 4) — the errorScope net depends on the implementation's reporting
+// quality (devices whose out-of-memory scope stays silent do exist — the Metal section of
+// docs/known-issues.md), and even when it catches something the diagnostic is per block and comes
+// only after several GiB have been transferred. A writeBuffer into an invalid buffer is a no-op
+// without even a warning, so whatever slips through the net becomes "running with empty weights".
 //
-// ここが固定するのは 4 点:
-// ① 寸法の取り方 — 適格席は payload・適格外席は **f32 展開後**・companion scale も 1 本数える
-// ② 上限は 2 本とも見る（maxStorageBufferBindingSize / maxBufferSize）
-// ③ 超過は**全件を 1 回で**列挙し、上限ぴったりは通る（境界）
-// ④ 実際に確保より前で落ちる — フェイク device の createBuffer が 1 回も呼ばれない
+// Four things are pinned here:
+// ① how sizes are taken — the payload for eligible classes, **the size after f32 expansion** for
+//    ineligible ones, and a companion scale counts as one buffer too
+// ② both limits are checked (maxStorageBufferBindingSize / maxBufferSize)
+// ③ excesses are listed **all at once**, and exactly the limit passes (the boundary)
+// ④ it really fails before allocation — the fake device's createBuffer is never called
 //
-// 実 GPU は使わない。上限は環境ごとに違い、実物で超過を作るには数 GiB の資産が要るので、門
-// そのものは「limits を絞ったフェイク device」でしか決定論的に固定できない。
+// No real GPU is used. The limits differ per environment, and producing an excess on real hardware
+// needs assets of several GiB, so the check itself can only be pinned deterministically with "a
+// fake device with tightened limits".
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStringIncludes, assertThrows } from "@std/assert";
@@ -40,12 +44,12 @@ import {
 } from "./helpers/model-fixture.ts";
 
 // ---------------------------------------------------------------------------
-// 材料（グラフ・フェイク device）
+// Fixtures (graphs, a fake device)
 // ---------------------------------------------------------------------------
 
 /**
- * linear 1 本（重み `w` は f16 で適格 = payload がそのまま GPU に載る）。
- * w の payload は 8×4×2 = **64 バイト**・bias `b` は f32 の生バイト常駐で **32 バイト**。
+ * A single linear (the weight `w` is f16 and eligible = the payload goes onto the GPU as is).
+ * w's payload is 8×4×2 = **64 bytes**; bias `b` is f32 with raw-byte residency, **32 bytes**.
  */
 const f16LinearGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -67,14 +71,16 @@ const f16LinearGraph = (): DeclarationJson => ({
 });
 
 /**
- * 4 種類の確保が同居するグラフ（席ごとに寸法の出どころが違うことを 1 本で見る）:
- * - `w` = i8 常駐 → payload **16 バイト**（8×2）+ companion scale **32 バイト**（8 チャネル×4）
- * - `b` = 生バイト常駐 → **32 バイト**
- * - `g` = 重みスロット以外（mul）の消費で適格外 → payload は 16 バイトだが**確保は展開後の
- *   32 バイト**
+ * A graph where 4 kinds of allocation coexist (one graph shows that the size comes from a different
+ * place per residency class):
+ * - `w` = i8-resident → payload **16 bytes** (8×2) + companion scale **32 bytes** (8 channels×4)
+ * - `b` = raw-byte residency → **32 bytes**
+ * - `g` = ineligible through a consumer other than a weight slot (mul) → the payload is 16 bytes,
+ *   but **the allocation is the 32 bytes after expansion**
  *
- * scale が payload より大きいのは意図的（`[8,2]` は行が短くチャネルが多い）— scale を数えない
- * 実装が「payload だけ見て通す」形をここで踏む。
+ * The scale is larger than the payload on purpose (`[8,2]` has short rows and many channels) — an
+ * implementation that does not count the scale trips here on "looking only at the payload and
+ * passing".
  */
 const mixedSeatGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -101,20 +107,26 @@ const mixedSeatGraph = (): DeclarationJson => ({
   ],
 });
 
-/** このファイルの 2 グラフの格納（IR v2 の宣言は持たない — 束縛表側の欄）。 */
+/**
+ * The storage of this file's 2 graphs (IR v2 declarations do not carry it — a binding-table field).
+ */
 const STORAGE: StorageMap = { w: "f16", g: "f16" };
 const MIXED_STORAGE: StorageMap = { w: "int8-sym", g: "f16" };
 
-/** 宣言 → 常駐計画（重みの中身は 1 バイトも要らない — プランナは純関数）。 */
+/**
+ * Declarations → residency plan (not a single byte of weight data is needed — the planner is a pure
+ * function).
+ */
 const residencyOf = (
   graph: DeclarationJson,
   storage: StorageMap,
 ): ReturnType<typeof planWeightResidency> => planWeightResidency(mergeGraph(graph, storage));
 
 /**
- * 上限 2 本だけを指定した limits（他のキーは門が見ないので WebGPU core 既定で埋める）。
- * 引数の順は「束縛上限・バッファ上限」で、**あえて逆転させられる**（2 本を独立に見ている
- * ことの検出条件そのもの）。
+ * Limits with only the 2 limits specified (the check does not look at the other keys, so they are
+ * filled with the WebGPU core defaults). The argument order is "binding limit, buffer limit", and
+ * the two **can deliberately be inverted** (that is exactly the condition that detects whether both
+ * are checked independently).
  */
 const limits = (maxStorageBufferBindingSize: number, maxBufferSize: number): RequiredLimits => ({
   maxBufferSize,
@@ -130,13 +142,15 @@ const limits = (maxStorageBufferBindingSize: number, maxBufferSize: number): Req
   maxComputeWorkgroupsPerDimension: 65535,
 });
 
-/** 確保の到達を数える器（門が確保より前で落ちることの観測点）。 */
+/**
+ * A counter of allocations reached (the observation point for the check failing before allocation).
+ */
 type AllocSpy = { createBuffer: number };
 
 /**
- * createBuffer が呼ばれたら**必ず分かる**フェイク device。DOM 型全体は再現しないので cast で
- * 渡す（tests/helpers/fake-gpu.ts と同じテスト専用の境界）。errorScope と queue は後始末経路が
- * 触るだけなので素通しの no-op でよい。
+ * A fake device that **always notices** a createBuffer call. The whole DOM type is not reproduced,
+ * so it is passed with a cast (the same test-only boundary as tests/helpers/fake-gpu.ts).
+ * errorScope and queue are only touched by the cleanup path, so pass-through no-ops suffice.
  */
 const spyDevice = (spy: AllocSpy): GPUDevice =>
   ({
@@ -146,7 +160,7 @@ const spyDevice = (spy: AllocSpy): GPUDevice =>
     popErrorScope: (): Promise<GPUError | null> => Promise.resolve(null),
     createBuffer: (): GPUBuffer => {
       spy.createBuffer += 1;
-      throw new Error("注入: createBuffer が呼ばれた");
+      throw new Error("injected: createBuffer was called");
     },
     queue: {
       writeBuffer: (): void => {},
@@ -158,22 +172,25 @@ const spyGpu = (spy: AllocSpy, gpuLimits: RequiredLimits): GpuContext =>
   new GpuContext(spyDevice(spy), readAdapterInfo({}), gpuLimits, new Set());
 
 // ---------------------------------------------------------------------------
-// chunkLength の値域門（GPU 非依存の純関数 — src/runtime/generation-context.ts）
+// The range check of chunkLength (a GPU-independent pure function —
+// src/runtime/generation-context.ts)
 // ---------------------------------------------------------------------------
 
 /**
- * 論理長の搬送先が u32 なので上限は 0xffffffff（ADR 0066 決定 4 / 追記 4）。ここに書くのは
- * 実装の private 定数の**写し**ではなく、文言に出る上限をそのまま観測する形にしてある
- * （実装が上限を変えれば下の assertStringIncludes が落ちる）。
+ * The logical length is carried in a u32, so the limit is 0xffffffff (ADR 0066 decision 4 /
+ * addendum 4). What is written here is not a **copy** of the implementation's private constant; it
+ * observes the limit as it appears in the message (if the implementation changes the limit, the
+ * assertStringIncludes below fails).
  */
 const MAX_LOGICAL_LENGTH = 0xffffffff;
 
-test("assertChunkLength は 1..u32 上限の整数だけを通す", () => {
-  // 境界の内側（下端・上端とも通る）
+test("assertChunkLength passes only integers from 1 to the u32 limit", () => {
+  // Inside the boundaries (both the lower and the upper end pass)
   assertChunkLength(1);
   assertChunkLength(MAX_LOGICAL_LENGTH);
-  // 0 / 負 / 非整数 / 上限超え / NaN は全て同じ門で落ちる。estimator も同じ門を通るので、
-  // ここが緩むと「実構築が拒否する指定に見積りだけが正常値を返す」形になる。
+  // 0 / negative / non-integer / over the limit / NaN all fail in the same check. The estimator
+  // goes through the same check, so loosening it here would let "only the estimate return a normal
+  // value for a setting the real construction rejects".
   for (const bad of [0, -1, 1.5, MAX_LOGICAL_LENGTH + 1, Number.NaN]) {
     const error = assertThrows(() => assertChunkLength(bad), ExecutionError, "chunkLength");
     assertStringIncludes(error.message, `chunkLength ${bad}`);
@@ -182,12 +199,12 @@ test("assertChunkLength は 1..u32 上限の整数だけを通す", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 寸法の取り方（純関数の門）
+// How sizes are taken (the pure-function check)
 // ---------------------------------------------------------------------------
 
-test("上限を超える payload は席ごとの確保寸法で名指しされる", () => {
+test("a payload over the limit is named with the allocation size of its residency class", () => {
   const residency = residencyOf(f16LinearGraph(), STORAGE);
-  // w は 64 バイト（束縛上限 32 を超える）・b は 32 バイトちょうどで通る。
+  // w is 64 bytes (over the binding limit of 32); b is exactly 32 bytes and passes.
   const error = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(32, 64)),
     ExecutionError,
@@ -200,9 +217,10 @@ test("上限を超える payload は席ごとの確保寸法で名指しされ�
   );
 });
 
-test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見る", () => {
+test("both limits, maxStorageBufferBindingSize and maxBufferSize, are checked", () => {
   const residency = residencyOf(f16LinearGraph(), STORAGE);
-  // 束縛上限だけが緩い device（仕様が期待する大小関係が崩れた形）でも素通ししない。
+  // Not passed through even on a device where only the binding limit is loose (the size relation
+  // the spec expects is broken).
   const bufferOnly = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(1024, 32)),
     ExecutionError,
@@ -211,10 +229,11 @@ test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見
   assertEquals(
     bufferOnly.message.includes("maxStorageBufferBindingSize"),
     false,
-    "超えていない上限は文言に出さない（どれを直せばよいかが埋もれる）",
+    "a limit that is not exceeded does not appear in the message (it would bury which one to fix)",
   );
 
-  // 両方を超えるときは 1 行に 2 本とも並ぶ（どちらを上げても足りないことが読める）。
+  // When both are exceeded, both appear on one line (so it reads that raising either one is not
+  // enough).
   const both = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(16, 48)),
     ExecutionError,
@@ -223,18 +242,20 @@ test("上限は maxStorageBufferBindingSize と maxBufferSize の 2 本とも見
   assertStringIncludes(both.message, "exceeds maxBufferSize 48 bytes by 16 bytes");
 });
 
-test("適格外席は f32 展開後の寸法で見る・companion scale も 1 本として見る", () => {
+test("ineligible classes are checked at the size after f32 expansion, and a companion scale counts as one buffer", () => {
   const residency = residencyOf(mixedSeatGraph(), MIXED_STORAGE);
   const error = assertThrows(
     () => assertWeightsWithinLimits(residency, limits(16, 16)),
     ExecutionError,
   );
-  // 適格外の `m.g` は payload 16 バイト（= 上限ちょうど）だが、GPU に載るのは展開後の 32 バイト。
+  // The ineligible `m.g` has a 16-byte payload (= exactly the limit), but what goes onto the GPU is
+  // the 32 bytes after expansion.
   assertStringIncludes(
     error.message,
     "initializer 'g' payload (decoded to f32) (residency class expanded, allocated 32 bytes)",
   );
-  // scale は payload と別に確保されるので、payload が通っても scale で落ちる。
+  // The scale is allocated separately from the payload, so it fails on the scale even when the
+  // payload passes.
   assertStringIncludes(
     error.message,
     "initializer 'w' scale (residency class i8, allocated 32 bytes)",
@@ -242,27 +263,27 @@ test("適格外席は f32 展開後の寸法で見る・companion scale も 1 �
   assertEquals(
     error.message.includes("initializer 'w' payload"),
     false,
-    "16 バイトの payload は上限ちょうどで通る（scale だけが超過）",
+    "the 16-byte payload passes at exactly the limit (only the scale exceeds it)",
   );
 });
 
-test("超過は全件を 1 回で列挙する（1 本ずつ落とさない）", () => {
+test("excesses are listed all at once (not failing one at a time)", () => {
   const error = assertThrows(
     () => assertWeightsWithinLimits(residencyOf(mixedSeatGraph(), MIXED_STORAGE), limits(16, 16)),
     ExecutionError,
   );
-  // w.scale / b / g の 3 本（w.payload だけが 16 バイトで通る）。
+  // The 3 buffers w.scale / b / g (only w.payload passes, at 16 bytes).
   assertStringIncludes(error.message, "3 weight buffers");
   assertEquals(
     error.message.split("\n").filter((line) => line.startsWith("  - initializer")).length,
     3,
-    "超過した確保の数だけ行が出る",
+    "one line per allocation that exceeds",
   );
 });
 
-test("上限ぴったりは通る（境界の内側 / 外側）", () => {
+test("exactly the limit passes (inside / outside the boundary)", () => {
   const mixed = residencyOf(mixedSeatGraph(), MIXED_STORAGE);
-  // 最大の確保は 32 バイト（w.scale / b / g の展開後）。
+  // The largest allocation is 32 bytes (w.scale / b / g after expansion).
   assertWeightsWithinLimits(mixed, limits(32, 32));
   assertThrows(() => assertWeightsWithinLimits(mixed, limits(31, 32)), ExecutionError);
   assertThrows(() => assertWeightsWithinLimits(mixed, limits(32, 31)), ExecutionError);
@@ -273,13 +294,17 @@ test("上限ぴったりは通る（境界の内側 / 外側）", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Session 構築の入口で実際に通ること（確保より前に落ちる）
+// That it really runs at the Session construction entry (failing before allocation)
 // ---------------------------------------------------------------------------
 
-/** f16LinearGraph に対応する供給（宣言と現物のバイト数は合流層の門が見る）。 */
+/**
+ * The supplies for f16LinearGraph (the merge layer's check compares the declared and the real byte
+ * counts).
+ */
 const f16LinearModel = (): BoundContainer => {
   const graph = f16LinearGraph();
-  // `w` だけは実バイト列を渡す（f16 の payload 長が宣言から決まることを合流層が見る）。
+  // Only `w` is passed real bytes (the merge layer checks that the f16 payload length follows from
+  // the declaration).
   const supplied = autoTensors(graph, STORAGE).map((tensor) =>
     tensor.initializer === "w"
       ? {
@@ -291,7 +316,7 @@ const f16LinearModel = (): BoundContainer => {
   return memoryModel(graph, supplied);
 };
 
-test("createSessionFromContainer は上限超過の重みを createBuffer より前に落とす", async () => {
+test("createSessionFromContainer fails weights over the limit before createBuffer", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(32, 64));
   const error = await assertRejects(
@@ -302,27 +327,30 @@ test("createSessionFromContainer は上限超過の重みを createBuffer より
   assertEquals(
     spy.createBuffer,
     0,
-    "確保に 1 本も到達しない（errorScope が沈黙する device でも検出できる条件そのもの）",
+    "no allocation is reached (exactly the condition that detects it even on a device whose errorScope stays silent)",
   );
 });
 
-test("上限に収まる重みは門を素通りして確保へ進む（門は全拒否ではない）", async () => {
+test("weights within the limits pass the check and proceed to allocation (the check does not reject everything)", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(1024, 1024));
-  // 同じモデル・同じ経路で、違うのは limits だけ。確保まで進んだことは注入した失敗で分かる。
+  // The same model on the same path; only the limits differ. The injected failure shows that
+  // allocation was reached.
   const error = await assertRejects(
     () => createSessionFromContainer(gpu, f16LinearModel(), GRAPH_NAME),
     Error,
   );
-  assertStringIncludes(error.message, "注入: createBuffer が呼ばれた");
+  assertStringIncludes(error.message, "injected: createBuffer was called");
   assertEquals(spy.createBuffer, 1);
 });
 
 // ---------------------------------------------------------------------------
-// state スロット側（既存の束縛上限ゲートの補完 — ADR 0066 追記 5）
+// The state-slot side (complementing the existing binding-limit check — ADR 0066 addendum 5)
 // ---------------------------------------------------------------------------
 
-/** state スロット 1 本（`kv`）だけを持つグラフ（参照側の `state_append` は withStateReaders が足す）。 */
+/**
+ * A graph with a single state slot (`kv`) only (withStateReaders adds the reading `state_append`).
+ */
 const stateGraph = (shape: readonly number[]): IrGraph => {
   const graph = baseDeclaration();
   graph.states = { kv: { dtype: "f32", shape: [...shape] } };
@@ -338,9 +366,10 @@ const stateHost = (gpu: GpuContext, graph: IrGraph): GenerationContextHost => ({
   adopt: (allocate) => allocate(),
 });
 
-test("state スロットの maxBufferSize 超過も createBuffer より前に落ちる", async () => {
+test("a state slot over maxBufferSize also fails before createBuffer", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
-  // 束縛上限には収まるがバッファ上限を超える形（2 本を独立に見ていなければ素通りする）。
+  // Within the binding limit but over the buffer limit (passes through unless both are checked
+  // independently).
   const gpu = spyGpu(spy, limits(1024, 16));
   const graph = stateGraph([8]);
   const error = await assertRejects(
@@ -351,13 +380,13 @@ test("state スロットの maxBufferSize 超過も createBuffer より前に落
     error.message,
     "state 'kv': capacity [8] takes 32 bytes, which exceeds maxBufferSize 16 bytes",
   );
-  assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
+  assertEquals(spy.createBuffer, 0, "no allocation is reached");
 });
 
-test("state スロットの maxStorageBufferBindingSize 超過も createBuffer より前に落ちる", async () => {
+test("a state slot over maxStorageBufferBindingSize also fails before createBuffer", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
-  // バッファ上限には収まるが束縛上限を超える形（上の maxBufferSize 側と対 — 2 本を独立に
-  // 見ていなければ、どちらか片方だけが検出器になる）。
+  // Within the buffer limit but over the binding limit (the counterpart of the maxBufferSize case
+  // above — unless both are checked independently, only one of them works as a detector).
   const gpu = spyGpu(spy, limits(16, 1024));
   const error = await assertRejects(
     () => GenerationContext.create(stateHost(gpu, stateGraph([8])), { chunkLength: 1 }),
@@ -367,32 +396,35 @@ test("state スロットの maxStorageBufferBindingSize 超過も createBuffer �
     error.message,
     "state 'kv': capacity [8] takes 32 bytes, which exceeds maxStorageBufferBindingSize 16 bytes",
   );
-  assertEquals(spy.createBuffer, 0, "確保に 1 本も到達しない");
+  assertEquals(spy.createBuffer, 0, "no allocation is reached");
 });
 
-test("state スロットが両上限に収まれば確保へ進む（門は全拒否ではない）", async () => {
+test("a state slot within both limits proceeds to allocation (the check does not reject everything)", async () => {
   const spy: AllocSpy = { createBuffer: 0 };
   const gpu = spyGpu(spy, limits(1024, 1024));
   const error = await assertRejects(
     () => GenerationContext.create(stateHost(gpu, stateGraph([8])), { chunkLength: 1 }),
     Error,
   );
-  assertStringIncludes(error.message, "注入: createBuffer が呼ばれた");
+  assertStringIncludes(error.message, "injected: createBuffer was called");
   assertEquals(spy.createBuffer, 1);
 });
 
 // ---------------------------------------------------------------------------
-// 見積り側（estimateGraphMemory）— 実構築と**同じ境界**であること（ADR 0066 追記 5 / Q4-3）
+// The estimate side (estimateGraphMemory) — that it has **the same boundaries** as the real
+// construction (ADR 0066 addendum 5 / Q4-3)
 //
-// 見積りだけが受理する寸法があると、CLI のように `--capacity` の値検査を見積りに兼ねさせて
-// いる呼び手で「起動時には数字が出て、最初のターンで落ちる」形になる。
+// If some size were accepted only by the estimate, a caller that lets the estimate double as the
+// value check of `--capacity` (like the CLI) would "print numbers at startup and fail on the first
+// turn".
 // ---------------------------------------------------------------------------
 
 /**
- * 見積りと実構築の**両方**を通せる最小グラフ。上の `stateGraph` は `state_append` の入力が
- * rank-4 契約を満たさない（実構築は graph を計画しないので通るが、見積りは planGraph を通る）
- * ので、対で見るテストはこちらを使う。スロット `kv` は [1,2,1,4] = 8 要素 × 4 = **32 バイト**
- * （`stateGraph([8])` と同じ大きさなので境界の数字も同じ）。
+ * The smallest graph that can go through **both** the estimate and the real construction. The
+ * `stateGraph` above has a `state_append` input that does not meet the rank-4 contract (the real
+ * construction passes because it does not plan the graph, but the estimate goes through
+ * planGraph), so the paired tests use this one. The slot `kv` is [1,2,1,4] = 8 elements × 4 = **32
+ * bytes** (the same size as `stateGraph([8])`, so the boundary numbers are the same too).
  */
 const pairedStateGraph = (): IrGraph => {
   const graph = baseDeclaration();
@@ -409,7 +441,10 @@ const pairedStateGraph = (): IrGraph => {
   return mergeGraph(graph);
 };
 
-/** 同じグラフ・同じ上限で見積りを引く（state スロットは `kv` 1 本 = 8 要素 × 4 = 32 バイト）。 */
+/**
+ * Takes the estimate for the same graph with the same limits (the state slot is the single `kv` = 8
+ * elements × 4 = 32 bytes).
+ */
 const stateEstimateAt = (
   graph: IrGraph,
   maxStorageBufferBindingSize: number,
@@ -422,7 +457,10 @@ const stateEstimateAt = (
     maxBufferSize,
   }).resident.stateBytes;
 
-/** 実構築を同じ上限で走らせ、拒否されたなら文言を返す（確保へ進んだなら undefined）。 */
+/**
+ * Runs the real construction with the same limits and returns the message if it was rejected
+ * (undefined if it proceeded to allocation).
+ */
 const createRejectionAt = async (
   graph: IrGraph,
   maxStorageBufferBindingSize: number,
@@ -438,12 +476,18 @@ const createRejectionAt = async (
   return error.message;
 };
 
-test("束縛上限の境界は見積りと実構築で同じ（1 バイト下回ると両方が同じ文言で落ちる）", async () => {
+test("the binding-limit boundary is the same for the estimate and the real construction (1 byte below, both fail with the same message)", async () => {
   const graph = pairedStateGraph();
-  // 上限ぴったり（32 バイト）は両方とも通る — 実構築は確保へ進み、見積りは数字を返す。
-  assertEquals(stateEstimateAt(graph, 32, 1024), 32 + 8, "スロット 32 + 論理長 uniform 8");
-  assertEquals(await createRejectionAt(graph, 32, 1024), undefined, "境界ちょうどは確保へ進む");
-  // 1 バイト下回ると、見積りも実構築も落ちる。文言は 1 本の門を共有しているので同一。
+  // Exactly the limit (32 bytes) passes both — the real construction proceeds to allocation and
+  // the estimate returns a number.
+  assertEquals(stateEstimateAt(graph, 32, 1024), 32 + 8, "slot 32 + logical-length uniform 8");
+  assertEquals(
+    await createRejectionAt(graph, 32, 1024),
+    undefined,
+    "exactly the boundary proceeds to allocation",
+  );
+  // 1 byte below, both the estimate and the real construction fail. They share one check, so the
+  // message is identical.
   const rejection = await createRejectionAt(graph, 31, 1024);
   const estimateError = assertThrows(() => stateEstimateAt(graph, 31, 1024), ExecutionError);
   assertEquals(estimateError.message, rejection);
@@ -453,7 +497,7 @@ test("束縛上限の境界は見積りと実構築で同じ（1 バイト下回
   );
 });
 
-test("バッファ上限の境界も見積りと実構築で同じ（束縛上限に収まる形で片側だけを割る）", async () => {
+test("the buffer-limit boundary is also the same for the estimate and the real construction (only one side is undercut, within the binding limit)", async () => {
   const graph = pairedStateGraph();
   assertEquals(stateEstimateAt(graph, 1024, 32), 32 + 8);
   assertEquals(await createRejectionAt(graph, 1024, 32), undefined);
@@ -466,9 +510,10 @@ test("バッファ上限の境界も見積りと実構築で同じ（束縛上�
   );
 });
 
-test("上限を渡さない見積りは既定値を捏造しない（device を持たない呼び手は従来どおり）", () => {
+test("an estimate given no limits does not invent default values (callers without a device behave as before)", () => {
   const graph = pairedStateGraph();
-  // 片側だけを渡す形も含めて、渡した欄だけが検査に効く（未指定の側は見ない）。
+  // Including when only one side is passed, only the passed fields affect the check (the
+  // unspecified side is not looked at).
   assertEquals(
     estimateGraphMemory(graph, planWeightResidency(graph), {
       bindings: { T: 1 },

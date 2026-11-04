@@ -1,24 +1,26 @@
-// gru_scan / gru_scan_reverse（ADR 0056）の**ビット同一の門**。
+// The **bit-identity check** of gru_scan / gru_scan_reverse (ADR 0056).
 //
-// 同じ入力に対し、
+// For the same inputs, it runs
 //
-//   ① 既存 GPU op 列で組んだ「torch の GRU 分解を逐語に写した」参照グラフ
-//      （`linear → slice → add → sigmoid / mul → add → tanh / sub → mul → add` を T 回）
-//   ② `gru_scan` op 1 ノード
+//   ① a reference graph built from existing GPU ops that "copies torch's GRU decomposition
+//      literally" (`linear → slice → add → sigmoid / mul → add → tanh / sub → mul → add`, T times)
+//   ② one `gru_scan` op node
 //
-// を**同じ実 GPU**で流し、出力を **f32 のビット列**で突き合わせる。allclose ではなく
-// `Uint32Array` の完全一致で見るのが要点で、tolerance に隠れる丸め列の変化（隠れ側縮約が
-// `linear` の GEMM からずれる / 融合側だけ fma へ縮約される / 更新式を `(1−z)·n + z·h` に
-// 書き換える）はここでしか検出できない。
+// on **the same real GPU** and compares the outputs as **f32 bit patterns**. The point is to use an
+// exact `Uint32Array` match rather than allclose: changes in the rounding sequence that a tolerance
+// hides (the hidden-side reduction drifting from the GEMM of `linear` / only the fused side being
+// contracted into fma / the update rewritten as `(1−z)·n + z·h`) can only be detected here.
 //
-// **この op は attention（ADR 0023 決定 2）と同じ「本物の A/B オラクル」を持つ**。T を固定
-// すれば torch の分解グラフがそのまま完全な参照実装になるので、新規原子（deform_conv2d）が
-// 逃げた退化オラクルは要らない。
+// **This op has the same "real A/B oracle" as attention (ADR 0023 decision 2).** With T fixed,
+// torch's decomposed graph is itself a complete reference implementation, so the degenerate oracle
+// that the new primitive (deform_conv2d) fell back to is not needed.
 //
-// MUST: 恒真化しないこと。①② は**別々のグラフ**を別々の Session で走らせ、さらに
-//   - 出力が定数列でないこと（時間方向に値が動いていること）
-//   - `gru_scan` と `gru_scan_reverse` の出力が**違う**こと（方向が効いていること）
-// を毎ケース確かめる（走査方向を無視した実装は前者だけでは緑のまま通る）。
+// MUST: do not let it become vacuous. ①② run **separate graphs** in separate Sessions, and every
+// case also checks
+//   - that the output is not a constant sequence (the values move along time)
+//   - that the outputs of `gru_scan` and `gru_scan_reverse` are **different** (the direction
+//     matters)
+// (an implementation that ignores the scan direction stays green with the first check alone).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -44,20 +46,22 @@ type Geometry = {
 };
 
 /**
- * torch の GRU 分解を既存語彙へ逐語に写した参照グラフ（T は静的に展開する）。
+ * Reference graph that copies torch's GRU decomposition literally into the existing vocabulary (T
+ * is unrolled statically).
  *
- * | torch の分解ノード列              | ここ                                        |
+ * | torch's decomposed nodes          | here                                        |
  * | --------------------------------- | ------------------------------------------- |
- * | `linear(h, w_hh, b_hh)`           | `linear`（bias は GEMM の epilogue = last） |
+ * | `linear(h, w_hh, b_hh)`           | `linear` (bias is the GEMM epilogue = last) |
  * | `sigmoid(add(gh_r, gi_r))`        | `add` → `sigmoid`                           |
  * | `tanh(add(gi_n, mul(gh_n, r)))`   | `mul` → `add` → `tanh`                      |
  * | `add(mul(sub(h, n), z), n)`       | `sub` → `mul` → `add`                       |
- * | 各ステップの h を時間方向へ積む   | `reshape` → `cat`(dim 0)                    |
+ * | stack each step's h along time    | `reshape` → `cat`(dim 0)                    |
  *
- * MUST: 引数の順序を入れ替えない。有限 f32 では加算・乗算は可換だが、**この列が丸め列の
- * 正本**なので、順序を変えると「何と一致させたいのか」が変わる（ADR 0056 決定 3）。
- * MUST: 逆方向は**走査順だけ**を反転し、`cat` へ渡す並びは順方向の時間順のままにする
- * （`flip` を挟まない = op が畳んでいる形と同じ意味論）。
+ * MUST: do not reorder the arguments. Addition and multiplication of finite f32 are commutative,
+ * but **this sequence is the source of truth for the rounding sequence**, so changing the order
+ * changes "what it is meant to match" (ADR 0056 decision 3).
+ * MUST: the reverse direction inverts **only the scan order**; the sequence passed to `cat` stays
+ * in forward time order (no `flip` in between = the same semantics as the form the op folds).
  */
 const decomposedGraph = (geometry: Geometry, reverse: boolean): DeclarationJson => {
   const { time, batch, hidden } = geometry;
@@ -68,7 +72,7 @@ const decomposedGraph = (geometry: Geometry, reverse: boolean): DeclarationJson 
     values[name] = { dtype: "f32", shape: [...shape] };
     return name;
   };
-  /** `[N, 3H]` のゲート束から 1 ゲート（`0 = r / 1 = z / 2 = n`）を切り出す。 */
+  /** Slices 1 gate (`0 = r / 1 = z / 2 = n`) out of the `[N, 3H]` gate bundle. */
   const gate = (source: string, name: string, index: number): string => {
     nodes.push({
       op: "slice",
@@ -87,7 +91,8 @@ const decomposedGraph = (geometry: Geometry, reverse: boolean): DeclarationJson 
     return name;
   };
 
-  // 走査順（逆方向は t が降順）。書き出し先の時間添字は常に t そのもの。
+  // Scan order (t descending for the reverse direction). The time index written to is always t
+  // itself.
   const order = Array.from({ length: time }, (_unused, step) => (reverse ? time - 1 - step : step));
   const stacked: string[] = [];
   let state = "h0";
@@ -127,7 +132,8 @@ const decomposedGraph = (geometry: Geometry, reverse: boolean): DeclarationJson 
       "add",
       binary("mul", binary("sub", state, candidate, `diff${t}`), update, `decay${t}`),
       candidate,
-      // MUST: 入力名 `h0` と衝突させない（t = 0 の状態を `h0` と綴ると SSA 違反になる）
+      // MUST: do not collide with the input name `h0` (spelling the t = 0 state `h0` would violate
+      // SSA)
       `state${t}`,
     );
     nodes.push({
@@ -183,27 +189,33 @@ const run = async (
   }
 };
 
-/** f32 のビット列（末尾 1 ulp の差も `0.0` と `-0.0` の差も見える形）。 */
+/**
+ * f32 bit patterns (a difference of 1 ulp at the end and the difference between `0.0` and `-0.0`
+ * are both visible).
+ */
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-// 決定的な列（乱数は使わない — 失敗が再現しないため）。値域はゲートが飽和しきらない範囲に
-// 採る: sigmoid が 0 / 1 に張り付くと更新式の丸め差が値に出ず、門が恒真化する。
+// Deterministic sequences (no random numbers — a failure would not reproduce). The range keeps the
+// gates from saturating fully: if sigmoid sticks to 0 / 1, rounding differences in the update do
+// not show in the values and the check becomes vacuous.
 const GATE_INPUT = (i: number): number => (((i * 7) % 23) - 11) * 0.21;
 const STATE_INIT = (i: number): number => (((i * 5) % 17) - 8) * 0.13;
 const WEIGHT = (i: number): number => (((i * 11) % 29) - 14) * 0.037;
 const BIAS = (i: number): number => (((i * 3) % 13) - 6) * 0.11;
 
 const CASES: readonly Geometry[] = [
-  // 最小形（T が 2 = 状態が 1 度は運ばれる最小）
+  // Smallest shape (T = 2 = the minimum where the state is carried at least once)
   { time: 2, batch: 1, hidden: 3 },
-  // vowel-detector の隠れ幅（H = 128）を実長で踏む
+  // The vowel-detector hidden width (H = 128) at its real size
   { time: 4, batch: 1, hidden: 128 },
-  // H が workgroup 幅ちょうど（1 lane = 1 隠れユニットの上限 — 端の lane が effective）
+  // H exactly the workgroup width (the limit of 1 lane = 1 hidden unit — the edge lane is
+  // effective)
   { time: 3, batch: 1, hidden: 256 },
-  // バッチ > 1（workgroup 間で状態が混ざらないことの門）
+  // Batch > 1 (checks that the state does not mix between workgroups)
   { time: 5, batch: 3, hidden: 7 },
-  // 縮約長が GEMM の K タイル（16）の倍数でない形（端タイルのゼロ詰めが効く）
+  // A reduction length that is not a multiple of the GEMM K tile (16) (the zero padding of the edge
+  // tile matters)
   { time: 3, batch: 2, hidden: 19 },
 ];
 
@@ -219,11 +231,12 @@ const inputsFor = (geometry: Geometry): Record<string, FilledTensor> => {
 };
 
 /**
- * 飽和域の門（gru_scan v2 = tanh_stable 共有の回帰検出）。n ゲート入力を飽和域
- * （|x| > 9.5）〜 exp(2x) の f32 オーバーフロー域（|x| > 44.36）に置く。素の組込 `tanh` へ
- * 戻す退行は、IEEE 忠実な実装ではビット同一のまま緑だが、`(exp(2x)−1)/(exp(2x)+1)` で
- * 計算する実装（Metal fast-math）では下の Number.isFinite 門が赤くなる。r / z ゲートは
- * 従来の値域のまま（sigmoid が 0 / 1 に張り付くと更新式の丸め差が値に出ない）。
+ * Saturation-range check (regression detection for gru_scan v2 = the shared tanh_stable). Puts the
+ * n-gate inputs from the saturation range (|x| > 9.5) up to the range where exp(2x) overflows f32
+ * (|x| > 44.36). A regression back to the plain built-in `tanh` stays green and bit-identical on an
+ * IEEE-faithful implementation, but turns the Number.isFinite check below red on an implementation
+ * that computes `(exp(2x)−1)/(exp(2x)+1)` (Metal fast-math). The r / z gates keep the usual range
+ * (if sigmoid sticks to 0 / 1, rounding differences in the update do not show in the values).
  */
 const SATURATED_N_GATE = [12, -15, 50, -50, 120, -120, 9.4, -9.6] as const;
 
@@ -250,7 +263,7 @@ const scanGraph = (op: string, geometry: Geometry): DeclarationJson => {
   );
 };
 
-/** 単一ノードグラフの入力名（`x0`…）へ付け替える。 */
+/** Renames to the input names of a single-node graph (`x0`…). */
 const asSingleOpInputs = (
   named: Readonly<Record<string, FilledTensor>>,
 ): Record<string, FilledTensor> => ({
@@ -262,17 +275,17 @@ const asSingleOpInputs = (
 
 for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
   test.skipIf(!GPU_AVAILABLE)(
-    `${op} 1 ノードの出力が torch 分解の逐語（linear + elementwise 列）と**ビット単位で一致**する（実 GPU）`,
+    `${op}: the output of 1 node **matches torch's literal decomposition (linear + elementwise ops) bit for bit** (real GPU)`,
     async () => {
       const gpu = await acquireGpu();
       try {
         const parityCases = [
           ...CASES.map((geometry) => ({ geometry, named: inputsFor(geometry), tag: "" })),
-          // 飽和域ケース（H = 実測形の 128 — 候補ゲートの引数が ±9.5 を跨ぐ）
+          // Saturation case (H = the measured 128 — the candidate gate's argument crosses ±9.5)
           {
             geometry: { time: 3, batch: 2, hidden: 128 },
             named: saturatedInputsFor({ time: 3, batch: 2, hidden: 128 }),
-            tag: " 飽和域",
+            tag: " saturated",
           },
         ];
         for (const { geometry, named, tag } of parityCases) {
@@ -294,16 +307,20 @@ for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
           assertEquals(
             mismatches.length,
             0,
-            `${label}: ${mismatches.length} / ${a.length} 要素がビット不一致（先頭 ${mismatches
+            `${label}: ${mismatches.length} / ${a.length} elements differ in bits (first ${mismatches
               .slice(0, 4)
               .map((i) => `#${i} fused=0x${a[i].toString(16)} decomposed=0x${b[i].toString(16)}`)
-              .join(" / ")}）`,
+              .join(" / ")})`,
           );
 
-          // 恒真化の確認: 出力が定数列でない（分解側が全て同じ値なら一致は何も語らない）
+          // Not vacuous: the output is not a constant sequence (if the decomposed side were all one
+          // value, a match would say nothing)
           const values = fused.data as Float32Array;
-          assert(values.every(Number.isFinite), `${label}: 非有限値がある`);
-          assert(new Set(values).size > 1, `${label}: 出力が定数列（門が恒真化している）`);
+          assert(values.every(Number.isFinite), `${label}: has non-finite values`);
+          assert(
+            new Set(values).size > 1,
+            `${label}: the output is a constant sequence (the check is vacuous)`,
+          );
         }
       } finally {
         gpu.destroy();
@@ -312,10 +329,11 @@ for (const op of ["gru_scan", "gru_scan_reverse"] as const) {
   );
 }
 
-// 走査方向が本当に効いていることの門。逆方向を「順方向と同じ走査」で実装しても上の parity は
-// **両側が同じ誤りを持つ**ので緑になりうる（参照グラフも同じ関数から順序を受け取るため）。
+// Checks that the scan direction really matters. Implementing the reverse direction as "the same
+// scan as forward" can keep the parity above green because **both sides share the same error**
+// (the reference graph takes its order from the same function).
 test.skipIf(!GPU_AVAILABLE)(
-  "gru_scan と gru_scan_reverse は同じ入力で違う出力を出す（走査方向が効いている）",
+  "gru_scan and gru_scan_reverse give different outputs for the same inputs (the scan direction matters)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -331,7 +349,7 @@ test.skipIf(!GPU_AVAILABLE)(
         }
         assert(
           same < a.length,
-          `T${geometry.time} N${geometry.batch} H${geometry.hidden}: 順方向と逆方向の出力が完全一致（走査方向が無視されている）`,
+          `T${geometry.time} N${geometry.batch} H${geometry.hidden}: the forward and reverse outputs match exactly (the scan direction is ignored)`,
         );
       }
     } finally {

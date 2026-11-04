@@ -24,7 +24,7 @@ const graph = (): DeclarationJson => ({
 });
 for (const fail of [false, true]) {
   test.skipIf(!GPU_AVAILABLE)(
-    `レシピ並列準備: ${fail ? "失敗時も全件を待つ" : "完了順が逆でも依存順に実行する"}`,
+    `recipe parallel preparation: ${fail ? "waits for every item even on failure" : "runs in dependency order even when completion order is reversed"}`,
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openGraphModel(graph()), "model");
@@ -61,7 +61,7 @@ for (const fail of [false, true]) {
         ]);
         assertEquals(count, 2);
         await new Promise((resolve) => setTimeout(resolve, 0));
-        assertEquals(settled, false, "未決着compileを残したままrunを返さない");
+        assertEquals(settled, false, "run does not return while a compile is still unsettled");
         gate.resolve();
         if (fail) {
           const error = await assertRejects(() => running, RangeError, "injected compile failure");

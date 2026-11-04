@@ -1,12 +1,14 @@
-// 常駐テンソル（第 4 の寿命クラス）とフェンス無し enqueue（H-5）の門。
+// Checks for resident tensors (the fourth lifetime class) and fenceless enqueue (H-5).
 //
-// 狙いは「生成ループの run 境界フェンスを数本まで落とす」ことなので、この門が固定するのは
-// ①値が正しいこと（常駐入力・写し先とも、ホスト経由の run とビット単位で一致）②**フェンスが
-// 実際に減っていること**（batch 全体で onSubmittedWorkDone が 1 回）③追い越しが起きないこと
-// （eager submit の不変条件）④寿命の破れが fail loudly になること（破棄後利用・参照中の破棄）。
+// The aim is "bring the run-boundary fences of the generation loop down to a few", so these
+// checks pin ① correct values (both resident inputs and copy targets are bit-identical to a run
+// through the host) ② **that the fences really decrease** (one onSubmittedWorkDone for the whole
+// batch) ③ no overtaking (the invariant of eager submit) ④ lifetime violations fail loudly (use
+// after dispose, dispose while referenced).
 //
-// ② が無いと、内部で flush へ退避していても値は正しいまま緑になる（例外も警告も出ない）。
-// ③ が無いと、前後の enqueue の入力が入れ替わっても「どちらも計算はされている」ので気づけない。
+// Without ②, an internal fallback to flush would still pass with correct values (no exception, no
+// warning). Without ③, swapping the inputs of consecutive enqueues would go unnoticed, since "both
+// are computed anyway".
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
@@ -32,7 +34,7 @@ const COLS = 3;
 const COUNT = ROWS * COLS;
 const BYTES = COUNT * 4;
 
-/** y = x + x（= 2x）。生産側。 */
+/** y = x + x (= 2x). The producer side. */
 const PRODUCER: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -45,7 +47,7 @@ const PRODUCER: DeclarationJson = {
   nodes: [{ op: "add", ins: ["x", "x"], outs: ["y"], attrs: {} }],
 };
 
-/** w = z * z。消費側（生産側の出力を常駐テンソル経由で受ける）。 */
+/** w = z * z. The consumer side (receives the producer's output through a resident tensor). */
 const CONSUMER: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -58,14 +60,17 @@ const CONSUMER: DeclarationJson = {
   nodes: [{ op: "mul", ins: ["z", "z"], outs: ["w"], attrs: {} }],
 };
 
-/** `phase` ごとに値が変わる入力（同じ値を配ると取り違えが検出できない）。 */
+/** An input whose values change with `phase` (handing out the same values would hide a mix-up). */
 const input = (phase: number): Tensor => ({
   dtype: "f32",
   shape: [ROWS, COLS],
   data: Float32Array.from({ length: COUNT }, (_, i) => (((i + phase * 3) % 9) - 4) * 0.5),
 });
 
-/** 参照値。ノードごとに f32 へ丸めながら手計算する（実装とは独立）。 */
+/**
+ * Reference values, computed by hand while rounding to f32 at every node (independent of the
+ * implementation).
+ */
 const expectedChain = (phase: number): Float32Array<ArrayBuffer> => {
   const x = input(phase).data;
   const out = new Float32Array(COUNT);
@@ -76,7 +81,10 @@ const expectedChain = (phase: number): Float32Array<ArrayBuffer> => {
   return out;
 };
 
-/** ビット列比較（丸めの取り違えを許容しない）。常駐テンソルの読み戻しは素の ArrayBuffer。 */
+/**
+ * Bit-pattern comparison (does not tolerate a rounding mix-up). A resident tensor reads back as a
+ * plain ArrayBuffer.
+ */
 const bits = (data: Tensor["data"] | ArrayBuffer): readonly number[] =>
   Array.from(
     data instanceof ArrayBuffer
@@ -91,7 +99,7 @@ const consumerSession = async (gpu: GpuContext): Promise<Session> =>
   await createSessionFromContainer(gpu, await openGraphModel(CONSUMER), "model");
 
 test.skipIf(!GPU_AVAILABLE)(
-  "常駐入力は writeBuffer 無しで束ねられ、ホスト入力の run とビット一致する（実 GPU）",
+  "a resident input is bound without writeBuffer and is bit-identical to a run with host input (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const resident = await gpu.createResident(BYTES, "x");
@@ -101,8 +109,8 @@ test.skipIf(!GPU_AVAILABLE)(
       for (const phase of [0, 1, 2]) {
         const tensor = input(phase);
         resident.write(tensor.data);
-        // 1 run 目は非 backed（アリーナ経路）、2 run 目以降は backed。常駐入力は両経路とも
-        // 「実体をそのまま束ねる」なので、どちらでも同じ値でなければならない。
+        // Run 1 is not backed (the arena path); run 2 onwards is backed. On both paths a resident
+        // input "binds the storage as is", so both must give the same values.
         const actual = await session.run({ x: resident });
         const expected = await reference.run({ x: tensor });
         assertEquals(bits(actual["y"].data), bits(expected["y"].data), `phase ${phase}`);
@@ -119,7 +127,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "enqueue の連鎖は常駐テンソル経由で値を渡し、フェンスは batch の 1 本だけ（実 GPU）",
+  "a chain of enqueues passes values through resident tensors with a single fence for the batch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
@@ -130,18 +138,19 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const batch = await gpu.beginBatch();
       await producer.enqueue({ x: input(0) }, { batch, copyOutputs: { y: carrier } });
-      // 生産側の出力は常駐テンソルにしか残らない。消費側はそれを**そのまま**入力に取る。
+      // The producer's output remains only in the resident tensor. The consumer takes it **as is**
+      // as its input.
       await consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: sink } });
-      assertEquals(fences.count(), 0, "enqueue はフェンスを 1 本も張らない");
+      assertEquals(fences.count(), 0, "enqueue sets no fence at all");
 
       await batch.finish();
-      assertEquals(fences.count(), 1, "batch 全体で onSubmittedWorkDone は 1 回");
+      assertEquals(fences.count(), 1, "one onSubmittedWorkDone for the whole batch");
 
       assertEquals(bits(await sink.read()), bits(expectedChain(0)));
-      // どちらの enqueue も初回から backed（アリーナ経路へ黙って退避していない）。
+      // Both enqueues are backed from the first call (no silent fallback to the arena path).
       assertEquals(producer.diagnostics().planBacking.buildCount, 1);
       assertEquals(consumer.diagnostics().planBacking.buildCount, 1);
-      assertEquals(producer.diagnostics().lastRun, undefined, "enqueue はアリーナを使わない");
+      assertEquals(producer.diagnostics().lastRun, undefined, "enqueue does not use the arena");
     } finally {
       fences.restore();
       await producer.dispose();
@@ -154,7 +163,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "settle() は区間の途中でフェンスを 1 本だけ張り、以後のチャンク上限を推定へ切り替える（実 GPU）",
+  "settle() sets a single fence in the middle of the section and switches the later chunk cap to the estimate (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
@@ -166,23 +175,24 @@ test.skipIf(!GPU_AVAILABLE)(
       const batch = await gpu.beginBatch();
       await producer.enqueue({ x: input(0) }, { batch, copyOutputs: { y: carrier } });
       const before = producer.diagnostics().submit;
-      assertEquals(before.measuredCount, 0, "区間の途中では窓が閉じない");
+      assertEquals(before.measuredCount, 0, "no window closes in the middle of the section");
       assertEquals(before.currentChunkSize, DEFAULT_SUBMIT_POLICY.initialChunkSize);
 
       await batch.settle();
-      assertEquals(fences.count(), 1, "settle() のフェンスは 1 本");
+      assertEquals(fences.count(), 1, "settle() sets one fence");
       const after = producer.diagnostics().submit;
-      assertEquals(after.measuredCount, 1, "settle() で窓が 1 つ閉じる");
-      // 実測が分解能未満（0）だと裏付けにならない（不変条件 1）— この形は数 µs の dispatch 1 本
-      // なので、裏付けが付いたときだけ上限の切り替えを見る。
+      assertEquals(after.measuredCount, 1, "settle() closes one window");
+      // A measurement below the resolution (0) is no evidence (invariant 1) — this shape is a
+      // single dispatch of a few µs, so the cap switch is checked only when evidence exists.
       if (after.msPerWorkgroup !== undefined) {
         assertEquals(after.currentChunkSize, DEFAULT_SUBMIT_POLICY.maxChunkSize);
       }
 
-      // 区間は続く: 後続の enqueue は同じ区間に入り、finish のフェンスで完了する。
+      // The section continues: the later enqueue joins the same section and completes with
+      // finish's fence.
       await consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: sink } });
       await batch.finish();
-      assertEquals(fences.count(), 2, "settle() 1 本 + finish 1 本");
+      assertEquals(fences.count(), 2, "one from settle() + one from finish");
       assertEquals(bits(await sink.read()), bits(expectedChain(0)));
 
       await assertRejects(() => batch.settle(), BatchScopeError, "after finish()");
@@ -198,7 +208,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "settle() は in-flight の enqueue がある間は fail loudly（窓の帰属を守る・実 GPU）",
+  "settle() fails loudly while an enqueue is in flight (keeps the window attribution, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
@@ -225,7 +235,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "settle() の途中は enqueue も 2 度目の settle() も finish() も fail loudly（実 GPU）",
+  "during settle(), enqueue, a second settle() and finish() all fail loudly (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const producer = await producerSession(gpu);
@@ -236,9 +246,10 @@ test.skipIf(!GPU_AVAILABLE)(
       const batch = await gpu.beginBatch();
       await producer.enqueue({ x: input(0) }, { batch, copyOutputs: { y: carrier } });
 
-      // 3 本の拒否は `settle()` を await しない**同期区間**でまとめて取る。await を挟むと
-      // 途中でフェンスが解けて区間が open へ戻りうるので、拒否を踏めたかどうかが実行時の
-      // 運になる（門としては空振りする）。
+      // Take the three rejections together in **the synchronous part** that does not await
+      // `settle()`. With an await in between, the fence could resolve midway and the section return
+      // to open, so whether a rejection is hit would be a matter of run-time luck (the check would
+      // never fire).
       const settling = batch.settle();
       const duplicated = batch.settle();
       const late = producer.enqueue({ x: input(1) }, { batch, copyOutputs: { y: carrier } });
@@ -249,13 +260,15 @@ test.skipIf(!GPU_AVAILABLE)(
       await assertRejects(() => closing, BatchScopeError, "Cannot finish()");
       await settling;
 
-      // 拒否された enqueue が区間へ入っていないことは値で確かめる: 通っていれば carrier は
-      // phase 1 の 2 倍で上書きされ、消費側の出力は expectedChain(1) になる。
+      // Confirm by value that the rejected enqueue did not enter the section: had it gone through,
+      // carrier would be overwritten with twice phase 1 and the consumer's output would be
+      // expectedChain(1).
       assert(
         JSON.stringify(bits(expectedChain(0))) !== JSON.stringify(bits(expectedChain(1))),
-        "phase ごとに期待値が変わっていない（検出器として空振る）",
+        "the expected values do not change per phase (the detector would never fire)",
       );
-      // 拒否は区間を壊さない: settle 後の finish は従来どおり通り、リースも簿記も残らない。
+      // The rejections do not break the section: finish after settle goes through as before, and
+      // neither leases nor bookkeeping remain.
       await consumer.enqueue({ z: carrier }, { batch, copyOutputs: { w: sink } });
       await batch.finish();
       assertEquals(bits(await sink.read()), bits(expectedChain(0)));
@@ -270,16 +283,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "連続 enqueue の入力書き込みは先行 dispatch を追い越さない（eager submit の門・実 GPU）",
+  "input writes of consecutive enqueues do not overtake the preceding dispatch (the eager-submit check, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const first = await gpu.createResident(BYTES, "first");
     const second = await gpu.createResident(BYTES, "second");
     try {
-      // 同一 signature = 入力バッファは backing 所有の**1 本**。enqueue → writeBuffer（次の値）→
-      // enqueue の順で積むので、eager submit が抜けると 2 本目の書き込みが 1 本目の dispatch を
-      // 追い越し、両方が新しい値になる（例外は出ない）。
+      // Same signature = **one** input buffer, owned by the backing. The order queued is enqueue →
+      // writeBuffer (the next value) → enqueue, so without eager submit the second write would
+      // overtake the first dispatch and both would get the new value (no exception).
       const batch = await gpu.beginBatch();
       await session.enqueue({ x: input(0) }, { batch, copyOutputs: { y: first } });
       await session.enqueue({ x: input(1) }, { batch, copyOutputs: { y: second } });
@@ -289,17 +302,26 @@ test.skipIf(!GPU_AVAILABLE)(
         const x = input(phase).data;
         return Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i]));
       };
-      // 恒真化の門: 2 つの phase の期待値が同じなら取り違えを検出できない。
+      // A check against tautology: if the two phases expected the same values, a mix-up could not
+      // be detected.
       assert(
         JSON.stringify(bits(doubled(0))) !== JSON.stringify(bits(doubled(1))),
-        "phase ごとに期待値が変わっていない（検出器として空振る）",
+        "the expected values do not change per phase (the detector would never fire)",
       );
-      assertEquals(bits(await first.read()), bits(doubled(0)), "先の enqueue は古い値を読む");
-      assertEquals(bits(await second.read()), bits(doubled(1)), "後の enqueue は新しい値を読む");
+      assertEquals(
+        bits(await first.read()),
+        bits(doubled(0)),
+        "the earlier enqueue reads the old value",
+      );
+      assertEquals(
+        bits(await second.read()),
+        bits(doubled(1)),
+        "the later enqueue reads the new value",
+      );
       assertEquals(
         session.diagnostics().planBacking.buildCount,
         1,
-        "同一 signature で作り直さない",
+        "the same signature is not rebuilt",
       );
     } finally {
       await session.dispose();
@@ -407,7 +429,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "常駐入力の識別子は導出済み計画のキーに効く（差し替えで再導出・戻すとヒット・実 GPU）",
+  "the identity of a resident input is part of the derived plan's key (swapping re-derives, swapping back hits, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -422,24 +444,26 @@ test.skipIf(!GPU_AVAILABLE)(
       await session.run({ x: a });
       assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: 1 });
 
-      // 別の常駐テンソルは別 signature。焼き込み済み bind group を使い回してはいけない。
+      // A different resident tensor is a different signature. Baked bind groups must not be
+      // reused.
       const swapped = await session.run({ x: b });
       assertEquals(
         session.diagnostics().lastRunPrepared,
         { hit: false, cachedPlans: 2 },
-        "常駐入力の差し替えは別キー",
+        "swapping the resident input gives a different key",
       );
       const doubled = (phase: number): readonly number[] => {
         const x = input(phase).data;
         return bits(Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i])));
       };
-      assertEquals(bits(swapped["y"].data), doubled(1), "差し替え後は新しい実体を読む");
+      assertEquals(bits(swapped["y"].data), doubled(1), "after the swap the new storage is read");
 
       const back = await session.run({ x: a });
       assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: 2 });
-      assertEquals(bits(back["y"].data), doubled(0), "戻すと元の実体を読む");
+      assertEquals(bits(back["y"].data), doubled(0), "swapping back reads the original storage");
 
-      // ホスト入力（Tensor）と常駐入力ではキーが分かれる（同じ shape でも別 signature）。
+      // Host input (Tensor) and resident input have separate keys (a different signature even with
+      // the same shape).
       await session.run({ x: input(0) });
       assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: 3 });
     } finally {
@@ -452,7 +476,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "焼き込みから参照中の常駐テンソルは破棄できない（故障注入・実 GPU）",
+  "a resident tensor referenced by baked bind groups cannot be disposed (fault injection, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -461,22 +485,23 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       bound.write(input(0).data);
       assertEquals(bound.bakedReferences, 0);
-      // 1 run 目は非 backed（焼き込み無し）— この時点ではまだ破棄できる状態のはず。
+      // Run 1 is not backed (nothing baked) — at this point it should still be disposable.
       await session.run({ x: bound });
-      assertEquals(bound.bakedReferences, 0, "非 backed run は焼き込み参照を作らない");
-      // 2 run 目で backing が構築され、bind group がこの実体を焼き込む。
+      assertEquals(bound.bakedReferences, 0, "a non-backed run creates no baked reference");
+      // Run 2 builds the backing, and the bind groups bake this storage in.
       await session.run({ x: bound });
       assertEquals(bound.bakedReferences, 1);
 
       assertThrows(() => bound.dispose(), ResidentTensorError, "referenced by baked bind groups");
-      assertEquals(bound.disposed, false, "拒否した破棄で状態を壊さない");
+      assertEquals(bound.disposed, false, "a refused dispose does not corrupt the state");
 
-      // 恒真化の門: 参照されていない常駐テンソルは同じ呼び出しで通る（検査が常に落ちる形に
-      // なっていないことの裏）。
+      // A check against tautology: an unreferenced resident tensor passes the same call (evidence
+      // that the check does not always fail).
       loose.dispose();
       assertEquals(loose.disposed, true);
 
-      // 参照を外す唯一の経路（Session の破棄 / signature 切替）を通れば破棄できる。
+      // Going through the only paths that drop the reference (disposing the Session / switching
+      // signature) makes it disposable.
       await session.dispose();
       assertEquals(bound.bakedReferences, 0);
       bound.dispose();
@@ -489,14 +514,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "破棄済み常駐テンソルの利用は全ての面で fail loudly（実 GPU）",
+  "using a disposed resident tensor fails loudly on every surface (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const dead = await gpu.createResident(BYTES, "dead");
     try {
       dead.dispose();
-      dead.dispose(); // 2 度目は no-op（破棄の冪等性）
+      dead.dispose(); // the second call is a no-op (dispose is idempotent)
 
       assertThrows(
         () => dead.write(new Float32Array(COUNT)),
@@ -524,31 +549,34 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// 消失した device では `queue.writeBuffer` が破棄済みバッファへの**沈黙 no-op**（警告すら
-// 出ない）になり、`createBuffer` の errorScope も消失を捕らえない（pop は null で resolve）ため
-// 無効なバッファを掴んだ resident が成功として返る。どちらも loud になるのは次のフェンスで、
-// その間の診断は誤導的 — 入口の同期検査でしか止められない。
+// On a lost device, `queue.writeBuffer` becomes a **silent no-op** on a destroyed buffer (not even
+// a warning), and the errorScope of `createBuffer` does not catch the loss either (pop resolves
+// with null), so a resident holding an invalid buffer comes back as a success. Both turn loud only
+// at the next fence, and the diagnostics in between are misleading — only a synchronous check at
+// the entry can stop it.
 test.skipIf(!GPU_AVAILABLE)(
-  "device.destroy() 直後（lost の反応前）から常駐テンソルの受付を拒否する（実 GPU）",
+  "resident tensors are refused right after device.destroy() (before the lost reaction) (real GPU)",
   async () => {
-    // この case は device を壊すので専用の GpuContext を取る。
+    // This case breaks the device, so it takes a GpuContext of its own.
     const gpu = await acquireGpu();
     const resident = await gpu.createResident(BYTES, "victim");
 
     gpu.destroy();
-    // MUST: ここで lost が**未記録**であること。記録済みなら既存の lost 判定だけで通ってしまい、
-    // 「destroy の同期フラグを見ている」ことの証拠にならない（門が恒真になる）。
-    assertStrictEquals(gpu.lost, undefined, "destroy 直後に lost の reaction が走っている");
-    assert(gpu.destroyRequested, "destroy 要求が同期に立っていない");
+    // MUST: lost is **not yet recorded** here. If it were, the existing lost check alone would
+    // pass, which would be no evidence that "the synchronous destroy flag is checked" (the check
+    // would be a tautology).
+    assertStrictEquals(gpu.lost, undefined, "the lost reaction ran right after destroy");
+    assert(gpu.destroyRequested, "the destroy request was not set synchronously");
 
     assertThrows(
       () => resident.write(new Float32Array(COUNT)),
       GpuDeviceLostError,
       "device was lost",
     );
-    // read も同じ門を通る。無いと破棄済み device 上で staging を確保して copy を submit し、
-    // 消失後の popErrorScope は null で resolve するので失敗が捕まらない（この 1 本だけが
-    // 門の証拠 — 下の lost 記録後は raceDeviceLost が既に同じ型で落としている）。
+    // read goes through the same check. Without it, read would allocate staging on the destroyed
+    // device and submit a copy, and popErrorScope after the loss resolves with null, so the failure
+    // would not be caught (this one call is the only evidence for the check — after lost is
+    // recorded below, raceDeviceLost already fails with the same type).
     await assertRejects(() => resident.read(), GpuDeviceLostError, "device was lost");
     // clear() takes the same guard: commands on a destroyed device are silent no-ops, so the state
     // would silently keep its previous contents.
@@ -560,7 +588,7 @@ test.skipIf(!GPU_AVAILABLE)(
     );
 
     await gpu.device.lost;
-    assert(gpu.lost !== undefined, "消失が記録されていない（門が空振りする）");
+    assert(gpu.lost !== undefined, "the loss was not recorded (the check would never fire)");
     assertThrows(() => resident.write(new Float32Array(COUNT)), GpuDeviceLostError);
     assertThrows(() => resident.clear(), GpuDeviceLostError);
     await assertRejects(() => resident.read(), GpuDeviceLostError);
@@ -569,7 +597,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "常駐テンソルの大きさ不一致は入力側・写し先側とも fail loudly（実 GPU）",
+  "a resident tensor size mismatch fails loudly on both the input side and the copy-target side (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -592,9 +620,10 @@ test.skipIf(!GPU_AVAILABLE)(
           "is not a graph output",
         );
       } finally {
-        // 落ちた enqueue の後も区間そのものは決着できる（残骸は discard 済み）。ただし決着は
-        // **最初のホスト側失敗**を帰属する — 2 本目の「グラフ出力ではない」ではなく 1 本目の
-        // 大きさ不一致が出るのが、記録を 1 件に絞っている根拠（派生失敗で根因が隠れない）。
+        // The section itself can still settle after the failed enqueues (the leftovers are
+        // discarded). But settling attributes **the first host-side failure** — the first call's
+        // size mismatch shows rather than the second's "not a graph output", which is why only one
+        // record is kept (a derived failure does not hide the root cause).
         await assertRejects(() => batch.finish(), ExecutionError, "bytes, but shape");
       }
     } finally {
@@ -606,24 +635,27 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test.skipIf(!GPU_AVAILABLE)("createResident は 4 の倍数の正の大きさしか受けない", async () => {
-  const gpu = await acquireGpu();
-  try {
-    for (const bad of [0, -4, 6, 1.5]) {
-      await assertRejects(
-        () => gpu.createResident(bad),
-        ResidentTensorError,
-        "multiple of 4",
-        `byteLength=${bad}`,
-      );
+test.skipIf(!GPU_AVAILABLE)(
+  "createResident accepts only positive sizes that are multiples of 4",
+  async () => {
+    const gpu = await acquireGpu();
+    try {
+      for (const bad of [0, -4, 6, 1.5]) {
+        await assertRejects(
+          () => gpu.createResident(bad),
+          ResidentTensorError,
+          "multiple of 4",
+          `byteLength=${bad}`,
+        );
+      }
+    } finally {
+      gpu.destroy();
     }
-  } finally {
-    gpu.destroy();
-  }
-});
+  },
+);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "決着済みの batch には enqueue できず、finish は何度でも同じ決着を返す（実 GPU）",
+  "a settled batch accepts no enqueue, and finish returns the same settlement every time (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -640,7 +672,7 @@ test.skipIf(!GPU_AVAILABLE)(
         "after finish()",
       );
 
-      // 区間を閉じた後の通常 run は従来どおり動く（scope ロックが返っている）。
+      // An ordinary run after the section closes works as before (the scope lock was released).
       const outputs = await session.run({ x: input(0) });
       assertEquals(outputs["y"].shape, [ROWS, COLS]);
     } finally {
@@ -685,7 +717,7 @@ test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "別の GpuContext で開いた batch には enqueue できない（実 GPU）",
+  "a batch opened on another GpuContext accepts no enqueue (real GPU)",
   async () => {
     const owner = await acquireGpu();
     const other = await acquireGpu();
@@ -709,7 +741,10 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** y = reshape(x)（[ROWS,COLS] → [COUNT]）。出力が入力の**別名**になる縮退グラフ。 */
+/**
+ * y = reshape(x) ([ROWS,COLS] → [COUNT]). A degenerate graph whose output is an **alias** of the
+ * input.
+ */
 const ALIAS: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -723,17 +758,18 @@ const ALIAS: DeclarationJson = {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "未 await の enqueue を積んだ直後の finish() でも全て区間に入る（実 GPU）",
+  "finish() right after queuing non-awaited enqueues still takes all of them into the section (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
     const sink = await gpu.createResident(BYTES, "sink");
     try {
       const batch = await gpu.beginBatch();
-      // MUST: 1 本も await しない。in-flight リースが無いと finish() が先に決着し、
-      // ①3 本とも BatchScopeError で reject ②sink は全 0（0 dispatch）③それでも finish は
-      // 成功で返る、という沈黙の空振りになる。
-      // NOTE: phase は 3 周期（`input` の式）なので、値が割れる範囲で 3 本積む。
+      // MUST: await none of them. Without the in-flight lease, finish() would settle first and
+      // the result would be a silent miss: ① all three reject with BatchScopeError ② sink is all 0
+      // (zero dispatches) ③ finish still returns success.
+      // NOTE: phase has period 3 (the `input` expression), so queue three within the range where
+      // the values differ.
       const pending = [0, 1, 2].map((phase) =>
         session.enqueue({ x: input(phase) }, { batch, copyOutputs: { y: sink } }),
       );
@@ -744,12 +780,13 @@ test.skipIf(!GPU_AVAILABLE)(
         const x = input(phase).data;
         return Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i]));
       };
-      // 恒真化の門: 先頭と末尾の期待値が同じなら「最後の 1 本が入った」ことを確かめられない。
+      // A check against tautology: if the first and the last expected values were the same, "the
+      // last one went in" could not be confirmed.
       assert(
         JSON.stringify(bits(doubled(0))) !== JSON.stringify(bits(doubled(2))),
-        "phase ごとに期待値が変わっていない（検出器として空振る）",
+        "the expected values do not change per phase (the detector would never fire)",
       );
-      assertEquals(bits(await sink.read()), bits(doubled(2)), "最後の enqueue まで実行されている");
+      assertEquals(bits(await sink.read()), bits(doubled(2)), "every enqueue up to the last ran");
       assertEquals(session.diagnostics().planBacking.buildCount, 1);
     } finally {
       await session.dispose();
@@ -760,7 +797,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "別 GpuContext の常駐テンソルはヒット経路でも fail loudly（ID 衝突の門・実 GPU）",
+  "a resident tensor of another GpuContext fails loudly on the hit path too (the ID-collision check, real GPU)",
   async () => {
     const owner = await acquireGpu();
     const other = await acquireGpu();
@@ -768,22 +805,23 @@ test.skipIf(!GPU_AVAILABLE)(
     const mine = await owner.createResident(BYTES, "mine");
     const foreign = await other.createResident(BYTES, "foreign");
     try {
-      // 前提の確認: 採番は GpuContext ごとに独立なので識別子が衝突する（衝突しないなら
-      // 導出済み計画のキーが分かれてしまい、この門は何も検出していないことになる）。
+      // Confirm the premise: IDs are assigned independently per GpuContext, so they collide (if
+      // they did not, the derived plan's keys would split and this check would detect nothing).
       assertEquals(
         mine[RUNTIME_INTERNAL].id,
         foreign[RUNTIME_INTERNAL].id,
-        "別 context の 1 本目どうしは同じ識別子（この門が塞ぐ前提）",
+        "the first residents of different contexts share an ID (the premise this check guards)",
       );
-      assertEquals(mine.byteLength, foreign.byteLength, "サイズ検査では区別できない");
+      assertEquals(mine.byteLength, foreign.byteLength, "the size check cannot tell them apart");
 
       mine.write(input(0).data);
-      await session.run({ x: mine }); // 1 run 目 = ミス（アリーナ経路）
-      await session.run({ x: mine }); // 2 run 目 = ヒット。backing が mine を焼き込む
+      await session.run({ x: mine }); // run 1 = miss (the arena path)
+      await session.run({ x: mine }); // run 2 = hit. The backing bakes in mine
       assertEquals(session.diagnostics().planBacking.buildCount, 1);
 
-      // 焼き込み済み backing はキー一致でそのまま再利用されるため、検査が無いと foreign は
-      // 1 バイトも読まれないまま mine の古い値が返る（例外ゼロ・警告ゼロ）。
+      // A baked backing is reused as is when the key matches, so without the check not a single
+      // byte of foreign would be read and mine's old values would come back (no exception, no
+      // warning).
       await assertRejects(
         () => session.run({ x: foreign }),
         ResidentTensorError,
@@ -792,7 +830,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         session.diagnostics().planBacking.buildCount,
         1,
-        "拒否した run は backing を作り直さない",
+        "the refused run does not rebuild the backing",
       );
     } finally {
       await session.dispose();
@@ -805,7 +843,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "copyOutputs の写し元と写し先が同一バッファなら enqueue 時点で落ちる（実 GPU）",
+  "copyOutputs with the same buffer as source and destination fails at enqueue (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openGraphModel(ALIAS), "model");
@@ -813,16 +851,18 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const batch = await gpu.beginBatch();
       try {
-        // y は x の別名（reshape）なので、写し元の実体は state そのもの。検査が無いと
-        // 自己コピーが積まれ、validation 失敗は batch.finish() まで遅れる（= 同じ区間の
-        // 無関係な enqueue まで巻き添えになり、原因の enqueue が特定できない）。
+        // y is an alias of x (reshape), so the copy source's storage is state itself. Without the
+        // check a self-copy would be queued and the validation failure delayed until
+        // batch.finish() (= unrelated enqueues in the same section would go down with it, and the
+        // enqueue at fault could not be identified).
         await assertRejects(
           () => session.enqueue({ x: state }, { batch, copyOutputs: { y: state } }),
           ExecutionError,
           "source and destination are the same buffer",
         );
       } finally {
-        // 落ちた enqueue はこの区間の最初のホスト側失敗として決着にも帰属する（RC1-2）。
+        // The failed enqueue is also attributed to the settlement as this section's first
+        // host-side failure (RC1-2).
         await assertRejects(
           () => batch.finish(),
           ExecutionError,
@@ -838,7 +878,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "進行中の run が束ねている常駐テンソルは破棄できない（故障注入・実 GPU）",
+  "a resident tensor bound by a run in progress cannot be disposed (fault injection, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -848,33 +888,34 @@ test.skipIf(!GPU_AVAILABLE)(
     let injected = 0;
     try {
       bound.write(input(0).data);
-      // ミス run は「env へ実体を束縛 → パイプライン生成を await → エンコード」の順で進む。
-      // その await 窓（= パイプライン生成中）で dispose を試すのがこの注入。焼き込み参照は
-      // まだ 0 本なので、束縛予約が無ければここは素通りしてしまう。
+      // A miss run proceeds as "bind the storage into env → await pipeline creation → encode".
+      // This injection tries dispose in that await window (= during pipeline creation). There are
+      // still no baked references, so without the binding reservation this would slip through.
       device.createComputePipelineAsync = (
         descriptor: GPUComputePipelineDescriptor,
       ): Promise<GPUComputePipeline> => {
         if (injected === 0) {
           injected += 1;
-          assertEquals(bound.bakedReferences, 0, "焼き込み参照はまだ立っていない窓");
-          assertEquals(bound.boundReferences, 1, "束縛予約が立っている");
+          assertEquals(bound.bakedReferences, 0, "the window where no baked reference exists yet");
+          assertEquals(bound.boundReferences, 1, "the binding reservation is held");
           assertThrows(() => bound.dispose(), ResidentTensorError, "bound as an input");
         }
         return original(descriptor);
       };
 
       const outputs = await session.run({ x: bound });
-      assertEquals(injected, 1, "注入が 1 度も走っていない（窓を踏めていない）");
+      assertEquals(injected, 1, "the injection never ran (the window was not hit)");
       const x = input(0).data;
       assertEquals(
         bits(outputs["y"].data),
         bits(Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i]))),
-        "拒否された dispose は run の値を壊さない",
+        "the refused dispose does not corrupt the run's values",
       );
 
-      // run が完了すれば予約は返っている（返し損ねると以後ずっと破棄できなくなる）。
+      // Once the run completes, the reservation is released (failing to release it would make the
+      // tensor undisposable from then on).
       assertEquals(bound.boundReferences, 0);
-      assertEquals(bound.disposed, false, "拒否した破棄で状態を壊さない");
+      assertEquals(bound.disposed, false, "a refused dispose does not corrupt the state");
       bound.dispose();
       assertEquals(bound.disposed, true);
     } finally {
@@ -885,17 +926,18 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 2x（PRODUCER の出力）の参照値。 */
+/** The reference value of 2x (PRODUCER's output). */
 const doubled = (phase: number): Float32Array<ArrayBuffer> => {
   const x = input(phase).data;
   return Float32Array.from({ length: COUNT }, (_, i) => Math.fround(x[i] + x[i]));
 };
 
-// 非 await の enqueue が本体で落ちても、区間は「dispatch が 1 本少ないまま成功」で決着して
-// いた（errorScope が捕らえるのは GPU 側の失敗だけで、ホスト側の throw は戻り Promise にしか
-// 出ない = 握っていなければ未処理拒否として抜けるだけ）。この門はその帰属を固定する。
+// When a non-awaited enqueue failed in its body, the section used to settle as "success with one
+// dispatch fewer" (the errorScope catches only GPU-side failures, and a host-side throw shows only
+// in the returned Promise = unless someone holds it, it just escapes as an unhandled rejection).
+// This check pins that attribution.
 test.skipIf(!GPU_AVAILABLE)(
-  "非 await の enqueue の失敗は finish() に帰属する（最初の 1 件・実 GPU）",
+  "the failure of a non-awaited enqueue is attributed to finish() (the first one, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -903,13 +945,14 @@ test.skipIf(!GPU_AVAILABLE)(
     const sink = await gpu.createResident(BYTES, "sink");
     try {
       const batch = await gpu.beginBatch();
-      // MUST: どちらも await しない（この面が明示的に許している形）。1 本目は写し先の大きさが
-      // 合わずに本体で落ち、2 本目は正常に積まれる。
+      // MUST: await neither (the form this surface explicitly allows). The first fails in its body
+      // because the copy target's size does not match; the second is queued normally.
       const pending = [
         session.enqueue({ x: input(0) }, { batch, copyOutputs: { y: wrong } }),
         session.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } }),
       ];
-      // 未処理拒否を作らないよう、発行と同じ同期区間でハンドラを付ける。
+      // Attach the handler in the same synchronous part as the issue, so no unhandled rejection
+      // arises.
       const settled = Promise.allSettled(pending);
 
       const attributed = await assertRejects(
@@ -919,20 +962,28 @@ test.skipIf(!GPU_AVAILABLE)(
       );
 
       const results = await settled;
-      assert(results[0].status === "rejected", "落ちた enqueue の戻り Promise は reject する");
+      assert(
+        results[0].status === "rejected",
+        "the returned Promise of the failed enqueue rejects",
+      );
       assertStrictEquals(
         results[0].reason,
         attributed,
-        "finish が投げるのは enqueue が落ちたその例外そのもの（同じ 1 事実が 2 経路で見える）",
+        "finish throws the very exception the enqueue failed with (one fact seen through two paths)",
       );
-      assertEquals(results[1].status, "fulfilled", "正常な enqueue は巻き添えで落ちない");
+      assertEquals(results[1].status, "fulfilled", "the healthy enqueue does not go down with it");
 
-      // 恒真化の門: 期待値が全 0 なら「写しが起きた」ことを確かめられない。
+      // A check against tautology: if the expected values were all 0, "the copy happened" could
+      // not be confirmed.
       assert(
         bits(doubled(1)).some((word) => word !== 0),
-        "期待値が全 0（写しの有無を判定できない）",
+        "the expected values are all 0 (whether the copy happened cannot be told)",
       );
-      assertEquals(bits(await sink.read()), bits(doubled(1)), "正常な enqueue の写し先は更新済み");
+      assertEquals(
+        bits(await sink.read()),
+        bits(doubled(1)),
+        "the healthy enqueue's copy target is updated",
+      );
     } finally {
       await session.dispose();
       wrong.dispose();
@@ -942,12 +993,13 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// 束縛予約（`#bindInput`）が立つのは実行本体 = マイクロタスク 1 段後なので、焼き込みも束縛も
-// 0 本の resident には「API が受理した直後の同じ tick に dispose が通る」窓が開いていた。
-// dispose の doc が謳う「誤りは dispose の呼び出し点で真因のまま落ちる」を、受理済みの
-// run / enqueue に対しても成り立たせるのが発行時の使用予約。
+// The binding reservation (`#bindInput`) is taken in the execution body = one microtask later, so
+// a resident with neither baked nor binding references had a window where "dispose goes through in
+// the same tick right after the API accepted the call". The use reservation at issue makes what the
+// dispose doc promises — "a mistake fails at the dispose call site with its true cause" — hold for
+// accepted runs / enqueues too.
 test.skipIf(!GPU_AVAILABLE)(
-  "発行済み run / enqueue が使う常駐テンソルは同じ tick でも破棄できない（実 GPU）",
+  "a resident tensor used by an issued run / enqueue cannot be disposed even in the same tick (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -955,26 +1007,39 @@ test.skipIf(!GPU_AVAILABLE)(
     const sink = await gpu.createResident(BYTES, "sink");
     try {
       fresh.write(input(0).data);
-      // 1 run 目はミス経路（backing 無し）— 焼き込み参照が 1 本も立たない窓であることの確認。
-      assertEquals(fresh.bakedReferences, 0, "焼き込み参照が既に立っている（門が空振りする）");
+      // Run 1 is on the miss path (no backing) — confirms the window where no baked reference
+      // exists.
+      assertEquals(
+        fresh.bakedReferences,
+        0,
+        "a baked reference already exists (the check would never fire)",
+      );
 
       const pending = session.run({ x: fresh });
-      assertEquals(fresh.useReferences, 1, "発行の同期区間で使用予約が立っていない");
-      assertEquals(fresh.boundReferences, 0, "束縛予約は本体まで立たない（この窓の証拠）");
+      assertEquals(
+        fresh.useReferences,
+        1,
+        "no use reservation in the synchronous part of the issue",
+      );
+      assertEquals(
+        fresh.boundReferences,
+        0,
+        "the binding reservation is not taken until the body (the evidence for this window)",
+      );
       assertThrows(() => fresh.dispose(), ResidentTensorError, "in use");
-      assertEquals(fresh.disposed, false, "拒否した破棄で状態を壊さない");
+      assertEquals(fresh.disposed, false, "a refused dispose does not corrupt the state");
       // clear() refuses in the same window (unlike write, which leaves it as a caller contract): a
       // clear here would land before the run's dispatch and zero the input it reads.
       assertThrows(() => fresh.clear(), ResidentTensorError, "cannot be cleared");
 
-      // 拒否した dispose は run を壊さない（受理済みの実行はそのまま完走する）。
+      // The refused dispose does not break the run (the accepted execution runs to completion).
       assertEquals(bits((await pending)["y"].data), bits(doubled(0)));
-      assertEquals(fresh.useReferences, 0, "決着で使用予約が返っていない");
+      assertEquals(fresh.useReferences, 0, "the use reservation was not released on settlement");
 
-      // 写し先（copyOutputs）も同じ寿命の保護を受ける。
+      // The copy target (copyOutputs) gets the same lifetime protection.
       const batch = await gpu.beginBatch();
       const queued = session.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } });
-      assertEquals(sink.useReferences, 1, "写し先に使用予約が立っていない");
+      assertEquals(sink.useReferences, 1, "no use reservation on the copy target");
       assertThrows(() => sink.dispose(), ResidentTensorError, "in use");
       assertThrows(() => sink.clear(), ResidentTensorError, "cannot be cleared");
       await queued;
@@ -982,7 +1047,8 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(sink.useReferences, 0);
       assertEquals(bits(await sink.read()), bits(doubled(1)));
 
-      // 決着後は通る（予約が返っていることの裏 — 検査が恒真になっていない）。
+      // After settlement it goes through (evidence that the reservations were released — the check
+      // is not a tautology).
       // The refused clears left the values intact (the run read input(0), the copy wrote doubled(1)),
       // and a clear after settlement goes through.
       fresh.clear();
@@ -1000,7 +1066,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "使用予約の取得が途中で落ちても取得済みは漏れない（rollback の門・実 GPU）",
+  "a failure midway through taking use reservations leaks none of those already taken (the rollback check, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -1010,25 +1076,27 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       dead.dispose();
       const batch = await gpu.beginBatch();
-      // 入力（alive）の予約を取った後に写し先（dead）で落ちる形。巻き戻さないと alive は
-      // 以後ずっと破棄できない。
+      // The shape that fails on the copy target (dead) after taking the input's (alive)
+      // reservation. Without the rollback, alive could never be disposed afterwards.
       await assertRejects(
         () => session.enqueue({ x: alive }, { batch, copyOutputs: { y: dead } }),
         ExecutionError,
         "disposed",
       );
-      assertEquals(alive.useReferences, 0, "取得済みの使用予約が巻き戻っていない");
-      // 区間に入る前に落ちた enqueue は区間の失敗ではない（リースを取っていない）。
+      assertEquals(alive.useReferences, 0, "the use reservation already taken was not rolled back");
+      // An enqueue that failed before entering the section is not a failure of the section (it
+      // took no lease).
       await batch.finish();
 
-      // batch.enter() が落ちる経路でも同じ（ここでは入力と写し先の 2 本を取った後に落ちる）。
+      // The same holds on the path where batch.enter() fails (here it fails after taking both the
+      // input and the copy target).
       await assertRejects(
         () => session.enqueue({ x: alive }, { batch, copyOutputs: { y: spare } }),
         BatchScopeError,
         "after finish()",
       );
-      assertEquals(alive.useReferences, 0, "enter 失敗で使用予約が漏れている");
-      assertEquals(spare.useReferences, 0, "enter 失敗で使用予約が漏れている");
+      assertEquals(alive.useReferences, 0, "the use reservation leaked on the enter failure");
+      assertEquals(spare.useReferences, 0, "the use reservation leaked on the enter failure");
 
       alive.dispose();
       spare.dispose();
@@ -1041,31 +1109,34 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// createResident が async なのは errorScope で囲むため（上限超過の createBuffer は同期例外を
-// 投げず**無効なバッファを返す**）。push/pop を外しても値は正しいままなので、この門が無いと
-// 「無効な resident が成功として返り、以後の write が沈黙 no-op になる」退行が全緑で通る。
+// createResident is async because it wraps the call in an errorScope (createBuffer over the limit
+// throws no synchronous exception and **returns an invalid buffer**). Removing push/pop keeps the
+// values correct, so without this check the regression "an invalid resident comes back as a
+// success and later writes become silent no-ops" would pass all green.
 test.skipIf(!GPU_AVAILABLE)(
-  "上限超過の createResident は errorScope 経由で型付き例外になる（実 GPU）",
+  "createResident over the limit becomes a typed exception through the errorScope (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // MUST: 上限超過かつ 4 の倍数を保つ（崩れると同期の引数検査が先に出て、別の門を検査して
-      // しまう）。`maxBufferSize` 自体は 4 の倍数とは限らない（Intel Arc B570 / Deno wgpu は
-      // 2³¹−1 — 2026-09-20 実測）ので、上限の次の 4 の倍数へ切り上げる。
+      // MUST: stay over the limit and a multiple of 4 (otherwise the synchronous argument check
+      // fires first and a different check gets tested). `maxBufferSize` itself is not necessarily a
+      // multiple of 4 (Intel Arc B570 / Deno wgpu report 2³¹−1 — measured 2026-09-20), so round up
+      // to the next multiple of 4 above the limit.
       const tooBig = Math.ceil((gpu.limits.maxBufferSize + 1) / 4) * 4;
       assert(tooBig > gpu.limits.maxBufferSize && tooBig % 4 === 0, `tooBig ${tooBig}`);
-      // 仕様上 size > maxBufferSize は**確保を伴わない** validation エラー（実メモリを食わない）。
+      // By the spec, size > maxBufferSize is a validation error **without an allocation** (it uses
+      // no real memory).
       const error = await assertRejects(
         () => gpu.createResident(tooBig, "too-big"),
         GpuValidationError,
       );
       assert(error.message.startsWith("resident 'too-big' allocation: "), error.message);
 
-      // スコープ残高 0（失敗経路で pop を積み残していればここが赤くなる）。
+      // The scope balance is 0 (if the failure path left a pop undone, this turns red).
       pushFailureScopes(gpu.device);
-      assertEquals(await popFailureScopes(gpu.device, "残高検査"), undefined);
+      assertEquals(await popFailureScopes(gpu.device, "balance check"), undefined);
 
-      // 恒真化の門: 門が「常に落ちる」形になっていないこと。
+      // A check against tautology: the check is not of the "always fails" kind.
       const ok = await gpu.createResident(BYTES, "ok");
       ok.write(input(0).data);
       assertEquals(bits(await ok.read()), bits(input(0).data));
@@ -1076,11 +1147,12 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// 区間は device 単位の errorScope 区間ロックを握り続けるので、finish() を通らずに抜けると
-// 以後の run が例外も診断も無く待ち続ける。`await using` はその取りこぼしを起こしにくくする
-// 書き方で、asyncDispose が無いと TS では型エラー・JS では TypeError（しかもロック取得後）。
+// A section keeps holding the per-device errorScope section lock, so leaving without finish()
+// would make later runs wait forever with neither an exception nor a diagnostic. `await using` is a
+// style that makes that slip harder; without asyncDispose it is a type error in TS and a TypeError
+// in JS (and only after the lock is taken).
 test.skipIf(!GPU_AVAILABLE)(
-  "await using で開いた batch 区間は抜けた時点で決着している（実 GPU）",
+  "a batch section opened with await using is settled when the block exits (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await producerSession(gpu);
@@ -1091,12 +1163,17 @@ test.skipIf(!GPU_AVAILABLE)(
         await using batch = await gpu.beginBatch();
         scope = batch;
         await session.enqueue({ x: input(0) }, { batch, copyOutputs: { y: sink } });
-        assertEquals(batch.finished, false, "区間の途中で決着している（門が空振りする）");
+        assertEquals(
+          batch.finished,
+          false,
+          "settled in the middle of the section (the check would never fire)",
+        );
       }
-      assertEquals(scope.finished, true, "区間を抜けても finish() が呼ばれていない");
-      assertEquals(bits(await sink.read()), bits(doubled(0)), "区間のぶんは完了している");
+      assertEquals(scope.finished, true, "finish() was not called on leaving the section");
+      assertEquals(bits(await sink.read()), bits(doubled(0)), "the section's work has completed");
 
-      // 区間ロックが返っている証拠。返っていなければこの run は永久に待つ（例外も診断も無い）。
+      // Evidence that the section lock was released. Otherwise this run would wait forever (with
+      // neither an exception nor a diagnostic).
       const outputs = await session.run({ x: input(1) });
       assertEquals(bits(outputs["y"].data), bits(doubled(1)));
     } finally {
@@ -1108,8 +1185,9 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * グラフ出力に initializer 名を書いた形（IR が許す）。その値は焼き込みの値写像に載らないので
- * `copyOutputs` の相手にはできない（実行のたびに同じ定数を GPU 内でコピーするだけ）。
+ * A graph output that names an initializer (the IR allows it). Its value is not in the baked value
+ * mapping, so it cannot be a `copyOutputs` target (it would only copy the same constant within the
+ * GPU on every execution).
  */
 const INITIALIZER_OUTPUT: DeclarationJson = {
   format: "karume-ir",
@@ -1137,7 +1215,7 @@ const openInitializerOutputModel = () =>
   ]);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "initializer 由来のグラフ出力への copyOutputs は積む前に落ち、区間の他を巻き添えにしない（実 GPU）",
+  "copyOutputs to a graph output from an initializer fails before queuing and does not take down the rest of the section (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(
@@ -1150,9 +1228,11 @@ test.skipIf(!GPU_AVAILABLE)(
     const sink = await gpu.createResident(BYTES, "sink");
     try {
       const batch = await gpu.beginBatch();
-      // MUST: どちらも await しない（失敗の帰属を finish に集める既存の形と同じ）。
+      // MUST: await neither (the same form as the existing one that collects failure attribution
+      // in finish).
       const pending = [
-        // IR v2 では initializer 名がそのまま実体の鍵なので、宣言どおり `c` が出力名になる。
+        // In IR v2 the initializer name is itself the storage key, so `c` becomes the output name
+        // as declared.
         session.enqueue({ x: input(0) }, { batch, copyOutputs: { c: constSink } }),
         healthy.enqueue({ x: input(1) }, { batch, copyOutputs: { y: sink } }),
       ];
@@ -1165,16 +1245,27 @@ test.skipIf(!GPU_AVAILABLE)(
       );
 
       const results = await settled;
-      assert(results[0].status === "rejected", "落ちた enqueue の戻り Promise は reject する");
+      assert(
+        results[0].status === "rejected",
+        "the returned Promise of the failed enqueue rejects",
+      );
       assertStrictEquals(results[0].reason, attributed);
-      assertEquals(results[1].status, "fulfilled", "同じ区間の別 enqueue は巻き添えで落ちない");
+      assertEquals(
+        results[1].status,
+        "fulfilled",
+        "the other enqueue in the same section does not go down with it",
+      );
       assertEquals(
         session.diagnostics().submit.dispatchCount,
         0,
-        "dispatch を 1 本も積む前に落ちていない",
+        "it did not fail before queuing a single dispatch",
       );
       assertEquals(session.diagnostics().submit.discardedDispatches, 0);
-      assertEquals(bits(await sink.read()), bits(doubled(1)), "正常な enqueue の写し先は更新済み");
+      assertEquals(
+        bits(await sink.read()),
+        bits(doubled(1)),
+        "the healthy enqueue's copy target is updated",
+      );
     } finally {
       await session.dispose();
       await healthy.dispose();

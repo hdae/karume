@@ -1,6 +1,7 @@
-// gpu_gridstride_test.ts の fixture（DegenerateCase 型とカーネル族別のケース生成関数）。
-// 実行ハーネス（runDegenerate / Deno.test）とケース一覧の組み立ては gpu_gridstride_test.ts に
-// 残し、ここは「1 族ぶんの縮退ケースを産む」責務だけを持つ — 依存は helpers → src の一方向。
+// Fixture of gpu_gridstride_test.ts (the DegenerateCase type and the case builders per kernel
+// family). The execution harness (runDegenerate / Deno.test) and the assembly of the case list stay
+// in gpu_gridstride_test.ts; this file only "produces the reduced-dispatch cases of one family" —
+// dependencies go one way, helpers → src.
 
 import {
   ELEMENTWISE_WORKGROUP_SIZE,
@@ -153,55 +154,60 @@ import { f32ToF16Bits, quantizeF16 } from "./f16.ts";
 import { quantizeI8 } from "./i8.ts";
 import { fill, type FilledTensor } from "./model-fixture.ts";
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data (no random numbers — a failure would not reproduce). */
 const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
 const POSITIVE = (i: number): number => 0.125 + (i % 17) * 0.5;
 
 /**
- * 1 カーネル族ぶんの縮退ケース。binding は `0 = params` / `1..n = 入力（並び順）` /
- * 末尾 = 出力で、全カーネル族が共有する配置。
+ * The reduced-dispatch case of one kernel family. Bindings are `0 = params` /
+ * `1..n = inputs (in order)` / last = output, a layout shared by every kernel family.
  */
 export type DegenerateCase = {
   readonly name: string;
   readonly key: string;
   readonly wgsl: string;
   readonly params: Uint32Array<ArrayBuffer>;
-  /** params を uniform で受けるカーネル（行ループに workgroupBarrier がある族）。 */
+  /** Kernels that take params as a uniform (families with a workgroupBarrier in the row loop). */
   readonly uniformParams: boolean;
   /**
-   * 入力バッファに書く中身。`Uint8Array` は**生バイト**（f16 / i8 格納の重みは 2 / 4 要素を
-   * 1 語に詰めていてホストの数値配列型では表せない — ADR 0018 / 0019）。
+   * Contents written to the input buffers. A `Uint8Array` is **raw bytes** (weights stored as f16 /
+   * i8 pack 2 / 4 elements into one word and cannot be expressed with the host's numeric array
+   * types — ADR 0018 / 0019).
    */
   readonly inputs: readonly (FilledTensor | Uint8Array<ArrayBuffer>)[];
   /**
-   * 比較しない**もう 1 本の書き込み先**のバイト数（束縛は入力の次・比較対象の出力の 1 つ前）。
-   * `quantize_rows` のように 1 dispatch が 2 本書く族のためのもので、こちらの中身は f32 では
-   * 表せない（i8 の 4 詰め）ので突合の対象にしない — 縮退耐性は行方向のループが担うので、
-   * 行ごとに 1 語書く `xs` 側を比較すれば同じ経路を踏める。
+   * Byte count of **one more write target** that is not compared (bound after the inputs, one
+   * before the compared output). It is for families where one dispatch writes two outputs, like
+   * `quantize_rows`; its contents cannot be expressed in f32 (4 packed i8), so it is not compared —
+   * robustness to a reduced dispatch is carried by the row loop, so comparing the `xs` side, which
+   * writes one word per row, exercises the same path.
    *
-   * `topk`（ADR 0068 決定 3）も 1 dispatch が 2 本書く族で、こちらには**値の列**を置いて
-   * **添字の列**を突合する（値側も f32 で表せるが、縮退耐性の検出力は添字側が高い — 同じ
-   * ループが両方を書くので、行ループが 1 周で止まる誤りは添字側に必ず出るうえ、i32 の
-   * 厳密一致は allclose より締まっている）。
+   * `topk` (ADR 0068 decision 3) is also a family where one dispatch writes two outputs; here the
+   * **values** go in this slot and the **indices** are compared (the values could be expressed in
+   * f32 too, but the indices detect reduced-dispatch bugs better — the same loop writes both, so a
+   * row loop that stops after one pass always shows in the indices, and exact i32 matching is
+   * stricter than allclose).
    */
   readonly sideOutputBytes?: number;
   /**
-   * i8 変種の per-channel scale（ADR 0019）。束縛は**出力の次の番号**なので、出力を積んだ
-   * 後に足す（カーネル側の `*_SCALE_BINDING` と同じ位置になる）。
+   * Per-channel scale of the i8 variants (ADR 0019). Its binding is **the number after the
+   * output**, so it is added after the output (the same position as `*_SCALE_BINDING` on the kernel
+   * side).
    */
   readonly weightScale?: Float32Array<ArrayBuffer>;
   /**
-   * CPU 参照が出した期待出力。読み出しは**この dtype で** view を張る（f32 の族と、添字を
-   * 書く i32 の族〈argmax〉— 突合できない格納形は {@link sideOutputBytes} 側に置く）。
+   * The expected output from the CPU reference. The read-back view is created **with this dtype**
+   * (the f32 families and the i32 families that write indices, such as argmax — storage forms that
+   * cannot be compared go into {@link sideOutputBytes}).
    */
   readonly expected: RefTensor;
-  /** 素直に割ったときの必要 workgroup 数（縮退していることの証拠として固定する）。 */
+  /** Workgroups needed with a plain division (pinned as evidence that the dispatch is reduced). */
   readonly natural: number;
-  /** 意図的に絞った dispatch 数。 */
+  /** The deliberately reduced dispatch count. */
   readonly groups: number;
 };
 
-/** 要素方向の族（`gid.x` の 1 次元 grid-stride）。 */
+/** Elementwise families (1-D grid-stride over `gid.x`). */
 export const elementwiseCase = (): DegenerateCase => {
   const count = 100_000;
   const spec = { op: "neg", rank: 1, dtype: "f32" } as const;
@@ -242,7 +248,8 @@ export const gatherCase = (): DegenerateCase => {
   const srcCols = 9;
   const cols = 6;
   const src = fill([rows, srcCols], SIGNED);
-  // 添字は 0..srcCols-1 を一巡する（恒等でも単調でもない列 — 1 ずれが必ず値に出る）。
+  // The indices cycle through 0..srcCols-1 (neither identity nor monotonic — an off-by-one always
+  // shows in the values).
   const index = fill([rows, cols], (i) => (i * 5) % srcCols, "i32");
   return {
     name: "gather",
@@ -258,22 +265,23 @@ export const gatherCase = (): DegenerateCase => {
 };
 
 /**
- * 重み格納の変種（ADR 0018 / 0019）を縮退ハーネスに載せるための小道具。**f16 / i8 変種は
- * WGSL 本体が違う = 別の検出対象**なので、f32 版と同じ形の縮退ケースを 1 本ずつ持つ
- * （このファイル冒頭の MUST）。CPU 参照の重みは**丸め後の値**（fake-quant — ADR 0006）にする。
+ * Small tool for putting the weight-storage variants (ADR 0018 / 0019) on the reduced-dispatch
+ * harness. **The f16 / i8 variants have a different WGSL body = a separate detection target**, so
+ * each has a reduced-dispatch case of the same shape as the f32 version (the MUST at the top of
+ * this file). The CPU reference's weights are **the rounded values** (fake-quant — ADR 0006).
  */
 type VariantWeight = {
-  /** 入力バッファに載せる中身（f32 はそのまま / f16・i8 は整列済みの生バイト）。 */
+  /** Contents put into the input buffer (f32 as is / f16 and i8 as aligned raw bytes). */
   readonly payload: FilledTensor | Uint8Array<ArrayBuffer>;
-  /** CPU 参照が使う重み（低精度格納なら丸め後）。 */
+  /** Weights the CPU reference uses (rounded for low-precision storage). */
   readonly reference: RefTensor;
-  /** i8 変種の per-channel scale（他の変種は undefined）。 */
+  /** Per-channel scale of the i8 variant (undefined for the other variants). */
   readonly scale?: Float32Array<ArrayBuffer>;
 };
 
 /**
- * `channelAxis` は per-channel scale が掛かる軸（conv_transpose1d だけ 1 — ADR 0019）。
- * f32 / f16 では使われない。
+ * `channelAxis` is the axis the per-channel scale applies to (1 only for conv_transpose1d —
+ * ADR 0019). Unused for f32 / f16.
  */
 const variantWeight = (
   weight: FilledTensor,
@@ -289,7 +297,7 @@ const variantWeight = (
     };
   }
   if (storage === "bf16") {
-    // bf16 も 2 バイト / 要素なので整列の詰め物は f16 と共用（ADR 0131）。
+    // bf16 is also 2 bytes / element, so it shares the alignment padding with f16 (ADR 0131).
     const quantized = quantizeBf16(weight.data);
     return {
       payload: alignF16Payload(quantized.bytes),
@@ -306,7 +314,8 @@ const variantWeight = (
 
 export const embeddingCase = (storage: WeightStorage): DegenerateCase => {
   const vocab = 64;
-  // 行長を奇数にする（f16 変種で行の先頭が語の上位・下位に交互に来る — 対の取り違えの検出器）
+  // Odd row length (in the f16 variant row starts alternate between the high and low half of a
+  // word — a detector for swapped pairs)
   const hidden = 5;
   const rows = 20_000;
   const weight = variantWeight(fill([vocab, hidden], SIGNED), storage, 0);
@@ -319,7 +328,8 @@ export const embeddingCase = (storage: WeightStorage): DegenerateCase => {
     uniformParams: true,
     inputs: [weight.payload, index],
     weightScale: weight.scale,
-    // padding_idx は forward に効かないが契約の必須 attr（src/ops/attrs.ts）— 未指定の番兵 −1 を渡す
+    // padding_idx has no effect on forward but is a required attr of the contract
+    // (src/ops/attrs.ts) — pass the unset sentinel −1
     expected: applyReferenceOp("embedding", [weight.reference, index], { padding_idx: -1 }, [
       rows,
       hidden,
@@ -335,7 +345,8 @@ export const maskedFillCase = (): DegenerateCase => {
   const outShape = [rows, cols];
   const value = -3.4028234663852886e38;
   const x = fill(outShape, SIGNED);
-  // mask は最終次元を stride 0 で複製する形（実測の右詰め broadcast と同型）。
+  // The mask replicates the last dimension with stride 0 (the same shape as the right-aligned
+  // broadcast seen in practice).
   const mask = fill([rows, 1], (i) => (i % 3 === 0 ? 1 : 0), "bool");
   return {
     name: "masked_fill",
@@ -355,7 +366,7 @@ export const conv1dCase = (storage: WeightStorage): DegenerateCase => {
   const channelsIn = 2;
   const channelsOut = 2;
   const lengthIn = 25_000;
-  // K を奇数にする（f16 変種で重み行の先頭が語の上位・下位に交互に来る）
+  // Odd K (in the f16 variant weight-row starts alternate between the high and low half of a word)
   const kernel = 3;
   const stride = 1;
   const padding = 1;
@@ -397,18 +408,18 @@ export const conv1dCase = (storage: WeightStorage): DegenerateCase => {
 
 export const convTranspose1dCase = (storage: WeightStorage): DegenerateCase => {
   const batch = 1;
-  // 非対称チャネル（重み [Cin,Cout,K] を [Cout,Cin,K] と読む誤りをここでも赤にする）
+  // Asymmetric channels (reading the weight [Cin,Cout,K] as [Cout,Cin,K] turns red here too)
   const channelsIn = 3;
   const channelsOut = 2;
   const lengthIn = 12_000;
-  // K は契約（2·padding == K − stride）に縛られてここでは偶数（奇数長の対選択は
-  // stride 1 が取れる tests/gpu_f16_i8_weights_test.ts が見る）
+  // K is bound by the contract (2·padding == K − stride) and is even here (the pair selection of
+  // odd lengths is covered by tests/gpu_f16_i8_weights_test.ts, which can use stride 1)
   const kernel = 4;
   const stride = 2;
   const padding = 1;
   const lengthOut = lengthIn * stride;
   const x = fill([batch, channelsIn, lengthIn], SIGNED);
-  // MUST: チャネル軸は 1（重み [Cin, Cout, K] の転置レイアウト — ADR 0019）
+  // MUST: the channel axis is 1 (the transposed layout of the weight [Cin, Cout, K] — ADR 0019)
   const weight = variantWeight(fill([channelsIn, channelsOut, kernel], POSITIVE), storage, 1);
   const bias = fill([channelsOut], SIGNED);
   return {
@@ -444,13 +455,14 @@ export const convTranspose1dCase = (storage: WeightStorage): DegenerateCase => {
 
 export const conv2dCase = (storage: WeightStorage): DegenerateCase => {
   const batch = 1;
-  // Cin ≠ Cout・Kh ≠ Kw（縮退経路でも重みの軸取り違えが赤くなる形にする）
+  // Cin ≠ Cout, Kh ≠ Kw (a shape where swapped weight axes turn red on the reduced path too)
   const channelsIn = 2;
   const channelsOut = 3;
   const heightIn = 4;
   const widthIn = 8_000;
-  // NOTE: Kh·Kw が偶数なので重み行の先頭は常に語境界。f16 の対選択（奇数長）を踏むのは
-  // tests/gpu_f16_i8_weights_test.ts の担当で、ここは縮退耐性だけを見る。
+  // NOTE: Kh·Kw is even, so weight rows always start on a word boundary. Exercising the f16 pair
+  // selection (odd lengths) is the job of tests/gpu_f16_i8_weights_test.ts; this only checks
+  // robustness to a reduced dispatch.
   const kernelH = 3;
   const kernelW = 2;
   const paddingH = 1;
@@ -508,7 +520,8 @@ export const conv2dCase = (storage: WeightStorage): DegenerateCase => {
 export const padCase = (): DegenerateCase => {
   const rows = 4;
   const lengthIn = 25_000;
-  // 左右を**別の幅**にする（対称幅だと left / right の取り違えが出力に出ない）。
+  // Left and right get **different widths** (with symmetric widths, swapping left / right would not
+  // show in the output).
   const left = 3;
   const right = 5;
   const x = fill([rows, lengthIn], SIGNED);
@@ -527,7 +540,8 @@ export const padCase = (): DegenerateCase => {
 };
 
 export const flipCase = (): DegenerateCase => {
-  // 反転軸の長さは 3 以上（2 の反転は off-by-one が対称に消えて検出器にならない）。
+  // The flipped axis has length 3 or more (flipping 2 cancels an off-by-one symmetrically and
+  // detects nothing).
   const outer = 2;
   const length = 3;
   const inner = 20_000;
@@ -548,7 +562,8 @@ export const flipCase = (): DegenerateCase => {
 
 export const deformConv2dCase = (): DegenerateCase => {
   const batch = 1;
-  // Cin ≠ Cout・Kh ≠ Kw（縮退経路でも重みの軸取り違えと offset の y/x 順が赤くなる形）
+  // Cin ≠ Cout, Kh ≠ Kw (a shape where swapped weight axes and the y/x order of offset turn red on
+  // the reduced path too)
   const channelsIn = 2;
   const channelsOut = 3;
   const heightIn = 4;
@@ -562,7 +577,8 @@ export const deformConv2dCase = (): DegenerateCase => {
   const taps = kernelH * kernelW;
   const x = fill([batch, channelsIn, heightIn, widthIn], SIGNED);
   const weight = fill([channelsOut, channelsIn, kernelH, kernelW], POSITIVE);
-  // offset は ±1.5 の非整数（境界の内外を跨ぐ）・mask は BiRefNet と同じ [0,2]
+  // offset is the non-integer ±1.5 (crossing in and out of the border); mask is [0,2] as in
+  // BiRefNet
   const offset = fill([batch, 2 * taps, heightOut, widthOut], (i) => ((i % 7) - 3) * 0.5);
   const mask = fill([batch, taps, heightOut, widthOut], (i) => (i % 5) * 0.5);
   const bias = fill([channelsOut], SIGNED);
@@ -597,8 +613,9 @@ export const deformConv2dCase = (): DegenerateCase => {
 };
 
 export const upsampleBilinear2dCase = (): DegenerateCase => {
-  // 実モデルの形（BiRefNet の decoder 本流は 512² → 2048²）を要素数だけ縮めた比。倍率は
-  // 非整数（H は 39/399・W は 41/419）で、出力位置ごとに重みが違う形を縮退経路で踏む。
+  // The ratio of a real model's shape (BiRefNet's main decoder path is 512² → 2048²) with the
+  // element count shrunk. The factors are non-integers (H 39/399, W 41/419), so the reduced path
+  // exercises a shape whose weights differ per output position.
   const [heightIn, widthIn] = [40, 42];
   const [heightOut, widthOut] = [400, 420];
   const shape = [1, 1, heightIn, widthIn];
@@ -623,19 +640,21 @@ export const upsampleBilinear2dCase = (): DegenerateCase => {
 };
 
 /**
- * cat の実行カーネル（strided **書き**族）。1 dispatch = 出力の部分領域という cat の実形は
- * 残りが未書き込みで比較できないので、**出力全域を覆う置換**（読み族の permute [1,0] の双対）
- * としてパラメータを与える。書き族の grid-stride 上限 `n` は params[0]（= 入力要素数）だけで
- * 決まり stride 値に依らないので、縮退耐性はこの形で等価に踏める。
+ * The execution kernel of cat (the strided **write** family). The real shape of cat, one dispatch =
+ * a subregion of the output, leaves the rest unwritten and cannot be compared, so the parameters
+ * are given as **a permutation covering the whole output** (the dual of permute [1,0] of the read
+ * family). The grid-stride bound `n` of the write family is determined by params[0] (= the input
+ * element count) alone, independent of the stride values, so this shape exercises robustness to a
+ * reduced dispatch equivalently.
  */
 export const stridedWriteCase = (): DegenerateCase => {
   const srcShape = [400, 250];
   const outShape = [250, 400];
   const input = fill(srcShape, SIGNED);
-  // 入力座標 (a, b) → 出力添字 b·400 + a。軸 0 の送りが 1、軸 1 の送りが 400。
+  // Input coordinate (a, b) → output index b·400 + a. Axis 0 advances by 1, axis 1 by 400.
   const outStrides = [1, srcShape[0]];
   return {
-    name: "strided write (cat の書き族)",
+    name: "strided write (the write family of cat)",
     key: stridedWriteKey({ dtype: "f32" }),
     wgsl: stridedWriteWgsl({ dtype: "f32" }),
     params: stridedWriteParams(srcShape, outStrides, 0),
@@ -647,11 +666,12 @@ export const stridedWriteCase = (): DegenerateCase => {
   };
 };
 
-/** 行を単位とした `gid.x` の grid-stride（1 invocation = 1 行の逐次走査）。 */
+/** Grid-stride over `gid.x` in units of rows (1 invocation = a sequential scan of 1 row). */
 export const cumsumCase = (): DegenerateCase => {
   const rows = 20_000;
   const dim = 6;
-  // SIGNED は 0.75 の整数倍なので、6 項までの部分和は f32 で厳密（丸めの寄与を混ぜない）。
+  // SIGNED values are integer multiples of 0.75, so partial sums of up to 6 terms are exact in f32
+  // (no rounding contribution mixed in).
   const input = fill([rows, dim], SIGNED);
   return {
     name: "cumsum",
@@ -661,43 +681,48 @@ export const cumsumCase = (): DegenerateCase => {
     uniformParams: true,
     inputs: [input],
     expected: applyReferenceOp("cumsum", [input], { dim: 1 }, [rows, dim]),
-    // 行内は 1 スレッドの逐次走査なので、必要数は行数ではなく ceil(行数 / workgroup サイズ)。
+    // Each row is a sequential scan by one thread, so the number needed is not the row count but
+    // ceil(rows / workgroup size).
     natural: Math.ceil(rows / CUMSUM_WORKGROUP_SIZE),
     groups: 2,
   };
 };
 
-/** 行方向の族（`workgroup_id.x` を `num_workgroups.x` で送る行ループ）。 */
+/** Row families (a row loop advancing `workgroup_id.x` by `num_workgroups.x`). */
 export const reduceCase = (): DegenerateCase => {
   const rows = 5_000;
   const dim = 3;
   const input = fill([rows, dim], POSITIVE);
   return {
-    name: "行 reduce sum",
+    name: "row reduce sum",
     key: reduceKey({ op: "sum", dtype: "f32" }),
     wgsl: reduceWgsl({ op: "sum", dtype: "f32" }),
     params: reduceParams(rows, dim),
     uniformParams: true,
     inputs: [input],
     expected: applyReferenceOp("sum", [input], { dim: 1 }, [rows]),
-    // 1 行 = 1 workgroup（行長は workgroup 内で畳む）ので必要数は行数そのもの。
+    // 1 row = 1 workgroup (the row is folded inside the workgroup), so the number needed is the
+    // row count itself.
     natural: rows,
     groups: 2,
   };
 };
 
 /**
- * argmax（ADR 0068 決定 2）。行 reduce と同じ行方向 grid-stride だが**別族**（identity が
- * −inf・(値, index) 対を運ぶ）なので独立に載せる。期待値は i32 の添字。
+ * argmax (ADR 0068 decision 2). The same row grid-stride as row reduce but **a separate family**
+ * (identity −inf, carries (value, index) pairs), so it is listed on its own. The expected values
+ * are i32 indices.
  *
- * 行ごとに最大値の位置が変わる列にする MUST — 全行で同じ添字が正解だと「別の行を読む」誤りも
- * 「行ループが 1 周で止まる」誤りも値に出ない（未書き込みの毒値だけが検出器になり、
- * ゼロ埋めのバッファを引いた回では添字 0 が偶然正解になる行が出る）。
+ * MUST: the position of the maximum changes from row to row — if the same index were correct for
+ * every row, neither "reads another row" nor "the row loop stops after one pass" would show in the
+ * values (only unwritten poison would detect anything, and on a run that got a zero-filled buffer
+ * some rows would be correct by accident with index 0).
  */
 export const argmaxCase = (): DegenerateCase => {
   const rows = 5_000;
   const dim = 3;
-  // 行 r の最大値の位置は r % 3（POSITIVE の周期 17 と dim 3 が互いに素なので巡回する）。
+  // The maximum of row r is at r % 3 (it cycles because POSITIVE's period 17 and dim 3 are
+  // coprime).
   const input = fill([rows, dim], (i) => (i % dim === Math.floor(i / dim) % dim ? 9 : POSITIVE(i)));
   return {
     name: "argmax",
@@ -707,27 +732,30 @@ export const argmaxCase = (): DegenerateCase => {
     uniformParams: true,
     inputs: [input],
     expected: applyReferenceOp("argmax", [input], {}, [rows, 1]),
-    // 1 行 = 1 workgroup（行長は workgroup 内で畳む）ので必要数は行数そのもの。
+    // 1 row = 1 workgroup (the row is folded inside the workgroup), so the number needed is the
+    // row count itself.
     natural: rows,
     groups: 2,
   };
 };
 
 /**
- * topk（ADR 0068 決定 3）。argmax と同じ行方向 grid-stride だが**別族**（レーン局所 top-k →
- * k ラウンドのトーナメント merge・出力 2 本）なので独立に載せる。
+ * topk (ADR 0068 decision 3). The same row grid-stride as argmax but **a separate family**
+ * (lane-local top-k → a k-round tournament merge, two outputs), so it is listed on its own.
  *
- * 突合するのは**添字の列**（i32 の厳密一致）で、値の列は {@link DegenerateCase.sideOutputBytes}
- * 側に置く（束縛は values = 入力の次・indices = その次で、カーネルの宣言と一致する）。
- * 行ごとに上位の位置が変わる列にする MUST — 全行で同じ添字が正解だと「別の行を読む」誤りも
- * 「行ループが 1 周で止まる」誤りも値に出ない。
+ * **The indices** are compared (exact i32 match), and the values go into
+ * {@link DegenerateCase.sideOutputBytes} (bindings: values = after the inputs, indices = the next
+ * one, matching the kernel's declaration).
+ * MUST: the positions of the top entries change from row to row — if the same indices were correct
+ * for every row, neither "reads another row" nor "the row loop stops after one pass" would show in
+ * the values.
  */
 export const topkCase = (): DegenerateCase => {
   const rows = 5_000;
   const dim = 5;
   const k = 2;
-  // 行 r の最大は列 (r % 5)・2 番目は列 ((r+1) % 5)（POSITIVE の周期 17 と dim 5 が互いに素
-  // なので、素の値の並びも行ごとに回る）。
+  // The maximum of row r is in column (r % 5) and the second in column ((r+1) % 5) (POSITIVE's
+  // period 17 and dim 5 are coprime, so the raw values rotate per row too).
   const input = fill([rows, dim], (i) => {
     const row = Math.floor(i / dim);
     const col = i % dim;
@@ -743,10 +771,12 @@ export const topkCase = (): DegenerateCase => {
     params: topkParams(rows, dim),
     uniformParams: true,
     inputs: [input],
-    // 値の列（比較しない側）— 添字の列と同じ大きさ（どちらも rows·k 語の 4 バイト要素）。
+    // The values (the side not compared) — the same size as the indices (both rows·k words of 4
+    // bytes).
     sideOutputBytes: rows * k * 4,
     expected: outputs[1],
-    // 1 行 = 1 workgroup（行内は 32 レーンで畳む）ので必要数は行数そのもの。
+    // 1 row = 1 workgroup (a row is folded by 32 lanes), so the number needed is the row count
+    // itself.
     natural: rows,
     groups: 2,
   };
@@ -762,7 +792,7 @@ export const axisReduceCase = (): DegenerateCase => {
   const axis = 1;
   const input = fill(shape, POSITIVE);
   return {
-    name: "軸 reduce sum",
+    name: "axis reduce sum",
     key: axisReduceKey({ op: "sum", dtype: "f32" }, AXIS_REDUCE_SPLIT),
     wgsl: axisReduceWgsl({ op: "sum", dtype: "f32" }, AXIS_REDUCE_SPLIT),
     // out_count = 40·500 = 20,000 / axis_len = 3 / inner = 500
@@ -778,7 +808,8 @@ export const axisReduceCase = (): DegenerateCase => {
 export const softmaxCase = (): DegenerateCase => {
   const rows = 5_000;
   const dim = 4;
-  // 行ごとに違う分布にする（全行同じだと「別の行を読む」誤りが値に出ない）。
+  // A different distribution per row (with the same one on every row, "reads another row" would
+  // not show in the values).
   const input = fill([rows, dim], (i) => ((i * 3) % 13) * 0.25 - 1.5);
   return {
     name: "softmax",
@@ -794,17 +825,19 @@ export const softmaxCase = (): DegenerateCase => {
 };
 
 /**
- * 融合 attention の ②（行統計 — ADR 0023）。行方向 grid-stride の族で、期待値は
- * 「行ごとの `amax` と `1/Σexp(x − amax)`」。
+ * ② of fused attention (row statistics — ADR 0023). A row grid-stride family whose expected values
+ * are "`amax` and `1/Σexp(x − amax)` per row".
  *
- * MUST: 期待値を GPU と同じ式で組まない。ここは `applyReferenceOp` を通せない
- * （行統計は op 単体ではない）ので、**safe-softmax の CPU 参照が出す分布から逆算**して
- * `inv` を作る — 走査順や縮約の段が壊れれば allclose で落ちる。
+ * MUST: the expected values are not built with the same formula as the GPU. `applyReferenceOp`
+ * cannot be used here (row statistics are not a single op), so `inv` is **derived back from the
+ * distribution the safe-softmax CPU reference produces** — a broken scan order or reduction stage
+ * fails allclose.
  */
 export const attentionStatsCase = (): DegenerateCase => {
   const rows = 5_000;
   const dim = 4;
-  // 行ごとに違う分布にする（全行同じだと「別の行を読む」誤りが値に出ない）。
+  // A different distribution per row (with the same one on every row, "reads another row" would
+  // not show in the values).
   const input = fill([rows, dim], (i) => ((i * 3) % 13) * 0.25 - 1.5);
   const probs = applyReferenceOp("softmax", [input], { dim: 1 }, [rows, dim]);
   const expected = new Float32Array(rows * ATTENTION_STATS_STRIDE);
@@ -812,7 +845,9 @@ export const attentionStatsCase = (): DegenerateCase => {
     const base = row * dim;
     let amax = input.data[base];
     for (let i = 1; i < dim; i += 1) amax = Math.max(amax, input.data[base + i]);
-    // `p[j] = exp(x[j] − amax) · inv` なので、最大要素（exp(0) = 1）の確率がそのまま inv。
+    // `p[j] = exp(x[j] − amax) · inv`, so the probability of the maximum element (exp(0) = 1) is
+    // inv
+    // itself.
     let argmax = 0;
     for (let i = 1; i < dim; i += 1) {
       if (input.data[base + i] > input.data[base + argmax]) argmax = i;
@@ -834,12 +869,13 @@ export const attentionStatsCase = (): DegenerateCase => {
 };
 
 /**
- * 融合 attention ② の **f16 計算変種**（S を f16 で読む — ADR 0028）。行方向 grid-stride の
- * 族が 1 本増えるので、族の MUST に従ってここにも載せる。
+ * **The f16 compute variant** of fused attention ② (reads S as f16 — ADR 0028). It adds one more
+ * row grid-stride family, so per the families' MUST it is listed here too.
  *
- * MUST: 期待値は f16 に丸めた**後**の値から作る（`quantizeF16` の `values` は本番の
- * `decodeF16` が戻した値）。丸める前の値から組むと、丸め誤差ぶんだけ allclose の余裕を
- * 食い潰して「縮退の検出」ではなく「丸めの検出」になる。
+ * MUST: the expected values are built from the values **after** rounding to f16 (the `values` of
+ * `quantizeF16` are what the production `decodeF16` returned). Building them from the values before
+ * rounding would eat into the allclose margin by the rounding error, turning "detecting a reduced
+ * dispatch" into "detecting rounding".
  */
 export const attentionStatsF16Case = (): DegenerateCase => {
   const rows = 5_000;
@@ -874,17 +910,20 @@ export const attentionStatsF16Case = (): DegenerateCase => {
 };
 
 /**
- * 融合 attention ② の **S f16 格納変種**（`pack2x16float` の 2 要素／語 — 案 γ 波 1）。
- * 行方向 grid-stride の族がもう 1 本増えるので、族の MUST に従ってここにも載せる。
+ * **The S f16 storage variant** of fused attention ② (2 elements per word with `pack2x16float` —
+ * option γ, step 1). It adds yet another row grid-stride family, so per the families' MUST it is
+ * listed here too.
  *
- * `:c16` 版（上）と違い **`shader-f16` を要らない**（core WGSL）ので、別 device に分けず
- * 一括ハーネスへ入れる — これ自体が「案 γ は feature 非依存」の実行側の証拠になっている。
- * MUST: 期待値は f16 に丸めた**後**の値から作る（丸める前から組むと「縮退の検出」ではなく
- * 「丸めの検出」になる）。
+ * Unlike the `:c16` version (above) it **does not need `shader-f16`** (core WGSL), so it goes into
+ * the shared harness instead of a separate device — which is itself the execution-side evidence
+ * that "option γ does not depend on a feature".
+ * MUST: the expected values are built from the values **after** rounding to f16 (building them from
+ * the values before rounding would turn "detecting a reduced dispatch" into "detecting rounding").
  */
 export const attentionStatsS16Case = (): DegenerateCase => {
   const rows = 5_000;
-  // MUST: dim は 4 の倍数（s16 の適格形は N % 4 == 0）かつ workgroup 幅 256 の倍数でない
+  // MUST: dim is a multiple of 4 (the eligible s16 shape is N % 4 == 0) and not a multiple of the
+  // workgroup width 256
   const dim = 4;
   const raw = fill([rows, dim], (i) => ((i * 3) % 13) * 0.25 - 1.5);
   const rounded = Float32Array.from(raw.data, roundToF16);
@@ -902,7 +941,7 @@ export const attentionStatsS16Case = (): DegenerateCase => {
     expected[row * ATTENTION_STATS_STRIDE] = amax;
     expected[row * ATTENTION_STATS_STRIDE + 1] = probs.data[base + argmax];
   }
-  // GPU と同じ格納形（下位半分が偶数添字）へ詰める
+  // Pack into the same storage form as the GPU (the low half holds the even index)
   const words = new Uint32Array(rounded.length / 2);
   for (let i = 0; i < words.length; i += 1) {
     words[i] =
@@ -922,15 +961,17 @@ export const attentionStatsS16Case = (): DegenerateCase => {
 };
 
 /**
- * 活性の per-token 量子化（w8a8 の前段 — src/kernels/quantize-rows.ts）。行方向 grid-stride の
- * 族で、比較対象は行ごとの scale `xs`（`xq` は i8 の 4 詰めで f32 として比較できないため
- * {@link DegenerateCase.sideOutputBytes} で確保だけする）。
+ * Per-token quantization of activations (the stage before w8a8 — src/kernels/quantize-rows.ts). A
+ * row grid-stride family whose compared output is the per-row scale `xs` (`xq` is 4 packed i8 and
+ * cannot be compared as f32, so it is only allocated through {@link
+ * DegenerateCase.sideOutputBytes}).
  *
- * MUST: 行ごとに違う大きさの入力にする（全行同じ scale だと「別の行を読む」誤りが値に出ない）。
+ * MUST: the input magnitudes differ per row (with the same scale on every row, "reads another row"
+ * would not show in the values).
  */
 export const quantizeRowsCase = (): DegenerateCase => {
   const rows = 5_000;
-  // dim は 4 の倍数（i8 の 4 詰めの前提）かつ workgroup 幅 256 の倍数でない
+  // dim is a multiple of 4 (required by packing 4 i8) and not a multiple of the workgroup width 256
   const dim = 20;
   const input = fill([rows, dim], (i) => SIGNED(i) * (1 + (Math.floor(i / dim) % 7) * 0.5));
   return {
@@ -942,15 +983,17 @@ export const quantizeRowsCase = (): DegenerateCase => {
     inputs: [input],
     sideOutputBytes: rows * dim,
     expected: refTensor([rows], quantizeRowsReference(input.data, rows, dim).scale),
-    // 1 行 = 1 workgroup（行長は workgroup 内で畳む）ので必要数は行数そのもの
+    // 1 row = 1 workgroup (the row is folded inside the workgroup), so the number needed is the
+    // row count itself
     natural: rows,
     groups: 2,
   };
 };
 
 /**
- * `quantize_rows` の小 D 変種（perf-ledger P-1 — D=128 は 8 行 × 32 レーン）。行ループが
- * workgroup あたり複数行を進めるので、縮退で「組の末尾の行が無い」経路と grid-stride の両方を踏む。
+ * The small-D variant of `quantize_rows` (perf-ledger P-1 — D=128 is 8 rows × 32 lanes). The row
+ * loop advances several rows per workgroup, so a reduced dispatch exercises both the path where
+ * "the last rows of a group are missing" and the grid-stride.
  */
 export const quantizeRowsGroupedCase = (): DegenerateCase => {
   const rows = 5_003;
@@ -1099,10 +1142,11 @@ export const groupNormApplyCase = (): DegenerateCase => {
 };
 
 export const gruScanCase = (): DegenerateCase => {
-  // 行方向の族と同型（1 workgroup = 1 バッチ要素を `num_workgroups.x` で送る）。時間ループは
-  // カーネル内なので縮退の対象はバッチ軸だけで、必要数は N そのもの。
-  // MUST: バッチごとに違う `h0` を渡す（全バッチ同じだと「別のバッチを走査する」誤りが値に
-  // 出ず、縮退耐性の検査が恒真化する）。
+  // The same shape as the row families (1 workgroup = 1 batch element, advanced by
+  // `num_workgroups.x`). The time loop is inside the kernel, so only the batch axis is reduced, and
+  // the number needed is N itself.
+  // MUST: pass a different `h0` per batch (with the same one for every batch, "scans another batch"
+  // would not show in the values and the reduced-dispatch check would be tautological).
   const time = 3;
   const batch = 2_000;
   const hidden = 4;
@@ -1128,7 +1172,8 @@ export const rmsNormCase = (narrow = false): DegenerateCase => {
   const rows = 5_000;
   const dim = 4;
   const eps = 1e-6;
-  // 行ごとに違う二乗和にする（全行同じだと「別の行を読む」誤りが値に出ない）
+  // A different sum of squares per row (with the same one on every row, "reads another row" would
+  // not show in the values)
   const input = fill([rows, dim], (i) => ((i * 5) % 17) * 0.5 - 4);
   const weight = fill([dim], POSITIVE);
   return {
@@ -1169,18 +1214,19 @@ export const rmsNormPrefetchCase = (): DegenerateCase => {
 };
 
 // ---------------------------------------------------------------------------
-// 融合カーネル（op 語彙の外・src/runtime/fusion.ts が置換で挿す 3 族）
+// Fused kernels (outside the op vocabulary; the 3 families src/runtime/fusion.ts inserts by
+// rewriting)
 //
-// MUST: 融合カーネルも grid-stride を謳う以上ここに載せる。担当テスト
-// （gpu_upsample2x_fusion_test.ts / gpu_silu_fusion_test.ts / gpu_adaln_fusion_test.ts）は
-// 形が小さく必要数の workgroup がそのまま割り当たるので、`stride` を定数化する退行が
-// 緑のまま通る。
+// MUST: fused kernels claim grid-stride too, so they are listed here. Their own tests
+// (gpu_upsample2x_fusion_test.ts / gpu_silu_fusion_test.ts / gpu_adaln_fusion_test.ts) use small
+// shapes that get every workgroup they need, so a regression that makes `stride` a constant would
+// pass green there.
 // ---------------------------------------------------------------------------
 
 /**
- * `upsample2x`（NCHW nearest 2 倍・融合ルール upsample2x）。要素方向の族で、1 invocation が
- * 入力 1 要素を出力の 2×2 block へ書く。期待値は**ホストで組む**（op 語彙に無いので
- * `applyReferenceOp` を通せない）。
+ * `upsample2x` (NCHW nearest ×2, fusion rule upsample2x). An elementwise family in which one
+ * invocation writes one input element into a 2×2 block of the output. The expected values are
+ * **built on the host** (it is not in the op vocabulary, so `applyReferenceOp` cannot be used).
  */
 export const upsample2xCase = (): DegenerateCase => {
   const rows = 700;
@@ -1200,7 +1246,7 @@ export const upsample2xCase = (): DegenerateCase => {
     }
   }
   return {
-    name: "upsample2x（融合）",
+    name: "upsample2x (fused)",
     key: UPSAMPLE_2X_KEY,
     wgsl: UPSAMPLE_2X_WGSL,
     params: upsample2xParams(count, width),
@@ -1213,9 +1259,9 @@ export const upsample2xCase = (): DegenerateCase => {
 };
 
 /**
- * `silu`（`x · sigmoid(x)`・融合ルール silu）。**block ループ**の族（workgroup memory 往復の
- * 丸め障壁を持つので `gid.x` ではなく `wid.x` を `nwg.x` で送る）。期待値は素の列と同じ
- * 2 段（sigmoid → mul）で組む。
+ * `silu` (`x · sigmoid(x)`, fusion rule silu). A **block loop** family (it has a rounding barrier
+ * through a workgroup-memory round trip, so it advances `wid.x` by `nwg.x` instead of `gid.x`). The
+ * expected values are built in the same 2 steps as the unfused sequence (sigmoid → mul).
  */
 export const siluCase = (): DegenerateCase => {
   const count = 100_000;
@@ -1225,7 +1271,7 @@ export const siluCase = (): DegenerateCase => {
     Math.fround(input.data[i] * sigmoid.data[i]),
   );
   return {
-    name: "silu（融合）",
+    name: "silu (fused)",
     key: siluKey("x-sigmoid"),
     wgsl: siluWgsl("x-sigmoid"),
     params: siluParams(count),
@@ -1238,10 +1284,11 @@ export const siluCase = (): DegenerateCase => {
 };
 
 /**
- * `adaln_norm`（`layer_norm → (1 + scale) → mul → add`・融合ルール adaln）。行方向 grid-stride の
- * 族で、束縛は 6 入力（x / weight / bias / scale_vec / one / shift）+ 出力。
+ * `adaln_norm` (`layer_norm → (1 + scale) → mul → add`, fusion rule adaln). A row grid-stride
+ * family bound with 6 inputs (x / weight / bias / scale_vec / one / shift) + the output.
  *
- * MUST: 行ごとに違う統計にする（全行同じだと「別の行を読む」誤りが値に出ない）。
+ * MUST: the statistics differ per row (with the same ones on every row, "reads another row" would
+ * not show in the values).
  */
 export const adalnNormCase = (): DegenerateCase => {
   const rows = 5_000;
@@ -1271,7 +1318,7 @@ export const adalnNormCase = (): DegenerateCase => {
     }
   }
   return {
-    name: "adaln_norm（融合）",
+    name: "adaln_norm (fused)",
     key: ADALN_NORM_KEY,
     wgsl: ADALN_NORM_WGSL,
     params: adalnNormParams(rows, dim, eps),

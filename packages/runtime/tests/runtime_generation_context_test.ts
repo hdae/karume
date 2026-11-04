@@ -1,7 +1,8 @@
-// GenerationContext の GPU 非依存な純関数 4 本（`assertChunkLength` / `assertChunkBuckets` /
-// `resolveBindings` / `resolveSlotShape`）の受理集合。4 本は**見積り（estimate.ts）と実構築が
-// 共有する唯一の受理集合**なので、門の正本は device を要らない側に置く — 実 GPU 経由の同じ門
-// （gpu_generation_context_test.ts）はアダプタ無しの環境では 1 本も走らない。
+// The accepted sets of GenerationContext's 4 GPU-independent pure functions (`assertChunkLength` /
+// `assertChunkBuckets` / `resolveBindings` / `resolveSlotShape`). The 4 are **the only accepted
+// sets shared by the estimate (estimate.ts) and the real build**, so the source of truth for the
+// check sits on the side that needs no device — the same check through a real GPU
+// (gpu_generation_context_test.ts) runs not at all in an environment without an adapter.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -17,8 +18,8 @@ import { ExecutionError, type SymbolBindings } from "../src/runtime/plan.ts";
 import { type DeclarationJson, GRAPH_NAME, memoryModel } from "./helpers/model-fixture.ts";
 
 /**
- * 記号 2 本のグラフ。`__proto__` を宣言しているのは器の性質を撃つため — シンボルの文法
- * `[A-Za-z_][A-Za-z0-9_]*` はこの綴りにマッチする。
+ * A graph with 2 symbols. It declares `__proto__` to exercise the container object's properties —
+ * the symbol grammar `[A-Za-z_][A-Za-z0-9_]*` matches this spelling.
  */
 const symbolGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -35,12 +36,13 @@ const symbolGraph = (): DeclarationJson => ({
   nodes: [{ op: "add", ins: ["x", "p"], outs: ["y"], attrs: {} }],
 });
 
-/** 宣言 → 合流後のグラフ（initializer 0 本なので供給は要らない）。 */
+/** Declaration → merged graph (0 initializers, so no supply is needed). */
 const parse = (graph: DeclarationJson): IrGraph =>
   mergedGraph(memoryModel(graph, []).graphs[GRAPH_NAME], GRAPH_NAME);
 
-test("assertChunkLength は 1..0xffffffff の整数だけを受理する", () => {
-  // 0 / 負 / 小数 / u32 の 1 つ上（搬送先が u32 なので上限はここ）。
+test("assertChunkLength accepts only integers in 1..0xffffffff", () => {
+  // 0 / negative / fractional / one above u32 (the value is carried as a u32, so the limit is
+  // here).
   for (const chunkLength of [0, -1, 1.5, 2 ** 32]) {
     const error = assertThrows(() => assertChunkLength(chunkLength), ExecutionError);
     assert(error.message.includes(`chunkLength ${chunkLength}`), error.message);
@@ -49,21 +51,24 @@ test("assertChunkLength は 1..0xffffffff の整数だけを受理する", () =>
   assertChunkLength(0xffffffff);
 });
 
-test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理する", () => {
-  // 省略と空は「追加の実行形なし」— 従来どおり prefill 形 1 本 + decode 形。
+test("assertChunkBuckets accepts only strictly ascending values in 2..chunkLength-1", () => {
+  // Omitted and empty mean "no additional execution shapes" — one prefill shape + the decode shape,
+  // as before.
   assertChunkBuckets(undefined, 8);
   assertChunkBuckets([], 8);
   assertChunkBuckets([2], 8);
   assertChunkBuckets([2, 3, 5, 7], 8);
 
-  // 値域外: 1（= decode 形そのもの）/ 0 / 負 / 非整数 / chunkLength / chunkLength 超。
+  // Out of range: 1 (= the decode shape itself) / 0 / negative / non-integer / chunkLength / above
+  // chunkLength.
   for (const buckets of [[1], [0], [-2], [2.5], [8], [9]]) {
     const error = assertThrows(() => assertChunkBuckets(buckets, 8), ExecutionError);
     assert(error.message.includes("chunkBuckets[0]"), error.message);
     assert(error.message.includes("is not an integer in 2..7"), error.message);
   }
 
-  // 順序: 重複も降順も「queryLength 以上の最小」を線形走査で決められなくする。
+  // Order: duplicates and descending order both prevent deciding "the smallest at or above
+  // queryLength" by a linear scan.
   for (const buckets of [
     [2, 2],
     [4, 3],
@@ -73,12 +78,12 @@ test("assertChunkBuckets は 2..chunkLength-1 の狭義昇順だけを受理す�
     assert(error.message.includes("not strictly ascending"), error.message);
   }
 
-  // chunkLength = 1（decode 形しか無い context）ではどんなバケットも値域に入らない。
+  // With chunkLength = 1 (a context with only the decode shape), no bucket is in range.
   assertChunkBuckets(undefined, 1);
   assertThrows(() => assertChunkBuckets([2], 1), ExecutionError);
 });
 
-test("resolveBindings は未知の記号と非負整数でない値を拒否する", () => {
+test("resolveBindings rejects unknown symbols and values that are not non-negative integers", () => {
   const graph = parse(symbolGraph());
 
   const unknown = assertThrows(() => resolveBindings(graph, { D: 8 }), ExecutionError);
@@ -89,13 +94,15 @@ test("resolveBindings は未知の記号と非負整数でない値を拒否す�
     assert(error.message.includes("is not a non-negative integer"), error.message);
   }
 
-  // 0 は「容量 0」として下流（resolveSlotShape）が落とす — ここは非負まで。
+  // 0 is rejected downstream (resolveSlotShape) as "capacity 0" — this only goes as far as
+  // non-negative.
   assertEquals(resolveBindings(graph, { T: 0 })["T"], 0);
 });
 
-test("resolveBindings の器は null プロトタイプで '__proto__' が own property として残る", () => {
+test("resolveBindings' container has a null prototype, so '__proto__' remains an own property", () => {
   const graph = parse(symbolGraph());
-  // 計算キーで書く（`{ __proto__: 4 }` は [[Prototype]] 設定の構文で own property を作らない）。
+  // Written as a computed key (`{ __proto__: 4 }` is the syntax for setting [[Prototype]] and
+  // creates no own property).
   const resolved = resolveBindings(graph, { ["__proto__"]: 4, T: 2 });
 
   assertEquals(Object.getPrototypeOf(resolved), null);
@@ -104,10 +111,10 @@ test("resolveBindings の器は null プロトタイプで '__proto__' が own p
   assertEquals(resolved["T"], 2);
 });
 
-test("resolveSlotShape は未束縛シンボルと正でない容量を拒否する", () => {
+test("resolveSlotShape rejects unbound symbols and capacities that are not positive", () => {
   const bound: SymbolBindings = { C: 8 };
   assertEquals(resolveSlotShape("k", [1, 2, "C", 4], bound), [1, 2, 8, 4]);
-  // 数値次元だけの shape は束縛が空でもそのまま返る。
+  // A shape with only numeric dimensions is returned as is even with empty bindings.
   assertEquals(resolveSlotShape("k", [1, 2, 8, 4], {}), [1, 2, 8, 4]);
 
   const unbound = assertThrows(() => resolveSlotShape("k", [1, "C", 4], {}), ExecutionError);

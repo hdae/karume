@@ -1,14 +1,17 @@
 import { stateStatsPvWgsl } from "../../src/kernels/state-attention-stats-pv.ts";
-// gpu_state_attention_test.ts の**直接 dispatch ハーネス**（states 形 attention 3 段 +
-// `state_append`）。executor / recipe-builder への結線は波 D-3 の担当なので、本波の実 GPU 検証は
-// `createComputePipeline` + 手組みバッファでカーネルを直接撃つ。依存は helpers → src の一方向。
+// **Direct dispatch harness** of gpu_state_attention_test.ts (the 3 stages of states-form
+// attention + `state_append`). Wiring into the executor / recipe-builder belongs to step D-3, so
+// the real-GPU checks of this step dispatch the kernels directly with `createComputePipeline` +
+// hand-built buffers. Dependencies go one way, helpers → src.
 //
-// MUST: パイプラインは**最終 WGSL 文字列**でキャッシュする（`PipelineCache` を使わない）。
-// 故障注入は WGSL を書き換えた**別の文字列**を撃つので、キー（= 変種）でキャッシュすると
-// 正常版のパイプラインが変異版の dispatch に配られ、故障注入が「常に緑」になる。
-// MUST: S は毎回**毒値で埋めてから** ①QK を撃つ（S は一時バッファで、実運用では前回の残骸が
-// 居る）。①が live 範囲を書き切らない誤りと、②③ が live の外まで読む誤りの両方が、この
-// 毒値でしか値に出ない。
+// MUST: pipelines are cached by **the final WGSL string** (no `PipelineCache`). Fault injection
+// dispatches **a different string** with rewritten WGSL, so caching by key (= variant) would hand
+// the correct version's pipeline to the mutant's dispatch, and the fault injection would be
+// "always green".
+// MUST: S is **filled with a poison value** every time before ①QK is dispatched (S is a scratch
+// buffer, and in real use the previous run's leftovers are in it). Both the bug where ① does not
+// write the whole live range and the bug where ②③ read beyond the live range show up in values
+// only through this poison.
 
 import {
   STATE_STATS_STRIDE,
@@ -46,42 +49,45 @@ import {
   stateAppendWorkgroups,
 } from "../../src/kernels/state-append.ts";
 
-/** 1 ケースぶんの形と論理長（記号は ADR 0067 決定 4）。 */
+/** Shape and logical lengths of one case (symbols per ADR 0067 decision 4). */
 export type StateCase = {
   readonly name: string;
-  /** `B`。 */
+  /** `B`. */
   readonly batch: number;
-  /** `H`。 */
+  /** `H`. */
   readonly heads: number;
-  /** `Hkv`（`H % Hkv == 0`）。 */
+  /** `Hkv` (`H % Hkv == 0`). */
   readonly kvHeads: number;
-  /** `M`（物理 chunk 行数）。 */
+  /** `M` (physical chunk row count). */
   readonly chunkRows: number;
-  /** `D`。 */
+  /** `D`. */
   readonly depth: number;
-  /** `C`（スロットの行容量）。 */
+  /** `C` (row capacity of the slot). */
   readonly capacity: number;
-  /** `W`（`0` = full）。 */
+  /** `W` (`0` = full). */
   readonly window: number;
-  /** `P`。 */
+  /** `P`. */
   readonly past: number;
-  /** `Q`。 */
+  /** `Q`. */
   readonly query: number;
   /**
-   * 1 dispatch が担当する行数（省略時は `M` 一括）。ADR 0067 決定 7 の行ブロック実行を
-   * 踏ませるために、複数ブロックへ割るケースを混ぜる。
+   * Rows handled by one dispatch (default: all `M` at once). Cases split into several blocks are
+   * mixed in to exercise the row-block execution of ADR 0067 decision 7.
    */
   readonly rowsBlock?: number;
 };
 
-/** S の列ストライド（full = `C` / sliding = `(W−1) + M` — ADR 0067 決定 4 の resident 範囲）。 */
+/**
+ * Column stride of S (full = `C` / sliding = `(W−1) + M` — the resident range of ADR 0067 decision
+ * 4).
+ */
 export const caseColCap = (spec: StateCase): number =>
   stateSliding(spec.window) ? spec.window - 1 + spec.chunkRows : spec.capacity;
 
-/** 半スケール（`√(1/√D)` — 既存 attention と同じ契約）。 */
+/** Half scale (`√(1/√D)` — the same contract as the existing attention). */
 export const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data (no random numbers — a failure would not reproduce). */
 export const seeded = (
   count: number,
   generator: (index: number) => number,
@@ -91,7 +97,10 @@ export const seeded = (
   return data;
 };
 
-/** ①③ が読む 5 本の入力（スロットは「前 step までの内容」— 非 resident 行も埋まっている）。 */
+/**
+ * The 5 inputs ①③ read (the slots hold "the contents up to the previous step" — non-resident rows
+ * are filled too).
+ */
 export type StateInputs = {
   readonly q: Float32Array<ArrayBuffer>;
   readonly insK: Float32Array<ArrayBuffer>;
@@ -101,15 +110,16 @@ export type StateInputs = {
 };
 
 /**
- * カーネルの WGSL を差し替える故障注入。`undefined` を返した変異は「置換対象が見つからない」
- * ので、呼び手が {@link assertMutated} で落とす（文言が変わって変異が空振りするのを防ぐ）。
+ * Fault injection that replaces a kernel's WGSL. A mutation returning `undefined` means "the
+ * replacement target was not found", and the caller fails it with {@link assertMutated} (so a
+ * mutation cannot silently become a no-op when the text changes).
  */
 export type StateMutation = (kernel: "qk" | "stats" | "pv" | "append", wgsl: string) => string;
 
 /**
- * 最終 WGSL 文字列 → パイプラインのキャッシュ（ケース間で共有すると shader compile が 1 回で
- * 済む）。MUST: キーは**変種キーではなく WGSL 文字列**（故障注入の変異版が正常版のパイプライン
- * を引くと、注入が「常に緑」になる）。
+ * Cache of final WGSL string → pipeline (sharing it across cases needs only one shader compile).
+ * MUST: the key is **the WGSL string, not the variant key** (if a fault-injection mutant got the
+ * correct version's pipeline, the injection would be "always green").
  */
 export type StatePipelineCache = Map<string, GPUComputePipeline>;
 
@@ -128,7 +138,9 @@ const uniformBuffer = (device: GPUDevice, data: Uint32Array<ArrayBuffer>): GPUBu
   return buffer;
 };
 
-/** 論理長 uniform（`{past, query}` の 8 バイト — `GenerationContext` が持つのと同じ形）。 */
+/**
+ * Logical-length uniform (8 bytes of `{past, query}` — the same shape `GenerationContext` holds).
+ */
 const lengthsBuffer = (device: GPUDevice, past: number, query: number): GPUBuffer =>
   uniformBuffer(device, new Uint32Array([past, query]));
 
@@ -160,8 +172,9 @@ const readFloats = async (
   new Float32Array(await readRaw(device, buffer, count), 0, count);
 
 /**
- * **語（u32）のまま**読み戻す。①ₜ と ① のビット同一門は f32 比較では組めない — `-inf` も
- * 毒値も NaN も `===` で比べられない値が正規に混ざるので、語で突き合わせる唯一の形。
+ * Reads back **as words (u32)**. The bit-identity check of ①ₜ against ① cannot be built from f32
+ * comparisons — `-inf`, the poison and NaN, values `===` cannot compare, legitimately appear, so
+ * comparing words is the only form that works.
  */
 const readWords = async (
   device: GPUDevice,
@@ -196,29 +209,33 @@ const bind = (
   });
 
 /**
- * ①QK が S へ書く前に埋める毒値（読者が live の外を読んだら amax がこれに支配される）。
+ * Poison value S is filled with before ①QK writes it (if a reader reads beyond the live range, amax
+ * is dominated by it).
  *
- * MUST: **f32 で厳密に表せる値**（2 の冪）。`1e30` のような十進リテラルは Float32Array へ
- * 入れた時点で丸められ、読み戻した値との `===` 比較が**常に false** になる — 「毒値が残って
- * いないこと」を見る門が丸ごと空振りする（値の大きさは tolerance を軽く超えれば足りるので、
- * 厳密比較できる側を採る）。
+ * MUST: **a value exactly representable in f32** (a power of 2). A decimal literal like `1e30` is
+ * rounded when stored into a Float32Array, and the `===` comparison with the read-back value is
+ * **always false** — the check that "no poison is left" would be a no-op altogether (the magnitude
+ * only has to clearly exceed the tolerance, so the exactly comparable choice is taken).
  */
 export const STATE_S_POISON = 2 ** 100;
 
 export type StateRunResult = {
-  /** `[B,H,M,D]`。 */
+  /** `[B,H,M,D]`. */
   readonly out: Float32Array<ArrayBuffer>;
-  /** **最後の行ブロック**の S `[B·H, rowsBlock, colCap]`（述語の直接検査用）。 */
+  /**
+   * S of **the last row block** `[B·H, rowsBlock, colCap]` (for checking the predicates directly).
+   */
   readonly scores: Float32Array<ArrayBuffer>;
-  /** 最後の行ブロックの行統計 `[B·H·rowsBlock, 2]`。 */
+  /** Row statistics of the last row block `[B·H·rowsBlock, 2]`. */
   readonly stats: Float32Array<ArrayBuffer>;
 };
 
 /**
- * states 形 attention の 3 段を行ブロックごとに直接 dispatch する。
+ * Dispatches the 3 stages of states-form attention directly, per row block.
  *
- * MUST: 出力バッファは**毒値で初期化**する（③ が全行を書く = full-write 不変条件の検出線。
- * pad 行を書かない実装はここで残った毒値として見える）。
+ * MUST: the output buffer is **initialized with the poison value** (the detector for the full-write
+ * invariant that ③ writes every row; an implementation that skips pad rows shows up here as
+ * leftover poison).
  */
 export const runStateAttention = async (
   device: GPUDevice,
@@ -227,16 +244,21 @@ export const runStateAttention = async (
   options: {
     readonly mutate?: StateMutation;
     readonly cache?: StatePipelineCache;
-    /** ② / ③' を融合して直接検証する。 */
+    /** Checks ② / ③' fused, directly. */
     readonly statsPvFusion?: boolean;
-    /** ③ の縮約形（既定 sequential = 参照経路・parallel = ③' の KV 並列縮約変種）。 */
+    /**
+     * Reduction form of ③ (default sequential = reference path; parallel = the KV-parallel
+     * reduction variant ③').
+     */
     readonly pvReduce?: "sequential" | "parallel";
     /**
-     * ① の縮約形（既定 sequential = 参照経路・parallel = ①' の D 並列縮約変種）。
+     * Reduction form of ① (default sequential = reference path; parallel = the D-parallel
+     * reduction variant ①').
      *
-     * NOTE: 実行 Session の席（`stateAttentionReduce`）は ① と ③ を**一緒に**切り替えるが、
-     * この直接 dispatch ハーネスは 2 段を**別々に**選べる。①' の帯を測るときに ③ を参照経路に
-     * 固定できないと、差が ①' 由来か ③' 由来か分けられない。
+     * NOTE: the Session option (`stateAttentionReduce`) switches ① and ③ **together**, but this
+     * direct dispatch harness can pick the two stages **separately**. Without pinning ③ to the
+     * reference path while measuring the band of ①', a difference could not be attributed to ①' or
+     * to ③'.
      */
     readonly qkReduce?: "sequential" | "parallel";
   } = {},
@@ -309,8 +331,9 @@ export const runStateAttention = async (
       const statsParams = track(
         uniformBuffer(device, stateStatsParams(batchHeads, block, rowOffset, colCap, spec.window)),
       );
-      // MUST: ブロックごとに毒値へ戻す（前ブロックの S が残っていると、live 範囲を書き切らない
-      // 誤りが「前ブロックの値」で塗り潰されて検出できない）
+      // MUST: reset to the poison per block (with the previous block's S left in place, the bug of
+      // not writing the whole live range would be painted over by "the previous block's values" and
+      // go undetected)
       device.queue.writeBuffer(
         scores,
         0,
@@ -381,23 +404,25 @@ export const runStateAttention = async (
 };
 
 /**
- * ①QK の 3 経路（`sequential` = ① 参照経路 / `parallel` = ①' D 並列縮約 /
- * `tiled` = ①ₜ K 行タイル共有）。束縛番号は 3 経路とも同じで、替わるのは WGSL・params・
- * workgroup 算出の 3 点だけ。
+ * The 3 paths of ①QK (`sequential` = ① reference path / `parallel` = ①' D-parallel reduction /
+ * `tiled` = ①ₜ shared K-row tiles). The binding numbers are the same on all 3 paths; only the WGSL,
+ * the params and the workgroup computation change.
  * `folded` is ①' with the F = r query heads of one kv plane per workgroup (perf-ledger K-55 — GQA
  * full-attention cases only; the same bindings and params as ①').
  */
 export type StateQkVariant = "sequential" | "parallel" | "tiled" | "folded";
 
 /**
- * ①QK **だけ**を行ブロックごとに撃ち、各ブロックの S を**語（u32）のまま**返す。
+ * Dispatches **only** ①QK per row block and returns each block's S **as words (u32)**.
  *
- * ②③ を積まないのは、①ₜ と ① の一致を S そのもので見るため（O まで通すと softmax の
- * 正規化が差を潰し、`[live, col_cap)` の残骸も pad 行の非書き込みも観測できなくなる）。
+ * ②③ are not stacked on top because the match of ①ₜ against ① is checked on S itself (going
+ * through to O, the softmax normalization would flatten the differences, and neither leftovers in
+ * `[live, col_cap)` nor unwritten pad rows could be observed).
  *
- * MUST: ブロックごとに S を毒値へ戻す（前ブロックの残りが「書き切らない誤り」を塗り潰す）。
- * MUST: パイプラインは**最終 WGSL 文字列**でキャッシュする（{@link runStateAttention} と同文 —
- * 故障注入の変異版が正常版のパイプラインを引くと注入が常に緑になる）。
+ * MUST: reset S to the poison per block (the previous block's leftovers would paint over "the bug
+ * of not writing everything").
+ * MUST: pipelines are cached by **the final WGSL string** (as in {@link runStateAttention} — if a
+ * fault-injection mutant got the correct version's pipeline, the injection would always be green).
  */
 export const runStateQk = async (
   device: GPUDevice,
@@ -515,21 +540,23 @@ export const runStateQk = async (
 };
 
 /**
- * ③PV の 3 経路（`sequential` = ③ 参照経路 / `parallel` = ③' KV 並列縮約 /
- * `tiled` = ③ₜ V 行タイル共有）。束縛番号は 3 経路とも同じで、替わるのは WGSL・params・
- * workgroup 算出の 3 点だけ。
+ * The 3 paths of ③PV (`sequential` = ③ reference path / `parallel` = ③' KV-parallel reduction /
+ * `tiled` = ③ₜ shared V-row tiles). The binding numbers are the same on all 3 paths; only the WGSL,
+ * the params and the workgroup computation change.
  */
 export type StatePvVariant = "sequential" | "parallel" | "tiled";
 
 /**
- * ①②③ を行ブロックごとに撃ち、**O バッファ全体を語（u32）のまま**返す。①② は常に参照経路
- * （①QK 逐次 + ②stats）で、切り替わるのは ③ だけ — ③ₜ と ③ の突合で、差の出どころが ③ 以外に
- * 無いことを構造で保証する（① も決定的なので、2 回の run が食う S / 行統計は同一）。
+ * Dispatches ①②③ per row block and returns **the whole O buffer as words (u32)**. ①② always take
+ * the reference path (①QK sequential + ②stats) and only ③ switches — in the comparison of ③ₜ
+ * against ③, this guarantees by construction that a difference can come from nowhere but ③ (① is
+ * deterministic too, so the S / row statistics the two runs consume are identical).
  *
- * MUST: O は**毒値で初期化**して行ブロックを跨いで塗り直さない（③ の full-write 不変条件 —
- * pad 行を書かない実装は残った毒値として語比較に出る）。
- * MUST: パイプラインは**最終 WGSL 文字列**でキャッシュする（{@link runStateAttention} と同文 —
- * 故障注入の変異版が正常版のパイプラインを引くと注入が常に緑になる）。
+ * MUST: O is **initialized with the poison value** and not repainted across row blocks (the
+ * full-write invariant of ③ — an implementation that skips pad rows shows up in the word
+ * comparison as leftover poison).
+ * MUST: pipelines are cached by **the final WGSL string** (as in {@link runStateAttention} — if a
+ * fault-injection mutant got the correct version's pipeline, the injection would always be green).
  */
 export const runStatePv = async (
   device: GPUDevice,
@@ -614,8 +641,9 @@ export const runStatePv = async (
       const statsParams = track(
         uniformBuffer(device, stateStatsParams(batchHeads, block, rowOffset, colCap, spec.window)),
       );
-      // MUST: ブロックごとに S / 行統計を毒値へ戻す（前ブロックの残りが「書き切らない誤り」を
-      // 塗り潰す）。O だけは全ブロックの書き込みを積むので触らない。
+      // MUST: reset S / row statistics to the poison per block (the previous block's leftovers
+      // would paint over "the bug of not writing everything"). O alone accumulates the writes of
+      // every block, so it is left alone.
       device.queue.writeBuffer(
         scores,
         0,
@@ -664,7 +692,7 @@ export type StateAppendCase = {
   readonly query: number;
 };
 
-/** `state_append` を直接 dispatch し、**書き込み後のスロット全体**を読み戻す。 */
+/** Dispatches `state_append` directly and reads back **the whole slot after the write**. */
 export const runStateAppend = async (
   device: GPUDevice,
   spec: StateAppendCase,
@@ -707,18 +735,21 @@ export const runStateAppend = async (
 };
 
 /**
- * 故障注入の置換が**実際に効いた**ことの門。
+ * Check that the fault-injection replacement **actually took effect**.
  *
- * MUST: 変異が空振り（置換対象が文言変更で消えた）だと、変異版が正常版と同一になり
- * 「故障注入しても緑 = 検出できていない」を「変異が無かった」と区別できなくなる。
+ * MUST: if a mutation is a no-op (the replacement target disappeared through a text change), the
+ * mutant is identical to the correct version, and "green under fault injection = not detected"
+ * could no longer be told apart from "there was no mutation".
  */
 export const assertMutated = (before: string, after: string, label: string): void => {
   if (before === after) {
-    throw new Error(`故障注入 '${label}' が空振りした（置換対象が WGSL に無い）`);
+    throw new Error(
+      `fault injection '${label}' was a no-op (the replacement target is not in the WGSL)`,
+    );
   }
 };
 
-/** readonly（past だけを読む）の入力 — `q [B,H,1,D]` と貸し手のスロット 2 本。 */
+/** Inputs of readonly (reads only past) — `q [B,H,1,D]` and the lender's two slots. */
 export type StateReadonlyInputs = {
   readonly q: Float32Array<ArrayBuffer>;
   readonly slotK: Float32Array<ArrayBuffer>;
@@ -726,11 +757,13 @@ export type StateReadonlyInputs = {
 };
 
 /**
- * readonly 変種（①' ro → ② ro → ③' ro）を直接 dispatch する。`spec.chunkRows` / `spec.query` は
- * 1 固定（借り手 context の契約）で、`spec.past` が貸し手の論理長 P。
+ * Dispatches the readonly variants (①' ro → ② ro → ③' ro) directly. `spec.chunkRows` /
+ * `spec.query` are fixed at 1 (the contract of the borrowing context), and `spec.past` is the
+ * lender's logical length P.
  *
- * MUST: 出力と S は毒値で初期化する（{@link runStateAttention} と同じ検出線 — P = 0 の空行が
- * 厳密 0 で書かれること・live の外を読まないことは毒値でしか見えない）。
+ * MUST: the output and S are initialized with the poison value (the same detector as
+ * {@link runStateAttention} — that the empty rows of P = 0 are written as exact 0 and that nothing
+ * beyond the live range is read are visible only through the poison).
  */
 export const runStateAttentionReadonly = async (
   device: GPUDevice,
@@ -743,7 +776,7 @@ export const runStateAttentionReadonly = async (
 ): Promise<StateRunResult> => {
   if (spec.chunkRows !== 1 || spec.query !== 1) {
     throw new Error(
-      `readonly は M = Q = 1 固定（${spec.name}: M=${spec.chunkRows} Q=${spec.query}）`,
+      `readonly is fixed at M = Q = 1 (${spec.name}: M=${spec.chunkRows} Q=${spec.query})`,
     );
   }
   const { mutate } = options;

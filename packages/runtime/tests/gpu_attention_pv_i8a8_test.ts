@@ -1,45 +1,51 @@
-// 融合 attention ③PV の **i8a8 変種**（P̃ = round(127·exp(S−m)) の非実体化 × V の per-column i8）
-// の実行経路。
-// This file also holds the ①QK i8a8 variant (q / k both per-token i8, integer dot product)
-// and the Session-path route checks for both stages.
+// The execution path of the **i8a8 variant** of fused attention ③PV (P̃ = round(127·exp(S−m))
+// without materialization × per-column i8 of V). This file also holds the ①QK i8a8 variant (q / k
+// both per-token i8, integer dot product) and the Session-path route checks for both stages.
 //
-// 設計 = docs/research/2026-08-04-attention-a8-design.md §2.2 / §2.3 / §4.2、実装 =
-// src/codegen/strided.ts（Vᵀ・無改変で再利用）+ src/kernels/quantize-rows.ts（無改変）+
-// src/kernels/attention-i8a8.ts、opt-in = `SessionOptions.attentionCompute: "a8"`（既定 "f32"）。
+// Design = docs/research/2026-08-04-attention-a8-design.md §2.2 / §2.3 / §4.2, implementation =
+// src/codegen/strided.ts (Vᵀ, reused unmodified) + src/kernels/quantize-rows.ts (unmodified) +
+// src/kernels/attention-i8a8.ts, opt-in = `SessionOptions.attentionCompute: "a8"` (default "f32").
 //
-// ## このファイルが固定する数値契約（①QK と決定的に違う — 設計 §4.2）
+// ## The numeric contract this file pins (decisively different from ①QK — design §4.2)
 //
-// ③PV の O に**素朴な atol=0 は立たない**。A 側の量子化値が `round(127·exp(S−m))` で、
-// `exp` は WGSL と JS でビット一致する保証が無く、`127·exp` は [0,127] に密に分布するので
-// 丸め境界に落ちる要素が必ず出るため。そこで契約を **2 段に割る**:
+// **A naive atol=0 does not hold** for O of ③PV. The quantized values on the A side are
+// `round(127·exp(S−m))`; `exp` is not guaranteed to match bit for bit between WGSL and JS, and
+// `127·exp` is densely distributed over [0,127], so some elements always land on a rounding
+// boundary. So the contract is **split in 2 steps**:
 //
-// (a) **整数を受け取ってからの純関数**（`referenceAttentionPvI8a8Core`）とは **atol=0**。
-//     GPU が使った `qP` は観測できない（P は実体化されない）ので、**V を単位行列にした
-//     もう 1 本の実行を「qP の読み出し器」として使う**（vq = 127·I / vs = 1/127 になるので
-//     O が 127·qP·prow·vs にしかならない）。vq / vs は一時バッファをそのまま読み戻す。
-// (a2) **Vᵀ の量子化**（strided permute + quantize_rows）は TS 参照と atol=0。
-//     permute の軸取り違えと per-column 量子化の唯一の機械的検出器。
-// (b) **`qP` の生成**は別の門: TS 参照との不一致は**必ず ±1 段**（±2 が 1 件でも出たら
-//     実装バグ）で、不一致率そのものを記録する。恒真化しない門にするための形。
-// (c) dp4a とエミュは atol=0（拡張の有無は速度にしか効かない）。
+// (a) **atol=0** against **the pure function from the integers on**
+//     (`referenceAttentionPvI8a8Core`). The `qP` the GPU used cannot be observed (P is not
+//     materialized), so **another run with V set to the identity matrix serves as "a reader of
+//     qP"** (it gives vq = 127·I / vs = 1/127, so O can only be 127·qP·prow·vs). vq / vs are read
+//     back from the temporary buffers as is.
+// (a2) **The quantization of Vᵀ** (strided permute + quantize_rows) is atol=0 against the TS
+//     reference. The only mechanical detector of a mixed-up permute axis and of the per-column
+//     quantization.
+// (b) **The generation of `qP`** is a separate check: mismatches with the TS reference are **always
+//     ±1 step** (a single ±2 is an implementation bug), and the mismatch rate itself is recorded.
+//     The form chosen so that the check is not a tautology.
+// (c) dp4a and the emulation are atol=0 (whether the extension is present only affects speed).
 //
 // ## The ①QK contract (design §2.1 / §4.1)
 //
-// **S（①QK の出力）について GPU と TS 参照が atol=0 で一致する**。成立の根拠は linear の
-// w8a8（tests/gpu_i8a8_test.ts）と同じ 2 点だけ — 「内積が i32 の厳密加算（順序非依存）」と
-// 「浮動小数の演算が出力 1 要素あたり数個で全て round-to-nearest-even」。したがってタイル
-// 分割・K 端数の 0 埋め・共有メモリの配置をどう変えても値は 1 ビットも動かないはずで、
-// 動いたらそれは実装の誤り。
-// S is an intermediate buffer on the Session path, so the ①QK raw-dispatch section below is
-// the oracle for S; the Session-path section only checks route selection and degradation.
+// **For S (the output of ①QK), the GPU and the TS reference match at atol=0**. It rests on the same
+// 2 points as linear's w8a8 (tests/gpu_i8a8_test.ts) — "the dot product is an exact i32 sum (order
+// independent)" and "the floating-point operations are a few per output element, all
+// round-to-nearest-even". So however the tiling, the zero fill of the K remainder or the shared
+// memory layout change, the values should not move by a single bit; if they move, the
+// implementation is wrong. S is an intermediate buffer on the Session path, so the ①QK raw-dispatch
+// section below is the oracle for S; the Session-path section only checks route selection and
+// degradation.
 //
-// ## この波で意図的に検証していないもの
+// ## What this iteration deliberately does not verify
 //
-// - grid-stride の縮退ハーネス（tests/gpu_gridstride_test.ts）への追加は**不要**。新カーネルは
-//   「1 workgroup = 1 出力タイル」で全域を覆う形（上限超過は `tiledWorkgroups` の fail loudly）。
-//   同時に走る `quantize_rows` と `strided` は既に載っている。
-// - 分解経路とのビット同一（tests/gpu_attention_parity_test.ts）は i8a8 では原理的に成立
-//   しない。同テストは f32 / f16 変種専用の門として据え置く（別キーなので構造的に混ざらない）。
+// - Adding it to the grid-stride degeneration harness (tests/gpu_gridstride_test.ts) is **not
+//   needed**. The new kernel covers the whole domain as "1 workgroup = 1 output tile" (exceeding
+//   the limit is the fail loudly of `tiledWorkgroups`). The `quantize_rows` and `strided` that run
+//   with it are already covered.
+// - Bit identity with the decomposed path (tests/gpu_attention_parity_test.ts) cannot hold for i8a8
+//   in principle. That test stays as the check dedicated to the f32 / f16 variants (separate keys,
+//   so they cannot mix structurally).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -111,81 +117,92 @@ import { requireCensus } from "./helpers/pipeline-census.ts";
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
-/** atol=0 を主張してよい丸め境界からの余裕（2.5 ULP ≈ 1.9e-5 に対し 50 倍以上）。 */
+/**
+ * The margin from the rounding boundaries that allows claiming atol=0 (at least 50 times the 2.5
+ * ULP ≈ 1.9e-5).
+ */
 const TIE_MARGIN = 1e-3;
 
 /**
- * P̃ の格子と `1/127`（**観測の算術にだけ使う** — 参照側の定数は src/reference/i8a8.ts が
- * 独立に持つ）。
+ * The P̃ grid and `1/127` (**used only for the arithmetic of the observation** — the reference side
+ * holds its constants independently in src/reference/i8a8.ts).
  */
 const P_ABS_MAX = 127;
 const INV_P_ABS_MAX = Math.fround(1 / P_ABS_MAX);
 
 /**
- * atol=0 の全数比較。`===` なので ±0 は同一視するが、それ以外は 1 ビットの差も許さない。
+ * Exhaustive atol=0 comparison. It uses `===`, so ±0 are treated as equal, but otherwise not even a
+ * 1-bit difference is allowed.
  */
 const assertExact = (
   actual: ArrayLike<number>,
   expected: ArrayLike<number>,
   where: string,
 ): void => {
-  assertEquals(actual.length, expected.length, `${where}: 長さ`);
+  assertEquals(actual.length, expected.length, `${where}: length`);
   for (let i = 0; i < actual.length; i += 1) {
     if (Number.isNaN(expected[i])) {
-      assert(Number.isNaN(actual[i]), `${where}[${i}]: 参照 NaN に対し ${actual[i]}`);
+      assert(Number.isNaN(actual[i]), `${where}[${i}]: ${actual[i]} against a reference NaN`);
       continue;
     }
-    assert(actual[i] === expected[i], `${where}[${i}]: GPU ${actual[i]} / 参照 ${expected[i]}`);
+    assert(
+      actual[i] === expected[i],
+      `${where}[${i}]: GPU ${actual[i]} / reference ${expected[i]}`,
+    );
   }
 };
 
 // ---------------------------------------------------------------------------
-// 形状群とデータ
+// Shapes and data
 // ---------------------------------------------------------------------------
 
 type PvShape = {
   readonly name: string;
-  /** B·H を畳んだバッチ軸。**2 以上が batch base の唯一の検出器**。 */
+  /** The batch axis folding B·H. **2 or more is the only detector of the batch base**. */
   readonly batch: number;
-  /** 出力の行 = M。 */
+  /** Output rows = M. */
   readonly m: number;
-  /** 縮約軸 = N（`N % 4 == 0` が i8a8 の適格条件）。 */
+  /** Reduction axis = N (`N % 4 == 0` is the i8a8 eligibility condition). */
   readonly n: number;
-  /** 出力の列 = D（`D % 4 == 0` が v4 書き出しの条件）。 */
+  /** Output columns = D (`D % 4 == 0` is the condition for the v4 write-out). */
   readonly d: number;
 };
 
 /**
- * 形の踏み分け。
+ * Which shapes are hit.
  *
- * MUST: **B·H ≥ 2 かつ head ごとに統計もパターンも違う**形を持つ（バッチ base の唯一の
- * 検出器 — head ごとに大きさだけを変えると量子化後の整数が同じになり、ペイロード側の base の
- * 取り違えが値に出ない。波 1 の教訓）。
- * MUST: **m / d をタイル辺 64 を跨がせる**（行 inv と列 scale の取り違えの検出器）。
- * MUST: **v4 経路（D%4==0）とスカラ経路を対で持つ**（O の書き出しが変種ごとに別の式）。
- * MUST: **N % 16 != 0** を含む（K タイル 16 の端数 = P̃ タイルの 0 埋めが効いていることの
- * 検出器。N=20 は k4=5 で 2 タイル目の 4 パック中 1 パックしか有効でない）。
+ * MUST: include shapes with **B·H ≥ 2 and different statistics and patterns per head** (the only
+ * detector of the batch base — changing only the magnitude per head yields the same integers after
+ * quantization, and a mixed-up base on the payload side does not show in the values. A lesson of
+ * iteration 1).
+ * MUST: **make m / d cross the tile edge 64** (the detector of mixing up the row inv and the column
+ * scale).
+ * MUST: **pair the v4 path (D%4==0) with the scalar path** (the write-out of O is a different
+ * formula per variant).
+ * MUST: include **N % 16 != 0** (a remainder of the K tile 16 = the detector that the zero fill of
+ * the P̃ tile takes effect. N=20 is k4=5, with only 1 of the 4 packs of the 2nd tile valid).
  */
 const PV_SHAPES: readonly PvShape[] = [
-  // v4 / m は 64 タイル 2 枚 / N=68 は k4=17 で K タイル 5 枚（端数 1 パック）
+  // v4 / m spans 2 tiles of 64 / N=68 is k4=17, 5 K tiles (remainder of 1 pack)
   { name: "v4 B·H6 M65 N68 D20", batch: 6, m: 65, n: 68, d: 20 },
-  // スカラ（D % 4 != 0）で 1 タイルに収まる形 + head 2 枚 / N=20 は端数タイル
-  { name: "スカラ B·H2 M17 N20 D19", batch: 2, m: 17, n: 20, d: 19 },
-  // K タイルが 9 枚（k4=33・端数 1 パック）/ D=5 はスカラ / M=70 で行タイル 2 枚
-  { name: "スカラ 長K B·H2 M70 N132 D5", batch: 2, m: 70, n: 132, d: 5 },
-  // 1 タイルに収まる最小形（ガードが全て真のまま通る経路）
-  { name: "v4 小 B·H1 M3 N8 D4", batch: 1, m: 3, n: 8, d: 4 },
-  // 実測形（DiT の self-attention）— **列タイル 2 枚**（D=128）で列 scale の束縛を踏む
-  { name: "DiT 形 B·H4 M64 N64 D128", batch: 4, m: 64, n: 64, d: 128 },
+  // Scalar (D % 4 != 0) fitting in 1 tile + 2 heads / N=20 is a remainder tile
+  { name: "scalar B·H2 M17 N20 D19", batch: 2, m: 17, n: 20, d: 19 },
+  // 9 K tiles (k4=33, remainder of 1 pack) / D=5 is scalar / M=70 gives 2 row tiles
+  { name: "scalar long-K B·H2 M70 N132 D5", batch: 2, m: 70, n: 132, d: 5 },
+  // The smallest shape fitting in 1 tile (the path where every guard stays true)
+  { name: "v4 small B·H1 M3 N8 D4", batch: 1, m: 3, n: 8, d: 4 },
+  // A measured shape (DiT self-attention) — **2 column tiles** (D=128) hit the binding of the
+  // column scale
+  { name: "DiT shape B·H4 M64 N64 D128", batch: 4, m: 64, n: 64, d: 128 },
 ];
 
 /**
- * S の素の値（決定的 — 乱数は使わない）。head / 行ごとに**パターンが変わる**ので、
- * P̃ は行内で 0（丸めで消える要素）から 127（行の最大）まで広がる。
+ * Raw values of S (deterministic — no random numbers). **The pattern changes** per head / row, so
+ * P̃ spreads within a row from 0 (elements that vanish in rounding) to 127 (the row maximum).
  *
- * MUST: 刻みを**密**にする（`0.5` 刻みのような「きれいな」値だけだと `127·exp` が丸め境界の
- * 近傍に一度も落ちず、(b) の門が実質恒真になる — 実測で 62,088 要素中 0 件だった）。
- * 2 項を非共約の刻みで重ねて値域 15 を細かく埋める。
+ * MUST: make the steps **dense** (with only "clean" values like steps of `0.5`, `127·exp` never
+ * lands near a rounding boundary and check (b) becomes effectively a tautology — measured: 0 of
+ * 62,088 elements). 2 terms with incommensurate steps are layered to fill the range of 15 finely.
  */
 const scoreAt = (b: number, row: number, col: number): number => {
   const index = col * 7 + row * 3 + b * 5;
@@ -193,15 +210,17 @@ const scoreAt = (b: number, row: number, col: number): number => {
 };
 
 /**
- * V の素の値。**列（D）方向にも行（N）方向にも統計が偏る**形にしてある — per-column scale を
- * per-token（行 n ごと）へ取り違える誤りは、この偏りがあるときだけ値に出る（設計 §2.3）。
- * head ごとにパターンをずらすのは、大きさだけの差では量子化後の整数が一致してしまい
- * ペイロード base の取り違えが検出できないため（波 1 の教訓）。
+ * Raw values of V. Built so that **the statistics are skewed along both the column (D) and the row
+ * (N) direction** — mistaking the per-column scale for per-token (per row n) shows in the values
+ * only when this skew is present (design §2.3). The pattern is shifted per head because a
+ * difference in magnitude alone makes the quantized integers match, and a mixed-up payload base
+ * could not be detected (a lesson of iteration 1).
  */
 const valueAt = (b: number, row: number, col: number, d: number): number => {
-  // MUST: 刻みを scale の格子と共約にしない（`x/s` が半整数に乗ると、GPU の除算が 2.5 ULP
-  // まで許されているぶん量子化値が ±1 段揺れて (a2) の atol=0 が「たまたま落ちる」）。
-  // 余裕は {@link quantizeRowsTieMargin} で毎回実測して門にする。
+  // MUST: do not make the steps commensurate with the scale grid (if `x/s` lands on a half-integer,
+  // the GPU division being allowed up to 2.5 ULP makes the quantized value wobble by ±1 step, and
+  // the atol=0 of (a2) "happens to fail"). The margin is measured every time with
+  // {@link quantizeRowsTieMargin} and made a check.
   const base = ((((row * d + col + b * 11) * 5) % 17) - 8) * 0.2731 + 0.1237;
   const colGain = 0.04 * Math.pow(3.7, col % 5);
   const rowGain = 0.25 + (row % 6) * 0.83;
@@ -210,13 +229,13 @@ const valueAt = (b: number, row: number, col: number, d: number): number => {
 
 type PreparedPv = {
   readonly s: Float32Array<ArrayBuffer>;
-  /** 行統計 `[batch·m, 2]`（`[0]` = 行の最大 / `[1]` = `1/Σexp(S−m)`）。 */
+  /** Row statistics `[batch·m, 2]` (`[0]` = the row maximum / `[1]` = `1/Σexp(S−m)`). */
   readonly stats: Float32Array<ArrayBuffer>;
   readonly rowInv: Float32Array<ArrayBuffer>;
   readonly v: Float32Array<ArrayBuffer>;
-  /** Vᵀ`[batch, d, n]`（GPU の strided permute が作るはずの中身）。 */
+  /** Vᵀ`[batch, d, n]` (the content the GPU's strided permute should produce). */
   readonly vt: Float32Array<ArrayBuffer>;
-  /** Vᵀ の `x/s` の丸め境界からの余裕。 */
+  /** The margin of Vᵀ's `x/s` from the rounding boundaries. */
   readonly margin: number;
 };
 
@@ -255,7 +274,9 @@ const preparePv = (shape: PvShape): PreparedPv => {
   return { s, stats, rowInv, v, vt, margin: quantizeRowsTieMargin(vt, batch * d, n) };
 };
 
-/** `[batch, n, d]` → `[batch, d, n]`（GPU 側は既存の strided permute がやる仕事）。 */
+/**
+ * `[batch, n, d]` → `[batch, d, n]` (the job the existing strided permute does on the GPU side).
+ */
 const transpose = (
   v: ArrayLike<number>,
   batch: number,
@@ -273,7 +294,9 @@ const transpose = (
   return out;
 };
 
-/** head ごとの単位行列 `[batch, n, n]`（qP の読み出し器 — 下の {@link observeQuantizedP}）。 */
+/**
+ * An identity matrix per head `[batch, n, n]` (the reader of qP — {@link observeQuantizedP} below).
+ */
 const identityV = (batch: number, n: number): Float32Array<ArrayBuffer> => {
   const out = new Float32Array(batch * n * n);
   for (let b = 0; b < batch; b += 1) {
@@ -283,7 +306,7 @@ const identityV = (batch: number, n: number): Float32Array<ArrayBuffer> => {
 };
 
 // ---------------------------------------------------------------------------
-// 生 dispatch（executor の ③PV i8a8 と同じ 3 dispatch を流し、一時バッファも読み戻す）
+// Raw dispatches (the executor's 3 dispatches of ③PV i8a8, reading back the temporary buffers too)
 // ---------------------------------------------------------------------------
 
 const readbackBytes = async (
@@ -308,16 +331,18 @@ const readbackBytes = async (
 
 type PvRun = {
   readonly o: Float32Array<ArrayBuffer>;
-  /** GPU が使った Vᵀ の量子化値（`[batch, d, n]` の平坦 i8 — 4 詰めをそのまま読んだもの）。 */
+  /**
+   * The quantized Vᵀ the GPU used (flat i8 of `[batch, d, n]` — the 4-per-word packing read as is).
+   */
   readonly vq: Int8Array<ArrayBuffer>;
-  /** GPU が使った Vᵀ の行 scale（`[batch·d]`）。 */
+  /** The row scale of Vᵀ the GPU used (`[batch·d]`). */
   readonly vs: Float32Array<ArrayBuffer>;
 };
 
 /**
- * `strided`（Vᵀ）→ `quantize_rows` → i8a8 GEMM の 3 dispatch を生で流す。
- * S と行統計は**テストが直接与える**（③ の契約は「S と stats を受け取って O を書く」なので、
- * ①② を通す必要が無い）。
+ * Runs the 3 dispatches `strided` (Vᵀ) → `quantize_rows` → i8a8 GEMM raw. S and the row statistics
+ * are **supplied directly by the test** (the contract of ③ is "take S and stats and write O", so ①
+ * and ② need not run).
  */
 const runPvI8a8 = async (
   gpu: GpuContext,
@@ -345,7 +370,7 @@ const runPvI8a8 = async (
     const stats = host(input.stats);
     const v = host(input.v);
 
-    // (a) v[batch,N,D] → vT[batch,D,N]（既存の strided 読みコピー族 = permute）
+    // (a) v[batch,N,D] → vT[batch,D,N] (the existing strided read-copy family = permute)
     const stridedSpec = { dtype: "f32" } as const;
     const permuteKey = stridedKey(stridedSpec);
     const { pipeline: permutePipeline, layout: permuteLayout } = await cache.get(
@@ -373,7 +398,7 @@ const runPvI8a8 = async (
       permuteKey,
     );
 
-    // (b) Vᵀ の per-row 量子化（= V の per-column 量子化）
+    // (b) Per-row quantization of Vᵀ (= per-column quantization of V)
     const { pipeline: quantizePipeline, layout: quantizeLayout } = await cache.get(
       QUANTIZE_ROWS_KEY,
       QUANTIZE_ROWS_WGSL,
@@ -397,7 +422,7 @@ const runPvI8a8 = async (
       QUANTIZE_ROWS_KEY,
     );
 
-    // (c) 整数内積の GEMM（P̃ は A タイル充填で作る）
+    // (c) The integer dot-product GEMM (P̃ is produced by the A tile fill)
     const v4 = attentionPvI8a8UsesVec4(d);
     const dp4a = dot === "dp4a";
     const pvGeometry = defaultI8a8Geometry("attention_pv");
@@ -420,7 +445,8 @@ const runPvI8a8 = async (
         ],
       }),
       [
-        // MUST: 辺は ③PV 自身の幾何から導く（①QK とは別の既定 — キーと生成物の解決点と同じ）
+        // MUST: derive the edges from ③PV's own geometry (a default distinct from ①QK — the same
+        // resolution point as the key and the generated code)
         tiledWorkgroups(d, i8a8TileN(pvGeometry), limit, where),
         tiledWorkgroups(m, i8a8TileM(pvGeometry), limit, where),
         tiledWorkgroups(batch, 1, limit, where),
@@ -434,7 +460,7 @@ const runPvI8a8 = async (
     const vsBytes = await readbackBytes(gpu.device, vs, batch * d * 4);
     return {
       o: new Float32Array(outBytes.buffer, 0, batch * m * d),
-      // pack4xI8 は成分 i を i バイト目へ置くので、平坦 i8 の並びはバイト列そのもの
+      // pack4xI8 places component i into byte i, so the flat i8 order is the byte sequence itself
       vq: new Int8Array(vqBytes.buffer, 0, batch * d * n),
       vs: new Float32Array(vsBytes.buffer, 0, batch * d),
     };
@@ -444,12 +470,12 @@ const runPvI8a8 = async (
 };
 
 /**
- * GPU が A タイルで作った `qP` を観測する。
+ * Observes the `qP` the GPU produced in the A tile.
  *
- * V を head ごとの単位行列にすると `vq = 127·I` / `vs = 1/127` になるので、
- * `O[m,j] = f32(127·qP[m,j]) · (prow · vs[j])` = **qP の読み出し器**になる。
- * MUST: 前提（vq が対角 127・非対角 0）を assert してから割る — 前提が崩れたまま割ると
- * 観測値が静かにずれ、(a) の atol=0 が「たまたま通る」形になる。
+ * Making V an identity matrix per head gives `vq = 127·I` / `vs = 1/127`, so
+ * `O[m,j] = f32(127·qP[m,j]) · (prow · vs[j])` = **a reader of qP**.
+ * MUST: assert the premise (vq diagonal 127, off-diagonal 0) before dividing — dividing with the
+ * premise broken shifts the observed values quietly, and the atol=0 of (a) "happens to pass".
  */
 const observeQuantizedP = (
   run: PvRun,
@@ -459,12 +485,16 @@ const observeQuantizedP = (
   const { batch, m, n } = shape;
   for (let b = 0; b < batch; b += 1) {
     for (let row = 0; row < n; row += 1) {
-      assertEquals(run.vs[b * n + row], INV_P_ABS_MAX, `単位行列の列 scale [${b},${row}]`);
+      assertEquals(
+        run.vs[b * n + row],
+        INV_P_ABS_MAX,
+        `column scale of the identity matrix [${b},${row}]`,
+      );
       for (let col = 0; col < n; col += 1) {
         assertEquals(
           run.vq[(b * n + row) * n + col],
           row === col ? P_ABS_MAX : 0,
-          `単位行列の量子化値 [${b},${row},${col}]`,
+          `quantized value of the identity matrix [${b},${row},${col}]`,
         );
       }
     }
@@ -479,7 +509,7 @@ const observeQuantizedP = (
         const rounded = Math.round(raw);
         assert(
           Math.abs(raw - rounded) < 1e-3 && rounded >= 0 && rounded <= P_ABS_MAX,
-          `qP の読み出しが整数にならない [${b},${row},${col}]: ${raw}`,
+          `the qP readout is not an integer [${b},${row},${col}]: ${raw}`,
         );
         qp[(b * m + row) * n + col] = rounded;
       }
@@ -489,33 +519,40 @@ const observeQuantizedP = (
 };
 
 // ---------------------------------------------------------------------------
-// 丸め境界からの余裕（Vᵀ の量子化を atol=0 で突合してよいことの門）
+// Margin from the rounding boundaries (the check that Vᵀ's quantization may be compared at atol=0)
 // ---------------------------------------------------------------------------
 
-/** `quantize_rows` の dispatch 数（小 D 変種でキーが幾何ごとに割れるので接頭辞で束ねる）。 */
+/**
+ * The dispatch count of `quantize_rows` (the small-D variants split keys per geometry, so they are
+ * grouped by prefix).
+ */
 const quantizeRowsDispatches = (byKey: ReadonlyMap<string, number>): number =>
   [...byKey]
     .filter(([key]) => key.startsWith(QUANTIZE_ROWS_KEY))
     .reduce((sum, [, count]) => sum + count, 0);
 
-test("attention_pv i8a8: 形状群の Vᵀ は丸め境界から十分離れている（vq 突合の前提）", () => {
-  // GPU の除算（`x/s`）は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段
-  // 揺れうる。余裕を**毎回実測**して門にしないと、(a2) の atol=0 は「たまたま通っているだけ」。
+test("attention_pv i8a8: Vᵀ of the shapes stays well away from the rounding boundaries (premise of the vq comparison)", () => {
+  // The GPU division (`x/s`) is allowed up to 2.5 ULP, so an element whose `x/s` is near a
+  // half-integer can wobble by ±1 step. Unless the margin is **measured every time** and made a
+  // check, the atol=0 of (a2) "merely happens to pass".
   let worst = Number.POSITIVE_INFINITY;
   for (const shape of PV_SHAPES) {
     const { margin } = preparePv(shape);
-    assert(margin > TIE_MARGIN, `${shape.name}: 丸め境界からの余裕が ${margin} しかない`);
+    assert(
+      margin > TIE_MARGIN,
+      `${shape.name}: the margin from the rounding boundaries is only ${margin}`,
+    );
     worst = Math.min(worst, margin);
   }
-  assert(worst > TIE_MARGIN, `最悪余裕 ${worst}`);
+  assert(worst > TIE_MARGIN, `worst margin ${worst}`);
 });
 
 // ---------------------------------------------------------------------------
-// (a) 整数を受け取ってからの純関数との atol=0 / (a2) Vᵀ の量子化の atol=0
+// (a) atol=0 against the pure function from the integers on / (a2) atol=0 of the quantization of Vᵀ
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_pv i8a8 の O が TS 参照（整数の手前で割った純関数）と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  "O of attention_pv i8a8 matches the TS reference (the pure function split just before the integers) at atol=0 (v4 / scalar / tile edge / K remainder / B·H≥2, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -524,24 +561,26 @@ test.skipIf(!GPU_AVAILABLE)(
         const prepared = preparePv(shape);
         const run = await runPvI8a8(gpu, shape, prepared, "dp4a", shape.name);
 
-        // (a2) Vᵀ（permute の実体化）とその per-column 量子化が TS 参照とビット一致する。
-        // **permute の軸取り違えと per-token 化の唯一の機械的検出器**。
+        // (a2) Vᵀ (the materialized permute) and its per-column quantization are bit-identical to
+        // the TS reference. **The only mechanical detector of a mixed-up permute axis and of going
+        // per-token**.
         const expectedV = quantizeRowsReference(prepared.vt, batch * d, n);
-        assertExact(run.vq, expectedV.q, `${shape.name}: Vᵀ の量子化値`);
-        assertExact(run.vs, expectedV.scale, `${shape.name}: Vᵀ の列 scale`);
-        // 恒真化の門: 列 scale が全部同じなら「列で引く」ことを何も検証していない
+        assertExact(run.vq, expectedV.q, `${shape.name}: quantized values of Vᵀ`);
+        assertExact(run.vs, expectedV.scale, `${shape.name}: column scale of Vᵀ`);
+        // Tautology guard: if the column scales are all the same, "pulling by column" verifies
+        // nothing
         assert(
           new Set([...run.vs]).size > Math.max(2, batch),
-          `${shape.name}: 列 scale が散らばっていない（軸の検出器が成立しない）`,
+          `${shape.name}: the column scales are not spread out (the axis detector does not hold)`,
         );
 
-        // (a) GPU が使った qP を観測してから、整数だけの参照と突き合わせる
+        // (a) Observe the qP the GPU used, then compare against the integer-only reference
         const observed = await runPvI8a8(
           gpu,
           { batch, m, n, d: n },
           { s: prepared.s, stats: prepared.stats, v: identityV(batch, n) },
           "dp4a",
-          `${shape.name}（qP 観測）`,
+          `${shape.name} (qP observation)`,
         );
         const qp = observeQuantizedP(observed, shape, prepared.rowInv);
         const expected = referenceAttentionPvI8a8Core({
@@ -556,18 +595,19 @@ test.skipIf(!GPU_AVAILABLE)(
         });
         assertExact(run.o, expected, shape.name);
 
-        // 恒真化の門: O が定数なら「一致」は何も検証していない
-        assert(new Set([...run.o]).size > 1, `${shape.name}: O が定数`);
-        // qP は 0 と 127 の両端に届いている（丸めで消える要素と行の最大が同居する形）
-        assert([...qp].includes(P_ABS_MAX), `${shape.name}: qP に 127 が無い`);
-        assert([...qp].includes(0), `${shape.name}: qP に 0 が無い`);
-        // head ごとに統計が違うこと（バッチ base の検出器が成立する前提そのもの）
+        // Tautology guard: if O is constant, "equal" verifies nothing
+        assert(new Set([...run.o]).size > 1, `${shape.name}: O is constant`);
+        // qP reaches both ends 0 and 127 (elements vanishing in rounding and the row maximum
+        // coexist)
+        assert([...qp].includes(P_ABS_MAX), `${shape.name}: qP has no 127`);
+        assert([...qp].includes(0), `${shape.name}: qP has no 0`);
+        // The statistics differ per head (the very premise for the batch-base detector to hold)
         if (batch > 1) {
           const head0 = run.o.slice(0, m * d);
           const head1 = run.o.slice(m * d, 2 * m * d);
           assert(
             [...head0].some((value, index) => value !== head1[index]),
-            `${shape.name}: head 0 と head 1 の O が同一（base の取り違えが値に出ない）`,
+            `${shape.name}: O of head 0 and head 1 is identical (a mixed-up base would not show in the values)`,
           );
         }
       }
@@ -578,11 +618,11 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (b) qP の生成（exp の実装差 — atol=0 は原理的に立たない）
+// (b) The generation of qP (an implementation difference of exp — atol=0 cannot hold in principle)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_pv i8a8: qP は TS 参照と必ず ±1 段以内で一致する（exp の実装差・実 GPU）",
+  "attention_pv i8a8: qP always matches the TS reference within ±1 step (an implementation difference of exp, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     let total = 0;
@@ -596,7 +636,7 @@ test.skipIf(!GPU_AVAILABLE)(
           { batch, m, n, d: n },
           { s: prepared.s, stats: prepared.stats, v: identityV(batch, n) },
           "dp4a",
-          `${shape.name}（qP 観測）`,
+          `${shape.name} (qP observation)`,
         );
         const qp = observeQuantizedP(observed, shape, prepared.rowInv);
         const rowMax = new Float32Array(batch * m);
@@ -604,10 +644,11 @@ test.skipIf(!GPU_AVAILABLE)(
         const expected = referenceAttentionPvQuant(prepared.s, rowMax, batch * m, n);
         for (let i = 0; i < qp.length; i += 1) {
           const diff = qp[i] - expected[i];
-          // MUST: ±2 段以上は 1 件でも実装バグ（exp の数 ULP 差では届かない）
+          // MUST: ±2 steps or more is an implementation bug even once (a few-ULP difference of exp
+          // cannot reach it)
           assert(
             Math.abs(diff) <= 1,
-            `${shape.name}: qP[${i}] が GPU ${qp[i]} / 参照 ${expected[i]}（±2 段以上）`,
+            `${shape.name}: qP[${i}] is GPU ${qp[i]} / reference ${expected[i]} (±2 steps or more)`,
           );
           if (diff !== 0) mismatched += 1;
           total += 1;
@@ -616,21 +657,25 @@ test.skipIf(!GPU_AVAILABLE)(
     } finally {
       gpu.destroy();
     }
-    // 実測の記録（設計 §4.2 の「不一致率そのものが記録になる」）。恒真化しないよう上限も置く
+    // A record of the measurement (design §4.2's "the mismatch rate itself becomes the record"). An
+    // upper bound is set too so it is not a tautology
     const rate = mismatched / total;
     console.log(
-      `qP の GPU/TS 不一致率: ${mismatched} / ${total} = ${(rate * 100).toFixed(4)}%（全て ±1 段）`,
+      `GPU/TS mismatch rate of qP: ${mismatched} / ${total} = ${(rate * 100).toFixed(4)}% (all ±1 step)`,
     );
-    assert(rate < 0.02, `qP の不一致率 ${rate} が 2% を超えた（exp の実装差にしては大きい）`);
+    assert(
+      rate < 0.02,
+      `the qP mismatch rate ${rate} exceeded 2% (large for an exp implementation difference)`,
+    );
   },
 );
 
 // ---------------------------------------------------------------------------
-// (c) dp4a とエミュ
+// (c) dp4a and the emulation
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_pv i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  "attention_pv i8a8: the dot4I8Packed version and the emulated version match at atol=0 (the extension only affects speed, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -638,8 +683,8 @@ test.skipIf(!GPU_AVAILABLE)(
         const prepared = preparePv(shape);
         const dp4a = await runPvI8a8(gpu, shape, prepared, "dp4a", shape.name);
         const emu = await runPvI8a8(gpu, shape, prepared, "emu", shape.name);
-        assertExact(emu.o, dp4a.o, `${shape.name}: dp4a vs エミュ`);
-        assert(new Set([...dp4a.o]).size > 1, `${shape.name}: O が定数`);
+        assertExact(emu.o, dp4a.o, `${shape.name}: dp4a vs emulation`);
+        assert(new Set([...dp4a.o]).size > 1, `${shape.name}: O is constant`);
       }
     } finally {
       gpu.destroy();
@@ -652,22 +697,26 @@ test.skipIf(!GPU_AVAILABLE)(
 // ---------------------------------------------------------------------------
 
 /**
- * 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。
+ * Deterministic data sequences (no random numbers — failures would not reproduce).
  *
- * MUST: 刻みを scale の格子と共約にしない（`x/s` が半整数に乗ると、GPU の除算が 2.5 ULP まで
- * 許されているぶん量子化値が ±1 段揺れて atol=0 が「たまたま落ちる」ようになる）。余裕は
- * {@link quantizeRowsTieMargin} で毎回実測して門にする。
+ * MUST: do not make the steps commensurate with the scale grid (if `x/s` lands on a half-integer,
+ * the GPU division being allowed up to 2.5 ULP makes the quantized value wobble by ±1 step, and
+ * atol=0 starts to "happen to fail"). The margin is measured every time with
+ * {@link quantizeRowsTieMargin} and made a check.
  */
 const QUERY = (i: number): number => (((i * 3) % 29) - 14) * 0.3717 + 0.0419;
 const KEY = (i: number): number => (((i * 3) % 41) - 20) * 0.2917 - 0.0173;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.3119;
 
-/** 半スケール（torch math decomp の `√scale_factor`）— ADR 0023 の契約どおりの値。 */
+/**
+ * The half scale (`√scale_factor` of torch's math decomposition) — the value per the contract of
+ * ADR 0023.
+ */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
 type QkShape = {
   readonly name: string;
-  /** B·H を畳んだバッチ軸。**2 以上が batch base の唯一の検出器**。 */
+  /** The batch axis folding B·H. **2 or more is the only detector of the batch base**. */
   readonly batch: number;
   readonly m: number;
   readonly n: number;
@@ -675,32 +724,36 @@ type QkShape = {
 };
 
 /**
- * 形の踏み分け。
+ * Which shapes are hit.
  *
- * MUST: **B·H ≥ 2 かつ head ごとに統計が違う**形を持つ（バッチ base の唯一の検出器 —
- * head ごとに大きさだけを変えると量子化後の整数が同じになり、ペイロード側の base の
- * 取り違えが値に出ない。**パターンごと**変えること）。
- * MUST: **m / n をタイル辺 64 を跨がせる**（行 scale と列 scale の取り違えの検出器）。
- * MUST: **v4 経路とスカラ経路を対で持つ**（S の書き出しが変種ごとに別の式）。
- * MUST: **D % 16 != 0** を含む（K 端数の 0 埋めが効いていることの検出器）。
+ * MUST: include shapes with **B·H ≥ 2 and different statistics per head** (the only detector of the
+ * batch base — changing only the magnitude per head yields the same integers after quantization,
+ * and a mixed-up base on the payload side does not show in the values. Change **the pattern
+ * itself**).
+ * MUST: **make m / n cross the tile edge 64** (the detector of mixing up the row scale and the
+ * column scale).
+ * MUST: **pair the v4 path with the scalar path** (the write-out of S is a different formula per
+ * variant).
+ * MUST: include **D % 16 != 0** (the detector that the zero fill of the K remainder takes effect).
  */
 const QK_SHAPES: readonly QkShape[] = [
-  // v4（N % 4 == 0）/ m・n とも 64 タイル 2 枚 / D=20 は k4=5 で K タイル 2 枚（端数 1 パック）
+  // v4 (N % 4 == 0) / m and n both span 2 tiles of 64 / D=20 is k4=5, 2 K tiles (remainder of 1
+  // pack)
   { name: "v4 B·H6 M65 N68 D20", batch: 6, m: 65, n: 68, d: 20 },
-  // スカラ（N % 4 != 0）で 1 タイルに収まる形 + head 2 枚
-  { name: "スカラ B·H2 M17 N19 D20", batch: 2, m: 17, n: 19, d: 20 },
-  // K タイルが 9 枚（k4=33・端数 1 パック）/ n=5 はスカラ / m=70 で行タイル 2 枚
-  { name: "スカラ 長K B·H2 M70 N5 D132", batch: 2, m: 70, n: 5, d: 132 },
-  // 1 タイルに収まる最小形（ガードが全て真のまま通る経路）
-  { name: "v4 小 B·H1 M3 N8 D4", batch: 1, m: 3, n: 8, d: 4 },
-  // 実測形（DiT の self-attention）— タイル辺にちょうど乗る形
-  { name: "DiT 形 B·H4 M64 N64 D128", batch: 4, m: 64, n: 64, d: 128 },
+  // Scalar (N % 4 != 0) fitting in 1 tile + 2 heads
+  { name: "scalar B·H2 M17 N19 D20", batch: 2, m: 17, n: 19, d: 20 },
+  // 9 K tiles (k4=33, remainder of 1 pack) / n=5 is scalar / m=70 gives 2 row tiles
+  { name: "scalar long-K B·H2 M70 N5 D132", batch: 2, m: 70, n: 5, d: 132 },
+  // The smallest shape fitting in 1 tile (the path where every guard stays true)
+  { name: "v4 small B·H1 M3 N8 D4", batch: 1, m: 3, n: 8, d: 4 },
+  // A measured shape (DiT self-attention) — sits exactly on the tile edges
+  { name: "DiT shape B·H4 M64 N64 D128", batch: 4, m: 64, n: 64, d: 128 },
 ];
 
 /**
- * head ごとに**パターンも大きさも**変えたデータ（バッチ base の検出器の前提）。
- * 大きさだけ変えると量子化後の整数が head 間で同一になり、ペイロード base の取り違えが
- * 値に出なくなる。
+ * Data with **both the pattern and the magnitude** changed per head (the premise of the batch-base
+ * detector). Changing only the magnitude makes the quantized integers identical across heads, and a
+ * mixed-up payload base would not show in the values.
  */
 const headVaried = (
   base: (index: number) => number,
@@ -723,7 +776,7 @@ type PreparedQk = {
   readonly k: Float32Array<ArrayBuffer>;
   readonly scale: number;
   readonly expected: Float32Array<ArrayBuffer>;
-  /** `x/s` の丸め境界からの余裕（q / k の最小値）。 */
+  /** The margin of `x/s` from the rounding boundaries (the minimum over q / k). */
   readonly margin: number;
 };
 
@@ -741,8 +794,8 @@ const prepareQk = (shape: QkShape): PreparedQk => {
 };
 
 /**
- * executor の ①QK i8a8 と同じ 3 dispatch（`quantize_rows` ×2 → i8a8 GEMM）を生で流し、
- * **S をそのまま読み戻す**。Session 経路では S が中間バッファなので観測できない。
+ * Runs raw the same 3 dispatches as the executor's ①QK i8a8 (`quantize_rows` ×2 → i8a8 GEMM) and
+ * **reads S back as is**. On the Session path S is an intermediate buffer and cannot be observed.
  */
 const runAttentionQkI8a8 = async (
   gpu: GpuContext,
@@ -812,8 +865,9 @@ const runAttentionQkI8a8 = async (
         { binding: ATTENTION_QK_K_SCALE_BINDING, resource: { buffer: key.scales } },
       ],
     });
-    // MUST: dispatch の辺は**このカーネルの幾何**（キー・生成物へ渡したものと同じ）から導く。
-    // 定数を渡すと実タイル辺と食い違い、下回った側でタイルが欠落して沈黙誤値になる。
+    // MUST: derive the dispatch edges from **this kernel's geometry** (the same one passed to the
+    // key and the generated code). Passing a constant disagrees with the actual tile edge, and on
+    // the smaller side tiles go missing as a silent wrong value.
     scheduler.dispatch(
       pipeline,
       bindGroup,
@@ -832,21 +886,26 @@ const runAttentionQkI8a8 = async (
   }
 };
 
-test("attention_qk i8a8: 形状群の q / k は丸め境界から十分離れている（atol=0 の前提）", () => {
-  // GPU の除算は 2.5 ULP まで許されるので、`x/s` が半整数の近傍にある要素は ±1 段揺れうる。
-  // 余裕を**毎回実測**して門にしないと、atol=0 は「たまたま通っているだけ」になる。
+test("attention_qk i8a8: q / k of the shapes stay well away from the rounding boundaries (premise of atol=0)", () => {
+  // The GPU division is allowed up to 2.5 ULP, so an element whose `x/s` is near a half-integer can
+  // wobble by ±1 step. Unless the margin is **measured every time** and made a check, atol=0
+  // "merely happens to pass".
   let worst = Number.POSITIVE_INFINITY;
   for (const shape of QK_SHAPES) {
     const { margin } = prepareQk(shape);
-    assert(margin > TIE_MARGIN, `${shape.name}: 丸め境界からの余裕が ${margin} しかない`);
+    assert(
+      margin > TIE_MARGIN,
+      `${shape.name}: the margin from the rounding boundaries is only ${margin}`,
+    );
     worst = Math.min(worst, margin);
   }
-  // 全形状を通した最悪余裕（データ列を変えたらこの値が動く = 門が教えてくれる）
-  assert(worst > TIE_MARGIN, `最悪余裕 ${worst}`);
+  // The worst margin over all shapes (changing the data sequences moves this value = the check
+  // tells you)
+  assert(worst > TIE_MARGIN, `worst margin ${worst}`);
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_qk i8a8 の S が TS 参照と atol=0 で一致する（v4 / スカラ / タイル端 / K 端数 / B·H≥2・実 GPU）",
+  "S of attention_qk i8a8 matches the TS reference at atol=0 (v4 / scalar / tile edge / K remainder / B·H≥2, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -854,15 +913,15 @@ test.skipIf(!GPU_AVAILABLE)(
         const prepared = prepareQk(shape);
         const actual = await runAttentionQkI8a8(gpu, shape, prepared, "dp4a");
         assertExact(actual, prepared.expected, shape.name);
-        // 恒真化の門: S が定数なら「一致」は何も検証していない
-        assert(new Set([...actual]).size > 1, `${shape.name}: S が定数`);
-        // head ごとに統計が違うこと（バッチ base の検出器が成立する前提そのもの）
+        // Tautology guard: if S is constant, "equal" verifies nothing
+        assert(new Set([...actual]).size > 1, `${shape.name}: S is constant`);
+        // The statistics differ per head (the very premise for the batch-base detector to hold)
         if (shape.batch > 1) {
           const head0 = actual.slice(0, shape.m * shape.n);
           const head1 = actual.slice(shape.m * shape.n, 2 * shape.m * shape.n);
           assert(
             [...head0].some((value, index) => value !== head1[index]),
-            `${shape.name}: head 0 と head 1 の S が同一（base の取り違えが値に出ない）`,
+            `${shape.name}: S of head 0 and head 1 is identical (a mixed-up base would not show in the values)`,
           );
         }
       }
@@ -873,11 +932,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_qk i8a8: K 側の充填スロットが 5 以上の幾何でも S が TS 参照と atol=0 で一致する（実 GPU）",
+  "attention_qk i8a8: S matches the TS reference at atol=0 even on geometries with 5 or more K-side fill slots (real GPU)",
   async () => {
-    // 充填の値変数が関数スコープの `k4`（K のパック数）を覆い隠していた欠陥（2026-09-27）の検出器。
-    // 1 スレッドが埋める K 側スロット数 = regN · tileK / 4 / wgY が 5 以上の幾何で、5 番目以降の
-    // 列が黙って 0 になっていた。既定幾何（2 スロット）では踏めないので、8 / 16 スロットの幾何で撃つ。
+    // Detector of the defect (2026-09-27) where the fill's value variable shadowed the
+    // function-scope `k4` (the K pack count). On geometries where the K-side slots one thread fills
+    // = regN · tileK / 4 / wgY is 5 or more, the 5th and later columns silently became 0. The
+    // default geometry (2 slots) cannot hit it, so 8 / 16-slot geometries are used.
     const geometries: readonly I8a8Geometry[] = [
       { regM: 4, regN: 4, wgX: 8, wgY: 4, tileK: 32 },
       { regM: 8, regN: 8, wgX: 8, wgY: 4, tileK: 32 },
@@ -886,7 +946,7 @@ test.skipIf(!GPU_AVAILABLE)(
       const slots = (geometry.regN * (geometry.tileK / 4)) / geometry.wgY;
       assert(
         slots >= 5,
-        `${i8a8GeometryKeyPart(geometry, false)}: 充填スロット ${slots} では欠陥を踏まない`,
+        `${i8a8GeometryKeyPart(geometry, false)}: ${slots} fill slots do not hit the defect`,
       );
     }
     const gpu = await acquireGpu();
@@ -901,7 +961,7 @@ test.skipIf(!GPU_AVAILABLE)(
               prepared.expected,
               `${shape.name} / ${i8a8GeometryKeyPart(geometry, false)} / ${dot}`,
             );
-            assert(new Set([...actual]).size > 1, `${shape.name}: S が定数`);
+            assert(new Set([...actual]).size > 1, `${shape.name}: S is constant`);
           }
         }
       }
@@ -912,13 +972,14 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_qk i8a8: NaN 行は行全体・NaN 列は列全体へ伝播し、ゼロ行は厳密に 0（実 GPU）",
+  "attention_qk i8a8: a NaN row propagates to the whole row, a NaN column to the whole column, and a zero row is exactly 0 (real GPU)",
   async () => {
     const shape: QkShape = { name: "nan/zero B·H2 M8 N12 D20", batch: 2, m: 8, n: 12, d: 20 };
     const { batch, m, n, d } = shape;
     const q = headVaried(QUERY, batch, m, d);
     const k = headVaried(KEY, batch, n, d);
-    // head 1 の q 行 2 に NaN・q 行 5 を全ゼロ（tiny 床）・head 0 の k 行（= 出力列）3 に NaN
+    // NaN in q row 2 of head 1, q row 5 all zero (tiny floor), NaN in k row (= output column) 3 of
+    // head 0
     const nanRow = 2;
     const zeroRow = 5;
     const nanCol = 3;
@@ -928,12 +989,15 @@ test.skipIf(!GPU_AVAILABLE)(
     k[(0 * n + nanCol) * d + 1] = Number.NaN;
     const scale = halfScale(d);
     const expected = referenceAttentionQkI8a8({ q, k, batch, m, n, d, scale });
-    // 非有限行の比は `quantizeRowsTieMargin` が読み飛ばすので、余裕の門はそのまま掛かる
+    // quantizeRowsTieMargin skips the ratios of non-finite rows, so the margin check still applies
     const margin = Math.min(
       quantizeRowsTieMargin(q, batch * m, d),
       quantizeRowsTieMargin(k, batch * n, d),
     );
-    assert(margin > TIE_MARGIN, `${shape.name}: 丸め境界からの余裕が ${margin} しかない`);
+    assert(
+      margin > TIE_MARGIN,
+      `${shape.name}: the margin from the rounding boundaries is only ${margin}`,
+    );
     const prepared: PreparedQk = { q, k, scale, expected, margin };
 
     const gpu = await acquireGpu();
@@ -944,43 +1008,47 @@ test.skipIf(!GPU_AVAILABLE)(
       gpu.destroy();
     }
     assertExact(actual, expected, shape.name);
-    // NaN 行は**全列**が NaN（scale が NaN になり dequant で行全体へ乗る）
+    // A NaN row is NaN in **every column** (the scale becomes NaN and dequant spreads it over the
+    // whole row)
     for (let col = 0; col < n; col += 1) {
-      assert(Number.isNaN(actual[(1 * m + nanRow) * n + col]), `NaN 行 col=${col}`);
+      assert(Number.isNaN(actual[(1 * m + nanRow) * n + col]), `NaN row col=${col}`);
     }
-    // NaN 列は**全行**が NaN（列 scale の側の伝播 — 行と列で別の経路）
+    // A NaN column is NaN in **every row** (propagation on the column-scale side — rows and columns
+    // take different paths)
     for (let row = 0; row < m; row += 1) {
       // oxlint-disable-next-line oxc/erasing-op -- `0 * m` names head 0 in the (head * m + row) index
-      assert(Number.isNaN(actual[(0 * m + row) * n + nanCol]), `NaN 列 row=${row}`);
+      assert(Number.isNaN(actual[(0 * m + row) * n + nanCol]), `NaN column row=${row}`);
     }
-    // 隣の head は無傷（q の NaN 行が head を跨いでいない — NaN 列は head 0 の側の設計）
+    // The neighbouring head is intact (q's NaN row does not cross heads — the NaN column is on head
+    // 0's side by design)
     for (let col = 0; col < n; col += 1) {
       if (col === nanCol) continue;
       // oxlint-disable-next-line oxc/erasing-op -- `0 * m` names head 0 in the (head * m + row) index
-      assert(Number.isFinite(actual[(0 * m + nanRow) * n + col]), `隣接 head col=${col}`);
+      assert(Number.isFinite(actual[(0 * m + nanRow) * n + col]), `adjacent head col=${col}`);
     }
-    // 全ゼロ行は q = 0・s = tiny なので S も厳密に 0（±0 は同一視）。NaN 列は head 0 の側
-    // なので、head 1 のこの行は全列が有限で 0 になる
+    // An all-zero row has q = 0, s = tiny, so S is exactly 0 too (±0 treated as equal). The NaN
+    // column is on head 0's side, so this row of head 1 is finite and 0 in every column
     for (let col = 0; col < n; col += 1) {
-      assertEquals(actual[(1 * m + zeroRow) * n + col], 0, `ゼロ行 col=${col}`);
+      assertEquals(actual[(1 * m + zeroRow) * n + col], 0, `zero row col=${col}`);
     }
   },
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_qk i8a8: dot4I8Packed 版とエミュ版が atol=0 で一致する（拡張の有無は速度だけ・実 GPU）",
+  "attention_qk i8a8: the dot4I8Packed version and the emulated version match at atol=0 (the extension only affects speed, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // 本機は packed_4x8_integer_dot_product を列挙するので**両変種とも実走できる**。
-      // この 1 本が「エミュは数値同一」という主張の attention 側の機械的検出器。
+      // This machine enumerates packed_4x8_integer_dot_product, so **both variants can actually
+      // run**. This one test is the attention-side mechanical detector of the claim "the emulation
+      // is numerically identical".
       for (const shape of QK_SHAPES) {
         const prepared = prepareQk(shape);
         const dp4a = await runAttentionQkI8a8(gpu, shape, prepared, "dp4a");
         const emu = await runAttentionQkI8a8(gpu, shape, prepared, "emu");
-        assertExact(emu, dp4a, `${shape.name}: dp4a vs エミュ`);
-        // どちらも TS 参照と一致する（両者が同じだけずれている形を塞ぐ）
-        assertExact(emu, prepared.expected, `${shape.name}: エミュ vs 参照`);
+        assertExact(emu, dp4a, `${shape.name}: dp4a vs emulation`);
+        // Both match the TS reference (closes off the case where both are off by the same amount)
+        assertExact(emu, prepared.expected, `${shape.name}: emulation vs reference`);
       }
     } finally {
       gpu.destroy();
@@ -989,12 +1057,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// Session 経路（attentionCompute: "a8"）— 段ごとの適格判定と混成
+// Session path (attentionCompute: "a8") — per-stage eligibility and mixing
 // ---------------------------------------------------------------------------
 
 type RunResult = {
   readonly output: Float32Array<ArrayBuffer>;
-  /** 走ったパイプラインキー（census — 計測に依らない）。 */
+  /** The pipeline keys that ran (census — independent of timing). */
   readonly entries: readonly { readonly key: string; readonly dispatchCount: number }[];
 };
 
@@ -1039,9 +1107,10 @@ const relativeRms = (actual: ArrayLike<number>, expected: ArrayLike<number>): nu
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionCompute:'a8' は ①QK と ③PV を整数内積にし、②行統計は f32 のまま走る（実 GPU）",
+  "attentionCompute:'a8' makes ①QK and ③PV integer dot products while ② row statistics runs in f32 (real GPU)",
   async () => {
-    // MUST: **shader-f16 を要求しない既定の device** で走ること（i8a8 は feature ゲートの外）。
+    // MUST: run on **the default device that does not request shader-f16** (i8a8 is outside the
+    // feature gate).
     const gpu = await acquireGpu();
     try {
       const shape = { b: 2, h: 3, m: 65, n: 68 };
@@ -1050,22 +1119,28 @@ test.skipIf(!GPU_AVAILABLE)(
       const plain = await runAttention(gpu, shape, d, {});
       assert(
         [...i8a8.output].some((value, index) => value !== plain.output[index]),
-        "i8a8 の出力が f32 経路と 1 ビットも違わない（opt-in が効いていない）",
+        "the i8a8 output does not differ by a single bit from the f32 path (the opt-in has no effect)",
       );
-      assert(new Set([...i8a8.output]).size > 1, "出力が定数（比較が恒真になっている）");
-      // 経路全体が正しく結線されていることの粗い門（V の scale 軸を取り違える等の沈黙誤値は
-      // 桁で外れる。数値契約そのものは上の生 dispatch が atol=0 で持つ）。
-      // 実測 6.09e-2（決定的なデータなので値は動かない）に対し門は 1e-1。この形は S の値域が
-      // 広く softmax が鋭いので P̃ の peak/rms が大きい = 設計 §2.2 の理論どおり誤差も大きい
+      assert(
+        new Set([...i8a8.output]).size > 1,
+        "the output is constant (the comparison is a tautology)",
+      );
+      // A coarse check that the whole path is wired correctly (silent wrong values such as a
+      // mixed-up scale axis of V miss by orders of magnitude. The numeric contract itself is held
+      // at atol=0 by the raw dispatches above). Measured 6.09e-2 (deterministic data, so the value
+      // does not move) against a check of 1e-1. This shape has a wide range of S and a sharp
+      // softmax, so the peak/rms of P̃ is large = the error is large too, as design §2.2's theory
+      // says
       const rms = relativeRms(i8a8.output, plain.output);
-      assert(rms < 0.1, `i8a8 と f32 の相対 RMS が ${rms}（結線を疑う）`);
+      assert(rms < 0.1, `the relative RMS of i8a8 vs f32 is ${rms} (suspect the wiring)`);
 
-      // 整数内積変種のノブは attention の**両段**に効く（linear と同じ 1 つのノブ）
+      // The knob of the integer dot-product variant affects **both stages** of attention (the same
+      // single knob as linear)
       const emu = await runAttention(gpu, shape, d, {
         attentionCompute: "a8",
         [I8A8_DOT]: "emu",
       });
-      assertExact(emu.output, i8a8.output, "dp4a vs エミュ（Session 経路）");
+      assertExact(emu.output, i8a8.output, "dp4a vs emulation (Session path)");
     } finally {
       gpu.destroy();
     }
@@ -1073,15 +1148,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **census**（ADR 0058 決定 4）。どの変種が実際に走ったかはキーでしか見えない
- * （i8a8 縮退も dp4a ↔ エミュも値はビット同一のまま経路だけが変わる）。
+ * **census** (ADR 0058 decision 4). Which variant actually ran is visible only from keys (both the
+ * i8a8 degradation and dp4a ↔ emulation keep the values bit-identical and only change the path).
  *
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
- * 無条件に FAIL にする（「entries が空なら何も見ない」で守ると検査が 1 つも走らないまま
- * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing (runs on machines without
+ * timing too). An empty census FAILs unconditionally (guarding with "if entries is empty, look at
+ * nothing" turns green without a single check running — `requireCensus` in
+ * tests/helpers/pipeline-census.ts).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionCompute:'a8' の変種選択（①③ i8a8 / ②行統計 f32 / dp4a ↔ エミュ）をキーで見る（実 GPU）",
+  "the variant choice of attentionCompute:'a8' (①③ i8a8 / ② row statistics f32 / dp4a ↔ emulation) is checked through keys (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -1089,9 +1165,9 @@ test.skipIf(!GPU_AVAILABLE)(
       const shape = { b: 2, h: 3, m: 65, n: 68 };
       const d = 20;
       const i8a8 = await runAttention(gpu, shape, d, { attentionCompute: "a8" });
-      assert(i8a8.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      assert(i8a8.entries.length > 0, "the breakdown is empty (the key check is a no-op)");
       const byKey = new Map(i8a8.entries.map((entry) => [entry.key, entry.dispatchCount]));
-      // ①QK / ③PV とも i8a8 変種で、f32 変種は 1 本も走らない
+      // ①QK / ③PV are both the i8a8 variant, and not a single f32 variant runs
       assertEquals(
         byKey.get(
           attentionQkI8a8Key(
@@ -1113,35 +1189,45 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           byKey.has(attentionQkKey(v4, "f32", "f32", false, false, false, profile.attention.qk)),
           false,
-          "f32 の attention_qk が残っている",
+          "the f32 attention_qk is still there",
         );
         assertEquals(
           byKey.has(attentionPvKey(v4, "f32", "f32", false, false, profile.attention.pv)),
           false,
-          "f32 の attention_pv が残っている",
+          "the f32 attention_pv is still there",
         );
       }
-      // ②行統計は f32 のまま（S の格納形も f32 のまま — 設計 §4.3 の分母量子化は不採用）。
-      // regcache（S 1 回読み）は dim 依存の生成なので epc がキーに載る（値はビット同一）
+      // ② row statistics stays f32 (the storage form of S stays f32 too — design §4.3's denominator
+      // quantization was not adopted).
+      // regcache (reading S once) is generated per dim, so epc appears in the key (the values are
+      // bit-identical)
       assertEquals(
         byKey.get(attentionStatsKey("f32", "f32", attentionStatsRegCache(shape.n))),
         1,
-        "②行統計は f32 のまま",
+        "② row statistics stays f32",
       );
-      // 量子化は q / k / Vᵀ の 3 本、permute は Vᵀ の 1 本（ノード全体で 7 dispatch）
-      assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows が q / k / v の 3 本でない");
-      assertEquals(byKey.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
+      // Quantization runs 3 times for q / k / Vᵀ, the permute once for Vᵀ (7 dispatches for the
+      // whole node)
+      assertEquals(quantizeRowsDispatches(byKey), 3, "quantize_rows is not the 3 of q / k / v");
+      assertEquals(
+        byKey.get(stridedKey({ dtype: "f32" })),
+        1,
+        "the permute of Vᵀ is not exactly 1",
+      );
       assertEquals(
         [...byKey.values()].reduce((sum, count) => sum + count, 0),
         7,
-        "1 ノード = 7 dispatch",
+        "1 node = 7 dispatches",
       );
 
       const emu = await runAttention(gpu, shape, d, {
         attentionCompute: "a8",
         [I8A8_DOT]: "emu",
       });
-      assert(emu.entries.length > 0, "エミュ側の内訳が空（キー検査が空振りしている）");
+      assert(
+        emu.entries.length > 0,
+        "the emulated side's breakdown is empty (the key check is a no-op)",
+      );
       const keys = new Set(emu.entries.map((entry) => entry.key));
       assertEquals(
         keys.has(
@@ -1160,12 +1246,12 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         keys.has(attentionQkI8a8Key(qkV4, false, "f32", profile.i8a8.attentionQk)),
         true,
-        "エミュ変種のキー",
+        "key of the emulated variant",
       );
       assertEquals(
         keys.has(attentionQkI8a8Key(qkV4, true, "f32", profile.i8a8.attentionQk)),
         false,
-        "dp4a 変種が残っている",
+        "the dp4a variant is still there",
       );
     } finally {
       gpu.destroy();
@@ -1174,32 +1260,40 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionCompute:'a8' の両段縮退（D%4 / N%4 とも不適格）は f32 経路とビット同一（実 GPU）",
+  "the degradation of both stages under attentionCompute:'a8' (D%4 / N%4 both ineligible) is bit-identical to the f32 path (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // 縮退は沈黙（検出器はキーと値の 2 本 — キー側は下の census が持つ）
+      // The degradation is silent (the detectors are 2: keys and values — the key side is held by
+      // the census below)
       const both = { b: 1, h: 2, m: 17, n: 19 };
       const degraded = await runAttention(gpu, both, 13, { attentionCompute: "a8" });
       const plain = await runAttention(gpu, both, 13, {});
-      assertExact(degraded.output, plain.output, "両段の縮退が f32 経路と一致しない");
+      assertExact(
+        degraded.output,
+        plain.output,
+        "the degradation of both stages does not match the f32 path",
+      );
     } finally {
       gpu.destroy();
     }
   },
 );
 
-/** 段ごとに独立な適格判定（混成）は値に出ないのでキーが唯一の検出器。空の census を落とす理由は上の census と同じ。 */
+/**
+ * Independent per-stage eligibility (mixing) does not show in the values, so keys are the only
+ * detector. The reason to fail an empty census is the same as the census above.
+ */
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionCompute:'a8' の適格判定は段ごとに独立で、片方だけ f32 へ縮退する混成が起こる（実 GPU）",
+  "eligibility under attentionCompute:'a8' is independent per stage, producing a mix where only one stage degrades to f32 (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
     try {
-      // ① N % 4 != 0 → ③PV だけ f32（①QK は D=20 で i8a8 のまま）
+      // ① N % 4 != 0 → only ③PV is f32 (①QK stays i8a8 with D=20)
       const mixedPv = { b: 1, h: 2, m: 17, n: 19 };
       const pvF32 = await runAttention(gpu, mixedPv, 20, { attentionCompute: "a8" });
-      assert(pvF32.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      assert(pvF32.entries.length > 0, "the breakdown is empty (the key check is a no-op)");
       const pvKeys = new Map(pvF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
       assertEquals(
         pvKeys.get(
@@ -1212,7 +1306,7 @@ test.skipIf(!GPU_AVAILABLE)(
           attentionPvKey(gemmUsesVec4(19, 20), "f32", "f32", false, false, profile.attention.pv),
         ),
         1,
-        "③PV は f32 へ縮退する",
+        "③PV degrades to f32",
       );
       for (const v4 of [false, true]) {
         assertEquals(
@@ -1220,14 +1314,15 @@ test.skipIf(!GPU_AVAILABLE)(
           false,
         );
       }
-      // 量子化は q / k の 2 本だけ・Vᵀ の permute は走らない
-      assertEquals(quantizeRowsDispatches(pvKeys), 2, "quantize_rows が q / k の 2 本でない");
-      assertEquals(pvKeys.has(stridedKey({ dtype: "f32" })), false, "Vᵀ の permute が走っている");
+      // Quantization runs only twice for q / k, and the permute of Vᵀ does not run
+      assertEquals(quantizeRowsDispatches(pvKeys), 2, "quantize_rows is not the 2 of q / k");
+      assertEquals(pvKeys.has(stridedKey({ dtype: "f32" })), false, "the permute of Vᵀ runs");
 
-      // ② D % 4 != 0 → ①QK だけ f32（③PV は N=20 で i8a8 のまま）— 逆向きの混成
+      // ② D % 4 != 0 → only ①QK is f32 (③PV stays i8a8 with N=20) — the mix in the opposite
+      // direction
       const mixedQk = { b: 1, h: 2, m: 17, n: 20 };
       const qkF32 = await runAttention(gpu, mixedQk, 13, { attentionCompute: "a8" });
-      assert(qkF32.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      assert(qkF32.entries.length > 0, "the breakdown is empty (the key check is a no-op)");
       const qkKeys = new Map(qkF32.entries.map((entry) => [entry.key, entry.dispatchCount]));
       assertEquals(
         qkKeys.get(
@@ -1242,7 +1337,7 @@ test.skipIf(!GPU_AVAILABLE)(
           ),
         ),
         1,
-        "①QK は f32 へ縮退する",
+        "①QK degrades to f32",
       );
       assertEquals(
         qkKeys.get(
@@ -1256,31 +1351,40 @@ test.skipIf(!GPU_AVAILABLE)(
           false,
         );
       }
-      // 量子化は Vᵀ の 1 本だけ（q / k は f32 のまま読まれる）
-      assertEquals(quantizeRowsDispatches(qkKeys), 1, "quantize_rows が Vᵀ の 1 本でない");
-      assertEquals(qkKeys.get(stridedKey({ dtype: "f32" })), 1, "Vᵀ の permute が 1 本でない");
+      // Quantization runs only once for Vᵀ (q / k are read as f32)
+      assertEquals(quantizeRowsDispatches(qkKeys), 1, "quantize_rows is not the 1 of Vᵀ");
+      assertEquals(
+        qkKeys.get(stridedKey({ dtype: "f32" })),
+        1,
+        "the permute of Vᵀ is not exactly 1",
+      );
 
-      // ③ 両方満たさない形は前段も後段も走らない（値の側は上のテストが持つ）
+      // ③ A shape meeting neither runs neither the prologue nor the epilogue (the values side is
+      // held by the test above)
       const both = { b: 1, h: 2, m: 17, n: 19 };
       const degraded = await runAttention(gpu, both, 13, { attentionCompute: "a8" });
-      assert(degraded.entries.length > 0, "内訳が空（キー検査が空振りしている）");
+      assert(degraded.entries.length > 0, "the breakdown is empty (the key check is a no-op)");
       const keys = new Set(degraded.entries.map((entry) => entry.key));
       assertEquals(
         [...keys].some((key) => key.startsWith(QUANTIZE_ROWS_KEY)),
         false,
-        "縮退したのに量子化が走っている",
+        "quantization runs despite the degradation",
       );
-      assertEquals(keys.has(stridedKey({ dtype: "f32" })), false, "縮退したのに permute が走る");
+      assertEquals(
+        keys.has(stridedKey({ dtype: "f32" })),
+        false,
+        "the permute runs despite the degradation",
+      );
       assertEquals(
         keys.has(attentionQkKey(false, "f32", "f32", false, false, false, profile.attention.qk)),
         true,
-        "f32 の attention_qk が走っていない",
+        "the f32 attention_qk did not run",
       );
       for (const dp4a of [false, true]) {
         assertEquals(
           keys.has(attentionQkI8a8Key(false, dp4a, "f32", profile.i8a8.attentionQk)),
           false,
-          "縮退したのに i8a8 が走っている",
+          "i8a8 runs despite the degradation",
         );
       }
     } finally {
@@ -1290,9 +1394,10 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attention_pv i8a8: N が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  "attention_pv i8a8: fails loudly when N exceeds the i32 reduction limit (2^17) (no silent rollback, real GPU)",
   async () => {
-    // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ N·127² は i32 に収まるが、門は安全側。
+    // Just outside the limit (2^17 + 4, a multiple of 4). |acc| ≤ N·127² fits in i32, but the limit
+    // errs on the safe side.
     const n = LINEAR_I8A8_MAX_K + 4;
     const shape = { b: 1, h: 1, m: 1, n };
     const gpu = await acquireGpu();
@@ -1302,7 +1407,8 @@ test.skipIf(!GPU_AVAILABLE)(
         ExecutionError,
         "i32 reduction guard",
       );
-      // 既定の f32 経路では同じ形が普通に走る（門が i8a8 経路だけのものであること）
+      // On the default f32 path the same shape runs normally (the limit belongs only to the i8a8
+      // path)
       const baseline = await runAttention(gpu, shape, 4, {});
       assertEquals(baseline.output.length, 4);
     } finally {
@@ -1313,9 +1419,10 @@ test.skipIf(!GPU_AVAILABLE)(
 
 // ①QK has its own D gate, a separate branch from the ③PV N gate above.
 test.skipIf(!GPU_AVAILABLE)(
-  "attention i8a8: D が i32 縮約の門（2^17）を超えたら fail loudly（黙って巻き戻さない・実 GPU）",
+  "attention i8a8: fails loudly when D exceeds the i32 reduction limit (2^17) (no silent rollback, real GPU)",
   async () => {
-    // 門のすぐ外側（4 の倍数で 2^17 + 4）。|acc| ≤ D·127² は i32 に収まるが、門は安全側。
+    // Just outside the limit (2^17 + 4, a multiple of 4). |acc| ≤ D·127² fits in i32, but the limit
+    // errs on the safe side.
     const d = LINEAR_I8A8_MAX_K + 4;
     const shape = { b: 1, h: 1, m: 1, n: 4 };
     const gpu = await acquireGpu();
@@ -1325,7 +1432,8 @@ test.skipIf(!GPU_AVAILABLE)(
         ExecutionError,
         "i32 reduction guard",
       );
-      // 既定の f32 経路では同じ形が普通に走る（門が i8a8 経路だけのものであること）
+      // On the default f32 path the same shape runs normally (the limit belongs only to the i8a8
+      // path)
       const baseline = await runAttention(gpu, shape, d, {});
       assertEquals(baseline.output.length, d);
     } finally {

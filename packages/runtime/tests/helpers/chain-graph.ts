@@ -1,15 +1,16 @@
-// Session ライフサイクル系テストの共有フィクスチャ（runtime_executor_test.ts と
-// gpu_runtime_executor_test.ts が同じ鎖グラフを使う）。宣言は IR v2、実体は容器
-// （`krm` のバイト列 → `openContainer`）で渡す。
+// Shared fixture of the Session lifecycle tests (runtime_executor_test.ts and
+// gpu_runtime_executor_test.ts use the same chain graph). The declaration is IR v2; the data is
+// passed as a container (`krm` bytes → `openContainer`).
 //
-// 宣言の組み立ての小道具（`f32Bytes` / `fill` / `singleOpDeclaration` / `openGraphModel`）は
-// `helpers/model-fixture.ts` に 1 本きり — ここが持つのは「鎖グラフ」という形そのものだけ。
+// The declaration-building utilities (`f32Bytes` / `fill` / `singleOpDeclaration` /
+// `openGraphModel`) live only in `helpers/model-fixture.ts` — this file holds just the shape of the
+// "chain graph" itself.
 
 import type { TensorInput } from "./container-write.ts";
 import type { OpenedContainer } from "../../src/format/container/open.ts";
 import { type DeclarationJson, f32Bytes, GRAPH_NAME, openGraphModel } from "./model-fixture.ts";
 
-/** y = relu(x·w + b)（x: [T,4] → y: [T,3]）— 中間値 2 本を持つ最小の鎖。 */
+/** y = relu(x·w + b) (x: [T,4] → y: [T,3]) — the smallest chain with two intermediate values. */
 export const chainGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -35,7 +36,7 @@ export const chainGraph = (): DeclarationJson => ({
 export const W = Float32Array.from([0.5, -1, 0.25, 2, 0.125, -0.5, -3, 1.5, 0.75, 1, -0.25, 0.5]);
 export const B = Float32Array.from([1, -2, 0.5]);
 
-/** {@link chainGraph} の initializer 2 本（丸ごと f32）。 */
+/** The two initializers of {@link chainGraph} (plain f32). */
 export const chainTensors = (): readonly TensorInput[] => [
   {
     graph: GRAPH_NAME,
@@ -51,7 +52,7 @@ export const chainTensors = (): readonly TensorInput[] => [
   },
 ];
 
-/** 鎖グラフ（差し替え可）を容器に書いて開く。 */
+/** Writes the chain graph (replaceable) into a container and opens it. */
 export const openChainModel = (
   graph: DeclarationJson = chainGraph(),
   tensors: readonly TensorInput[] = chainTensors(),

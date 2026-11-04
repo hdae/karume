@@ -13,7 +13,7 @@ import {
 } from "./helpers/model-fixture.ts";
 import { permutedSourceIndices } from "./helpers/permute.ts";
 
-/** 宣言 → 合流後のグラフ（このファイルのグラフは initializer を 1 本も持たない）。 */
+/** Declaration → merged graph (the graphs in this file have no initializers at all). */
 const parse = (graph: DeclarationJson): IrGraph =>
   mergedGraph(memoryModel(graph, []).graphs[GRAPH_NAME], GRAPH_NAME);
 
@@ -24,8 +24,8 @@ const permutations = (axes: readonly number[]): number[][] =>
         permutations(axes.filter((_, j) => i !== j)).map((rest) => [axis, ...rest]),
       );
 
-describe("要素順を保つpermuteの別名化", () => {
-  it("rank 1〜4の全軸順を、平坦な要素番号の並べ替えと照合する", () => {
+describe("aliasing a permute that preserves element order", () => {
+  it("checks every axis order of rank 1–4 against a permutation of flat element indices", () => {
     let cases = 0;
     for (const rank of [1, 2, 3, 4]) {
       for (let code = 0; code < 3 ** rank; code++) {
@@ -36,7 +36,8 @@ describe("要素順を保つpermuteの別名化", () => {
               attrs: { dims },
             }),
           );
-          // コピー元を内部確保にし、所有権の条件と添字の条件を分けて検証する。
+          // Make the copy source an internal allocation so the ownership condition is verified
+          // separately from the index condition.
           const owned = singleOpDeclaration("permute", [shape], [dims.map((axis) => shape[axis])], {
             attrs: { dims },
           });
@@ -57,7 +58,7 @@ describe("要素順を保つpermuteの別名化", () => {
     assertEquals(cases, 2127);
   });
 
-  it("記号束縛後の形で判定し、M=1と複数tokenを混同しない", () => {
+  it("decides on the shape after symbol binding, and does not confuse M=1 with multiple tokens", () => {
     const source = singleOpDeclaration("permute", [[1, "M", 8, 256]], [[1, 8, "M", 256]], {
       attrs: { dims: [0, 2, 1, 3] },
       symbols: ["M"],
@@ -71,7 +72,7 @@ describe("要素順を保つpermuteの別名化", () => {
       const nodes = planGraph(graph, { M }).nodes;
       assertEquals(planAliases(nodes).has(nodes[1]), M === 1);
     }
-    // 要素が無い形は今回の最適化対象に含めない。
+    // Shapes with no elements are not part of this optimization.
     const empty = singleOpDeclaration("permute", [[0, 1]], [[1, 0]], { attrs: { dims: [1, 0] } });
     empty.requires.ops.push("neg");
     empty.values.h = { dtype: "f32", shape: [0, 1] };
@@ -80,7 +81,7 @@ describe("要素順を保つpermuteの別名化", () => {
     assertEquals(planAliases(planGraph(parse(empty), {}).nodes).size, 0);
   });
 
-  it("見積りも実行と同じ別名判定を使い、共有元1本だけを数える", () => {
+  it("the estimate uses the same alias decision as execution and counts only the one shared source", () => {
     for (const [dims, expectedBytes] of [
       [[1, 0, 2], 24],
       [[2, 0, 1], 48],

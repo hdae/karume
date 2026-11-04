@@ -1,26 +1,29 @@
-// conv1d implicit GEMM（ADR 0024 の 1D 版）の**ビット同一の門**。
+// **Bit-identity check** of conv1d implicit GEMM (the 1D version of ADR 0024).
 //
-// 同じ入力バッファに対し、
+// On the same input buffers,
 //
-//   ① 直接畳み込みカーネル（`conv1d:v2:…:direct:wg256` — groups > 1 用に恒久で残る）
-//   ② implicit GEMM カーネル（`conv1d:v4:…:igemm64x128…`）
+//   (1) the direct convolution kernel (`conv1d:v2:…:direct:wg256` — kept permanently for groups > 1)
+//   (2) the implicit GEMM kernel (`conv1d:v4:…:igemm64x128…`)
 //
-// を**同じ実 GPU**で流し、出力を **f32 のビット列**で突き合わせる。allclose ではなく
-// `Uint32Array` の完全一致で見るのが要点で、tolerance に隠れる丸め列の変化（例: bias を
-// `acc` の初期値ではなく store 側で足す / 平坦 k を `(k, ic)` の順に割る）はここでしか
-// 検出できない。
+// run on **the same real GPU**, and their outputs are compared as **f32 bit patterns**. The point is
+// to compare by exact `Uint32Array` equality rather than allclose: a change in the rounding sequence
+// that a tolerance would hide (e.g. adding the bias at the store instead of as the initial value of
+// `acc` / splitting the flat k in `(k, ic)` order) can be detected only here.
 //
-// 成立の根拠: 平坦 k 昇順 = 直接カーネルの `(ic, k)` 二重昇順、K タイル 16 昇順、bias は
-// 両方とも縮約の**前**、padding は「加算せず読み飛ばす」と「0 を掛けて足す」で
-// `a + 0.0 == a`（`a` が有限）。
+// Why it holds: ascending flat k = the direct kernel's double ascending `(ic, k)`, ascending K tiles
+// of 16, the bias comes **before** the reduction in both, and for padding "skip without adding" and
+// "multiply by 0 and add" agree because `a + 0.0 == a` (for finite `a`).
 //
-// **唯一の例外 = 符号付きゼロ**: 部分和がちょうど `−0.0` の位置に padding 由来の `+0.0` を
-// 足すと `+0.0` に転ぶ（直接カーネルは足さないので `−0.0` が残る）。本ファイルの主テストは
-// **bias を全ケース非ゼロ**にしてその領域を避け、機序そのものは末尾の負ケースが固定する。
+// **The only exception = signed zero**: adding a padding-derived `+0.0` where the partial sum is
+// exactly `−0.0` flips it to `+0.0` (the direct kernel adds nothing, so `−0.0` remains). This file's
+// main test avoids that region by **making the bias non-zero in every case**; the mechanism itself
+// is pinned by the negative case at the end.
 //
-// MUST: 恒真化しないこと。①② は**別のパイプライン・別の WGSL**で、生成関数も別。
-// MUST: 変種（v4 / スカラ）と格納（f32 / f16 / i8）を全て踏む。踏んだ変種は `expectVec4` で
-// 明示的に固定する（判定の取り違えが「両方とも同じ変種で緑」に紛れないため）。
+// MUST: do not let the check become vacuous. (1) and (2) are **different pipelines and different
+// WGSL**, from different generator functions.
+// MUST: cover every variant (v4 / scalar) and every storage (f32 / f16 / i8). The variant each case
+// exercises is pinned explicitly with `expectVec4` (so that a mix-up in the predicate cannot hide
+// behind "both green on the same variant").
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -66,22 +69,23 @@ const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
 /**
- * CPU 参照との突合の許容誤差。参照は JS の f64 で縮約するので f32 の逐次加算とは丸めが違い、
- * ビット一致は原理的に成立しない（K ≤ 288・値域 |x| ≤ 2 / |w| ≤ 0.25 の本ケース群では
- * 数 ulp 級）。**実装バグの誤差は O(1)** なので 6 桁以上離れている。
+ * Tolerance of the comparison with the CPU reference. The reference reduces in JS f64, which rounds
+ * differently from sequential f32 addition, so bit identity cannot hold in principle (a few ulp for
+ * this set of cases: K ≤ 288, ranges |x| ≤ 2 / |w| ≤ 0.25). **An implementation bug's error is
+ * O(1)**, more than 6 orders of magnitude away.
  */
 const CPU_REFERENCE_TOLERANCE = { atol: 1e-5, rtol: 1e-5 } as const;
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data sequences (no random numbers — a failure would not reproduce). */
 const SIGNED = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const WEIGHT = (i: number): number => (((i * 11) % 19) - 9) * 0.023;
 /**
- * 符号付きゼロの負ケース専用の重み（**厳密に正**）。既定の {@link WEIGHT} は 0 を含み、
- * `x · 0` が符号付きゼロを作ってしまうので、負ケースの機序が padding 由来かどうかを
- * 分離できない。
+ * Weights only for the signed-zero negative case (**strictly positive**). The default {@link WEIGHT}
+ * contains 0, and `x · 0` produces signed zeros of its own, so whether the negative case's mechanism
+ * comes from padding could not be isolated.
  */
 const POSITIVE_WEIGHT = (i: number): number => 0.05 + ((i * 11) % 19) * 0.011;
-/** MUST: bias は非ゼロ（符号付きゼロの領域を避ける — 冒頭の caveat）。 */
+/** MUST: the bias is non-zero (avoids the signed-zero region — the caveat at the top). */
 const BIAS = (i: number): number => 0.375 + (i % 5) * 0.25;
 
 type ParityCase = {
@@ -95,9 +99,9 @@ type ParityCase = {
   readonly padding: number;
   readonly dilation: number;
   readonly storage: WeightStorage;
-  /** 踏むはずの変種（判定の取り違えが「両方同じ変種」で紛れないように明示する）。 */
+  /** The variant the case should exercise (stated explicitly so that a predicate mix-up cannot hide behind "both on the same variant"). */
   readonly expectVec4: boolean;
-  /** 既定は非ゼロ bias / 0 を含む重み。符号付きゼロの負ケースだけが差し替える。 */
+  /** By default a non-zero bias / weights that contain 0. Only the signed-zero negative case replaces them. */
   readonly bias?: (index: number) => number;
   readonly weight?: (index: number) => number;
 };
@@ -130,10 +134,11 @@ const dimsOf = (testCase: ParityCase): Conv1dDims => ({
 });
 
 /**
- * 重み格納の変種ぶんのペイロード（f32 はそのまま / f16・i8 は整列済みの生バイト）。
+ * The payload for each weight storage variant (f32 as is / f16 and i8 as aligned raw bytes).
  *
- * `values` は**格納から復号し直した f32**（fake-quant 後の重み）。CPU 参照はこれを重みとして
- * 使う — 素の f32 を渡すと格納の丸め誤差が「カーネルの誤り」に化ける。
+ * `values` is **the f32 decoded back from the storage** (the weights after fake-quant). The CPU
+ * reference uses it as the weights — handing it the plain f32 would turn the storage's rounding error
+ * into "a kernel error".
  */
 const weightPayload = (
   weight: FilledTensor,
@@ -153,7 +158,7 @@ const weightPayload = (
     const quantized = quantizeF16(weight.data);
     return { bytes: alignF16Payload(quantized.bytes), values: quantized.values };
   }
-  // conv1d の per-channel scale の軸は 0（出力チャネル — ADR 0019）
+  // The axis of conv1d's per-channel scale is 0 (output channels — ADR 0019)
   const quantized = quantizeI8(weight.data, weight.shape, 0);
   return {
     bytes: alignI8Payload(quantized.bytes),
@@ -190,10 +195,10 @@ type ParityResult = {
 };
 
 /**
- * 直接カーネルと implicit GEMM を**同じ入力バッファ**で走らせ、出力のビット列を組で返す。
+ * Runs the direct kernel and implicit GEMM on **the same input buffers** and returns the output bit patterns as a pair.
  *
- * 入力（x / 重み / bias / scale）はどちらの dispatch も同じ GPUBuffer を束縛する — ホスト側で
- * 2 度書くと「書き込みの差」が「カーネルの差」に化ける。
+ * For the inputs (x / weights / bias / scale) both dispatches bind the same GPUBuffer — writing them
+ * twice on the host would turn "a difference in the writes" into "a difference in the kernels".
  */
 const runBoth = async (
   gpu: GpuContext,
@@ -214,7 +219,7 @@ const runBoth = async (
     const payload = weightPayload(weight, testCase.storage);
 
     const upload = (data: ArrayBufferView<ArrayBuffer>): GPUBuffer => {
-      // vec4 束縛（f32 の v4 経路）が末尾 quad を落とさないよう 16 バイトへ丸める
+      // Round up to 16 bytes so that the vec4 binding (the f32 v4 path) does not drop the last quad
       const buffer = arena.allocHostWritten(
         Math.ceil(Math.max(4, data.byteLength) / 16) * 16,
         STORAGE_IN,
@@ -249,7 +254,7 @@ const runBoth = async (
       return { group: gpu.device.createBindGroup({ layout, entries }), out };
     };
 
-    // ① 直接カーネル（grid-stride）
+    // (1) direct kernel (grid-stride)
     const directKey = conv1dKey(testCase.storage);
     const { pipeline: directPipeline, layout: directLayout } = await cache.get(
       directKey,
@@ -263,7 +268,7 @@ const runBoth = async (
       directKey,
     );
 
-    // ② implicit GEMM（1 workgroup = 1 出力タイル）
+    // (2) implicit GEMM (1 workgroup = 1 output tile)
     const kFlat = dims.channelsIn * dims.kernel;
     const v4 = conv1dUsesVec4(kFlat, dims.lengthOut, dims.stride);
     const igemmKey = conv1dIgemmKey(testCase.storage, v4, mTile);
@@ -272,8 +277,9 @@ const runBoth = async (
       conv1dIgemmWgsl(testCase.storage, v4, mTile),
     );
     const igemm = bind(igemmLayout, conv1dIgemmParams(dims));
-    // MUST: dispatch の辺は生成・キーと**同じ解決点**（`gemmMTileGeometry`）から導く。
-    // m タイルの変種が動かすのは行の辺だけで、n の辺は幾何の tileN（両変種で同じ）。
+    // MUST: the dispatch edges are derived from **the same resolution point** as generation and the key
+    // (`gemmMTileGeometry`). The m-tile variant moves only the row edge; the n edge is the geometry's
+    // tileN (the same for both variants).
     const geometry = gemmMTileGeometry(mTile);
     scheduler.dispatch(
       igemmPipeline,
@@ -287,8 +293,8 @@ const runBoth = async (
     );
 
     await scheduler.flush();
-    // CPU 参照は**量子化した重みを展開し直したもの**で作る（f16 / i8 の格納誤差を
-    // 「カーネルの誤り」に化けさせない）。dequant は要素ごと（ADR 0019）。
+    // The CPU reference is built from **the quantized weights expanded back** (so that the f16 / i8
+    // storage error does not turn into "a kernel error"). Dequant is per element (ADR 0019).
     const reference = referenceConv1d(
       refTensor(x.shape, x.data),
       refTensor(weight.shape, payload.values),
@@ -313,9 +319,9 @@ const runBoth = async (
 
 const CASES: readonly ParityCase[] = [
   {
-    // 実測形（dacvae decoder）を縮めたもの: 3 tap pad 1 same。B=2 でバッチが N に畳まれる
-    // ことを固定し、m タイル 2 枚（Cout=70）・K 端数（24 = 16 + 8）を 1 本で踏む。
-    name: "実測縮小 K=3 pad1 [2,8,20] * W[70,8,3] (f32/v4)",
+    // A shrunk version of a measured shape (dacvae decoder): 3 taps, pad 1, same. Pins that with B=2 the
+    // batch folds into N, and covers 2 m tiles (Cout=70) and a K remainder (24 = 16 + 8) in one case.
+    name: "shrunk measured shape K=3 pad1 [2,8,20] * W[70,8,3] (f32/v4)",
     batch: 2,
     channelsIn: 8,
     channelsOut: 70,
@@ -328,9 +334,10 @@ const CASES: readonly ParityCase[] = [
     expectVec4: true,
   },
   {
-    // kFlat = 1·7 = 7 → `kFlat % 4 ≠ 0` でスカラ変種、かつ `K % 16 ≠ 0` で K 端数 0 埋めを
-    // 踏む。**`Cin % 4` で判定すると v4 が選ばれてしまう形**（Cin=1）の検出器も兼ねる。
-    name: "端数 K スカラ Cin=1 K=7 [1,1,19] * W[5,1,7] pad3 (f32)",
+    // kFlat = 1·7 = 7 -> `kFlat % 4 ≠ 0` selects the scalar variant, and `K % 16 ≠ 0` exercises the
+    // zero fill of the K remainder. Also the detector for **a shape where deciding by `Cin % 4` would
+    // pick v4** (Cin=1).
+    name: "K remainder scalar Cin=1 K=7 [1,1,19] * W[5,1,7] pad3 (f32)",
     batch: 1,
     channelsIn: 1,
     channelsOut: 5,
@@ -343,7 +350,7 @@ const CASES: readonly ParityCase[] = [
     expectVec4: false,
   },
   {
-    // stride 2（出力位置と入力位置の対応が 1:1 でなくなる）
+    // stride 2 (output and input positions no longer correspond 1:1)
     name: "stride=2 [1,3,21] * W[4,3,3] pad1 (f32)",
     batch: 1,
     channelsIn: 3,
@@ -357,9 +364,9 @@ const CASES: readonly ParityCase[] = [
     expectVec4: false,
   },
   {
-    // **v4 述語の stride 条件の検出器**: kFlat = 16 も Lout = 8 も 4 の倍数なので、
-    // stride を見落とすと v4 が選ばれ、連続 4 列読みが 8 飛びの位置を連続として読む。
-    // Cout=16（m タイル 1 枚・行の 3/4 が空く形）も兼ねる。
+    // **Detector for the stride condition of the v4 predicate**: kFlat = 16 and Lout = 8 are both
+    // multiples of 4, so overlooking the stride would pick v4, and the 4-column contiguous read would
+    // read positions 8 apart as contiguous. Also covers Cout=16 (1 m tile with 3/4 of its rows empty).
     name: "stride=8 [1,4,64] * W[16,4,4] pad0 (f32)",
     batch: 1,
     channelsIn: 4,
@@ -373,7 +380,7 @@ const CASES: readonly ParityCase[] = [
     expectVec4: false,
   },
   {
-    // dilation 3（tap の間隔 — 出力位置側に掛ける誤りは stride と見分けがつかない）
+    // dilation 3 (the tap spacing — applying it on the output-position side is indistinguishable from stride)
     name: "dilation=3 [1,4,24] * W[12,4,3] pad3 (f32/v4)",
     batch: 1,
     channelsIn: 4,
@@ -387,7 +394,7 @@ const CASES: readonly ParityCase[] = [
     expectVec4: true,
   },
   {
-    // dilation 9（実測形の最大 — tap が系列の外へ大きくはみ出す）
+    // dilation 9 (the largest measured shape — taps reach far outside the sequence)
     name: "dilation=9 [1,2,40] * W[6,2,3] pad9 (f32)",
     batch: 1,
     channelsIn: 2,
@@ -401,8 +408,8 @@ const CASES: readonly ParityCase[] = [
     expectVec4: false,
   },
   {
-    // Cout=1（m タイル 1 枚で 63/64 行が空く — 空き行の acc が store の行ガードで
-    // 捨てられること、bias-first の範囲外読みが値に出ないことを固定する）
+    // Cout=1 (1 m tile with 63/64 rows empty — pins that the acc of the empty rows is discarded by the
+    // store's row guard, and that the out-of-range read of bias-first does not show in the values)
     name: "Cout=1 [1,4,12] * W[1,4,3] pad1 (f32/v4)",
     batch: 1,
     channelsIn: 4,
@@ -416,9 +423,9 @@ const CASES: readonly ParityCase[] = [
     expectVec4: true,
   },
   {
-    // **`Lout % 4` の検出器**: kFlat = 12 は 4 の倍数・stride = 1 なので、Lout を見落とすと
-    // v4 が選ばれ、store の quad 書きが出力の端を越える。
-    name: "Lout=15（kFlat%4==0 だが Lout%4≠0）[1,4,15] * W[8,4,3] pad1 (f32)",
+    // **Detector for `Lout % 4`**: kFlat = 12 is a multiple of 4 and stride = 1, so overlooking Lout
+    // would pick v4, and the store's quad write would cross the end of the output.
+    name: "Lout=15 (kFlat%4==0 but Lout%4≠0) [1,4,15] * W[8,4,3] pad1 (f32)",
     batch: 1,
     channelsIn: 4,
     channelsOut: 8,
@@ -431,9 +438,9 @@ const CASES: readonly ParityCase[] = [
     expectVec4: false,
   },
   {
-    // padding がカーネル張りを超える形（出力の両端が padding 域だけを見る = 範囲外を
-    // クランプ添字で読む誤りが必ず値に出る）
-    name: "過剰 padding=3 [1,4,4] * W[5,4,3] (f32/v4)",
+    // Padding wider than the kernel span (both ends of the output see only the padding area = the
+    // error of reading out-of-range positions with clamped indices always shows in the values)
+    name: "excess padding=3 [1,4,4] * W[5,4,3] (f32/v4)",
     batch: 1,
     channelsIn: 4,
     channelsOut: 5,
@@ -446,7 +453,7 @@ const CASES: readonly ParityCase[] = [
     expectVec4: true,
   },
   {
-    // f16 格納 × v4（quad 展開 `dequant4` は平坦添字が 4 の倍数であることに依存する）
+    // f16 storage x v4 (the quad expansion `dequant4` relies on the flat index being a multiple of 4)
     name: "f16 v4 [1,8,16] * W[12,8,3] pad1",
     batch: 1,
     channelsIn: 8,
@@ -460,9 +467,10 @@ const CASES: readonly ParityCase[] = [
     expectVec4: true,
   },
   {
-    // f16 格納 × スカラ。kFlat = 1·9 = 9 が**奇数**なので重み行の先頭が語の上位・下位に
-    // 交互に来る（平坦添字の偶奇で対を選ぶことの検出器 — ADR 0018 の罠）。
-    name: "f16 スカラ 行長 9（奇数）[1,1,12] * W[4,1,9] pad4",
+    // f16 storage x scalar. kFlat = 1·9 = 9 is **odd**, so the start of a weight row alternates between
+    // the high and low half of a word (the detector for choosing the pair by the parity of the flat
+    // index — the pitfall of ADR 0018).
+    name: "f16 scalar row length 9 (odd) [1,1,12] * W[4,1,9] pad4",
     batch: 1,
     channelsIn: 1,
     channelsOut: 4,
@@ -475,10 +483,10 @@ const CASES: readonly ParityCase[] = [
     expectVec4: false,
   },
   {
-    // **i8 の scale 軸の検出器**: scale は行（= 出力チャネル）。Cout = 96 で m タイルが
-    // 64 行なら 2 枚・32 行なら 3 枚になるので、`arow` の代わりにタイル内相対の行や列を
-    // 引く取り違えが値に出る（1 タイルに収まる形では `wid.y = 0` で偶然一致してしまう）。
-    // `96 % 64 == 32` なので m タイル述語の本命形でもある。
+    // **Detector for the i8 scale axis**: the scale runs along rows (= output channels). With Cout = 96
+    // there are 2 m tiles of 64 rows or 3 of 32 rows, so a mix-up that takes a tile-relative row or a
+    // column instead of `arow` shows in the values (a shape that fits in one tile matches by accident
+    // with `wid.y = 0`). Since `96 % 64 == 32`, it is also the main shape for the m-tile predicate.
     name: "i8 v4 Cout=96（M%64==32）[1,4,16] * W[96,4,1]",
     batch: 1,
     channelsIn: 4,
@@ -492,9 +500,9 @@ const CASES: readonly ParityCase[] = [
     expectVec4: true,
   },
   {
-    // i8 × スカラ変種（`unpack4xI8` の 4 剰余を平坦添字から取ること + m タイル 2 枚）。
-    // kFlat = 2·3 = 6 は 4 の倍数でないのでスカラへ落ちる。
-    name: "i8 スカラ m タイル 2 枚 [1,2,10] * W[66,2,3] pad1",
+    // i8 x the scalar variant (taking `unpack4xI8`'s remainder mod 4 from the flat index + 2 m tiles).
+    // kFlat = 2·3 = 6 is not a multiple of 4, so it falls to scalar.
+    name: "i8 scalar 2 m tiles [1,2,10] * W[66,2,3] pad1",
     batch: 1,
     channelsIn: 2,
     channelsOut: 66,
@@ -508,7 +516,7 @@ const CASES: readonly ParityCase[] = [
   },
 ];
 
-/** ビット列の食い違い（先頭 4 件）を人が読める形にする。 */
+/** Formats the bit-pattern mismatches (the first 4) for a human reader. */
 const firstMismatches = (direct: Uint32Array, igemm: Uint32Array): readonly string[] => {
   const found: string[] = [];
   for (let i = 0; i < direct.length && found.length < 4; i += 1) {
@@ -520,28 +528,40 @@ const firstMismatches = (direct: Uint32Array, igemm: Uint32Array): readonly stri
 };
 
 /**
- * 1 ケースぶんの検査。
+ * The checks for one case.
  *
- * ① 直接カーネルとの **Uint32 ビット完全一致**（丸め列の変化はここでしか出ない）
- * ② CPU 参照（`referenceConv1d`）との数値一致（両カーネルが**揃って**誤る形の検出器 —
- *    ビット比較だけだと「同じ間違いをしている」に気づけない）
- * ③ 恒真化の門（出力が定数なら一致は何も検証していない）
+ * (1) **exact Uint32 bit equality** with the direct kernel (a change in the rounding sequence shows
+ *     only here)
+ * (2) numeric agreement with the CPU reference (`referenceConv1d`) (the detector for both kernels
+ *     being wrong **together** — a bit comparison alone cannot notice "they make the same mistake")
+ * (3) the vacuity check (if the output is constant, agreement verifies nothing)
  */
 const assertParity = (testCase: ParityCase, where: string, result: ParityResult): void => {
   const { direct, igemm, v4, reference } = result;
-  assertEquals(v4, testCase.expectVec4, `${where}: 踏んだ変種が想定と違う`);
-  assertEquals(firstMismatches(direct, igemm), [], `${where}: 直接カーネルとビット列が違う`);
+  assertEquals(
+    v4,
+    testCase.expectVec4,
+    `${where}: the variant exercised differs from the expected one`,
+  );
+  assertEquals(
+    firstMismatches(direct, igemm),
+    [],
+    `${where}: the bit pattern differs from the direct kernel`,
+  );
   const values = new Float32Array(igemm.buffer, igemm.byteOffset, igemm.length);
   const report = allclose(values, reference, CPU_REFERENCE_TOLERANCE);
   assert(
     report.pass,
-    `${where}: CPU 参照と食い違う（maxAbs ${report.maxAbsError} @${report.worstIndex} / 破り ${report.failCount}）`,
+    `${where}: disagrees with the CPU reference (maxAbs ${report.maxAbsError} @${report.worstIndex} / violations ${report.failCount})`,
   );
-  assert(new Set(direct).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
+  assert(
+    new Set(direct).size > 1,
+    `${where}: the output is constant (bit equality has become vacuous)`,
+  );
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "conv1d の implicit GEMM は直接カーネルと**ビット単位で一致**する（実 GPU）",
+  "conv1d implicit GEMM **matches the direct kernel bit for bit** (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -555,16 +575,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **32 行 m タイル変種**の恒久の門。全ケースを 32 行タイルで**強制的に**流す（述語が
- * 64 行を選ぶ形も含む）。タイル形は「どの workgroup がどの出力を担当するか」だけを変える
- * 設計なので、64 行版と同じ直接カーネル比較がそのまま通らなければならない。
+ * The permanent check for **the 32-row m-tile variant**. Runs every case **forcibly** with 32-row
+ * tiles (including shapes for which the predicate picks 64 rows). The tile shape is designed to
+ * change only "which workgroup handles which outputs", so the same direct-kernel comparison as for
+ * the 64-row version must pass unchanged.
  *
- * MUST: 述語（conv2d と共有の `conv2dIgemmMTile`）が選ぶかどうかと切り離して全形状を踏む。
- * 述語に従って選ばれた形だけを検査すると、述語の境界をずらす誤りが「変種が走らなくなる
- * だけ」で緑のまま通る。
+ * MUST: cover every shape independently of whether the predicate (`conv2dIgemmMTile`, shared with
+ * conv2d) picks it. Checking only the shapes the predicate picks would let an error that shifts the
+ * predicate's boundary pass green, with the variant "merely no longer running".
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "conv1d の 32 行 m タイル変種も直接カーネルとビット単位で一致する（実 GPU）",
+  "the conv1d 32-row m-tile variant also matches the direct kernel bit for bit (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -575,10 +596,10 @@ test.skipIf(!GPU_AVAILABLE)(
           await runBoth(gpu, testCase, GEMM_MTILE_SMALL),
         );
       }
-      // 述語が実際に 32 行を選ぶ形が CASES に含まれていること（テストが空振りしない門）
+      // CASES contains a shape for which the predicate actually picks 32 rows (the check that the test is not vacuous)
       assert(
         CASES.some((testCase) => conv2dIgemmMTile(testCase.channelsOut) === GEMM_MTILE_SMALL),
-        "述語が 32 行を選ぶケースが 1 本も無い",
+        "no case for which the predicate picks 32 rows",
       );
     } finally {
       gpu.destroy();
@@ -587,26 +608,26 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **符号付きゼロ = ビット同一の唯一の例外**（負ケース）。機序をテストとして記録し、将来
- * bias に `−0.0` が入るモデルが来たときの検出器を兼ねる。
+ * **Signed zero = the only exception to bit identity** (negative case). Records the mechanism as a
+ * test and doubles as a detector for a future model whose bias contains `−0.0`.
  *
- * 形: `Lin = 1 / K = 3 / padding = 3` なので出力の両端（ox = 0 と ox = 4）は**受容野が
- * まるごと padding 域**になる。bias を `−0.0`・重みを全て正にすると、
+ * Shape: `Lin = 1 / K = 3 / padding = 3`, so for both ends of the output (ox = 0 and ox = 4) **the
+ * whole receptive field is padding**. With the bias `−0.0` and all weights positive,
  *
- * - 直接カーネル … padding を**加算しない**ので `−0.0` がそのまま残る
- * - implicit GEMM … `0.0 × w = +0.0` を足すので `−0.0 + 0.0 = +0.0` に転ぶ
+ * - direct kernel … **does not add** the padding, so `−0.0` remains as is
+ * - implicit GEMM … adds `0.0 × w = +0.0`, so it flips to `−0.0 + 0.0 = +0.0`
  *
- * MUST: 差が出るのは**この 2 要素だけ**で、残りはビット一致（`a + 0.0 == a` が有限の `a` で
- * 成り立つことの裏返し）。値としては `−0.0 == +0.0` なので、allclose でも `===` でも
- * **絶対に検出できない** — ビット比較だけがこの差を見る。
+ * MUST: the difference appears in **these 2 elements only**; the rest is bit-identical (the flip side
+ * of `a + 0.0 == a` holding for finite `a`). As values `−0.0 == +0.0`, so neither allclose nor `===`
+ * **can ever detect it** — only a bit comparison sees this difference.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "conv1d: bias が −0.0 のとき padding だけの出力で符号付きゼロが割れる（実 GPU）",
+  "conv1d: with a −0.0 bias, the signed zero splits in outputs that see only padding (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       const testCase: ParityCase = {
-        name: "符号付きゼロ [1,1,1] * W[4,1,3] pad3 bias=-0.0",
+        name: "signed zero [1,1,1] * W[4,1,3] pad3 bias=-0.0",
         batch: 1,
         channelsIn: 1,
         channelsOut: 4,
@@ -622,28 +643,28 @@ test.skipIf(!GPU_AVAILABLE)(
       };
       const { direct, igemm } = await runBoth(gpu, testCase);
       const lengthOut = 5;
-      // 受容野が全て padding 域になる出力位置（origin = ox − 3、有効な入力添字は 0 だけ）
+      // Output positions whose receptive field is all padding (origin = ox − 3; the only valid input index is 0)
       const paddingOnly = new Set([0, 4]);
       const splits: number[] = [];
       for (let index = 0; index < direct.length; index += 1) {
         const ox = index % lengthOut;
         if (!paddingOnly.has(ox)) {
-          assertEquals(direct[index], igemm[index], `[${index}] は一致しなければならない`);
+          assertEquals(direct[index], igemm[index], `[${index}] must match`);
           continue;
         }
-        assertEquals(direct[index], 0x8000_0000, `[${index}] 直接カーネルは −0.0 を残す`);
-        assertEquals(igemm[index], 0x0000_0000, `[${index}] implicit GEMM は +0.0 に転ぶ`);
+        assertEquals(direct[index], 0x8000_0000, `[${index}] the direct kernel keeps −0.0`);
+        assertEquals(igemm[index], 0x0000_0000, `[${index}] implicit GEMM flips to +0.0`);
         splits.push(index);
       }
-      // 空振りの門（全ケースが「一致」側に落ちていたら負ケースとして成立していない）
+      // The vacuity check (if every case fell on the "match" side, the negative case would not hold)
       assertEquals(splits.length, testCase.channelsOut * paddingOnly.size);
-      // MUST: 値としては等しい（この差は allclose でも === でも検出できない）
+      // MUST: equal as values (this difference is detectable by neither allclose nor ===)
       const directValues = new Float32Array(direct.buffer, direct.byteOffset, direct.length);
       const igemmValues = new Float32Array(igemm.buffer, igemm.byteOffset, igemm.length);
       for (const index of splits) {
         assert(
           directValues[index] === igemmValues[index],
-          `[${index}] 値としては −0.0 === +0.0 のはず`,
+          `[${index}] as values −0.0 === +0.0 should hold`,
         );
       }
     } finally {
@@ -653,11 +674,11 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * executor の踏み分け。`groups == 1` は implicit GEMM、`groups > 1` は直接カーネル
- * （恒久の差分オラクルとして温存）。
+ * The executor's dispatch between kernels. `groups == 1` goes to implicit GEMM, `groups > 1` to the
+ * direct kernel (kept as a permanent differential oracle).
  *
- * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのカーネルも正しいので、
- * 出力の一致は踏み分けの証拠にならない。
+ * MUST: look at **the pipeline keys that actually ran**, not at values. Both kernels are correct, so
+ * matching outputs are no evidence of the dispatch.
  */
 const conv1dKeysUsed = async (channels: number, groups: number): Promise<ReadonlySet<string>> => {
   const gpu = await acquireGpu();
@@ -688,35 +709,36 @@ const conv1dKeysUsed = async (channels: number, groups: number): Promise<Readonl
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "executor は groups で 2 カーネルを踏み分ける（1 = igemm / >1 = 直接・実 GPU）",
+  "the executor dispatches between the 2 kernels by groups (1 = igemm / >1 = direct, real GPU)",
   async () => {
-    // Cin = Cout = 6・K=3 → kFlat = 18（groups=1）で 4 の倍数でないのでスカラ変種。
-    // Cout=6 は `6 % 64 == 6` なので m タイルは 32 行。
+    // Cin = Cout = 6, K=3 -> kFlat = 18 (groups=1) is not a multiple of 4, so the scalar variant.
+    // Cout=6 gives `6 % 64 == 6`, so the m tile has 32 rows.
     assertEquals(
       await conv1dKeysUsed(6, 1),
       new Set([conv1dIgemmKey("f32", false, GEMM_MTILE_SMALL)]),
     );
     assertEquals(await conv1dKeysUsed(6, 3), new Set([conv1dKey("f32")]));
-    // depthwise（groups = Cin = Cout）も直接カーネル側
+    // depthwise (groups = Cin = Cout) also goes to the direct kernel
     assertEquals(await conv1dKeysUsed(6, 6), new Set([conv1dKey("f32")]));
   },
 );
 
 /**
- * m タイルの選択が **executor に結線されている**ことの門。
+ * The check that the m-tile choice is **wired into the executor**.
  *
- * MUST: 値ではなく**実際に走ったパイプラインキー**で見る。どちらのタイル形も出力はビット
- * 同一なので、値の一致は結線の証拠にならない（述語を潰しても数値テストは全て緑のまま）。
+ * MUST: look at **the pipeline keys that actually ran**, not at values. Both tile shapes give
+ * bit-identical outputs, so matching values are no evidence of the wiring (with the predicate
+ * knocked out, every numeric test would stay green).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "conv1d の executor は M%64 で m タイル 64/32 を踏み分ける（実 GPU）",
+  "the conv1d executor dispatches between 64/32-row m tiles by M%64 (real GPU)",
   async () => {
-    // Cout = 96（`96 % 64 == 32`）→ 32 行。kFlat = 288・Lout = 8 なので v4。
+    // Cout = 96 (`96 % 64 == 32`) -> 32 rows. kFlat = 288 and Lout = 8, so v4.
     assertEquals(
       await conv1dKeysUsed(96, 1),
       new Set([conv1dIgemmKey("f32", true, GEMM_MTILE_SMALL)]),
     );
-    // Cout = 64（`64 % 64 == 0`）→ 64 行のまま
+    // Cout = 64 (`64 % 64 == 0`) -> stays at 64 rows
     assertEquals(await conv1dKeysUsed(64, 1), new Set([conv1dIgemmKey("f32", true, GEMM_TILE)]));
   },
 );

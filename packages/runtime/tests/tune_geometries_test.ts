@@ -42,8 +42,8 @@ const names = (items: readonly { readonly name: string }[]): string[] =>
 
 const gemmName = (geometry: GemmGeometry): string => gemmGeometryTileKeyPart(geometry);
 
-describe("f32 骨格の候補", () => {
-  it("本番の 3 幾何（既定・中 M・小 M バケット）を含む", () => {
+describe("candidates of the f32 skeleton", () => {
+  it("include the 3 production geometries (the default, mid-M and small-M buckets)", () => {
     const listed = names(gemmCandidates());
     for (const rows of [4096, 512, 64]) {
       assert(listed.includes(gemmName(gemmGeometryForRows(rows))), `M=${rows}`);
@@ -51,7 +51,7 @@ describe("f32 骨格の候補", () => {
     assert(listed.includes(gemmName(defaultGemmGeometry())));
   });
 
-  it("全候補が runtime の門を通り、threads ≤ 256・タイル辺 ≤ 128 に収まる", () => {
+  it("every candidate passes the runtime's check and stays within threads ≤ 256 and tile edges ≤ 128", () => {
     for (const { name, geometry } of gemmCandidates()) {
       assertGemmGeometry(geometry, name);
       assert(gemmThreads(geometry) <= 256, name);
@@ -60,20 +60,20 @@ describe("f32 骨格の候補", () => {
     }
   });
 
-  it("名前（= キー断片）に重複が無い", () => {
+  it("have no duplicate names (= key fragments)", () => {
     const listed = names(gemmCandidates());
     assertEquals(new Set(listed).size, listed.length);
   });
 
-  it("quick は full の部分集合で、既定を含む", () => {
+  it("quick is a subset of full and includes the default", () => {
     const full = new Set(names(gemmCandidates()));
     for (const name of names(quickGemmCandidates())) assert(full.has(name), name);
     assert(names(quickGemmCandidates()).includes(gemmName(defaultGemmGeometry())));
   });
 });
 
-describe("conv2d の候補", () => {
-  it("n タイルは 64 / 128 だけで、m タイル 64 / 32 の本番幾何を両方含む", () => {
+describe("conv2d candidates", () => {
+  it("n tiles are only 64 / 128, and both production geometries with m tiles of 64 / 32 are included", () => {
     const candidates = conv2dCandidates();
     for (const { name, geometry } of candidates) {
       assert([64, 128].includes(gemmTileN(geometry)), name);
@@ -84,23 +84,23 @@ describe("conv2d の候補", () => {
     }
   });
 
-  it("名前は本番のパイプラインキーの断片と同じ綴り（v4 無しのキーに含まれる）で、重複が無い", () => {
+  it("names are spelled like fragments of the production pipeline key (contained in the key without v4) and have no duplicates", () => {
     const candidates = conv2dCandidates();
     for (const { name, geometry } of candidates) {
       const key = conv2dIgemmKey("f16", false, 64, geometry);
-      assert(key.includes(`:${name}:`), `${key} に ${name} が無い`);
+      assert(key.includes(`:${name}:`), `${key} does not contain ${name}`);
     }
     assertEquals(new Set(names(candidates)).size, candidates.length);
   });
 
-  it("quick は full の部分集合", () => {
+  it("quick is a subset of full", () => {
     const full = new Set(names(conv2dCandidates()));
     for (const name of names(quickConv2dCandidates())) assert(full.has(name), name);
   });
 });
 
-describe("i8a8 の候補", () => {
-  it("linear / ①QK の既定と ③PV の既定を含み、全候補が runtime の門を通る", () => {
+describe("i8a8 candidates", () => {
+  it("include the linear / ①QK default and the ③PV default, and every candidate passes the runtime's check", () => {
     const candidates = i8a8Candidates();
     const listed = names(candidates);
     for (const op of ["linear", "attention_qk", "attention_pv"] as const) {
@@ -113,25 +113,25 @@ describe("i8a8 の候補", () => {
     assertEquals(new Set(listed).size, listed.length);
   });
 
-  it("quick は full の部分集合", () => {
+  it("quick is a subset of full", () => {
     const full = new Set(names(i8a8Candidates()));
     for (const name of names(quickI8a8Candidates())) assert(full.has(name), name);
   });
 });
 
-describe("候補集合 quick+（quick ∪ 登録済みプロファイルの採用幾何）", () => {
+describe("candidate set quick+ (quick ∪ the geometries adopted by the registered profiles)", () => {
   const includesAll = (listed: readonly string[], expected: readonly string[], label: string) => {
     const set = new Set(listed);
-    for (const name of expected) assert(set.has(name), `${label}: ${name} が無い`);
+    for (const name of expected) assert(set.has(name), `${label}: ${name} is missing`);
   };
 
-  it("quick を含む（f32・conv2d・i8a8）", () => {
+  it("includes quick (f32, conv2d, i8a8)", () => {
     includesAll(names(quickPlusGemmCandidates()), names(quickGemmCandidates()), "f32");
     includesAll(names(quickPlusConv2dCandidates()), names(quickConv2dCandidates()), "conv2d");
     includesAll(names(quickPlusI8a8Candidates()), names(quickI8a8Candidates()), "i8a8");
   });
 
-  it("登録済みの全プロファイルの全幾何を、その族の集合に含む", () => {
+  it("includes every geometry of every registered profile in the set of its family", () => {
     assert(BUILTIN_GEOMETRY_PROFILES.length > 0);
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
       includesAll(
@@ -187,14 +187,14 @@ describe("候補集合 quick+（quick ∪ 登録済みプロファイルの採�
     }
   });
 
-  it("conv2d は f32 の quick+ のうち tileN 64 / 128 のものを含む", () => {
+  it("conv2d includes the f32 quick+ geometries with tileN 64 / 128", () => {
     const expected = quickPlusGemmCandidates()
       .filter(({ geometry }) => [64, 128].includes(gemmTileN(geometry)))
       .map(({ geometry }) => conv2dCandidate(geometry).name);
     includesAll(names(quickPlusConv2dCandidates()), expected, "conv2d");
   });
 
-  it("名前に重複が無く、全候補が runtime の門を通る", () => {
+  it("has no duplicate names, and every candidate passes the runtime's check", () => {
     for (const candidates of [quickPlusGemmCandidates(), quickPlusConv2dCandidates()]) {
       assertEquals(new Set(names(candidates)).size, candidates.length);
       for (const { name, geometry } of candidates) assertGemmGeometry(geometry, name);
@@ -204,7 +204,7 @@ describe("候補集合 quick+（quick ∪ 登録済みプロファイルの採�
     for (const { name, geometry } of i8a8) assertI8a8Geometry(geometry, name);
   });
 
-  it("集合の名前は族ごとの集合の関数と一致する（quick / quick+ / full）", () => {
+  it("the named sets match the per-family set functions (quick / quick+ / full)", () => {
     assertEquals(names(gemmCandidatesIn("quick")), names(quickGemmCandidates()));
     assertEquals(names(gemmCandidatesIn("quick+")), names(quickPlusGemmCandidates()));
     assertEquals(names(gemmCandidatesIn("full")), names(gemmCandidates()));

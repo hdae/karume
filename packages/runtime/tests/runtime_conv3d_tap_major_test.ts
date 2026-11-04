@@ -1,9 +1,10 @@
-// conv3d の w8a8 の重みの並べ替え（ADR 0133 決定 4）の GPU を要らない面:
-// ① 並べ替える重みの集合（`conv3dTapMajorInitializers` — グラフだけから決まる）
-// ② バイト列の並べ替え（`reorderConv3dWeightTapMajor` — 行ごとの置換・piece 単位で同じ）
+// The GPU-free side of reordering conv3d w8a8 weights (ADR 0133 decision 4): ① the set of weights
+// to reorder (`conv3dTapMajorInitializers` — determined by the graph alone) ② reordering the bytes
+// (`reorderConv3dWeightTapMajor` — a per-row permutation, the same per piece)
 //
-// MUST: 集合の判定は「i8 格納 × 消費が全て適格な conv3d の weight slot × グラフ出力でない」。
-// 1 つでも外れる消費があれば並べ替えない（f32 カーネルが置換済みのバイト列を読む誤値を生まない）。
+// MUST: the set is "i8 storage × every consumer is the weight slot of an eligible conv3d × not a
+// graph output". If even one consumer falls outside, the weight is not reordered (so an f32 kernel
+// never reads permuted bytes and produces wrong values).
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -13,7 +14,10 @@ import { conv3dTapMajorInitializers } from "../src/runtime/plan.ts";
 
 const CONV_ATTRS = { stride: [1, 1, 1], padding: [0, 1, 1], dilation: [1, 1, 1], groups: 1 };
 
-/** 検査に要る欄だけを持つグラフ（契約検査は別層 — gpu_f16_i8_weights_test.ts と同じ流儀）。 */
+/**
+ * A graph with only the fields the check needs (contract checks are a separate layer — the same
+ * approach as gpu_f16_i8_weights_test.ts).
+ */
 const graphOf = (
   nodes: readonly { op: string; ins: string[]; outs: string[]; attrs: Record<string, unknown> }[],
   storage: Readonly<Record<string, string>>,
@@ -33,7 +37,7 @@ const graphOf = (
 
 const W_SHAPE = [6, 8, 3, 3, 3];
 
-test("conv3dTapMajorInitializers: i8 の重みを weight slot だけで消費する適格な conv3d の重みを選ぶ", () => {
+test("conv3dTapMajorInitializers: selects i8 weights of eligible conv3d consumed only through the weight slot", () => {
   const graph = graphOf(
     [{ op: "conv3d", ins: ["x", "w", "b"], outs: ["y"], attrs: CONV_ATTRS }],
     { w: "int8-sym", b: "f32" },
@@ -42,10 +46,10 @@ test("conv3dTapMajorInitializers: i8 の重みを weight slot だけで消費す
   assertEquals([...conv3dTapMajorInitializers(graph)], ["w"]);
 });
 
-test("conv3dTapMajorInitializers: f16 格納・Cin % 4 ≠ 0・groups > 1・他の消費・グラフ出力は外れる", () => {
+test("conv3dTapMajorInitializers: f16 storage, Cin % 4 ≠ 0, groups > 1, other consumers and graph outputs are excluded", () => {
   const cases: readonly [string, Parameters<typeof conv3dTapMajorInitializers>[0]][] = [
     [
-      "f16 格納",
+      "f16 storage",
       graphOf(
         [{ op: "conv3d", ins: ["x", "w", "b"], outs: ["y"], attrs: CONV_ATTRS }],
         { w: "f16", b: "f32" },
@@ -69,7 +73,7 @@ test("conv3dTapMajorInitializers: f16 格納・Cin % 4 ≠ 0・groups > 1・他�
       ),
     ],
     [
-      "weight slot 以外の消費が 1 つある",
+      "one consumer other than the weight slot",
       graphOf(
         [
           { op: "conv3d", ins: ["x", "w", "b"], outs: ["y"], attrs: CONV_ATTRS },
@@ -80,7 +84,7 @@ test("conv3dTapMajorInitializers: f16 格納・Cin % 4 ≠ 0・groups > 1・他�
       ),
     ],
     [
-      "グラフ出力に並ぶ",
+      "listed as a graph output",
       graphOf(
         [{ op: "conv3d", ins: ["x", "w", "b"], outs: ["y"], attrs: CONV_ATTRS }],
         { w: "int8-sym", b: "f32" },
@@ -94,7 +98,7 @@ test("conv3dTapMajorInitializers: f16 格納・Cin % 4 ≠ 0・groups > 1・他�
   }
 });
 
-test("conv3dTapMajorInitializers: 2 本の適格な conv3d が同じ重みを使えば並べ替える（1 本でも不適格なら外す）", () => {
+test("conv3dTapMajorInitializers: reorders a weight shared by two eligible conv3d (excluded if even one is ineligible)", () => {
   const both = graphOf(
     [
       { op: "conv3d", ins: ["x", "w", "b"], outs: ["y"], attrs: CONV_ATTRS },
@@ -117,11 +121,11 @@ test("conv3dTapMajorInitializers: 2 本の適格な conv3d が同じ重みを使
   assertEquals([...conv3dTapMajorInitializers(mixed)], []);
 });
 
-test("reorderConv3dWeightTapMajor: [row][Cin][taps] → [row][taps][Cin] を行ごとに置換する（piece 単位で同じ）", () => {
+test("reorderConv3dWeightTapMajor: permutes [row][Cin][taps] → [row][taps][Cin] per row (the same per piece)", () => {
   const rows = 2;
   const channelsIn = 4;
   const taps = 3;
-  // 値 = row·100 + ci·10 + tap（元の位置が読める）
+  // value = row·100 + ci·10 + tap (the original position can be read off)
   const bytes = new Uint8Array(rows * channelsIn * taps);
   for (let row = 0; row < rows; row += 1) {
     for (let ci = 0; ci < channelsIn; ci += 1) {
@@ -138,11 +142,11 @@ test("reorderConv3dWeightTapMajor: [row][Cin][taps] → [row][taps][Cin] を行�
       }
     }
   }
-  // 行 1 だけの piece を並べ替えると、全体の行 1 の部分と一致する
+  // Reordering a piece holding only row 1 matches the row-1 part of the whole
   const perRow = channelsIn * taps;
   const piece = reorderConv3dWeightTapMajor(bytes.slice(perRow, 2 * perRow), 1, channelsIn, taps);
   assertEquals([...piece], [...whole.slice(perRow, 2 * perRow)]);
-  // 元の配列は触らない
+  // The original array is not modified
   assertEquals(bytes[1], 1);
   assertThrows(() => reorderConv3dWeightTapMajor(bytes, 3, channelsIn, taps), CodegenError);
 });

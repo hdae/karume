@@ -1,15 +1,15 @@
-// 借り物 state スロット（`states[].external`）・readonly attention・共有 initializer の
-// **宣言と契約**の門（ADR 0096 段 2 §1.1〜§1.3）。GPU を一切使わない。
+// The check of the **declarations and contracts** of borrowed state slots (`states[].external`),
+// readonly attention and shared initializers (ADR 0096 step 2 §1.1–§1.3). Uses no GPU at all.
 //
-// 借り手（drafter）のグラフは 3 つの新しい宣言でできている:
-//   ① `states[].external: true` — 実体は貸し手 context にあり、自分では確保しない
-//   ② `attrs.readonly: true` の attention — ins は q 1 本で、列 `[P−min(P,W), P)` を読む
-//   ③ `initializers[].shared` — バイトを配布形に持たず、貸し手の重みをそのまま束ねる
+// The borrower's (drafter's) graph is made of three new declarations:
+//   ① `states[].external: true` — the instance lives in the lender context, not allocated here
+//   ② attention with `attrs.readonly: true` — ins is q alone; it reads columns `[P−min(P,W), P)`
+//   ③ `initializers[].shared` — no bytes in the distribution form; binds the lender's weight as is
 //
-// この 3 つは互いに支え合っている（external の読者は readonly だけ / readonly の相手は
-// external だけ / 混在は無し）ので、**片方だけ書いた形が全部 fail loudly になること**が
-// この門の本体。通してしまうと、どれも例外ではなく「未初期化の過去を読む」「貸し手が確定した
-// KV を上書きする」という**別の値**として出る。
+// The three support one another (external slots are read only by readonly / readonly reads only
+// external / no mixing), so **every form that writes only one side failing loudly** is the core of
+// this check. If such a form got through, none would raise an exception; each would show up as **a
+// different value**: "reading an uninitialized past" or "overwriting KV the lender has committed".
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
@@ -27,8 +27,8 @@ const CAPACITY = 16;
 const WINDOW = 8;
 
 /**
- * drafter の最小形: 借り物スロット 2 本を readonly attention 1 本が読むだけのグラフ。
- * 入力は q `[1,H,1,D]` の 1 本で、`state_append` は 1 本も無い。
+ * The minimal drafter: a graph where one readonly attention reads two borrowed slots.
+ * The input is q `[1,H,1,D]` alone, and there is no `state_append` at all.
  */
 const drafterGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -54,7 +54,7 @@ const drafterGraph = (): DeclarationJson => ({
   ],
 });
 
-/** 貸し手側の最小形（自前スロット + 通常の states 形 attention + append 2 本）。 */
+/** The minimal lender (own slots + a normal states-form attention + 2 appends). */
 const targetGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -97,10 +97,16 @@ const targetGraph = (): DeclarationJson => ({
   ],
 });
 
-/** 宣言 → 合流後のグラフ（helpers/merged-graph.ts — 供給は宣言から自動で作る）。 */
+/**
+ * Declaration → merged graph (helpers/merged-graph.ts — the supply is generated from the
+ * declaration).
+ */
 const parse = mergeGraph;
 
-/** 変異させたグラフを parse + 契約検査まで通す（どちらの層で落ちるかは各テストが指定する）。 */
+/**
+ * Passes a mutated graph through parse + contract checks (each test states which layer it fails
+ * in).
+ */
 const mutated = (mutate: (graph: DeclarationJson) => void): DeclarationJson => {
   const graph = drafterGraph();
   mutate(graph);
@@ -110,24 +116,24 @@ const mutated = (mutate: (graph: DeclarationJson) => void): DeclarationJson => {
 const slotShapes = (graph: IrGraph): ReadonlyMap<string, readonly number[]> =>
   new Map(Object.entries(graph.states).map(([name, slot]) => [name, slot.shape.map(Number)]));
 
-test("drafter の最小形（external 2 本 + readonly attention 1 本）は受理される", () => {
+test("the minimal drafter (2 external + 1 readonly attention) is accepted", () => {
   const graph = parse(drafterGraph());
   assertEquals(graph.states["l13.k"].external, true);
   validateGraphContracts(graph);
   const plan = planGraph(graph, {}, slotShapes(graph));
-  // 出力は q と同形（[B,H,1,D]）。
+  // The output has the same shape as q ([B,H,1,D]).
   assertEquals(plan.nodes[0].outputs[0].shape, [1, HEADS, 1, DEPTH]);
-  // ins は q 1 本だけ（今 step の k / v は取らない）。
+  // ins is q alone (this step's k / v are not taken).
   assertEquals(plan.nodes[0].inputShapes.length, 1);
 });
 
-test("貸し手（自前スロット + append）は 1 バイトも影響を受けない（external 無しは無風）", () => {
+test("the lender (own slots + append) is not affected by a single byte (no external means no change)", () => {
   const graph = parse(targetGraph());
   assertEquals(graph.states["l13.k"].external, false);
   validateGraphContracts(graph);
 });
 
-test("external スロットへの state_append は拒否する（書けるのは貸し手だけ）", () => {
+test("state_append to an external slot is rejected (only the lender can write)", () => {
   const graph = parse(
     mutated((g) => {
       g.requires.ops = ["attention", "state_append"];
@@ -144,9 +150,9 @@ test("external スロットへの state_append は拒否する（書けるのは
   assertThrows(() => validateGraphContracts(graph), ExecutionError, "external, yet state_append");
 });
 
-test("external スロットを readonly でない attention が読む形は拒否する", () => {
-  // 読者を従来の states 形（ins 3 本）に戻す = 「今 step の k/v を足す」形。書き手が居ない
-  // スロットに対してこれを許すと、必ず未初期化行を過去として読む。
+test("an attention that is not readonly reading an external slot is rejected", () => {
+  // The reader is put back into the normal states form (3 ins) = the form that "adds this step's
+  // k/v". Allowing this for a slot with no writer always reads uninitialized rows as the past.
   const graph = parse(
     mutated((g) => {
       g.inputs.push(
@@ -164,10 +170,10 @@ test("external スロットを readonly でない attention が読む形は拒�
   );
 });
 
-test("readonly の読者が非 external スロットを読む形は拒否する", () => {
+test("a readonly reader reading a non-external slot is rejected", () => {
   const graph = parse(
     mutated((g) => {
-      if (g.states === undefined) throw new Error("states が無い");
+      if (g.states === undefined) throw new Error("no states");
       delete g.states["l13.k"].external;
       delete g.states["l13.v"].external;
     }),
@@ -175,38 +181,40 @@ test("readonly の読者が非 external スロットを読む形は拒否する"
   assertThrows(() => validateGraphContracts(graph), ExecutionError, "the non-external state slot");
 });
 
-test("external と非 external の混在は拒否する（借り手は自前スロットを持たない）", () => {
+test("mixing external and non-external is rejected (the borrower has no slots of its own)", () => {
   const graph = parse(
     mutated((g) => {
-      if (g.states === undefined) throw new Error("states が無い");
+      if (g.states === undefined) throw new Error("no states");
       delete g.states["l13.v"].external;
     }),
   );
-  // 混在の判定より先に「readonly が非 external を読む」で落ちる（どちらも同じ層・同じ型）。
+  // It fails on "readonly reads a non-external slot" before the mixing check (both the same layer
+  // and type).
   assertThrows(() => validateGraphContracts(graph), ExecutionError, "ADR 0096 stage 2 §1.1");
 });
 
-test("external を宣言しつつ readonly も append も無いスロットは参照検査で落ちる", () => {
-  // 読者がゼロのスロットは IR 層（参照完全性）が落とす — external でも例外にならない。
+test("a slot declared external with neither a readonly reader nor an append fails the reference check", () => {
+  // A slot with zero readers is rejected by the IR layer (referential integrity) — external is no
+  // exception.
   const graph = mutated((g) => {
-    if (g.states === undefined) throw new Error("states が無い");
+    if (g.states === undefined) throw new Error("no states");
     g.states["l14.k"] = { dtype: "f32", shape: [1, KV_HEADS, CAPACITY, DEPTH], external: true };
   });
   assertThrows(() => parse(graph), IrError, "not referenced by any node");
 });
 
-test("states[].external は true 以外を書けない（不存在と同義の綴りを 2 つ持たない）", () => {
+test("states[].external cannot be anything but true (no two spellings meaning absent)", () => {
   for (const value of [false, 1, "true"] as const) {
     const graph = mutated((g) => {
-      if (g.states === undefined) throw new Error("states が無い");
-      // deno-lint-ignore no-explicit-any -- 契約外の値を注入する故障注入（型の外から来る形）
+      if (g.states === undefined) throw new Error("no states");
+      // deno-lint-ignore no-explicit-any -- injects a value outside the contract and the types
       (g.states["l13.k"] as any).external = value;
     });
     assertThrows(() => parse(graph), IrError, "external");
   }
 });
 
-test("readonly の attention は入力 1 本ちょうど（3 本は拒否・states 欄が要る）", () => {
+test("a readonly attention takes exactly one input (3 are rejected; the states field is required)", () => {
   const threeIns = parse(
     mutated((g) => {
       g.inputs.push(
@@ -237,7 +245,7 @@ test("readonly の attention は入力 1 本ちょうど（3 本は拒否・stat
   );
 });
 
-test("attrs.readonly は true のみ・state_append には書けない", () => {
+test("attrs.readonly is true only and cannot be written on state_append", () => {
   const falsy = parse(
     mutated((g) => {
       g.nodes[0].attrs = { scale: 0.5, window: WINDOW, readonly: false };
@@ -261,10 +269,10 @@ test("attrs.readonly は true のみ・state_append には書けない", () => {
   assertThrows(() => validateGraphContracts(onAppend), OpContractError, "has no attrs.readonly");
 });
 
-test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C", () => {
+test("readonly shape checks: M = 1 MUST, B / D match, H % Hkv, window ≤ C", () => {
   const cases: readonly (readonly [string, (graph: DeclarationJson) => void, string])[] = [
     [
-      "M が 2",
+      "M is 2",
       (g) => {
         g.inputs[0].shape = [1, HEADS, 2, DEPTH];
         g.values.o.shape = [1, HEADS, 2, DEPTH];
@@ -272,7 +280,7 @@ test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C"
       "M (axis 2) of exactly 1",
     ],
     [
-      "D がスロットと不一致",
+      "D does not match the slot",
       (g) => {
         g.inputs[0].shape = [1, HEADS, 1, DEPTH * 2];
         g.values.o.shape = [1, HEADS, 1, DEPTH * 2];
@@ -280,27 +288,27 @@ test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C"
       "B / D mismatch",
     ],
     [
-      "H が Hkv の倍数でない",
+      "H is not a multiple of Hkv",
       (g) => {
         g.inputs[0].shape = [1, HEADS + 1, 1, DEPTH];
         g.values.o.shape = [1, HEADS + 1, 1, DEPTH];
-        if (g.states === undefined) throw new Error("states が無い");
+        if (g.states === undefined) throw new Error("no states");
         g.states["l13.k"].shape = [1, 2, CAPACITY, DEPTH];
         g.states["l13.v"].shape = [1, 2, CAPACITY, DEPTH];
       },
       "is not a positive integer multiple",
     ],
     [
-      "window が容量を超える",
+      "window exceeds the capacity",
       (g) => {
         g.nodes[0].attrs = { scale: 0.5, window: CAPACITY + 1, readonly: true };
       },
       "slot capacity",
     ],
     [
-      "k / v スロットが同形でない",
+      "k / v slots differ in shape",
       (g) => {
-        if (g.states === undefined) throw new Error("states が無い");
+        if (g.states === undefined) throw new Error("no states");
         g.states["l13.v"].shape = [1, KV_HEADS, CAPACITY * 2, DEPTH];
       },
       "differ in shape",
@@ -312,15 +320,21 @@ test("readonly の形検査: M = 1 MUST・B / D 一致・H % Hkv・window ≤ C"
       () => planGraph(graph, {}, slotShapes(graph)),
       OpContractError,
       message,
-      `${name}: 拒否されていない`,
+      `${name}: not rejected`,
     );
   }
 });
 
-/** 貸し手の initializer 名（§1.3 — 借り手の宣言名は**貸し手と同じ** MUST）。 */
+/**
+ * The lender's initializer name (§1.3 — the borrower's declared name MUST be **the same as the
+ * lender's**).
+ */
 const SHARED_NAME = "model.lm_head.weight";
 
-/** 共有 initializer（§1.3）を 1 本持つ drafter（embedding の重みを貸し手から借りる形）。 */
+/**
+ * A drafter with one shared initializer (§1.3) (the form that borrows the embedding weight from the
+ * lender).
+ */
 const sharedGraph = (): DeclarationJson => {
   const graph = drafterGraph();
   graph.requires.ops = ["attention", "embedding"];
@@ -338,13 +352,15 @@ const sharedGraph = (): DeclarationJson => {
   return graph;
 };
 
-test("共有 initializer は実体も格納も持たずに受理され、席が shared になる", () => {
+test("a shared initializer is accepted with neither an instance nor storage, and its seat is shared", () => {
   const graph = parse(sharedGraph());
-  // 借り手の宣言名がそのまま貸し手の initializer 名（IR v2 では名前が実体の鍵）。
+  // The borrower's declared name is the lender's initializer name as is (in IR v2 the name is the
+  // key of the instance).
   assertEquals(graph.initializers[SHARED_NAME], { shared: true });
   validateGraphContracts(graph);
-  // 席は「借り物」。期待する貸し手の席は借り手側の消費（適格判定 + チャネル軸 0）だけが決まり、
-  // 貸し手の codec と突き合わせるのは借り手 Session の構築時。
+  // The seat is "borrowed". Only the borrower-side consumption (eligibility + channel axis 0)
+  // determines the lender seat it expects; it is matched against the lender's codec when the
+  // borrower Session is built.
   assertEquals(planWeightResidency(graph).get(SHARED_NAME), {
     seat: "shared",
     eligible: true,
@@ -354,15 +370,17 @@ test("共有 initializer は実体も格納も持たずに受理され、席が 
   });
 });
 
-test("共有 initializer に実体の鍵や格納を書く形は拒否する", () => {
-  // IR v2 の initializer 宣言に書けるのは `shared` だけ（実体との対応は容器の束縛表が持つ）。
-  // 旧配布形の `tensor` / `storage` をそのまま書いた形は未知のキーとして落ちる。
+test("a shared initializer that writes an instance key or storage is rejected", () => {
+  // An IR v2 initializer declaration can contain only `shared` (the mapping to the instance lives
+  // in the container's binding table). A form that writes the old distribution form's `tensor` /
+  // `storage` as is fails as an unknown key.
   for (const key of ["tensor", "storage"]) {
     const graph = sharedGraph();
     Object.assign(graph.initializers[SHARED_NAME], { [key]: "model.lm_head.weight" });
     assertThrows(() => parse(graph), IrError, `unknown key '${key}'`);
   }
-  // `shared` に書けるのは `true` だけ（`false` は欄の不存在と同じ宣言 — 正準直列化が割れる）。
+  // `shared` can only be `true` (`false` would be the same declaration as the field being absent —
+  // canonical serialization would split).
   const notTrue = sharedGraph();
   Object.assign(notTrue.initializers[SHARED_NAME], { shared: false });
   assertThrows(() => parse(notTrue), IrError, "write true only when it is borrowed");

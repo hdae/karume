@@ -4,28 +4,33 @@
 // unpack check, the i8 channel axis and rowAxis admission) stay separate. bf16 shares f16's packing
 // (two elements per u32 word, the same odd-length traps) and differs only in the unpack (a bitcast).
 //
-// f16 格納の実行経路（ADR 0018）— 適格判定・ロード経路・カーネル変種・診断の通し検証。
-// i8（per-channel symmetric int8）格納の実行経路（ADR 0019）— ロード時検証・適格判定の共用・
-// カーネル変種・診断の通し検証。
+// The f16 storage execution path (ADR 0018) — end-to-end checks of eligibility, the load path, the
+// kernel variants and the diagnostics.
+// The i8 (per-channel symmetric int8) storage execution path (ADR 0019) — end-to-end checks of
+// load-time validation, the shared eligibility decision, the kernel variants and the diagnostics.
 //
-// この波で入った 2 経路を両方踏む:
-//   適格（消費が WEIGHT_SLOTS に載った op の weight スロットだけ）→ 生バイトのまま GPU
-//     常駐し、dequant はカーネル内（`unpack2x16float`）
-//   適格外（bias / 混在消費 / その他）→ ロード時に CPU で f32 展開（VRAM 削減ゼロ）
+// Both paths introduced in this iteration are exercised:
+//   eligible (consumed only in the weight slot of an op listed in WEIGHT_SLOTS) -> resident on the
+//     GPU as raw bytes, dequant inside the kernel (`unpack2x16float`)
+//   ineligible (bias / mixed consumption / anything else) -> expanded to f32 on the CPU at load
+//     (zero VRAM saving)
 // (i8 dequantizes in the kernel with `unpack4xI8` + the per-channel scale.)
 //
-// MUST: 数値ケースは **in-features / K / Cin·Kh·Kw を奇数**にする。f16 は 2 要素を 1 語に
-// 詰めるので、行長が偶数だと重み行の先頭が必ず語境界に来る — 「対の選択を行内の相対添字で
-// 取る」誤りが偶数長では一切値に出ない（波Q1 の故障注入で実証）。
-// MUST: 重みの総要素数も奇数にする（末尾 2 バイトのゼロ詰めが無いと writeBuffer が
-// validation で落ちる経路をここで踏む）。
-// MUST: 数値ケースは **重み行の長さを 4 の倍数にしない**。i8 は 4 要素を 1 語に詰めるので、
-// 行長が 4 の倍数だと重み行の先頭が必ず語境界に来る — 「語とレーンの選択を行内の相対添字で
-// 取る」誤りが 4 の倍数長では一切値に出ない（f16 の偶奇 MUST と同型の罠）。
-// MUST: 重みの総要素数も 4 の倍数にしない（末尾ゼロ詰めが無いと writeBuffer が validation で
-// 落ちる経路をここで踏む）。
-// MUST: 期待値は**丸め後の重み**（fake-quant — ADR 0006）で作る。丸め前の f32 で比較すると
-// 量子化誤差と実装誤差が混ざり、tolerance を緩める圧力になる。
+// MUST: the numeric cases make **in-features / K / Cin·Kh·Kw odd**. f16 packs 2 elements into one
+// word, so with an even row length the start of a weight row always lands on a word boundary — the
+// error of "choosing the pair by the index relative to the row" never shows in the values with even
+// lengths (demonstrated by the fault injection of iteration Q1).
+// MUST: the total element count of the weights is odd too (this exercises the path where writeBuffer
+// fails validation without the zero fill of the last 2 bytes).
+// MUST: the numeric cases make **the weight row length not a multiple of 4**. i8 packs 4 elements
+// into one word, so with a row length that is a multiple of 4 the start of a weight row always lands
+// on a word boundary — the error of "choosing the word and the lane by the index relative to the
+// row" never shows in the values with such lengths (the same trap as the f16 parity MUST).
+// MUST: the total element count of the weights is not a multiple of 4 either (this exercises the
+// path where writeBuffer fails validation without the trailing zero fill).
+// MUST: the expected values are built from **the rounded weights** (fake-quant — ADR 0006).
+// Comparing with the f32 before rounding would mix quantization error with implementation error
+// and create pressure to loosen the tolerance.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertThrows } from "@std/assert";
@@ -71,11 +76,13 @@ const SIGNED = (i: number): number => ((i % 13) - 6) * 0.75;
 const POSITIVE = (i: number): number => 0.125 + (i % 17) * 0.5;
 
 /**
- * 宣言の initializer 全部に指定 codec の空バイト列を当てて合流した `IrGraph`（同期）。
- * 適格判定はグラフ構造だけを見るので、実体の中身は要らない — 合流層だけ通す。
+ * An `IrGraph` (synchronous) merged with empty bytes of the given codec on every initializer of the
+ * declaration. Eligibility looks only at the graph structure, so the actual contents are not needed
+ * — only the merge layer is passed through.
  *
- * 既定は `f16`（この系列が見るのは f16 格納の適格判定なので、名指ししない initializer も
- * f16 で載る — bias が f16 のまま適格から外れることが、ここの主張そのもの）。
+ * The default is `f16` (what this series looks at is the eligibility of f16 storage, so initializers
+ * not named explicitly are loaded as f16 too — that bias drops out of eligibility while still f16 is
+ * the very claim here).
  * `fallback` replaces that default for the other storage (the i8 run loads every unnamed
  * initializer, bias included, as int8-sym).
  */
@@ -91,7 +98,7 @@ const mergedFor = (
     ),
   );
 
-/** `linear(x, w, b)` 1 本の宣言。`extra` で w の消費を足せる（混在消費を作るため）。 */
+/** The declaration of a single `linear(x, w, b)`. `extra` can add consumers of w (to build mixed consumption). */
 const linearDeclaration = (
   extra: DeclarationJson["nodes"] = [],
   extraValues: DeclarationJson["values"] = {},
@@ -116,12 +123,12 @@ const linearDeclaration = (
 type WeightedCase = {
   readonly name: string;
   readonly op: string;
-  /** グラフ入力（x / index）。 */
+  /** Graph inputs (x / index). */
   readonly inputs: readonly (readonly [string, FilledTensor])[];
   readonly weight: FilledTensor;
-  /** per-channel scale のチャネル軸（conv_transpose1d だけ 1）。 */
+  /** The channel axis of the per-channel scale (1 only for conv_transpose1d). */
   readonly channelAxis: number;
-  /** bias は**常に f32 格納**（ADR 0006）。embedding のように bias が無い op は undefined。 */
+  /** The bias is **always f32-stored** (ADR 0006). undefined for ops without a bias, such as embedding. */
   readonly bias?: FilledTensor;
   readonly outShape: readonly number[];
   readonly attrs?: Record<string, unknown>;
@@ -130,7 +137,7 @@ type WeightedCase = {
 /** A weight rounded to one storage: the bytes to load and the values the CPU reference uses. */
 type QuantizedWeight = {
   readonly bytes: Uint8Array<ArrayBuffer>;
-  /** 量子化後の値（fake-quant — CPU 参照はこちらを重みとして使う）。 */
+  /** The values after quantization (fake-quant — the CPU reference uses these as the weights). */
   readonly values: Float32Array<ArrayBuffer>;
   readonly encoding: EncodingInput;
   /** The per-channel scale (i8 only); it is resident next to the payload. */
@@ -160,8 +167,9 @@ type WeightStorageCase = {
   };
 };
 
-// 行（= 出力チャネル）ごとに大きさが違う重み。POSITIVE のままだと各行の最大値が
-// 一致して scale が全チャネル同じになり、軸の取り違えが数値に出ない。
+// Weights whose magnitude differs per row (= output channel). With POSITIVE as is, every row's
+// maximum would be the same, the scale would be the same for every channel, and an axis mix-up
+// would not show in the numbers.
 const rowVarying =
   (cols: number) =>
   (i: number): number =>
@@ -177,8 +185,8 @@ const STORAGES: readonly WeightStorageCase[] = [
     },
     tileCases: [
       {
-        // k=20（4 の倍数・16 の倍数でない）/ n=68（最終タイルの有効 quad が 16 中 1）/
-        // m=65（行タイル 2 枚）。m/n/k は互いに違う長さ。
+        // k=20 (a multiple of 4, not of 16) / n=68 (1 of the 16 quads of the last tile is valid) /
+        // m=65 (2 row tiles). m/n/k all have different lengths.
         name: "linear v4 [65,20] × W[68,20] + b[68]",
         op: "linear",
         inputs: [["x", fill([65, 20], SIGNED)]],
@@ -188,8 +196,8 @@ const STORAGES: readonly WeightStorageCase[] = [
         outShape: [65, 68],
       },
       {
-        // k=37（2 の倍数でない = 平坦添字の偶奇の検出器）/ n=23 / m=70（行タイル 2 枚）
-        name: "linear スカラ [70,37] × W[23,37] + b[23]",
+        // k=37 (not a multiple of 2 = the detector for the parity of the flat index) / n=23 / m=70 (2 row tiles)
+        name: "linear scalar [70,37] × W[23,37] + b[23]",
         op: "linear",
         inputs: [["x", fill([70, 37], SIGNED)]],
         weight: fill([23, 37], POSITIVE),
@@ -200,23 +208,30 @@ const STORAGES: readonly WeightStorageCase[] = [
     ],
     // 12 elements × 2 bytes, already 4-byte aligned.
     mixedResidentBytes: 24,
-    // 適格: 21 要素 × 2 バイト = 42 → 4 バイト整列で 44
+    // Eligible: 21 elements × 2 bytes = 42 -> 44 with 4-byte alignment
     diagnostics: { payloadBytes: 42, residentBytes: 44 },
     titles: {
-      eligibility: "適格判定は WEIGHT_SLOTS の op の weight スロット消費だけを通す",
-      graphOutputEligibility: "graph 出力になった initializer は weight スロット消費だけでも適格外",
-      variants: "w=f16 変種 5 種が CPU 参照（丸め後の重み）と一致する（奇数長・実 GPU）",
-      tiles: "w=f16 の linear が GEMM タイル境界（v4 / スカラ）で CPU 参照と一致する（実 GPU）",
-      poison: "w=f16 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
-      mixed: "混在消費の f16 は CPU 展開へ落ち、適格経路とビット単位で同じ値を出す（実 GPU）",
-      diagnostics: "診断は適格 / 適格外 / 非圧縮を実バイト数で区別する（実 GPU）",
+      eligibility: "eligibility admits only consumption in the weight slot of a WEIGHT_SLOTS op",
+      graphOutputEligibility:
+        "an initializer that became a graph output is ineligible even when consumed only in a weight slot",
+      variants:
+        "the 5 w=f16 variants match the CPU reference (rounded weights) (odd lengths, real GPU)",
+      tiles:
+        "w=f16 linear matches the CPU reference at the GEMM tile boundaries (v4 / scalar) (real GPU)",
+      poison:
+        "the w=f16 variants also leave not a single poison word in pool-reused buffers (full-write / real GPU)",
+      mixed:
+        "f16 with mixed consumption falls back to CPU expansion and gives bit-identical values to the eligible path (real GPU)",
+      diagnostics:
+        "the diagnostics tell eligible / ineligible / uncompressed apart by actual byte counts (real GPU)",
       graphOutput:
-        "graph 出力にした f16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+        "an f16 initializer made a graph output falls back to CPU expansion, and the rounded values read as f32 (real GPU)",
     },
   },
   {
-    // bf16 = f32 の上位 16 bit（ADR 0131）。詰め方は f16 と同じ（2 要素 / 語）なので、奇数長の罠と
-    // 整列の詰め物もそのまま共有する。丸めは f32 の下位 16 bit を落とす RNE（helpers/bf16.ts）。
+    // bf16 = the upper 16 bits of f32 (ADR 0131). The packing is the same as f16 (2 elements / word),
+    // so it shares the odd-length traps and the alignment padding as is. The rounding is the RNE that
+    // drops the lower 16 bits of f32 (helpers/bf16.ts).
     storage: "bf16",
     codec: "bf16",
     quantize: (weight) => {
@@ -225,7 +240,7 @@ const STORAGES: readonly WeightStorageCase[] = [
     },
     tileCases: [
       {
-        // f16 と同じ形（k=20 の v4 経路 / k=37 のスカラ経路 — 偶奇の検出器）
+        // The same shapes as f16 (the v4 path with k=20 / the scalar path with k=37 — the parity detector)
         name: "linear v4 [65,20] × W[68,20] + b[68]",
         op: "linear",
         inputs: [["x", fill([65, 20], SIGNED)]],
@@ -235,7 +250,7 @@ const STORAGES: readonly WeightStorageCase[] = [
         outShape: [65, 68],
       },
       {
-        name: "linear スカラ [70,37] × W[23,37] + b[23]",
+        name: "linear scalar [70,37] × W[23,37] + b[23]",
         op: "linear",
         inputs: [["x", fill([70, 37], SIGNED)]],
         weight: fill([23, 37], POSITIVE),
@@ -246,18 +261,24 @@ const STORAGES: readonly WeightStorageCase[] = [
     ],
     // 12 elements × 2 bytes, already 4-byte aligned.
     mixedResidentBytes: 24,
-    // 適格: 21 要素 × 2 バイト = 42 → 4 バイト整列で 44
+    // Eligible: 21 elements × 2 bytes = 42 -> 44 with 4-byte alignment
     diagnostics: { payloadBytes: 42, residentBytes: 44 },
     titles: {
-      eligibility: "bf16 の適格判定は f16 と同じ 1 本の判定を通る（新設していない）",
-      graphOutputEligibility: "graph 出力になった bf16 initializer も同じ 1 本の判定で適格外",
-      variants: "w=bf16 変種 5 種が CPU 参照（丸め後の重み）と一致する（奇数長・実 GPU）",
-      tiles: "w=bf16 の linear が GEMM タイル境界（v4 / スカラ）で CPU 参照と一致する（実 GPU）",
-      poison: "w=bf16 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
-      mixed: "混在消費の bf16 は CPU 展開へ落ち、適格経路とビット単位で同じ値を出す（実 GPU）",
-      diagnostics: "診断は適格 / 適格外 / 非圧縮を実バイト数で区別する（bf16・実 GPU）",
+      eligibility: "bf16 eligibility goes through the same single decision as f16 (no new one)",
+      graphOutputEligibility:
+        "a bf16 initializer that became a graph output is ineligible by the same single decision",
+      variants:
+        "the 5 w=bf16 variants match the CPU reference (rounded weights) (odd lengths, real GPU)",
+      tiles:
+        "w=bf16 linear matches the CPU reference at the GEMM tile boundaries (v4 / scalar) (real GPU)",
+      poison:
+        "the w=bf16 variants also leave not a single poison word in pool-reused buffers (full-write / real GPU)",
+      mixed:
+        "bf16 with mixed consumption falls back to CPU expansion and gives bit-identical values to the eligible path (real GPU)",
+      diagnostics:
+        "the diagnostics tell eligible / ineligible / uncompressed apart by actual byte counts (bf16, real GPU)",
       graphOutput:
-        "graph 出力にした bf16 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+        "a bf16 initializer made a graph output falls back to CPU expansion, and the rounded values read as f32 (real GPU)",
     },
   },
   {
@@ -265,8 +286,9 @@ const STORAGES: readonly WeightStorageCase[] = [
     codec: "int8-sym",
     quantize: (weight, channelAxis) => {
       const quantized = quantizeI8(weight.data, weight.shape, channelAxis);
-      // per-channel の groupSize は台帳（`codecs.ts`）から引く（行長 = numel / shape[rowAxis]・
-      // groups は 1）— テスト側で数え直すと、供給の長さと期待の長さが同じ誤りを共有する。
+      // The per-channel groupSize is taken from the ledger (`codecs.ts`) (row length = numel /
+      // shape[rowAxis], groups is 1) — recounting it in the test would make the supplied length and the
+      // expected length share the same error.
       const numel = weight.shape.reduce((count, dim) => count * dim, 1);
       return {
         bytes: quantized.bytes,
@@ -282,8 +304,8 @@ const STORAGES: readonly WeightStorageCase[] = [
     },
     tileCases: [
       {
-        // k=20（4 の倍数・16 の倍数でない）/ n=68（最終タイルの有効 quad が 16 中 1）/
-        // m=65（行タイル 2 枚）。m/n/k は互いに違う長さで、scale は 68 チャネルぶん。
+        // k=20 (a multiple of 4, not of 16) / n=68 (1 of the 16 quads of the last tile is valid) /
+        // m=65 (2 row tiles). m/n/k all have different lengths, and the scale covers 68 channels.
         name: "linear v4 [65,20] × W[68,20] + b[68]",
         op: "linear",
         inputs: [["x", fill([65, 20], SIGNED)]],
@@ -293,8 +315,8 @@ const STORAGES: readonly WeightStorageCase[] = [
         outShape: [65, 68],
       },
       {
-        // n=19（4 の倍数でない → スカラ経路・行内の 4 剰余の罠を踏む形）/ k=20 / m=17
-        name: "linear スカラ [17,20] × W[19,20] + b[19]",
+        // n=19 (not a multiple of 4 -> the scalar path; exercises the trap of the remainder mod 4 within a row) / k=20 / m=17
+        name: "linear scalar [17,20] × W[19,20] + b[19]",
         op: "linear",
         inputs: [["x", fill([17, 20], SIGNED)]],
         weight: fill([19, 20], rowVarying(20)),
@@ -303,27 +325,32 @@ const STORAGES: readonly WeightStorageCase[] = [
         outShape: [17, 19],
       },
     ],
-    // 適格側: 12 バイト（4 の倍数でゼロ詰め無し）+ scale 3 要素 12 バイト
+    // The eligible side: 12 bytes (a multiple of 4, no zero fill) + 3 scale elements, 12 bytes
     mixedResidentBytes: 12 + 12,
-    // 適格: 21 バイト → 4 バイト整列で 24、+ scale 3 要素 12 バイト
+    // Eligible: 21 bytes -> 24 with 4-byte alignment, + 3 scale elements, 12 bytes
     diagnostics: { payloadBytes: 21, residentBytes: 24 + 12 },
     titles: {
-      eligibility: "i8 の適格判定は f16 と同じ 1 本の判定を通る（新設していない）",
-      graphOutputEligibility: "graph 出力になった i8 initializer も同じ 1 本の判定で適格外",
+      eligibility: "i8 eligibility goes through the same single decision as f16 (no new one)",
+      graphOutputEligibility:
+        "an i8 initializer that became a graph output is ineligible by the same single decision",
       variants:
-        "w=i8 変種 5 種が CPU 参照（丸め後の重み）と一致する（行長 4 の倍数でない・実 GPU）",
-      tiles: "w=i8 の linear が GEMM タイル境界（v4 / スカラ）で CPU 参照と一致する（実 GPU）",
-      poison: "w=i8 変種もプール再利用バッファの毒値を 1 語も残さない（full-write / 実 GPU）",
-      mixed: "混在消費の i8 は CPU 展開へ落ち、適格経路とビット単位で同じ値を出す（実 GPU）",
-      diagnostics: "診断は適格 / 適格外 / 非圧縮を実バイト数で区別する（scale 込み・実 GPU）",
+        "the 5 w=i8 variants match the CPU reference (rounded weights) (row length not a multiple of 4, real GPU)",
+      tiles:
+        "w=i8 linear matches the CPU reference at the GEMM tile boundaries (v4 / scalar) (real GPU)",
+      poison:
+        "the w=i8 variants also leave not a single poison word in pool-reused buffers (full-write / real GPU)",
+      mixed:
+        "i8 with mixed consumption falls back to CPU expansion and gives bit-identical values to the eligible path (real GPU)",
+      diagnostics:
+        "the diagnostics tell eligible / ineligible / uncompressed apart by actual byte counts (scale included, real GPU)",
       graphOutput:
-        "graph 出力にした i8 initializer は CPU 展開へ落ち、丸め後の値が f32 として読める（実 GPU）",
+        "an i8 initializer made a graph output falls back to CPU expansion, and the rounded values read as f32 (real GPU)",
     },
   },
 ];
 
 // ---------------------------------------------------------------------------
-// 適格判定（GPU 非依存 — グラフ構造だけで決まる）
+// Eligibility (GPU-independent — decided by the graph structure alone)
 // ---------------------------------------------------------------------------
 
 for (const storage of STORAGES) {
@@ -331,12 +358,13 @@ for (const storage of STORAGES) {
     const eligible = (declaration: DeclarationJson): readonly string[] =>
       [...eligibleCompressedInitializers(mergedFor(declaration, {}, storage.codec))].sort();
 
-    // 単独の weight 消費は適格。bias は同じグラフにいても**絶対に適格にならない**
-    // （プロトタイプの f16 降格バグの逆 — ADR 0006 が名指しした規則）。
+    // A sole weight consumption is eligible. The bias is **never eligible**, even in the same graph
+    // (the reverse of the prototype's f16 demotion bug — the rule ADR 0006 names).
     assertEquals(eligible(linearDeclaration()), ["w"]);
 
-    // MUST: 同じ initializer が weight 以外でも消費されたら適格を失う（混在消費）。
-    // 圧縮のまま上げると elementwise 側のカーネルが u32 を f32 として読む沈黙誤値になる。
+    // MUST: if the same initializer is also consumed outside a weight slot, it loses eligibility
+    // (mixed consumption). Uploading it compressed would make the elementwise kernel read u32 as f32, a
+    // silently wrong value.
     assertEquals(
       eligible(
         linearDeclaration(
@@ -348,7 +376,7 @@ for (const storage of STORAGES) {
       [],
     );
 
-    // 消費ゼロの initializer も適格外（実行に使われないバイトを「常駐圧縮」と数えない）
+    // An initializer with no consumers is ineligible too (bytes not used by execution are not counted as "resident compressed")
     const unused = linearDeclaration();
     unused.initializers["dead"] = {};
     unused.values["dead"] = { dtype: "f32", shape: [2] };
@@ -356,8 +384,8 @@ for (const storage of STORAGES) {
   });
 }
 
-test("適格判定は WEIGHT_SLOTS の op それぞれの weight スロット位置を見る（bias / index は適格にしない）", () => {
-  // op → (ins の並び, weight の位置)。embedding だけスロット 0（他は 1）。
+test("eligibility looks at the weight-slot position of each WEIGHT_SLOTS op (bias / index are not made eligible)", () => {
+  // op -> (order of ins, position of the weight). Only embedding has slot 0 (the others 1).
   const cases: readonly (readonly [string, readonly string[], readonly string[]])[] = [
     ["linear", ["x", "w", "b"], ["w"]],
     ["conv1d", ["x", "w", "b"], ["w"]],
@@ -365,19 +393,20 @@ test("適格判定は WEIGHT_SLOTS の op それぞれの weight スロット位
     ["conv3d", ["x", "w", "b"], ["w"]],
     ["conv_transpose1d", ["x", "w", "b"], ["w"]],
     ["embedding", ["w", "x"], ["w"]],
-    // 重みスロットを持たない op はどのスロットも適格にしない
+    // Ops without a weight slot make no slot eligible
     ["layer_norm", ["x", "w", "b"], []],
     ["rms_norm", ["x", "w"], []],
     ["masked_fill", ["w", "x"], []],
   ];
-  // 表が WEIGHT_SLOTS の全 op を覆うことを固定する（op を足したのに表が古いまま緑になるのを防ぐ）
+  // Pin that the table covers every op in WEIGHT_SLOTS (keeps it from staying green with a stale table after an op is added)
   assertEquals(
     new Set(cases.filter(([, , expected]) => expected.length > 0).map(([op]) => op)),
     new Set(WEIGHT_SLOTS.keys()),
   );
   for (const [op, ins, expected] of cases) {
-    // 適格判定はグラフの構造（op 名 × スロット位置）だけを見るので、shape / dtype 宣言の
-    // 整合はここでは要らない（契約検査は別層 — plan.ts の validateGraphContracts）。
+    // Eligibility looks only at the graph structure (op name x slot position), so the shape / dtype
+    // declarations need not be consistent here (the contract checks are a separate layer —
+    // validateGraphContracts in plan.ts).
     const graph = {
       initializers: {
         w: { storage: { codec: "f16" } },
@@ -398,18 +427,19 @@ for (const storage of STORAGES) {
     const eligible = (declaration: DeclarationJson): readonly string[] =>
       [...eligibleCompressedInitializers(mergedFor(declaration, {}, storage.codec))].sort();
 
-    // MUST: 消費が weight スロットだけでも、値そのものがグラフ出力なら適格を失う。readback は
-    // semantic f32（4 バイト / 要素）を仮定して重みバッファから写すので、圧縮のまま常駐させると
-    // copy が実バッファをはみ出す（極小サイズではビット列の読み替えが黙って返る）。
+    // MUST: even when consumed only in a weight slot, the value loses eligibility if it is itself a
+    // graph output. Readback copies from the weight buffer assuming semantic f32 (4 bytes / element), so
+    // keeping it resident compressed would make the copy overrun the actual buffer (at tiny sizes a
+    // reinterpretation of the bits comes back silently).
     assertEquals(eligible(linearDeclaration([], {}, ["w"])), []);
 
-    // 失格は**出力に載った名前だけ**に効く（同じグラフの別の重みは適格のまま）
+    // Disqualification applies **only to the name that is an output** (the other weight of the same graph stays eligible)
     const twoWeights = linearDeclaration(
       [{ op: "linear", ins: ["y", "w2", "b"], outs: ["y2"], attrs: {} }],
       { y2: { dtype: "f32", shape: [2, 3] } },
       ["y2", "w"],
     );
-    // requires.ops は重複を拒む（linear 2 本ぶんの宣言は 1 つ）
+    // requires.ops rejects duplicates (one declaration covers the 2 linears)
     twoWeights.requires.ops = ["linear"];
     twoWeights.initializers["w2"] = {};
     twoWeights.values["w2"] = { dtype: "f32", shape: [3, 3] };
@@ -417,7 +447,7 @@ for (const storage of STORAGES) {
   });
 }
 
-test("チャネル軸は消費側 op から決まる（conv_transpose1d だけ 1）", () => {
+test("the channel axis is decided by the consuming op (1 only for conv_transpose1d)", () => {
   const axisOf = (op: string, ins: readonly string[]): number | undefined => {
     const graph = {
       initializers: { w: { storage: { codec: "int8-sym", groupSize: 4, rowAxis: 0 } } },
@@ -428,15 +458,15 @@ test("チャネル軸は消費側 op から決まる（conv_transpose1d だけ 1
   assertEquals(axisOf("linear", ["x", "w", "b"]), 0);
   assertEquals(axisOf("conv1d", ["x", "w", "b"]), 0);
   assertEquals(axisOf("conv2d", ["x", "w", "b"]), 0);
-  // MUST: 重み [Cin, Cout, K] の転置レイアウトなので出力チャネルは軸 1
+  // MUST: the weight [Cin, Cout, K] is in a transposed layout, so the output channel is axis 1
   assertEquals(axisOf("conv_transpose1d", ["x", "w", "b"]), 1);
   assertEquals(axisOf("embedding", ["w", "x"]), 0);
-  // 重みスロットを持たない op / weight スロット以外の位置は軸を持たない
+  // Ops without a weight slot / positions other than the weight slot have no axis
   assertEquals(axisOf("layer_norm", ["x", "w", "b"]), undefined);
   assertEquals(axisOf("embedding", ["x", "w"]), undefined);
 });
 
-test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => {
+test("the same weight consumed by 2 ops with different axes fails loudly", () => {
   const graph = {
     initializers: { w: { storage: { codec: "int8-sym", groupSize: 4, rowAxis: 0 } } },
     nodes: [
@@ -452,13 +482,13 @@ test("同じ重みを軸の違う 2 op が食う形は fail loudly", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 合流層の検証（宣言 × 供給 — GPU 非依存）
+// Validation of the merge layer (declaration x supply — GPU-independent)
 // ---------------------------------------------------------------------------
 
-/** {@link linearDeclaration} の重み [3,4] を i8 量子化したもの（scale は行ごと 3 本）。 */
+/** The weight [3,4] of {@link linearDeclaration}, quantized to i8 (3 scales, one per row). */
 const LINEAR_W = quantizeI8(fill([3, 4], POSITIVE).data, [3, 4], 0);
 
-/** {@link linearDeclaration} への i8 供給。`encoding` を差し替えて 1 点だけ壊せる。 */
+/** The i8 supply for {@link linearDeclaration}. Replacing `encoding` breaks it at exactly one point. */
 const linearTensors = (encoding: EncodingInput): TensorInput[] => [
   { graph: GRAPH_NAME, initializer: "w", bytes: LINEAR_W.bytes, encoding },
   {
@@ -469,10 +499,10 @@ const linearTensors = (encoding: EncodingInput): TensorInput[] => [
   },
 ];
 
-// group 量子化を受理する codec は int4-sym-g だけ（ADR 0069 決定 2）— per-channel codec に
-// 行長と違う groupSize を付けた形は合流層が落とす（group ごとの scale を per-channel として
-// 読む沈黙誤値）。
-test("per-channel codec に行長と違う groupSize を付けると合流で落とす（ADR 0069）", () => {
+// The only codec that accepts group quantization is int4-sym-g (ADR 0069 decision 2) — a
+// per-channel codec with a groupSize different from the row length is rejected by the merge layer
+// (reading per-group scales as per-channel would be a silently wrong value).
+test("a per-channel codec with a groupSize different from the row length is rejected at merge (ADR 0069)", () => {
   const error = assertThrows(
     () =>
       mergeTensors(
@@ -490,12 +520,13 @@ test("per-channel codec に行長と違う groupSize を付けると合流で落
 });
 
 /**
- * f16 / bf16 / i8 は同じ capability 門を通る（適格かどうかは実行可否と別軸）。bf16 は ADR 0131 まで
- * 「宣言としては valid なまま実行できない」格納だったが、今は f16 と同じ経路で実行する。
+ * f16 / bf16 / i8 go through the same capability check (whether it is eligible is a separate axis
+ * from whether it can run). Until ADR 0131, bf16 was a storage that "stays valid as a declaration
+ * but cannot run"; it now runs on the same path as f16.
  */
-test("f16 / bf16 / i8 は capability 門を通る（適格かどうかは実行可否と別軸）", () => {
+test("f16 / bf16 / i8 pass the capability check (whether it is eligible is a separate axis from whether it can run)", () => {
   for (const storage of STORAGES) {
-    // 圧縮重み + f32 bias（`b` を省くと `mergedFor` の既定 f16 になり、fixture の意図が変わる）。
+    // Compressed weights + an f32 bias (leaving out `b` would give `mergedFor`'s default f16 and change the fixture's intent).
     assertRuntimeSupport(
       mergedFor(linearDeclaration(), { b: "f32" }, storage.codec),
       RUNTIME_SUPPORT,
@@ -504,13 +535,15 @@ test("f16 / bf16 / i8 は capability 門を通る（適格かどうかは実行�
 });
 
 /**
- * 適格経路の scale は**平坦添字で引ける形**でなければならない（ADR 0019）。broadcast 可能
- * なだけの形（重み `[3,4]` に対する `[1,4]`）はカーネルが `wscale[col]` と読むので沈黙誤値に
- * なる — 消費側 op の軸と突き合わせる admission（`planWeightResidency`）で落ちることを固定する。
+ * The scale of the eligible path **must have a shape addressable by the flat index** (ADR 0019). A
+ * shape that is merely broadcastable (`[1,4]` for the weight `[3,4]`) is read by the kernel as
+ * `wscale[col]`, a silently wrong value — this pins that the admission which checks it against the
+ * consuming op's axis (`planWeightResidency`) rejects it.
  */
-test("消費側の軸と食い違う rowAxis は admission（prepareContainer）で fail loudly", async () => {
-  // 重み [3,4] の軸 1 を行と宣言した形。容器としては整合するが、消費側（linear）の
-  // チャネル軸は 0 — 通すとカーネルが別の軸の scale を引く沈黙誤値になる。
+test("a rowAxis that disagrees with the consuming axis fails loudly at admission (prepareContainer)", async () => {
+  // A shape that declares axis 1 of the weight [3,4] as the rows. It is consistent as a container,
+  // but the consuming op's (linear's) channel axis is 0 — letting it through would make the kernel
+  // take the scale of another axis, a silently wrong value.
   const opened = await openModelBytes(
     linearDeclaration(),
     linearTensors({
@@ -529,17 +562,17 @@ test("消費側の軸と食い違う rowAxis は admission（prepareContainer）
 });
 
 // ---------------------------------------------------------------------------
-// CPU 側の展開（ホスト鏡像の仕様）
+// CPU-side expansion (the spec of the host mirror)
 // ---------------------------------------------------------------------------
 
-test("f16 → f32 の展開は ±0 / subnormal / ±Inf / NaN / 最大最小 normal を正しく扱う", () => {
+test("f16 -> f32 expansion handles ±0 / subnormal / ±Inf / NaN / the largest and smallest normal correctly", () => {
   assert(Object.is(f16BitsToF32(0x0000), 0), "+0");
   assert(Object.is(f16BitsToF32(0x8000), -0), "-0");
-  // subnormal: 最小（2^-24）と最大（2^-14 に 1 ulp 足りない）
+  // subnormal: the smallest (2^-24) and the largest (1 ulp short of 2^-14)
   assertEquals(f16BitsToF32(0x0001), 2 ** -24);
   assertEquals(f16BitsToF32(0x03ff), 1023 * 2 ** -24);
   assertEquals(f16BitsToF32(0x8001), -(2 ** -24));
-  // normal: 最小（2^-14）と最大（65504）
+  // normal: the smallest (2^-14) and the largest (65504)
   assertEquals(f16BitsToF32(0x0400), 2 ** -14);
   assertEquals(f16BitsToF32(0x7bff), 65504);
   assertEquals(f16BitsToF32(0xfbff), -65504);
@@ -548,20 +581,20 @@ test("f16 → f32 の展開は ±0 / subnormal / ±Inf / NaN / 最大最小 norm
   assertEquals(f16BitsToF32(0x7c00), Infinity);
   assertEquals(f16BitsToF32(0xfc00), -Infinity);
   assert(Number.isNaN(f16BitsToF32(0x7e00)), "quiet NaN");
-  assert(Number.isNaN(f16BitsToF32(0xfc01)), "signaling NaN（符号付き）");
-  // 展開後は必ず f32 で厳密（丸めが 1 度も起きない）
+  assert(Number.isNaN(f16BitsToF32(0xfc01)), "signaling NaN (signed)");
+  // After expansion the value is always exact in f32 (no rounding ever happens)
   for (const bits of [0x0001, 0x03ff, 0x0400, 0x7bff, 0x3555]) {
     assertEquals(Math.fround(f16BitsToF32(bits)), f16BitsToF32(bits), `bits=${bits}`);
   }
 });
 
-test("bf16 → f32 の展開は上位 16 bit の写し（±0 / subnormal / ±Inf / NaN / 最大最小 normal）", () => {
+test("bf16 -> f32 expansion copies the upper 16 bits (±0 / subnormal / ±Inf / NaN / the largest and smallest normal)", () => {
   assert(Object.is(bf16BitsToF32(0x0000), 0), "+0");
   assert(Object.is(bf16BitsToF32(0x8000), -0), "-0");
-  // subnormal: 最小（2^-133）と最大（2^-126 に 1 ulp 足りない）— f32 の subnormal にそのまま当たる
+  // subnormal: the smallest (2^-133) and the largest (1 ulp short of 2^-126) — they map directly onto f32 subnormals
   assertEquals(bf16BitsToF32(0x0001), 2 ** -133);
   assertEquals(bf16BitsToF32(0x007f), 127 * 2 ** -133);
-  // normal: 最小（2^-126）と最大（(2 - 2^-7) · 2^127）
+  // normal: the smallest (2^-126) and the largest ((2 - 2^-7) · 2^127)
   assertEquals(bf16BitsToF32(0x0080), 2 ** -126);
   assertEquals(bf16BitsToF32(0x7f7f), (2 - 2 ** -7) * 2 ** 127);
   assertEquals(bf16BitsToF32(0xff7f), -(2 - 2 ** -7) * 2 ** 127);
@@ -570,8 +603,8 @@ test("bf16 → f32 の展開は上位 16 bit の写し（±0 / subnormal / ±Inf
   assertEquals(bf16BitsToF32(0x7f80), Infinity);
   assertEquals(bf16BitsToF32(0xff80), -Infinity);
   assert(Number.isNaN(bf16BitsToF32(0x7fc0)), "quiet NaN");
-  assert(Number.isNaN(bf16BitsToF32(0xff81)), "signaling NaN（符号付き）");
-  // 展開はビットの写しなので、f32 → bf16 の往復（下位 16 bit が 0 の値）は恒等
+  assert(Number.isNaN(bf16BitsToF32(0xff81)), "signaling NaN (signed)");
+  // The expansion is a copy of bits, so the f32 -> bf16 round trip (values whose lower 16 bits are 0) is the identity
   for (const bits of [0x0001, 0x007f, 0x0080, 0x7f7f, 0x3555]) {
     const value = bf16BitsToF32(bits);
     assertEquals(Math.fround(value), value, `bits=${bits}`);
@@ -579,25 +612,25 @@ test("bf16 → f32 の展開は上位 16 bit の写し（±0 / subnormal / ±Inf
   }
 });
 
-test("decodeI8: 符号付き 8bit を per-channel scale で展開する（keepdim broadcast）", () => {
-  // [2,3] の重み。チャネル軸 0 の scale [2,1] が行ごとに掛かる。
+test("decodeI8: expands signed 8-bit values with the per-channel scale (keepdim broadcast)", () => {
+  // A [2,3] weight. The scale [2,1] on channel axis 0 applies per row.
   const bytes = i8BytesFrom([127, -128, 0, 1, -1, 64]);
   const scale = Float32Array.from([0.5, 0.25]);
   assertEquals([...decodeI8(bytes, [2, 3], scale, [2, 1])], [63.5, -64, 0, 0.25, -0.25, 16]);
-  // チャネル軸 1（conv_transpose1d の形）。列ごとに掛かる。
+  // Channel axis 1 (the conv_transpose1d shape). Applies per column.
   assertEquals(
     [...decodeI8(bytes, [2, 3], Float32Array.from([1, 2, 4]), [1, 3])],
     [127, -256, 0, 1, -2, 256],
   );
-  // 全軸 1 の scale（per-tensor 形）も broadcast としては成立する
+  // A scale with every axis 1 (per-tensor shape) also holds as a broadcast
   assertEquals(
     [...decodeI8(bytes, [2, 3], Float32Array.from([2]), [1, 1])],
     [254, -256, 0, 2, -2, 128],
   );
 });
 
-test("decodeI8: rank 3 以上でも軸ごとに正しく broadcast する", () => {
-  // [2,3,2]（conv1d の [Cout,Cin,K] 形）。チャネル軸 0 = 出力チャネル。
+test("decodeI8: broadcasts correctly per axis at rank 3 and above too", () => {
+  // [2,3,2] (the [Cout,Cin,K] shape of conv1d). Channel axis 0 = output channels.
   const q = [1, 2, 3, 4, 5, 6, -1, -2, -3, -4, -5, -6];
   const bytes = i8BytesFrom(q);
   const scale = Float32Array.from([0.5, 4]);
@@ -606,26 +639,26 @@ test("decodeI8: rank 3 以上でも軸ごとに正しく broadcast する", () =
     ...q.slice(0, 6).map((value) => value * 0.5),
     ...q.slice(6).map((value) => value * 4),
   ]);
-  // 中央の軸（conv_transpose1d の [Cin,Cout,K] 形 — 軸 1 が出力チャネル）
+  // The middle axis (the [Cin,Cout,K] shape of conv_transpose1d — axis 1 is the output channels)
   const middle = [...decodeI8(bytes, [2, 3, 2], Float32Array.from([1, 2, 4]), [1, 3, 1])];
   assertEquals(middle, [1, 2, 6, 8, 20, 24, -1, -2, -6, -8, -20, -24]);
 });
 
-test("decodeI8: 展開の丸めは f32 の 1 回だけ（GPU の f32 乗算と同値）", () => {
-  // 0.1 は f32 で丸められる値。q·s は f64 で厳密（7bit × 24bit）なので、f32 へ 1 度だけ
-  // 丸めた結果が GPU の f32 乗算の正しい丸めと一致する。
+test("decodeI8: the expansion rounds only once, in f32 (the same as the GPU's f32 multiplication)", () => {
+  // 0.1 is a value that f32 rounds. q·s is exact in f64 (7 bits x 24 bits), so the result rounded
+  // once to f32 matches the correct rounding of the GPU's f32 multiplication.
   const scale = Float32Array.from([0.1]);
   const decoded = decodeI8(i8BytesFrom([3, 7, 127]), [3, 1], scale, [1, 1]);
   for (const [index, q] of [3, 7, 127].entries()) {
     assertEquals(decoded[index], Math.fround(q * scale[0]), `q=${q}`);
-    assertEquals(Math.fround(decoded[index]), decoded[index], `q=${q}: f32 で厳密`);
+    assertEquals(Math.fround(decoded[index]), decoded[index], `q=${q}: exact in f32`);
   }
 });
 
-test("decodeI8: broadcast できない scale と要素数不一致を拒否する", () => {
+test("decodeI8: rejects a scale that cannot broadcast and an element-count mismatch", () => {
   const bytes = i8BytesFrom([1, 2, 3, 4, 5, 6]);
   assertThrows(() => decodeI8(bytes, [2, 3], Float32Array.from([1, 2]), [2]), I8Error, "rank");
-  // 軸 1 が 2（重みの 3 と違う）— 要素数は shape と整合しているので broadcast 検査が見る
+  // Axis 1 is 2 (unlike the weight's 3) — the element count is consistent with the shape, so the broadcast check catches it
   assertThrows(
     () => decodeI8(bytes, [2, 3], Float32Array.from([1, 2, 3, 4]), [2, 2]),
     I8Error,
@@ -638,23 +671,23 @@ test("decodeI8: broadcast できない scale と要素数不一致を拒否す�
   );
 });
 
-test("alignI8Payload: 4 バイト境界までゼロ詰めし、整列済みはコピーしない", () => {
+test("alignI8Payload: zero-fills up to a 4-byte boundary and does not copy an already aligned payload", () => {
   const aligned = i8BytesFrom([1, 2, 3, 4]);
   assertEquals(alignI8Payload(aligned), aligned);
-  assert(alignI8Payload(aligned) === aligned, "整列済みは同じ view を返す");
+  assert(alignI8Payload(aligned) === aligned, "an aligned payload returns the same view");
   for (const length of [1, 2, 3, 5, 6, 7]) {
     const padded = alignI8Payload(i8BytesFrom(new Array(length).fill(7)));
-    assertEquals(padded.byteLength % 4, 0, `${length} バイト`);
-    assertEquals(padded.byteLength, length + (4 - (length % 4)), `${length} バイト`);
+    assertEquals(padded.byteLength % 4, 0, `${length} bytes`);
+    assertEquals(padded.byteLength, length + (4 - (length % 4)), `${length} bytes`);
     assertEquals([...padded.slice(length)], new Array(padded.byteLength - length).fill(0));
   }
 });
 
 // ---------------------------------------------------------------------------
-// GPU 実行（変種カーネル）
+// GPU execution (variant kernels)
 // ---------------------------------------------------------------------------
 
-/** weight を圧縮 initializer にした単一ノードの宣言 + 開いた容器。 */
+/** The declaration of a single node with the weight as a compressed initializer + the opened container. */
 const weightedModel = (
   testCase: WeightedCase,
   quantized: QuantizedWeight,
@@ -664,8 +697,9 @@ const weightedModel = (
     y: { dtype: "f32", shape: [...testCase.outShape] },
   };
   const initializers: DeclarationJson["initializers"] = { w: {} };
-  // NOTE: 要素数が奇数の f16（42 バイト）でも並べる順は効かない — 容器は block ごとに
-  // 先頭 64 B 整列 + 末尾のゼロ詰めを書き手が焼くので、隣に何を置いても整列は崩れない。
+  // NOTE: even for an f16 with an odd element count (42 bytes), the order of placement does not
+  // matter — the writer bakes 64 B alignment at the start of each block + the trailing zero fill into
+  // the container, so the alignment holds whatever sits next to it.
   const tensors: TensorInput[] = [];
   if (testCase.bias !== undefined) {
     values["b"] = { dtype: "f32", shape: [...testCase.bias.shape] };
@@ -683,7 +717,7 @@ const weightedModel = (
     bytes: quantized.bytes,
     encoding: quantized.encoding,
   });
-  // ins の並びは契約どおり（embedding は weight が先頭・他は x の次）
+  // The order of ins follows the contract (embedding has the weight first, the others after x)
   const ins =
     testCase.op === "embedding"
       ? ["w", ...testCase.inputs.map(([name]) => name)]
@@ -734,13 +768,13 @@ const runWeighted = async (
 };
 
 /**
- * 5 変種の数値ケース。**重みの総要素数が全て奇数かつ 4 の倍数でない**（ゼロ詰め経路）で、
- * **重み行の長さも奇数かつ 4 の倍数でない**（対の選択 / 語とレーンの選択が平坦添字である
- * ことの検出器）。
+ * Numeric cases of the 5 variants. **The total element count of every weight is odd and not a
+ * multiple of 4** (the zero-fill path), and **the weight row length is also odd and not a multiple of
+ * 4** (the detector that the pair choice / the word and lane choice uses the flat index).
  */
 const WEIGHTED_CASES: readonly WeightedCase[] = [
   {
-    // k = 7（奇数）/ 重み 3·7 = 21 要素（奇数）
+    // k = 7 (odd) / weight 3·7 = 21 elements (odd)
     name: "linear [3,7] × W[3,7] + b[3]",
     op: "linear",
     inputs: [["x", fill([3, 7], SIGNED)]],
@@ -750,7 +784,7 @@ const WEIGHTED_CASES: readonly WeightedCase[] = [
     outShape: [3, 3],
   },
   {
-    // Cin·K = 9（奇数）/ 重み 5·3·3 = 45 要素（奇数）
+    // Cin·K = 9 (odd) / weight 5·3·3 = 45 elements (odd)
     name: "conv1d [1,3,9] * W[5,3,3] stride=1 padding=1",
     op: "conv1d",
     inputs: [["x", fill([1, 3, 9], SIGNED)]],
@@ -761,7 +795,7 @@ const WEIGHTED_CASES: readonly WeightedCase[] = [
     attrs: { stride: 1, padding: 1, dilation: 1, groups: 1 },
   },
   {
-    // Cin·Kh·Kw = 9（奇数）/ 重み 5·3·3·1 = 45 要素（奇数）。Kh ≠ Kw で軸取り違えも赤にする
+    // Cin·Kh·Kw = 9 (odd) / weight 5·3·3·1 = 45 elements (odd). Kh ≠ Kw turns an axis mix-up red too
     name: "conv2d [1,3,5,4] * W[5,3,3,1]",
     op: "conv2d",
     inputs: [["x", fill([1, 3, 5, 4], SIGNED)]],
@@ -772,9 +806,9 @@ const WEIGHTED_CASES: readonly WeightedCase[] = [
     attrs: { stride: [1, 1], padding: [1, 0], dilation: [1, 1], groups: 1 },
   },
   {
-    // K = 3（奇数・契約 2·padding == K − stride を満たす stride 1）/ 重み 3·5·3 = 45 要素
-    // **チャネル軸は 1**（[Cin,Cout,K] の転置レイアウト）で、
-    // Cin ≠ Cout なので軸を 0 と取り違えると shape 検査で赤くなる。
+    // K = 3 (odd; stride 1 satisfies the contract 2·padding == K − stride) / weight 3·5·3 = 45 elements
+    // **The channel axis is 1** (the transposed [Cin,Cout,K] layout), and Cin ≠ Cout, so mistaking the
+    // axis for 0 turns the shape check red.
     name: "conv_transpose1d [1,3,7] * W[3,5,3] stride=1 padding=1",
     op: "conv_transpose1d",
     inputs: [["x", fill([1, 3, 7], SIGNED)]],
@@ -785,7 +819,7 @@ const WEIGHTED_CASES: readonly WeightedCase[] = [
     attrs: { stride: 1, padding: 1 },
   },
   {
-    // H = 3（奇数）/ 重み 5·3 = 15 要素（奇数）
+    // H = 3 (odd) / weight 5·3 = 15 elements (odd)
     name: "embedding W[5,3] × index [2,4]",
     op: "embedding",
     inputs: [["x", fill([2, 4], (i) => (i * 3) % 5, "i32")]],
@@ -809,12 +843,12 @@ for (const storage of STORAGES) {
           `${testCase.name}: payload is 4-byte aligned (the zero-padding path is not taken)`,
         );
         const { output, residentBytes } = await runWeighted(gpu, testCase, quantized);
-        // 圧縮のまま常駐している（= CPU 展開に落ちていない）。ゼロ詰めぶんと scale を含む。
+        // Resident compressed (= not fallen back to CPU expansion). Includes the zero fill and the scale.
         const padded = quantized.bytes.byteLength + (4 - (quantized.bytes.byteLength % 4));
         assertEquals(
           residentBytes,
           padded + (quantized.scale?.byteLength ?? 0),
-          `${testCase.name}: GPU 常駐圧縮バイト数（scale 込み）`,
+          `${testCase.name}: compressed bytes resident on the GPU (scale included)`,
         );
         const reference = refTensor(testCase.weight.shape, quantized.values);
         const operands: RefTensor[] =
@@ -842,21 +876,25 @@ for (const storage of STORAGES) {
 }
 
 /**
- * linear の GEMM タイル境界（64×64 レジスタタイル — src/kernels/gemm.ts）を圧縮重みで踏む。
+ * Exercises linear's GEMM tile boundaries (64×64 register tiles — src/kernels/gemm.ts) with
+ * compressed weights.
  *
- * f16 — MUST: **v4 経路とスカラ経路を対で持つ**。
- * - v4（`k%4==0 && n%4==0`）は u32 **2 語**で 4 要素を組む経路で、2 語目のオフセット誤りは
- *   k が 4 の倍数の形なら必ず値に出る（k=20）。
- * - スカラ経路は 1 語 2 要素の偶奇選択で、上の {@link WEIGHTED_CASES}（k=7）と合わせて
- *   「行長が 2 の倍数でない」形が唯一の検出器（k=37）。v4 経路では行頭が常に語境界に来るので
- *   この罠を**踏めない** — スカラ側のケースを削ると検出力が消える。
+ * f16 — MUST: **have the v4 path and the scalar path as a pair**.
+ * - v4 (`k%4==0 && n%4==0`) builds 4 elements from **2 u32 words**; an offset error in the second
+ *   word always shows in the values for shapes where k is a multiple of 4 (k=20).
+ * - The scalar path selects by parity, 2 elements per word; together with {@link WEIGHTED_CASES}
+ *   (k=7) above, the shape "row length not a multiple of 2" is the only detector (k=37). On the v4
+ *   path a row always starts on a word boundary, so this trap **cannot be hit** — removing the scalar
+ *   case would remove the detection power.
  *
- * i8 — MUST: **v4 経路とスカラ経路を対で持ち、どちらも n / k を違う長さ**にする。scale は
- * **出力チャネルごと**（`wscale[wcol]`）で、別の軸（行 / k / 出力列以外）から引く誤りは
- * 「チャネルごとに scale が違う」形でしか値に出ない。quantizeI8 は行ごとに最大値から
- * scale を決めるので、行ごとに値の違う重みを入れれば scale も行ごとに違う。
- * MUST: v4 経路でも scale は**成分ごとの f32 乗算**（`vec4 * scalar`）— 縮約の外へ出すと
- * ADR 0019 の「(Σ x·q)·s は CPU 展開とのビット一致を失う」に触れる。
+ * i8 — MUST: **have the v4 path and the scalar path as a pair, both with different n / k lengths**.
+ * The scale is **per output channel** (`wscale[wcol]`), and the error of taking it from another axis
+ * (row / k / anything other than the output column) shows in the values only when "the scale differs
+ * per channel". quantizeI8 sets the scale from each row's maximum, so weights whose values differ per
+ * row give a scale that differs per row too.
+ * MUST: even on the v4 path the scale is **an f32 multiplication per component** (`vec4 * scalar`) —
+ * moving it outside the reduction would run into ADR 0019's "(Σ x·q)·s loses bit identity with CPU
+ * expansion".
  */
 for (const storage of STORAGES) {
   test.skipIf(!GPU_AVAILABLE)(storage.titles.tiles, async () => {
@@ -864,9 +902,12 @@ for (const storage of STORAGES) {
     try {
       for (const testCase of storage.tileCases) {
         const quantized = storage.quantize(testCase.weight, testCase.channelAxis);
-        // scale がチャネルごとに違う（同じなら軸の取り違えが数値に出ない — 恒真化の門）
+        // The scale differs per channel (if it were the same, an axis mix-up would not show in the numbers — the vacuity check)
         if (quantized.scale !== undefined) {
-          assert(new Set(quantized.scale).size > 1, `${testCase.name}: scale が全チャネルで同じ`);
+          assert(
+            new Set(quantized.scale).size > 1,
+            `${testCase.name}: the scale is the same for every channel`,
+          );
         }
         const { output } = await runWeighted(gpu, testCase, quantized);
         const expected = applyReferenceOp(
@@ -890,18 +931,18 @@ for (const storage of STORAGES) {
 }
 
 /**
- * GPU の `unpack2x16float` と CPU の {@link f16BitsToF32} が**全 65,536 パターンで
- * ビット一致**する（ADR 0018 の検証条件）。
+ * The GPU's `unpack2x16float` and the CPU's {@link f16BitsToF32} are **bit-identical over all 65,536
+ * patterns** (ADR 0018's verification condition).
  *
- * 運び方: embedding の weight を [256, 256] の f16 とし、`bits = row·256 + col` を並べて
- * 全パターンを 1 度に敷き詰める。embedding は行 gather で算術を 1 つも挟まないので、
- * 出力は dequant 結果そのもの。
+ * How: the embedding weight is a [256, 256] f16 laid out as `bits = row·256 + col`, covering every
+ * pattern at once. embedding is a row gather with not a single arithmetic operation in between, so
+ * the output is the dequant result itself.
  *
- * MUST: NaN だけは**双方 NaN**で見る。WGSL は NaN のペイロード伝播を保証しないため、
- * ビット列の一致を要求すると仕様外の性質に依存したテストになる。
+ * MUST: NaN alone is checked as **NaN on both sides**. WGSL does not guarantee NaN payload
+ * propagation, so demanding bit equality would make the test depend on a property outside the spec.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GPU の unpack2x16float と CPU 展開が全 65,536 パターンでビット一致（実 GPU）",
+  "the GPU's unpack2x16float and CPU expansion are bit-identical over all 65,536 patterns (real GPU)",
   async () => {
     const vocab = 256;
     const hidden = 256;
@@ -936,7 +977,7 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const outputs = await session.run({ index: fill([vocab], (i) => i, "i32") });
       actual = outputs["y"].data as Float32Array<ArrayBuffer>;
-      // 圧縮のまま常駐していなければ「GPU の展開」を見ていない
+      // If it is not resident compressed, the test is not looking at "the GPU's expansion"
       assertEquals(session.diagnostics().storage.residentCompressedBytes, bytes.byteLength);
     } finally {
       await session.dispose();
@@ -950,7 +991,7 @@ test.skipIf(!GPU_AVAILABLE)(
     for (let i = 0; i < expected.length; i += 1) {
       if (Number.isNaN(expected[i])) {
         nan += 1;
-        assert(Number.isNaN(actual[i]), `pattern 0x${i.toString(16)}: GPU 側が NaN でない`);
+        assert(Number.isNaN(actual[i]), `pattern 0x${i.toString(16)}: the GPU side is not NaN`);
         continue;
       }
       if (((i >> 10) & 0x1f) === 0 && (i & 0x3ff) !== 0) subnormal += 1;
@@ -960,22 +1001,25 @@ test.skipIf(!GPU_AVAILABLE)(
         `pattern 0x${i.toString(16)}: GPU ${actual[i]} / CPU ${expected[i]}`,
       );
     }
-    // 網羅の証拠（NaN 2046 本・subnormal 2046 本を実際に踏んでいる）
-    assertEquals(nan, 2046, "NaN パターン数");
-    assertEquals(subnormal, 2046, "subnormal パターン数");
+    // Evidence of exhaustiveness (2046 NaN and 2046 subnormal patterns are actually exercised)
+    assertEquals(nan, 2046, "number of NaN patterns");
+    assertEquals(subnormal, 2046, "number of subnormal patterns");
   },
 );
 
 /**
- * GPU の bf16 展開（`bitcast<f32>` — ADR 0131）と CPU の {@link bf16BitsToF32} が**全 65,536
- * パターンで一致**する。運び方は f16 の門と同じ（embedding の [256, 256]・`bits = row·256 + col`）。
+ * The GPU's bf16 expansion (`bitcast<f32>` — ADR 0131) and the CPU's {@link bf16BitsToF32} **agree
+ * over all 65,536 patterns**. The method is the same as the f16 check (embedding [256, 256],
+ * `bits = row·256 + col`).
  *
- * MUST: NaN は**双方 NaN**で見る（WGSL は NaN のペイロード伝播を保証しない — f16 と同じ）。
- * MUST: f32 の subnormal に当たるパターン（指数 0・仮数 ≠ 0）は **GPU が 0 へ flush してもよい**
- * （WGSL は subnormal の保持を保証しない）— それ以外はビット一致を要求する。
+ * MUST: NaN is checked as **NaN on both sides** (WGSL does not guarantee NaN payload propagation —
+ * the same as f16).
+ * MUST: patterns that map onto f32 subnormals (exponent 0, mantissa ≠ 0) **may be flushed to 0 by
+ * the GPU** (WGSL does not guarantee that subnormals are kept) — everything else must be
+ * bit-identical.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GPU の bf16 bitcast 展開と CPU 展開が全 65,536 パターンで一致（実 GPU・subnormal は flush を許す）",
+  "the GPU's bf16 bitcast expansion and CPU expansion agree over all 65,536 patterns (real GPU, subnormal flush allowed)",
   async () => {
     const vocab = 256;
     const hidden = 256;
@@ -1010,7 +1054,7 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const outputs = await session.run({ index: fill([vocab], (i) => i, "i32") });
       actual = outputs["y"].data as Float32Array<ArrayBuffer>;
-      // 圧縮のまま常駐していなければ「GPU の展開」を見ていない
+      // If it is not resident compressed, the test is not looking at "the GPU's expansion"
       assertEquals(session.diagnostics().storage.residentCompressedBytes, bytes.byteLength);
     } finally {
       await session.dispose();
@@ -1025,7 +1069,7 @@ test.skipIf(!GPU_AVAILABLE)(
     for (let i = 0; i < expected.length; i += 1) {
       if (Number.isNaN(expected[i])) {
         nan += 1;
-        assert(Number.isNaN(actual[i]), `pattern 0x${i.toString(16)}: GPU 側が NaN でない`);
+        assert(Number.isNaN(actual[i]), `pattern 0x${i.toString(16)}: the GPU side is not NaN`);
         continue;
       }
       if (((i >> 7) & 0xff) === 0 && (i & 0x7f) !== 0) {
@@ -1041,27 +1085,30 @@ test.skipIf(!GPU_AVAILABLE)(
         `pattern 0x${i.toString(16)}: GPU ${actual[i]} / CPU ${expected[i]}`,
       );
     }
-    // 網羅の証拠（NaN 254 本・subnormal 254 本を実際に踏んでいる）。flush の有無は機ごとの事実で、
-    // 門の条件ではない（ここでは数だけ残す）。
-    assertEquals(nan, 254, "NaN パターン数");
-    assertEquals(subnormal, 254, "subnormal パターン数");
-    assert(flushed <= subnormal, "flush の数が subnormal の数を超えている");
+    // Evidence of exhaustiveness (254 NaN and 254 subnormal patterns are actually exercised). Whether
+    // flushing happens is a fact of each machine, not a condition of the check (only the counts are
+    // kept here).
+    assertEquals(nan, 254, "number of NaN patterns");
+    assertEquals(subnormal, 254, "number of subnormal patterns");
+    assert(flushed <= subnormal, "the flush count exceeds the subnormal count");
   },
 );
 
 /**
- * GPU の `unpack4xI8` + scale 乗算と CPU の {@link decodeI8} が**全 256 値 × 4 レーン位置で
- * ビット一致**する（ADR 0019 の検証条件）。
+ * The GPU's `unpack4xI8` + scale multiplication and the CPU's {@link decodeI8} are **bit-identical
+ * over all 256 values x 4 lane positions** (ADR 0019's verification condition).
  *
- * 運び方: embedding の weight を [256, 4] の i8 とし、行 r の 4 要素すべてに値 `r − 128` を
- * 置く。平坦添字は `r·4 + col` なので、同じ値が 4 つのレーン位置すべてに現れる。embedding は
- * 行 gather で算術を 1 つも挟まないので、出力は dequant 結果そのもの。
+ * How: the embedding weight is a [256, 4] i8 with the value `r − 128` in all 4 elements of row r.
+ * The flat index is `r·4 + col`, so the same value appears in all 4 lane positions. embedding is a
+ * row gather with not a single arithmetic operation in between, so the output is the dequant result
+ * itself.
  *
- * scale は行ごとに違う非 2 冪の値にする（scale を掛け忘れる誤り・行を取り違える誤りの検出器で、
- * 同時に「f32 乗算の丸め 1 回」がホストと一致することの検証になる）。
+ * The scale is a different non-power-of-2 value per row (the detector for forgetting to multiply by
+ * the scale and for mixing up rows, and at the same time a check that "one rounding of the f32
+ * multiplication" matches the host).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GPU の unpack4xI8 と CPU 展開が全 256 値 × 4 レーンでビット一致（実 GPU）",
+  "the GPU's unpack4xI8 and CPU expansion are bit-identical over all 256 values x 4 lanes (real GPU)",
   async () => {
     const vocab = 256;
     const hidden = 4;
@@ -1103,7 +1150,7 @@ test.skipIf(!GPU_AVAILABLE)(
     try {
       const outputs = await session.run({ index: fill([vocab], (i) => i, "i32") });
       actual = outputs["y"].data as Float32Array<ArrayBuffer>;
-      // 圧縮のまま常駐していなければ「GPU の展開」を見ていない
+      // If it is not resident compressed, the test is not looking at "the GPU's expansion"
       assertEquals(
         session.diagnostics().storage.residentCompressedBytes,
         bytes.byteLength + scale.byteLength,
@@ -1124,17 +1171,18 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       seen.add(`${quantized[i]}:${i & 3}`);
     }
-    // 網羅の証拠（256 値 × 4 レーンを実際に踏んでいる）
-    assertEquals(seen.size, 256 * 4, "値 × レーンの網羅数");
+    // Evidence of exhaustiveness (256 values x 4 lanes are actually exercised)
+    assertEquals(seen.size, 256 * 4, "number of value x lane combinations covered");
   },
 );
 
 /**
- * 変種経路の full-write（ADR 0014）。プール再利用バッファに毒値を仕込んでから圧縮変種を
- * 実行し、1 語も残らないことを見る。
+ * full-write of the variant paths (ADR 0014). Poison values are planted in pool-reused buffers
+ * before running the compressed variants, and the test checks that not a single word remains.
  *
- * 仕込み方は tests/gpu_full_write_test.ts と同じ（消費者ゼロの恒等 cast の出力が
- * ノード境界でプールへ戻り、次の確保で配り直される）。
+ * They are planted the same way as in tests/gpu_full_write_test.ts (the output of an identity cast
+ * with no consumers returns to the pool at the node boundary and is handed out again by the next
+ * allocation).
  */
 const poisonedGraph = (
   op: string,
@@ -1178,14 +1226,14 @@ const poisonedGraph = (
   };
 };
 
-/** 毒値 0xDEADBEEF を f32 として読んだもの（0 でない有限値）。 */
+/** The poison value 0xDEADBEEF read as f32 (a non-zero finite value). */
 const POISON = new Float32Array(new Uint32Array([0xdeadbeef]).buffer)[0];
 
 for (const storage of STORAGES) {
   test.skipIf(!GPU_AVAILABLE)(storage.titles.poison, async () => {
     const gpu = await acquireGpu();
     try {
-      // linear（タイル形）と embedding（grid-stride + 範囲外分岐）の 2 本で踏む
+      // Exercised with 2 ops: linear (tiled) and embedding (grid-stride + out-of-range branch)
       const cases: readonly {
         readonly name: string;
         readonly graph: DeclarationJson;
@@ -1257,12 +1305,12 @@ for (const storage of STORAGES) {
             ...testCase.inputs,
           });
           const reuseCount = session.diagnostics().lastRun?.reuseCount ?? 0;
-          // 再利用が起きていなければ毒値検査は何も見ていない（恒真化の門）
-          assert(reuseCount >= 1, `${testCase.name}: プール再利用が起きていない`);
+          // If no reuse happened, the poison check sees nothing (the vacuity check)
+          assert(reuseCount >= 1, `${testCase.name}: no pool reuse happened`);
           assertEquals(
             [...outputs["y"].data].filter((value) => value === POISON),
             [],
-            `${testCase.name}: 毒値の残存`,
+            `${testCase.name}: poison values remain`,
           );
         } finally {
           await session.dispose();
@@ -1275,11 +1323,12 @@ for (const storage of STORAGES) {
 }
 
 /**
- * 適格外（混在消費）は CPU で f32 展開され、**適格経路と同じ値**を出す
- * （i8 では ADR 0019 の「要素ごと dequant」がこの一致の根拠）。
+ * The ineligible case (mixed consumption) is expanded to f32 on the CPU and gives **the same values
+ * as the eligible path** (for i8, ADR 0019's "per-element dequant" is the reason they agree).
  *
- * MUST: 2 経路の出力を突き合わせる。片方だけを CPU 参照と比べると、両経路が同じだけ
- * ずれている形（例: 展開表が誤っていて GPU 側も同じ誤りを持つ）を見逃す。
+ * MUST: compare the outputs of the 2 paths. Comparing only one of them with the CPU reference would
+ * miss the case where both paths are off by the same amount (e.g. the expansion table is wrong and
+ * the GPU side has the same error).
  */
 for (const storage of STORAGES) {
   test.skipIf(!GPU_AVAILABLE)(storage.titles.mixed, async () => {
@@ -1329,7 +1378,7 @@ for (const storage of STORAGES) {
     const gpu = await acquireGpu();
     try {
       const eligible = await run(gpu, linearDeclaration());
-      // w を add でも消費する = 混在消費（同じ linear ノードは残す）
+      // w is also consumed by add = mixed consumption (the same linear node stays)
       const mixed = await run(
         gpu,
         linearDeclaration(
@@ -1341,14 +1390,18 @@ for (const storage of STORAGES) {
       assertEquals(
         eligible.resident,
         storage.mixedResidentBytes,
-        "適格側は圧縮のまま常駐（scale 込み）",
+        "the eligible side stays resident compressed (scale included)",
       );
       assertEquals(eligible.expanded, 0);
-      assertEquals(mixed.resident, 0, "混在消費は 1 バイトも圧縮常駐しない");
-      assertEquals(mixed.expanded, 48, "CPU 展開バイト数（f32 換算 12 要素）");
-      // 同じ重み・同じ演算なので出力はビット単位で一致する（丸めの差も出ない）
+      assertEquals(
+        mixed.resident,
+        0,
+        "mixed consumption keeps not a single byte resident compressed",
+      );
+      assertEquals(mixed.expanded, 48, "CPU-expanded bytes (12 elements as f32)");
+      // Same weights, same computation, so the outputs are bit-identical (no rounding difference either)
       assertEquals([...mixed.y.data], [...eligible.y.data]);
-      // オラクル: 丸め後の重みでの CPU 参照
+      // Oracle: the CPU reference with the rounded weights
       const expected = applyReferenceOp(
         "linear",
         [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],
@@ -1364,15 +1417,15 @@ for (const storage of STORAGES) {
 }
 
 /**
- * 診断（ADR 0006 の常設義務）の検算。適格・適格外・非圧縮を 1 つのグラフに混ぜ、
- * 両方の数字が**実バイト数**と一致することを見る。
+ * A cross-check of the diagnostics (a standing obligation of ADR 0006). Eligible, ineligible and
+ * uncompressed are mixed into one graph, and both numbers must match **the actual byte counts**.
  *
- * bias を圧縮格納で宣言しても**必ず CPU 展開**に落ちる（bias スロットは適格判定に載らない —
- * プロトタイプの降格バグの逆）。
+ * Even when the bias is declared with compressed storage it **always falls back to CPU expansion**
+ * (the bias slot is not part of eligibility — the reverse of the prototype's demotion bug).
  */
 for (const storage of STORAGES) {
   test.skipIf(!GPU_AVAILABLE)(storage.titles.diagnostics, async () => {
-    // 重み 3·7 = 21 要素（ゼロ詰めが要る長さ）/ bias 3 要素を **圧縮格納で宣言**
+    // Weight 3·7 = 21 elements (a length that needs the zero fill) / bias of 3 elements **declared with compressed storage**
     const weight = storage.quantize(fill([3, 7], POSITIVE), 0);
     const bias = storage.quantize(fill([3], SIGNED), 0);
     const scale = fill([3], POSITIVE);
@@ -1398,7 +1451,7 @@ for (const storage of STORAGES) {
     };
     const opened = await openModelBytes(declaration, [
       { graph: GRAPH_NAME, initializer: "w", bytes: weight.bytes, encoding: weight.encoding },
-      // i8: bias は rank 1（行 = 3・行長 1）— per-channel の groupSize は行長 1。
+      // i8: the bias is rank 1 (rows = 3, row length 1) — the per-channel groupSize is the row length 1.
       { graph: GRAPH_NAME, initializer: "b", bytes: bias.bytes, encoding: bias.encoding },
       {
         graph: GRAPH_NAME,
@@ -1413,10 +1466,11 @@ for (const storage of STORAGES) {
       const diagnostics = session.diagnostics().storage;
       assertEquals(weight.bytes.byteLength, storage.diagnostics.payloadBytes);
       assertEquals(diagnostics.residentCompressedBytes, storage.diagnostics.residentBytes);
-      // 適格外: bias 3 要素を f32 展開 = 12 バイト（f32 格納の s は**どちらにも入らない**。
-      // bias の scale は GPU に上がらないので常駐にも展開にも数えない）
+      // Ineligible: the 3 bias elements expanded to f32 = 12 bytes (the f32-stored s goes **into
+      // neither**. The bias's scale is not uploaded to the GPU, so it counts as neither resident nor
+      // expanded)
       assertEquals(diagnostics.hostExpandedBytes, 12);
-      // 展開した bias が値としても正しい（診断だけ合っていて中身が壊れている形を塞ぐ）
+      // The expanded bias is also correct as values (closes off the case where only the diagnostics match and the contents are broken)
       const x = fill([2, 7], SIGNED);
       const outputs = await session.run({ x });
       const linear = applyReferenceOp(
@@ -1436,12 +1490,13 @@ for (const storage of STORAGES) {
 }
 
 /**
- * initializer 自身をグラフ出力にした形（IR が許す — format/ir.ts の定義済み検査）。
+ * A shape that makes an initializer itself a graph output (the IR allows it — the definition check in
+ * format/ir.ts).
  *
- * readback は宣言 dtype の semantic f32 を 4 バイト / 要素で重みバッファから写すので、圧縮の
- * まま常駐していると copy が実バッファ（f16 は 2 バイト / 要素・i8 は 1 バイト / 要素）を
- * はみ出す。適格判定が `graph.outputs` を見ていれば CPU 展開へ落ち、丸め後の重みがそのまま
- * 読める。
+ * Readback copies the declared dtype's semantic f32 from the weight buffer at 4 bytes / element, so
+ * if it stayed resident compressed, the copy would overrun the actual buffer (f16 is 2 bytes /
+ * element, i8 is 1 byte / element). If eligibility looks at `graph.outputs`, it falls back to CPU
+ * expansion and the rounded weights read as they are.
  */
 for (const storage of STORAGES) {
   test.skipIf(!GPU_AVAILABLE)(storage.titles.graphOutput, async () => {
@@ -1470,14 +1525,14 @@ for (const storage of STORAGES) {
       assertEquals(
         diagnostics.residentCompressedBytes,
         0,
-        "グラフ出力の重みは 1 バイトも圧縮常駐しない",
+        "a weight that is a graph output keeps not a single byte resident compressed",
       );
-      assertEquals(diagnostics.hostExpandedBytes, 48, "CPU 展開バイト数（f32 換算 12 要素）");
+      assertEquals(diagnostics.hostExpandedBytes, 48, "CPU-expanded bytes (12 elements as f32)");
       const outputs = await session.run({ x });
-      // 重みは実行に依らない定数なので、丸め後の値とビット単位で一致する
+      // The weights are constants independent of execution, so they are bit-identical to the rounded values
       assertEquals(outputs["w"].shape, [3, 4]);
       assertEquals([...outputs["w"].data], [...quantized.values]);
-      // 同じ run の計算側も従来どおり（展開経路でも値は変わらない）
+      // The computing side of the same run is as before (the values do not change on the expansion path either)
       const expected = applyReferenceOp(
         "linear",
         [x as RefTensor, refTensor([3, 4], quantized.values), bias as RefTensor],

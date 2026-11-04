@@ -23,10 +23,10 @@ const parity = (a: Uint32Array<ArrayBuffer>, b: Uint32Array<ArrayBuffer>, label:
   }
 };
 
-describe.skipIf(!GPU_AVAILABLE)("RMS→add融合（実GPU）", () => {
+describe.skipIf(!GPU_AVAILABLE)("RMS→add fusion (real GPU)", () => {
   for (const dim of [256, 1536, 2560]) {
     for (const normFirst of [false, true]) {
-      it(`dim=${dim} / normFirst=${normFirst}で参照・行数・相殺を検証する`, async () => {
+      it(`dim=${dim} / normFirst=${normFirst}: matches the reference across row counts and cancellation`, async () => {
         const gpu = await acquireGpu();
         try {
           let firstRow: Uint32Array<ArrayBuffer> | undefined;
@@ -73,7 +73,7 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add融合（実GPU）", () => {
                 if (pattern === "finite") {
                   const row = words(actual.y).slice(0, dim);
                   if (firstRow === undefined) firstRow = row;
-                  else parity(row, firstRow, "M=1と複数行の先頭が一致する");
+                  else parity(row, firstRow, "M=1 matches the first row of the multi-row run");
                 }
               }
             } finally {
@@ -87,7 +87,7 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add融合（実GPU）", () => {
       });
     }
   }
-  it("強制grid-strideで全行を書き、uniformのXORが実行される", async () => {
+  it("forced grid-stride writes every row and executes the uniform XOR", async () => {
     const gpu = await acquireGpu(),
       d = gpu.device,
       rows = 9,
@@ -164,13 +164,13 @@ describe.skipIf(!GPU_AVAILABLE)("RMS→add融合（実GPU）", () => {
       assertEquals(error, null);
     }
   });
-  it("boolean以外を黙って受理しない", async () => {
+  it("does not silently accept a non-boolean", async () => {
     const gpu = await acquireGpu();
     const opened = await openModelBytes(rmsNormAddGraph(), []);
     try {
       for (const value of [null, 0, "true"]) {
         const options: SessionOptions = {};
-        // 公開境界へ不正値を注入し、型だけで守ったつもりにならない。
+        // Inject an invalid value at the public boundary; the type alone is not a guard.
         Reflect.set(options, "fuseRmsNormAdd", value);
         await assertRejects(
           () => createSessionFromContainer(gpu, opened, GRAPH_NAME, options),

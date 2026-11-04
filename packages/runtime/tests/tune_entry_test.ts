@@ -1,7 +1,9 @@
-// 公開面 `@karume/runtime/tune` の入口（ADR 0117 決定 2）の門 — runGeometrySweep（専用の device を取って
-// 掃引し、記録を返す）と deriveGeometryProfile（記録から表と採否の行）。入口は公開面（../tune.ts）から
-// 引き、突き合わせの相手（CLI / GPU lab が通る生成器の内部）だけを src から引く。GPU の節はアダプタが
-// 無い環境で明示 SKIP。
+// The check of the entry points of the public surface `@karume/runtime/tune` (ADR 0117 decision 2)
+// — runGeometrySweep (takes a dedicated device, sweeps and returns the record) and
+// deriveGeometryProfile (the table and the adoption rows from records). The entry points come from
+// the public surface (../tune.ts); only the comparison counterpart (the generator internals that
+// the CLI / GPU lab go through) comes from src. The GPU sections are SKIPped explicitly in an
+// environment without an adapter.
 
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -33,9 +35,12 @@ const adapter = navigator.gpu === undefined ? null : await navigator.gpu.request
 const timestampQuery = adapter !== null && adapter.features.has("timestamp-query");
 
 /**
- * 記録に足した欄（ADR 0117 決定 8）のうち掃引の中身に依らない検査: 開始時刻が ISO 8601 で終了（`date`）以前・
- * ケース集合の版と既定の表のカーネルの指紋が今の runtime の値・測った候補の指紋が記録の行から生成器と同じ関数で
- * 導き直した値（書き手と読み手の往復）・ケースごとの壁時計が有限の非負。
+ * The checks of the fields added to the record (ADR 0117 decision 8) that do not depend on what was
+ * swept: the start time is ISO 8601 and not after the end (`date`); the case-set version and the
+ * kernel fingerprint of the default table are the current runtime's values; the fingerprint of the
+ * measured candidates equals the value re-derived from the record's rows with the generator's own
+ * function (a writer-reader round trip); the wall-clock time of each case is finite and
+ * non-negative.
  */
 const assertRecordFields = (swept: GeometrySweepReport): void => {
   assertEquals(new Date(swept.startedAt).toISOString(), swept.startedAt);
@@ -65,7 +70,7 @@ describe("deriveGeometryProfile", () => {
     },
   ];
 
-  it("記録から表と採否の行を返し、CLI / GPU lab の経路（deriveProfile → buildGeometryProfile）と同じ値になる", () => {
+  it("returns the table and the adoption rows from the records, equal to the CLI / GPU lab path (deriveProfile → buildGeometryProfile)", () => {
     const options = { id: "test-gpu", vendor: "apple", architecture: "metal-3" } as const;
     const { profile, verdicts } = deriveGeometryProfile(inputs, options);
     const sources = inputs.map(({ report, path, sha256 }) =>
@@ -78,7 +83,7 @@ describe("deriveGeometryProfile", () => {
     assertEquals(profile.provenance?.sweep, "a.json");
   });
 
-  it("minSpeedup の既定は ×1.05（×1.04 の勝ちは採らない）で、1 未満と非有限は投げる", () => {
+  it("minSpeedup defaults to ×1.05 (a ×1.04 win is not adopted), and values below 1 or non-finite throw", () => {
     const close = [
       {
         report: report(caseRows(linearCase(1024), BIG, [[A, { speedup: 1.04 }]])),
@@ -99,7 +104,7 @@ describe("deriveGeometryProfile", () => {
     }
   });
 
-  it("門に落ちる記録（壁時計で測った掃引）は生成器の理由のまま投げる", () => {
+  it("throws a record that fails the check (a sweep timed by the wall clock) with the generator's reason as is", () => {
     const wall = [
       {
         report: {
@@ -118,11 +123,12 @@ describe("deriveGeometryProfile", () => {
   });
 });
 
-describe("runGeometrySweep: options の検査（GPU に触れる前）", () => {
-  // 型の外から来る値（JS の呼び手・UI の文字列）の門 — JSON.parse の戻りは型検査を経ない
+describe("runGeometrySweep: options validation (before touching the GPU)", () => {
+  // The check of values from outside the types (JS callers, UI strings) — what JSON.parse returns
+  // goes through no type check
   const untyped = (json: string): GeometrySweepOptions => JSON.parse(json);
 
-  it("知らない候補集合・op・ケース id と、正の整数でない rounds は投げる（既定で走らせない）", async () => {
+  it("throws on an unknown candidate set, op or case id and on rounds that is not a positive integer (does not run with the default)", async () => {
     await assertRejects(
       () => runGeometrySweep(untyped('{ "candidateSet": "quik" }')),
       Error,
@@ -143,7 +149,7 @@ describe("runGeometrySweep: options の検査（GPU に触れる前）", () => {
     }
   });
 
-  it("op とケース id の両方に合うケースが無ければ投げる", async () => {
+  it("throws when no case matches both the op and the case id", async () => {
     await assertRejects(
       () => runGeometrySweep({ ops: ["linear"], cases: ["conv2d-c96-512x512"] }),
       Error,
@@ -153,7 +159,7 @@ describe("runGeometrySweep: options の検査（GPU に触れる前）", () => {
 });
 
 describe("timestampUnitFor", () => {
-  it("Deno（wgpu は raw tick を換算しない）は deno-raw-tick、それ以外（Chrome / Dawn）は ns", () => {
+  it("is deno-raw-tick for Deno (wgpu does not convert raw ticks) and ns otherwise (Chrome / Dawn)", () => {
     assertEquals(timestampUnitFor("Deno/2.9.6"), "deno-raw-tick");
     assertEquals(
       timestampUnitFor(
@@ -164,9 +170,9 @@ describe("timestampUnitFor", () => {
   });
 });
 
-describe("runGeometrySweep: 実 GPU", () => {
+describe("runGeometrySweep: real GPU", () => {
   it.skipIf(adapter === null)(
-    "中断済みの signal なら行を作らず、設定と adapter を載せた記録を返す",
+    "with an already aborted signal makes no rows and returns a record carrying the settings and the adapter",
     async () => {
       const kinds: GeometrySweepProgress["kind"][] = [];
       const swept = await runGeometrySweep({
@@ -194,7 +200,7 @@ describe("runGeometrySweep: 実 GPU", () => {
   );
 
   it.skipIf(adapter === null)(
-    "1 ケースを quick で測ると既定の行が先頭・全行が既定と出力一致し、通知は started → 行 → ケースの順",
+    "measuring 1 case with quick puts the default row first, every row matches the default's output, and notifications come in the order started → row → case",
     async () => {
       const id = "linear-m16-n3072-k1024";
       const kinds: GeometrySweepProgress["kind"][] = [];
@@ -214,7 +220,7 @@ describe("runGeometrySweep: 実 GPU", () => {
       // Deno reports raw ticks; every other runtime (Dawn on Node, browsers) reports nanoseconds.
       const unit = navigator.userAgent.startsWith("Deno/") ? "deno-raw-tick" : "ns";
       assertEquals(swept.gpuTiming.unit, timestampQuery ? unit : "wall");
-      assert(swept.rows.length >= 2, `${swept.rows.length} 行`);
+      assert(swept.rows.length >= 2, `${swept.rows.length} rows`);
       assertEquals(swept.rows[0].isDefault, true);
       for (const row of swept.rows) {
         assertEquals(row.caseId, id);
@@ -232,17 +238,17 @@ describe("runGeometrySweep: 実 GPU", () => {
       assert((swept.cases[0].defaultRepeat?.driftRatio ?? 0) > 0);
       assertEquals(swept.aborted, false);
       assertRecordFields(swept);
-      // 通知の case と記録の cases[] は同じ値（elapsedMs を含む）
+      // The notified case and the record's cases[] hold the same values (elapsedMs included)
       assertEquals(summaries, swept.cases);
     },
   );
 });
 
-describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
+describe("runGeometrySweep: real GPU — recording an abort (aborted)", () => {
   const id = "linear-m16-n3072-k1024";
 
   it.skipIf(adapter === null)(
-    "ケースの途中（既定の行の直後）で中断すると aborted が true で、そのケースは再測定を持たず elapsedMs を持つ",
+    "aborting mid-case (right after the default row) sets aborted to true, and that case has no re-measurement but has elapsedMs",
     async () => {
       const abort = new AbortController();
       const swept = await runGeometrySweep({
@@ -267,7 +273,7 @@ describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
   );
 
   it.skipIf(adapter === null)(
-    "全て測り終えた後（最後のケースの通知）に届いた中断は数えない（aborted が false — 記録は欠けていない）",
+    "an abort that arrives after everything is measured (at the last case's notification) does not count (aborted is false — the record is complete)",
     async () => {
       const abort = new AbortController();
       const swept = await runGeometrySweep({
@@ -281,7 +287,7 @@ describe("runGeometrySweep: 実 GPU — 中断の記録（aborted）", () => {
       });
       assert(abort.signal.aborted);
       assertEquals(swept.aborted, false);
-      assert(swept.cases[0].defaultRepeat !== undefined, "再測定まで測り終えていない");
+      assert(swept.cases[0].defaultRepeat !== undefined, "the re-measurement was not finished");
       assertRecordFields(swept);
     },
   );

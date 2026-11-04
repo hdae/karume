@@ -9,8 +9,8 @@ import { GRAPH_NAME, openModelBytes } from "./helpers/model-fixture.ts";
 import { rmsNormAddGraph } from "./helpers/rms-norm-add-graph.ts";
 import { assertCheckPart } from "./helpers/kernel-check-assert.ts";
 
-describe.skipIf(!GPU_AVAILABLE)("RMS subgroup32の明示指定", () => {
-  it("不正な値・必要なdevice機能の不足を重み転送前に拒否する", async () => {
+describe.skipIf(!GPU_AVAILABLE)("explicit RMS subgroup32", () => {
+  it("rejects an invalid value or a missing device feature before uploading weights", async () => {
     const gpu = await acquireGpu();
     const opened = await openModelBytes(rmsNormAddGraph(), []);
     try {
@@ -23,7 +23,8 @@ describe.skipIf(!GPU_AVAILABLE)("RMS subgroup32の明示指定", () => {
           "rmsNormReduce",
         );
       }
-      // 診断で利用者の変換を呼ばないこと: 変換が走れば `ExecutionError` ではなく "boom" が抜ける。
+      // The diagnostic must not call the caller's conversion: if it ran, "boom" would escape
+      // instead of `ExecutionError`.
       for (const value of [
         {
           toString(): string {
@@ -43,14 +44,14 @@ describe.skipIf(!GPU_AVAILABLE)("RMS subgroup32の明示指定", () => {
           ExecutionError,
           "rmsNormReduce",
         );
-        // 値そのものではなく型名だけを出す。
+        // Report only the type name, not the value itself.
         assertEquals(error.message.includes("object"), true, error.message);
       }
     } finally {
       gpu.destroy();
     }
   });
-  describe("対応実装ではCPU参照・融合・行数・grid-strideを検査する", () => {
+  describe("on a supporting implementation, checks the CPU reference, fusion, row counts and grid-stride", () => {
     let supported = false;
     beforeAll(async () => {
       const adapter = await navigator.gpu.requestAdapter();
@@ -62,7 +63,7 @@ describe.skipIf(!GPU_AVAILABLE)("RMS subgroup32の明示指定", () => {
         new Set(host.wgslLanguageFeatures).has("subgroup_id");
     });
     // The adapter's features are known only at run time, so the skip happens inside the case.
-    it("subgroups実走（Deno未対応なら明示SKIP、Chromeは別途同じ検査を実行）", async (context) => {
+    it("runs with subgroups (explicit SKIP when Deno lacks support; Chrome runs the same checks separately)", async (context) => {
       if (!supported) context.skip();
       const gpu = await acquireGpu({ subgroups: true });
       try {

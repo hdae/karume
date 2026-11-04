@@ -1,10 +1,13 @@
 /**
- * argmax の 2 相分割（src/kernels/argmax.ts の「2 相分割」— MTP 段 4-B ③）の純関数側の門。
+ * Checks of the pure-function side of the two-phase argmax split ("two-phase split" in
+ * src/kernels/argmax.ts — MTP stage 4-B ③).
  *
- * 見るのは 2 点: ①経路の選択が形の純関数で、閾値の両側で決定的（同じ形は常に同じ経路 = 同じ
- * キー）②params が分割の形と食い違う呼びを落とす（`groups` を別の値で渡すと partial の書き先と
- * merge の読み元がずれ、沈黙誤値になる）。GPU 上の値（ビット同一・タイブレーク・NaN・全 −inf 行）は
- * gpu_ops_test.ts の argmax 門が 2 相形のケースも含めて見る。
+ * Two things are checked: ① the path choice is a pure function of the shape, deterministic on both
+ * sides of the threshold (the same shape always takes the same path = the same key); ② params
+ * reject a call that disagrees with the split shape (passing another `groups` value would make the
+ * partial write target and the merge read source diverge, a silent wrong value). Values on the GPU
+ * (bit identity, tie-breaks, NaN, all −inf rows) are checked by the argmax check of
+ * gpu_ops_test.ts, including two-phase cases.
  */
 
 import { describe, it, test } from "vite-plus/test";
@@ -19,33 +22,33 @@ import {
   topkOneSplitGroups,
 } from "../src/kernels/argmax.ts";
 
-describe("argmax 2 相分割の経路選択は行長の純関数", () => {
-  it("閾値未満は 1 dispatch 形（区間 0）", () => {
+describe("the path choice of the two-phase argmax split is a pure function of the row length", () => {
+  it("below the threshold it is the one-dispatch form (0 spans)", () => {
     for (const dim of [1, 256, 4096, ARGMAX_SPLIT_MIN_DIM - 1]) {
       assertEquals(argmaxSplitGroups(dim), 0, `dim=${dim}`);
     }
   });
 
-  it("閾値以上は区間 ceil(dim / span) 本（端数の区間も 1 本に数える）", () => {
+  it("at or above the threshold there are ceil(dim / span) spans (a partial span counts as one)", () => {
     assertEquals(argmaxSplitGroups(ARGMAX_SPLIT_MIN_DIM), 4);
     assertEquals(argmaxSplitGroups(ARGMAX_SPLIT_MIN_DIM + 1), 5);
-    // gemma4 の語彙長（drafter の lm_head 出口）
+    // gemma4 vocabulary length (the drafter's lm_head output)
     assertEquals(argmaxSplitGroups(262144), 262144 / ARGMAX_SPLIT_SPAN);
   });
 
-  it("一時は [rows, groups] × (値 + index) の 8 バイト", () => {
+  it("the scratch is [rows, groups] × 8 bytes (value + index)", () => {
     assertEquals(argmaxSplitPartialBytes(3, 64), 3 * 64 * 8);
   });
 });
 
-describe("argmax 2 相分割の params は分割の形と一致しないと落ちる", () => {
-  it("正しい形は 4 語（rows, dim, groups, −inf）", () => {
+describe("the params of the two-phase argmax split fail when they do not match the split shape", () => {
+  it("the correct form is 4 words (rows, dim, groups, −inf)", () => {
     const params = argmaxSplitParams(2, 262144, 64);
     assertEquals([...params.slice(0, 3)], [2, 262144, 64]);
     assertEquals(params[3], 0xff800000);
   });
 
-  it("groups が純関数の値と違えば落ちる（1 dispatch 形の dim も）", () => {
+  it("fails when groups differs from the pure function's value (for a one-dispatch dim too)", () => {
     assertThrows(
       () => argmaxSplitParams(1, 262144, 63),
       CodegenError,
@@ -64,7 +67,7 @@ describe("argmax 2 相分割の params は分割の形と一致しないと落�
   });
 });
 
-test("topk k=1の分割は閾値とdispatch上限を守り、巨大な行は既存経路へ残す", () => {
+test("the topk k=1 split respects the threshold and the dispatch limit, and leaves huge rows on the existing path", () => {
   assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM - 1), 0);
   assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM), 4);
   assertEquals(topkOneSplitGroups(ARGMAX_SPLIT_MIN_DIM + 1), 5);

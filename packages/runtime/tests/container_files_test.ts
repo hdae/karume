@@ -1,13 +1,17 @@
-// `helpers/container-files.ts`（系列出力 / ミラーの `krm` を part 列として開く面）の門。
-// GPU も実資産も要らない — 合成の容器（`helpers/container-write.ts`）を一時ディレクトリへ
-// 分割形で書き、そのファイル列から開き直す。
+// Checks for `helpers/container-files.ts` (the surface that opens a series output's / mirror's
+// `krm` as a part list). No GPU and no real assets are needed — a synthetic container
+// (`helpers/container-write.ts`) is written to a temporary directory in split form and reopened
+// from those files.
 //
-// このヘルパを使う e2e は**正常な実資産しか渡さない**ので、fail-loudly の分岐（単一形と連番の
-// 同居 / `of` の食い違い / 欠番 / はみ出し / 別 dtype の混入）も、区間読みと sha256 検証も、
-// 実資産のある機でしか踏まれない。ここはそれを CPU だけで踏み切る席である。
+// The e2e tests that use this helper **pass only well-formed real assets**, so the fail-loudly
+// branches (single form next to numbered parts / disagreeing `of` / a missing number / an
+// out-of-range number / a different dtype mixed in), range reads and sha256 verification would be
+// exercised only on machines that have the real assets. This is where they are exercised on the CPU
+// alone.
 //
-// 鏡像の Python 側は `tools/exporter/tests/test_container.py` と、`tools/exporter/tests/test_dist.py`
-// の `TestPartExpansion`（連番の part 列の展開・単一形と連番の同居の拒否）。
+// The Python mirror is `tools/exporter/tests/test_container.py` plus `TestPartExpansion` in
+// `tools/exporter/tests/test_dist.py` (expanding the numbered part list, rejecting single form next
+// to numbered parts).
 
 import { makeTempDir, readFileSync, remove, writeFileSync } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -32,10 +36,10 @@ import {
 import { type IrDeclaration, parseIrDeclaration } from "../src/format/ir.ts";
 
 // ---------------------------------------------------------------------------
-// 合成の容器
+// Synthetic container
 // ---------------------------------------------------------------------------
 
-/** 決定的な疑似乱数バイト列（seed から xorshift32）。 */
+/** Deterministic pseudo-random bytes (xorshift32 from seed). */
 const bytesOf = (length: number, seed: number): Uint8Array<ArrayBuffer> => {
   const out = new Uint8Array(new ArrayBuffer(length));
   let state = seed >>> 0 || 1;
@@ -52,7 +56,7 @@ const bytesOf = (length: number, seed: number): Uint8Array<ArrayBuffer> => {
 
 type InitializerSpec = { readonly shape: readonly number[]; readonly shared?: true };
 
-/** initializer ごとに 1 ノードで消費する最小の IR v2 グラフ。 */
+/** The smallest IR v2 graph that consumes each initializer in one node. */
 const declaration = (initializers: Readonly<Record<string, InitializerSpec>>): IrDeclaration => {
   const names = Object.keys(initializers);
   return parseIrDeclaration(
@@ -84,7 +88,7 @@ const declaration = (initializers: Readonly<Record<string, InitializerSpec>>): I
 
 const F32 = 4;
 
-/** グラフ名は系列の部品名ではなく **family の weights キー**（`model`）を綴る。 */
+/** The graph name spells the **family's weights key** (`model`), not the series component name. */
 const GRAPH = "model";
 
 const syntheticModel = (): ModelInput => ({
@@ -112,7 +116,7 @@ const syntheticModel = (): ModelInput => ({
       encoding: { codec: "f16" },
     },
     {
-      // i8 + companion scale（行長 16 の per-channel）。
+      // i8 + companion scale (per-channel with row length 16).
       graph: GRAPH,
       initializer: "proj.weight",
       bytes: bytesOf(6 * 16, 22),
@@ -130,16 +134,16 @@ const syntheticModel = (): ModelInput => ({
   provenance: { license: "apache-2.0", writer: "test" },
 });
 
-/** part 長 / block 上限を絞って、部品 1 本でも part が複数本になるようにする。 */
+/** Tightens the part length / block limit so that even one component spans several parts. */
 const OPTIONS = { partBytes: 320, blockBytes: 256 } as const;
 
 const REPRESENTATIVE = "model.krm";
 
-/** `BlockSource` の part 添字（0 始まり）→ 分割形のファイル名（連番は 1 始まり）。 */
+/** `BlockSource` part index (0-based) → split-form file name (the numbering is 1-based). */
 const partName = (index: number, total: number): string =>
   `model-${String(index + 1).padStart(5, "0")}-of-${String(total).padStart(5, "0")}.krm`;
 
-/** 0 バイトのファイルを置いた一時ディレクトリ（末尾 `/` 付きの URL を渡す）。 */
+/** A temporary directory holding a zero-byte file (pass the URL with a trailing `/`). */
 const withFiles = async (names: readonly string[], body: (dir: URL) => void): Promise<void> => {
   const path = await makeTempDir({ prefix: "karume-container-files-" });
   try {
@@ -151,7 +155,7 @@ const withFiles = async (names: readonly string[], body: (dir: URL) => void): Pr
   }
 };
 
-/** 合成の容器を分割形で置いた一時ディレクトリ。 */
+/** A temporary directory holding a synthetic container in split form. */
 const withContainer = async (
   body: (dir: URL, written: WrittenContainer) => Promise<void>,
 ): Promise<void> => {
@@ -169,10 +173,10 @@ const withContainer = async (
 };
 
 // ---------------------------------------------------------------------------
-// resolveParts / modelPresent（ファイルの見つけ方）
+// resolveParts / modelPresent (how files are found)
 // ---------------------------------------------------------------------------
 
-test("resolveParts は分割されていない容器を代表 path 1 本として返す", async () => {
+test("resolveParts returns an unsplit container as a single representative path", async () => {
   await withFiles([REPRESENTATIVE], (dir) => {
     const representative = new URL(REPRESENTATIVE, dir);
     assertEquals(
@@ -182,8 +186,9 @@ test("resolveParts は分割されていない容器を代表 path 1 本とし�
   });
 });
 
-test("resolveParts は連番の part を番号昇順で返す（part 添字の保証）", async () => {
-  // 置く順は番号順ではない（`Deno.readDirSync` の列挙順に依らないことの検出器）。
+test("resolveParts returns numbered parts in ascending order (guarantees the part index)", async () => {
+  // They are placed out of order (a detector that it does not depend on `Deno.readDirSync`'s
+  // listing order).
   const names = [
     "model-00003-of-00003.krm",
     "model-00001-of-00003.krm",
@@ -198,7 +203,7 @@ test("resolveParts は連番の part を番号昇順で返す（part 添字の�
   });
 });
 
-test("resolveParts は単一形と連番の同居を fail loudly にする", async () => {
+test("resolveParts fails loudly when single form and numbered parts sit together", async () => {
   await withFiles(
     [REPRESENTATIVE, "model-00001-of-00002.krm", "model-00002-of-00002.krm"],
     (dir) => {
@@ -208,21 +213,21 @@ test("resolveParts は単一形と連番の同居を fail loudly にする", asy
   );
 });
 
-test("resolveParts は of の総数が食い違う連番を fail loudly にする", async () => {
+test("resolveParts fails loudly on numbered parts whose `of` totals disagree", async () => {
   await withFiles(["model-00001-of-00003.krm", "model-00002-of-00004.krm"], (dir) => {
     const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
     assertStringIncludes(error.message, "食い違っている");
   });
 });
 
-test("resolveParts は連番の欠番を何本目かを名指して fail loudly にする", async () => {
+test("resolveParts fails loudly on a missing number and names which one is missing", async () => {
   await withFiles(["model-00001-of-00003.krm", "model-00003-of-00003.krm"], (dir) => {
     const error = assertThrows(() => resolveParts(new URL(REPRESENTATIVE, dir)), Error);
     assertStringIncludes(error.message, "2 本目が無い");
   });
 });
 
-test("resolveParts は総数からはみ出した番号を fail loudly にする", async () => {
+test("resolveParts fails loudly on a number beyond the total", async () => {
   await withFiles(
     [
       "model-00001-of-00003.krm",
@@ -237,9 +242,10 @@ test("resolveParts は総数からはみ出した番号を fail loudly にする
   );
 });
 
-// 0 以下の番号（1 始まりの連番の下側へのはみ出し）。上側だけを数えると「はみ出した番号 []」と
-// 空リストで落ち、落ちてはいるのに何が余計なのかが読めない診断になる。
-test("resolveParts は 0 番の part も余計な番号として名指す", async () => {
+// Numbers at or below 0 (overrunning the 1-based numbering on the low side). Counting only the
+// high side would fail with an empty list of out-of-range numbers (`[]`) — it does fail, but the
+// diagnostic does not say what is extra.
+test("resolveParts names part 0 as an extra number too", async () => {
   await withFiles(
     ["model-00000-of-00002.krm", "model-00001-of-00002.krm", "model-00002-of-00002.krm"],
     (dir) => {
@@ -249,10 +255,11 @@ test("resolveParts は 0 番の part も余計な番号として名指す", asyn
   );
 });
 
-// stem は正規表現へ埋め込まれるので、escape が外れると `.` が任意 1 文字になり別 dtype の
-// 連番を拾う（拾えば総数 {1,2} の食い違いで落ちるので、この門は「1 本だけ返る」ことで escape と
-// stem 一致の両方を縛る）。
-test("resolveParts は別 dtype の容器を拾わない（stem の厳密一致）", async () => {
+// The stem is embedded into a regular expression, so without the escape `.` matches any one
+// character and picks up the numbered parts of another dtype (picking them up would fail on the
+// disagreeing totals {1,2}, so this check pins both the escape and the exact stem match by "exactly
+// one path comes back").
+test("resolveParts does not pick up a container of another dtype (exact stem match)", async () => {
   await withFiles(
     ["model.i8-00001-of-00001.krm", "modelXi8-00002-of-00002.krm", "other-00001-of-00002.krm"],
     (dir) => {
@@ -265,27 +272,30 @@ test("resolveParts は別 dtype の容器を拾わない（stem の厳密一致�
   );
 });
 
-test("modelPresent は連番だけが置かれた容器を在りと見る", async () => {
+test("modelPresent treats a container with only numbered parts as present", async () => {
   await withFiles(["model-00001-of-00002.krm", "model-00002-of-00002.krm"], (dir) => {
     assert(modelPresent(new URL(REPRESENTATIVE, dir)));
   });
 });
 
-test("modelPresent は容器が 1 本も無いディレクトリを無しと見る", async () => {
+test("modelPresent treats a directory with no container at all as absent", async () => {
   await withFiles(["io.ramp.safetensors"], (dir) => {
     assertEquals(modelPresent(new URL(REPRESENTATIVE, dir)), false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// fileBlockSource（区間の読み方）
+// fileBlockSource (how ranges are read)
 // ---------------------------------------------------------------------------
 
-test("fileBlockSource は part の本数と長さをファイルから配る", async () => {
+test("fileBlockSource hands out the part count and lengths from the files", async () => {
   await withContainer((dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     assertEquals(source.partCount, written.parts.length);
-    assert(source.partCount >= 3, `part が ${source.partCount} 本では分割形の門にならない`);
+    assert(
+      source.partCount >= 3,
+      `${source.partCount} parts are not enough to check the split form`,
+    );
     assertEquals(
       written.parts.map((_, index) => source.partLength(index)),
       written.parts.map((part) => part.byteLength),
@@ -294,19 +304,20 @@ test("fileBlockSource は part の本数と長さをファイルから配る", a
   });
 });
 
-// MUST: 誰も検証していない取得元が `verified: true` を名乗ると、`openContainer` は block ごとの
-// sha256 を掛けなくなる（container-v1 §7）= 改ざんが素通りする。
-test("fileBlockSource は検証済みを名乗らない", async () => {
+// MUST: if a source that nobody verified claimed `verified: true`, `openContainer` would stop
+// checking the per-block sha256 (container-v1 §7) = tampering would slip through.
+test("fileBlockSource does not claim to be verified", async () => {
   await withContainer((dir) => {
     assertEquals(fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir))).verified, false);
     return Promise.resolve();
   });
 });
 
-test("fileBlockSource は part の途中から要求した区間だけを返す", async () => {
+test("fileBlockSource returns only the requested range from the middle of a part", async () => {
   await withContainer(async (dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
-    // 最後の part（資産の専用 part）の中ほどを取る — seek が効いていなければ先頭が返る。
+    // Read from the middle of the last part (the dedicated asset part) — without a working seek the
+    // head would come back.
     const part = written.parts.length - 1;
     const bytes = written.parts[part];
     const offset = Math.floor(bytes.byteLength / 3);
@@ -315,7 +326,7 @@ test("fileBlockSource は part の途中から要求した区間だけを返す"
   });
 });
 
-test("fileBlockSource は part 長をはみ出す区間を fail loudly にする", async () => {
+test("fileBlockSource fails loudly on a range that runs past the part length", async () => {
   await withContainer(async (dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     const error = await assertRejects(
@@ -326,7 +337,7 @@ test("fileBlockSource は part 長をはみ出す区間を fail loudly にする
   });
 });
 
-test("fileBlockSource は存在しない part 添字を fail loudly にする", async () => {
+test("fileBlockSource fails loudly on a part index that does not exist", async () => {
   await withContainer(async (dir, written) => {
     const source = fileBlockSource(resolveParts(new URL(REPRESENTATIVE, dir)));
     const error = await assertRejects(() => source.read(written.parts.length, 0, 1), Error);
@@ -335,10 +346,10 @@ test("fileBlockSource は存在しない part 添字を fail loudly にする", 
 });
 
 // ---------------------------------------------------------------------------
-// openSeriesContainer（part 列 → 開いた容器）
+// openSeriesContainer (part list → opened container)
 // ---------------------------------------------------------------------------
 
-test("openSeriesContainer は分割形の part 列から容器を開く", async () => {
+test("openSeriesContainer opens a container from a split-form part list", async () => {
   await withContainer(async (dir) => {
     const opened = await openSeriesContainer(new URL(REPRESENTATIVE, dir));
     assertEquals(opened.header.kind, "model");
@@ -347,7 +358,7 @@ test("openSeriesContainer は分割形の part 列から容器を開く", async 
   });
 });
 
-test("openSeriesContainer で開いた容器は block を宣言どおりのバイト列で配る", async () => {
+test("a container opened with openSeriesContainer hands out blocks as the declared bytes", async () => {
   await withContainer(async (dir, written) => {
     const opened = await openSeriesContainer(new URL(REPRESENTATIVE, dir));
     for (const block of written.model.blocks) {
@@ -360,9 +371,10 @@ test("openSeriesContainer で開いた容器は block を宣言どおりのバ�
   });
 });
 
-// 誤りの注入 — ファイル 1 バイトを潰すと block の sha256 が食い違う。ここが緑のままなら
-// `verified: false` の経路が効いていない（= 区間読みの取得元で検証が抜けている）。
-test("openSeriesContainer は改ざんされた part を block の sha256 で落とす", async () => {
+// Fault injection — corrupting one byte of a file makes the block's sha256 disagree. If this stays
+// green, the `verified: false` path is not working (= verification is missing for range-reading
+// sources).
+test("openSeriesContainer rejects a tampered part through the block sha256", async () => {
   await withContainer(async (dir, written) => {
     const block = written.model.blocks[0];
     const file = new URL(partName(block.part, written.parts.length), dir);
@@ -375,7 +387,7 @@ test("openSeriesContainer は改ざんされた part を block の sha256 で落
   });
 });
 
-test("openSeriesContainer で開いた容器は資産を区間で読める", async () => {
+test("a container opened with openSeriesContainer can read assets by range", async () => {
   await withContainer(async (dir) => {
     const opened = await openSeriesContainer(new URL(REPRESENTATIVE, dir));
     const reader = opened.asset("ple_index");
@@ -387,7 +399,7 @@ test("openSeriesContainer で開いた容器は資産を区間で読める", asy
   });
 });
 
-test("openSeriesContainer は part が 1 本欠けた系列を fail loudly にする", async () => {
+test("openSeriesContainer fails loudly on a series missing one part", async () => {
   await withContainer(async (dir, written) => {
     await remove(new URL(partName(1, written.parts.length), dir));
     const error = await assertRejects(

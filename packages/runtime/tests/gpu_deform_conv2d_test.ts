@@ -1,18 +1,22 @@
-// deform_conv2d（DCNv2 — ADR 0055）の**オラクル門**。新規原子には対になる既存経路が無いので、
-// 正しさの根拠を 3 本に分けて立てる:
+// **Oracle checks** of deform_conv2d (DCNv2 — ADR 0055). A new primitive has no existing path to pair
+// with, so the case for its correctness is built in 3 parts:
 //
-//   ① 退化 = conv2d の**ビット同一**（`offset` 全 0・`mask` 全 1）。tolerance ではなく
-//      `Uint32Array` の完全一致で見る — 縮約順の変化（offset の読みを ic ループ外へ巻き上げる、
-//      mask の掛け先を変える、bias を store 側で足す）は丸め列だけを動かすので、allclose では
-//      沈黙する。ADR 0055 決定 2 / 決定 4 の実体。
-//   ② **境界の意味論**（中心が範囲外 → タップ全体 0 / 内側でも範囲外の隅はその隅だけ 0）を、
-//      1×1 カーネルの手計算値と**厳密一致**で突き合わせる。border clamp 実装はここでしか
-//      赤くならない（allclose だと clamp と 0 埋めの差が許容差に紛れる形が作れる）。
-//   ③ **NaN の伝播**。正の形の範囲判定だけだと NaN が 0 寄与へ落ちて沈黙誤値になるので、
-//      実 GPU で本当に NaN が出ることを固定する（ADR 0020 の系譜 — ドライバが判定ごと畳む
-//      可能性があるので、実測でしか担保できない）。
+//   (1) degenerate = **bit-identical** to conv2d (`offset` all 0, `mask` all 1). Compared by exact
+//       `Uint32Array` equality rather than a tolerance — a change in the reduction order (hoisting the
+//       offset read out of the ic loop, changing what the mask multiplies, adding the bias at the
+//       store) moves only the rounding sequence, so allclose would stay silent. The substance of
+//       ADR 0055 decision 2 / decision 4.
+//   (2) **The boundary semantics** (centre out of range -> the whole tap is 0 / inside, an
+//       out-of-range corner is 0 for that corner only), compared by **exact equality** with
+//       hand-computed values of a 1×1 kernel. A border-clamp implementation turns red only here
+//       (with allclose one can build shapes where the difference between clamp and zero fill hides
+//       in the tolerance).
+//   (3) **NaN propagation**. A range test of the positive form alone would turn NaN into a 0
+//       contribution, a silently wrong value, so this pins that NaN really comes out on a real GPU
+//       (in the line of ADR 0020 — the driver may fold the test away, so only a measurement can
+//       guarantee it).
 //
-// torch（torchvision）そのものとの突合は golden `deform_conv2d_block`（e2e_golden_test.ts）。
+// The comparison with torch (torchvision) itself is the golden `deform_conv2d_block` (e2e_golden_test.ts).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -40,12 +44,13 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 const STORAGE_IN = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 const UNIFORM_IN = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data sequences (no random numbers — a failure would not reproduce). */
 const SIGNED = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const WEIGHT = (i: number): number => (((i * 11) % 19) - 9) * 0.023;
 /**
- * MUST: bias は非ゼロ。出力がちょうど 0 になる要素では、deform が足す `+0.0` が conv2d 側の
- * `−0.0` を `+0.0` に転ばせる（唯一の数値差分 — ADR 0055 決定 4 / ADR 0024 決定 3 と同型）。
+ * MUST: the bias is non-zero. In elements whose output is exactly 0, the `+0.0` deform adds flips
+ * conv2d's `−0.0` to `+0.0` (the only numeric difference — the same shape as ADR 0055 decision 4 /
+ * ADR 0024 decision 3).
  */
 const BIAS = (i: number): number => 0.375 + (i % 5) * 0.25;
 
@@ -64,7 +69,7 @@ type ParityCase = {
 
 const PARITY_CASES: readonly ParityCase[] = [
   {
-    // BiRefNet の k=3 分岐と同型（同サイズ出力）。Cin ≠ Cout・Kh ≠ Kw で軸の取り違えも見る
+    // The same shape as BiRefNet's k=3 branch (same-size output). Cin ≠ Cout and Kh ≠ Kw also catch an axis mix-up
     name: "deform [1,3,6,7] * W[5,3,3,2] padding=[1,0]",
     batch: 1,
     channelsIn: 3,
@@ -77,7 +82,7 @@ const PARITY_CASES: readonly ParityCase[] = [
     paddingW: 0,
   },
   {
-    // k=1（ASPP の aspp1）。padding 0 なので範囲外タップが 1 本も出ない形
+    // k=1 (ASPP's aspp1). padding 0, so not a single tap is out of range
     name: "deform k=1 [2,4,5,6] * W[3,4,1,1] padding=[0,0]",
     batch: 2,
     channelsIn: 4,
@@ -90,7 +95,7 @@ const PARITY_CASES: readonly ParityCase[] = [
     paddingW: 0,
   },
   {
-    // 大きい k（BiRefNet の k=7 分岐と同型）。padding が入力長に近く、範囲外タップが支配的
+    // A large k (the same shape as BiRefNet's k=7 branch). The padding is close to the input length, and out-of-range taps dominate
     name: "deform k=5 [1,2,5,5] * W[4,2,5,5] padding=[2,2]",
     batch: 1,
     channelsIn: 2,
@@ -125,13 +130,14 @@ const readbackBits = async (
 };
 
 /**
- * deform（offset 全 0・mask 全 1）と conv2d 直接カーネルを**同じ入力バッファ**で走らせ、
- * 出力のビット列を組で返す。x / weight / bias はどちらの dispatch も同じ GPUBuffer を束縛する
- * （ホスト側で 2 度書くと「書き込みの差」が「カーネルの差」に化ける）。
+ * Runs deform (offset all 0, mask all 1) and the conv2d direct kernel on **the same input buffers**
+ * and returns the output bit patterns as a pair. For x / weight / bias both dispatches bind the same
+ * GPUBuffer (writing them twice on the host would turn "a difference in the writes" into "a
+ * difference in the kernels").
  *
- * MUST: 相手は conv2d の**直接カーネル**（`groups > 1` 用に恒久で残る側）。implicit GEMM は
- * タイル系で fma の畳み方が別なので、比較相手にすると「順序が同じこと」を見ていることに
- * ならない。
+ * MUST: the counterpart is conv2d's **direct kernel** (the side kept permanently for `groups > 1`).
+ * implicit GEMM is tiled and folds its fmas differently, so comparing against it would not show
+ * that "the order is the same".
  */
 const runBoth = async (
   gpu: GpuContext,
@@ -265,23 +271,23 @@ const runBoth = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "deform_conv2d は offset 0・mask 1 で conv2d 直接カーネルとビット同一（実 GPU）",
+  "deform_conv2d with offset 0 and mask 1 is bit-identical to the conv2d direct kernel (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const testCase of PARITY_CASES) {
         const { deform, conv } = await runBoth(gpu, testCase);
-        assert(deform.length > 0, `${testCase.name}: 出力が空`);
-        // Uint32 の完全一致（tolerance では丸め列の変化が沈黙する）
+        assert(deform.length > 0, `${testCase.name}: the output is empty`);
+        // Exact Uint32 equality (a tolerance would stay silent about a change in the rounding sequence)
         assertEquals(
           [...deform],
           [...conv],
-          `${testCase.name}: 退化ケースのビット列が conv2d と違う`,
+          `${testCase.name}: the bit pattern of the degenerate case differs from conv2d`,
         );
-        // 恒真化の門: 出力が bias 一色（= 縮約が 1 度も走っていない）でないこと
+        // The vacuity check: the output is not all bias (= the reduction never ran)
         assert(
           new Set(deform).size > 1,
-          `${testCase.name}: 出力が単一値（縮約が効いていない恒真な比較）`,
+          `${testCase.name}: the output is a single value (a vacuous comparison in which the reduction has no effect)`,
         );
       }
     } finally {
@@ -290,7 +296,7 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 単一ノードグラフで deform_conv2d を 1 回走らせる（executor 経路）。 */
+/** Runs deform_conv2d once in a single-node graph (the executor path). */
 const runDeform = async (
   gpu: GpuContext,
   inputs: readonly Tensor[],
@@ -320,10 +326,10 @@ const runDeform = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "deform_conv2d の境界は clamp ではなくゼロ埋め（手計算値と厳密一致 / 実 GPU）",
+  "the deform_conv2d boundary is zero fill, not clamp (exact equality with hand-computed values / real GPU)",
   async () => {
-    // 1×1 カーネル・Cin=Cout=1・weight 1・bias 0 なので、出力は
-    // `mask · bilinear(x, oy + off_y, ox + off_x)` そのもの（値は f32 で厳密）。
+    // A 1×1 kernel, Cin=Cout=1, weight 1, bias 0, so the output is exactly
+    // `mask · bilinear(x, oy + off_y, ox + off_x)` (the values are exact in f32).
     const x = fill([1, 1, 2, 2], (i) => 1 + i);
     const weight = fill([1, 1, 1, 1], () => 1);
     const bias = fill([1], () => 0);
@@ -331,16 +337,16 @@ test.skipIf(!GPU_AVAILABLE)(
     const gpu = await acquireGpu();
     try {
       const run = async (shiftY: number, shiftX: number): Promise<readonly number[]> => {
-        // offset は `[y 平面 4 要素, x 平面 4 要素]`（偶数チャネル = y / 奇数 = x）
+        // offset is `[4 elements of the y plane, 4 elements of the x plane]` (even channels = y / odd = x)
         const offset = fill([1, 2, 2, 2], (i) => (i < 4 ? shiftY : shiftX));
         const out = await runDeform(gpu, [x, weight, offset, mask, bias], [1, 1, 2, 2], [0, 0]);
         return [...out.data];
       };
-      // 境界の内側 — 下側の隅だけ範囲外（clamp なら 3, 4 が出るところが 1.5, 2 になる）
+      // Inside the boundary — only the lower corners are out of range (where clamp would give 3, 4, this gives 1.5, 2)
       assertEquals(await run(0.5, 0), [2, 3, 1.5, 2]);
-      // 中心が −1.5 ≤ −1 → タップ全体 0（clamp なら 1, 2 が出る）
+      // The centre at −1.5 ≤ −1 -> the whole tap is 0 (clamp would give 1, 2)
       assertEquals(await run(-1.5, 0), [0, 0, 0.5, 1]);
-      // MUST: 偶数 = y / 奇数 = x。入れ替えると値が別物になる形で固定する
+      // MUST: even = y / odd = x. Pinned with a shape in which swapping them gives entirely different values
       assertEquals(await run(1, 0), [3, 4, 0, 0]);
       assertEquals(await run(0, 1), [2, 0, 4, 0]);
     } finally {
@@ -350,15 +356,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "deform_conv2d の NaN offset は 0 に落ちず出力へ伝播する（実 GPU）",
+  "a NaN offset in deform_conv2d does not fall to 0 and propagates to the output (real GPU)",
   async () => {
-    // 正の形の範囲判定（`> −1 && < in`）は NaN で false 側に落ちるので、ビット列判定で
-    // NaN を先に分けていなければ**この出力は 0 になる**（沈黙誤値）。
+    // A range test of the positive form (`> −1 && < in`) falls to the false side on NaN, so unless NaN is
+    // split off first by a bit-pattern test, **this output becomes 0** (a silently wrong value).
     const x = fill([1, 1, 2, 2], (i) => 1 + i);
     const weight = fill([1, 1, 1, 1], () => 1);
     const bias = fill([1], () => 0);
     const mask = fill([1, 1, 2, 2], () => 1);
-    // y 平面の先頭だけ NaN・2 番目は +Inf（Inf は torch と同じく「範囲外 = 0」）
+    // Only the first element of the y plane is NaN, the second is +Inf (Inf is "out of range = 0", as in torch)
     const offset = fill([1, 2, 2, 2], (i) => {
       if (i === 0) return Number.NaN;
       if (i === 1) return Number.POSITIVE_INFINITY;
@@ -367,9 +373,9 @@ test.skipIf(!GPU_AVAILABLE)(
     const gpu = await acquireGpu();
     try {
       const out = await runDeform(gpu, [x, weight, offset, mask, bias], [1, 1, 2, 2], [0, 0]);
-      assertEquals(Number.isNaN(out.data[0]), true, "NaN の offset が 0 に落ちている");
-      assertEquals(out.data[1], 0, "±Inf の offset は範囲外 = 0（NaN ではない）");
-      assertEquals([...out.data.slice(2)], [3, 4], "他の要素は巻き添えにならない");
+      assertEquals(Number.isNaN(out.data[0]), true, "a NaN offset fell to 0");
+      assertEquals(out.data[1], 0, "a ±Inf offset is out of range = 0 (not NaN)");
+      assertEquals([...out.data.slice(2)], [3, 4], "the other elements are not caught up in it");
     } finally {
       gpu.destroy();
     }

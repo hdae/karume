@@ -1,8 +1,8 @@
-// フェイク device を**実物の** GpuContext に包むためのヘルパ。
+// Helper that wraps a fake device in a **real** GpuContext.
 //
-// MUST: GpuContext 自体はフェイクにしない。検証したいのは errorScope 区間ロック・消失購読と
-// いった GpuContext の本番実装そのもので、そこを差し替えるとテストがフェイクを検証するだけに
-// なる。差し替えるのは GPU 実体（device）だけに留める。
+// MUST: GpuContext itself is never faked. What the tests check is GpuContext's production code —
+// the errorScope section lock, the device-loss subscription and the like — and replacing it would
+// leave the tests checking only the fake. Replace just the GPU itself (the device).
 
 import { platformObject } from "@karume/test-support/webgpu";
 import {
@@ -12,7 +12,10 @@ import {
   type RequiredLimits,
 } from "../../src/gpu/device.ts";
 
-/** ロックと消失購読は limits を見ないため、要求キーを 0 で埋めた最小値でよい。 */
+/**
+ * The lock and the loss subscription never look at the limits, so every requested key at 0 is
+ * enough.
+ */
 const ZERO_LIMITS: RequiredLimits = {
   maxBufferSize: 0,
   maxStorageBufferBindingSize: 0,
@@ -27,18 +30,27 @@ const ZERO_LIMITS: RequiredLimits = {
   maxComputeWorkgroupsPerDimension: 0,
 };
 
-/** GpuContext が構築時に触る面（features / lost）だけを持つ最小のフェイク device。 */
+/**
+ * The smallest fake device: only the surface GpuContext touches at construction (features /
+ * lost).
+ */
 export type FakeDeviceParts = {
-  /** 未指定なら「消失しない device」（永久に未解決の promise）。 */
+  /** Absent = "a device that is never lost" (a promise that never settles). */
   readonly lost?: Promise<GPUDeviceLostInfo>;
   readonly features?: Iterable<string>;
-  /** errorScope の pop（batch の決着を通す検証で要る）。未指定なら null で即決着。 */
+  /**
+   * The errorScope pop (needed by checks that go through a batch's settlement). Absent = settles
+   * at once with null.
+   */
   readonly popErrorScope?: () => Promise<GPUError | null>;
-  /** `queue.onSubmittedWorkDone`（batch の完了フェンス）。未指定なら即決着。 */
+  /** `queue.onSubmittedWorkDone` (a batch's completion fence). Absent = settles at once. */
   readonly onSubmittedWorkDone?: () => Promise<void>;
-  /** `queue.submit`（呼ばれたことを観測する検証で要る）。未指定なら何もしない。 */
+  /** `queue.submit` (needed by checks that observe that it was called). Absent = does nothing. */
   readonly submit?: (commandBuffers: readonly GPUCommandBuffer[]) => void;
-  /** `createBuffer`（確保した実体の破棄を観測する検証で要る）。未指定なら持たない。 */
+  /**
+   * `createBuffer` (needed by checks that observe the destruction of allocated buffers). Absent =
+   * the device has no such method.
+   */
   readonly createBuffer?: (descriptor: GPUBufferDescriptor) => GPUBuffer;
   /**
    * `queue.writeBuffer` (needed by checks that observe what a GenerationContext writes to its
@@ -47,12 +59,13 @@ export type FakeDeviceParts = {
   readonly writeBuffer?: (buffer: GPUBuffer, offset: number, data: BufferSource) => void;
 };
 
-/** DOM 型全体は再現しないため cast で渡す（テスト専用の境界）。 */
+/** Passed through a cast because the whole DOM type is not reproduced (a test-only boundary). */
 export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
   ({
     lost: parts.lost ?? new Promise<GPUDeviceLostInfo>(() => {}),
     features: new Set(parts.features ?? []),
-    // `GpuContext.destroy()`（破棄要求の同期フラグ）を通す検証で要る。
+    // Needed by checks that go through `GpuContext.destroy()` (the synchronous destroy-request
+    // flag).
     destroy: (): void => undefined,
     pushErrorScope: (): void => undefined,
     popErrorScope: parts.popErrorScope ?? ((): Promise<GPUError | null> => Promise.resolve(null)),
@@ -67,20 +80,21 @@ export const fakeDevice = (parts: FakeDeviceParts = {}): GPUDevice =>
 export const fakeGpuContext = (device: GPUDevice, onDeviceLost?: DeviceLostHandler): GpuContext =>
   new GpuContext(device, readAdapterInfo({}), ZERO_LIMITS, new Set(), onDeviceLost);
 
-/** 引き金に何も渡さなかったときの消失情報（`reason` は GpuContext の分岐に使われない）。 */
+/** The loss info when the trigger is given nothing (GpuContext does not branch on `reason`). */
 const DEFAULT_LOSS: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({
   reason: "destroyed",
-  message: "テストによる消失",
+  message: "lost by the test",
 });
 
 /**
- * 消失を後から起こせるフェイク device と、その引き金。
+ * A fake device whose loss can be triggered later, and its trigger.
  *
- * `lose` に情報を渡せるのは、バックエンドが入れる真因（`reason` / `message`）が例外の文言まで
- * 運ばれることを固定するため。
+ * `lose` takes the info so a test can pin that the real cause the backend supplies (`reason` /
+ * `message`) is carried into the exception's message.
  *
- * `onDeviceLost` を渡せるのは、公開通知が**挿入順の先頭**に来る形（コンストラクタでの登録）
- * を再現するため。内部購読より先に呼ばれることが、例外隔離を要求する条件そのものになる。
+ * `onDeviceLost` can be passed to reproduce the shape where the public notification comes **first
+ * in insertion order** (registered in the constructor). Being called before the internal
+ * subscriptions is exactly the condition that requires the exception isolation.
  */
 export const losableGpuContext = (
   onDeviceLost?: DeviceLostHandler,

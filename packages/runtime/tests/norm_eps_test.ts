@@ -1,8 +1,9 @@
 /**
- * 正規化の eps の値域（GPU 不要）。op 契約（attrs）とカーネルの params は同じ条件
- * 「有限かつ f32 の正規数（2^-126 以上）に丸まる」を二重に持つ。片側だけが subnormal を通すと、
- * FTZ（subnormal を 0 として扱う — WGSL が許す）の GPU では eps = 0 で走り、全ゼロ行が
- * ゼロ除算になる。ここでは両側の受理集合が一致することを固定する。
+ * The value range of the normalisation eps (no GPU needed). The op contract (attrs) and the kernel
+ * params both hold the same condition, "finite and rounds to a normal f32 number (2^-126 or
+ * above)". If only one side lets a subnormal through, a GPU with FTZ (treating subnormals as 0 —
+ * which WGSL allows) runs with eps = 0, and an all-zero row divides by zero. This file pins that
+ * both sides accept the same set.
  */
 
 import { assertEquals, assertThrows } from "@std/assert";
@@ -28,16 +29,16 @@ const accepts = (check: () => unknown): boolean => {
 };
 
 const VALUES: readonly (readonly [string, number])[] = [
-  ["最小の subnormal 2^-149", F32_MIN_SUBNORMAL],
-  ["最大の subnormal", F32_MAX_SUBNORMAL],
-  ["f32 で 0 に丸まる 1e-50", 1e-50],
-  ["最小の正規数 2^-126", F32_MIN_NORMAL],
+  ["smallest subnormal 2^-149", F32_MIN_SUBNORMAL],
+  ["largest subnormal", F32_MAX_SUBNORMAL],
+  ["1e-50, which rounds to 0 in f32", 1e-50],
+  ["smallest normal number 2^-126", F32_MIN_NORMAL],
   ["1e-5", 1e-5],
-  ["f32 で無限大に丸まる 1e39", 1e39],
+  ["1e39, which rounds to infinity in f32", 1e39],
 ];
 
-describe("正規化の params: eps", () => {
-  it("非ゼロの subnormal（2^-149 と最大の subnormal）を layer_norm / rms_norm とも拒否する", () => {
+describe("normalisation params: eps", () => {
+  it("rejects a non-zero subnormal (2^-149 and the largest subnormal) for both layer_norm and rms_norm", () => {
     for (const eps of [F32_MIN_SUBNORMAL, F32_MAX_SUBNORMAL]) {
       assertThrows(
         () => layerNormParams(4, 8, eps),
@@ -54,12 +55,12 @@ describe("正規化の params: eps", () => {
     }
   });
 
-  it("最小の正規数 2^-126 は受理する（門を広げすぎていない対）", () => {
+  it("accepts the smallest normal number 2^-126 (the counterpart showing the check is not too wide)", () => {
     assertEquals(new Float32Array(layerNormParams(4, 8, F32_MIN_NORMAL).buffer)[2], F32_MIN_NORMAL);
     assertEquals(new Float32Array(rmsNormParams(4, 8, F32_MIN_NORMAL).buffer)[2], F32_MIN_NORMAL);
   });
 
-  it("op 契約（attrs）と params の受理集合が一致する", () => {
+  it("the op contract (attrs) and the params accept the same set", () => {
     for (const [label, eps] of VALUES) {
       const contract = accepts(() => LAYER_NORM_ATTRS.eps(eps, "test"));
       assertEquals(
@@ -70,7 +71,7 @@ describe("正規化の params: eps", () => {
       assertEquals(
         accepts(() => RMS_NORM_ATTRS.eps(eps, "test")),
         contract,
-        `rms 契約 ${label}`,
+        `rms contract ${label}`,
       );
       assertEquals(
         accepts(() => rmsNormParams(4, 8, eps)),

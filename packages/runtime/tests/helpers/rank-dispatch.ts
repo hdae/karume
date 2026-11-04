@@ -1,23 +1,24 @@
-// argmax / topk の**直接 dispatch ハーネス**（ADR 0068 受入条件③ の故障注入用）。通常の門は
-// Session 経由（executor + `PipelineCache`）で撃つが、故障注入は WGSL を書き換えた**別の文字列**
-// を撃つ必要があるため、ここでは `createComputePipeline` + 手組みバッファで直接撃つ。
-// 依存は helpers → src の一方向。
+// **Direct dispatch harness** for argmax / topk (for the fault injection of ADR 0068 acceptance
+// criterion ③). The regular checks dispatch through a Session (executor + `PipelineCache`), but
+// fault injection has to dispatch **a different string** with rewritten WGSL, so this dispatches
+// directly with `createComputePipeline` + hand-built buffers. Dependencies go one way, helpers →
+// src.
 //
-// MUST: パイプラインは**最終 WGSL 文字列**でキャッシュする（`PipelineCache` を使わない —
-// tests/helpers/state-dispatch.ts 冒頭と同じ理由）。キー（= 変種）でキャッシュすると正常版の
-// パイプラインが変異版の dispatch に配られ、故障注入が「常に緑」になる。
+// MUST: pipelines are cached by **the final WGSL string** (no `PipelineCache` — for the same reason
+// as the top of tests/helpers/state-dispatch.ts). Caching by key (= variant) would hand the correct
+// version's pipeline to the mutant's dispatch, and the fault injection would be "always green".
 
 import { gridStrideWorkgroups } from "../../src/codegen/dispatch.ts";
 import { ARGMAX_WGSL, argmaxParams } from "../../src/kernels/argmax.ts";
 import { topkParams, topkWgsl } from "../../src/kernels/topk.ts";
 
-/** WGSL を書き換える故障注入（空振りの検出は呼び手の `assertMutated`）。 */
+/** Fault injection that rewrites WGSL (the caller's `assertMutated` detects a no-op rewrite). */
 export type RankMutation = (wgsl: string) => string;
 
-/** 最終 WGSL 文字列 → パイプライン（キーではなく**文字列**がキー — 上の MUST）。 */
+/** Final WGSL string → pipeline (the key is **the string**, not a cache key — the MUST above). */
 export type RankPipelineCache = Map<string, GPUComputePipeline>;
 
-/** 平坦化した入力の形（`[rows, dim]` — 先行次元は呼び手が畳んでおく）。 */
+/** Shape of the flattened input (`[rows, dim]` — the caller folds the leading dimensions). */
 export type RankShape = {
   readonly rows: number;
   readonly dim: number;
@@ -78,7 +79,7 @@ const readBytes = async (
   return copy;
 };
 
-/** 1 dispatch を撃つ（束縛は binding 1 以降が引数の順 — 0 は params 固定）。 */
+/** Issues one dispatch (bindings from 1 on follow the argument order — 0 is always params). */
 const dispatch = (
   device: GPUDevice,
   pipeline: GPUComputePipeline,
@@ -98,7 +99,7 @@ const dispatch = (
   device.queue.submit([encoder.finish()]);
 };
 
-/** argmax を直接撃って添字列（`[rows]`）を返す。 */
+/** Dispatches argmax directly and returns the indices (`[rows]`). */
 export const runArgmaxDirect = async (
   device: GPUDevice,
   shape: RankShape,
@@ -113,7 +114,8 @@ export const runArgmaxDirect = async (
     const input = inputBuffer(device, x);
     const out = outputBuffer(device, shape.rows);
     buffers.push(params, input, out);
-    // 1 行 = 1 workgroup（上限超過は行 grid-stride 側で回る — recipe-builder と同じ式）
+    // 1 row = 1 workgroup (beyond the limit the row grid-stride loops — the same formula as
+    // recipe-builder)
     const groups = gridStrideWorkgroups(
       shape.rows,
       1,
@@ -126,13 +128,16 @@ export const runArgmaxDirect = async (
   }
 };
 
-/** topk の 2 出力（値 f32 の降順 + 添字 i32・どちらも `[rows, k]`）。 */
+/** The two outputs of topk (f32 values in descending order + i32 indices, both `[rows, k]`). */
 export type TopkDirectResult = {
   readonly values: Float32Array<ArrayBuffer>;
   readonly indices: Int32Array<ArrayBuffer>;
 };
 
-/** topk を直接撃って値列と添字列を返す（`k` は WGSL に焼かれるので shape と別に渡す）。 */
+/**
+ * Dispatches topk directly and returns values and indices (`k` is baked into the WGSL, so it is
+ * passed apart from the shape).
+ */
 export const runTopkDirect = async (
   device: GPUDevice,
   shape: RankShape & { readonly k: number },

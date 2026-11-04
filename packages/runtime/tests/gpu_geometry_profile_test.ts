@@ -1,30 +1,40 @@
-// GEMM 幾何のプロファイル（ADR 0115 — src/kernels/geometry-profile.ts）が Session の導出相まで
-// 結線されていることの実 GPU 検証。純関数の振る舞いは geometry_profile_test.ts。
+// Real-GPU check that the GEMM geometry profile (ADR 0115 — src/kernels/geometry-profile.ts) is
+// wired through to the Session's derivation phase. The behaviour of the pure functions is in
+// geometry_profile_test.ts.
 //
-// 見るのは 2 つ:
+// It looks at two things:
 //
-// 1. 選ばれたプロファイルの名前が診断（`SessionDiagnostics.geometryProfile`）に出る。
-// 2. 埋め込みの各プロファイル（src/kernels/geometry-profiles/）で組んだ Session の出力が、既定
-//    プロファイルの Session と**同じ入力で Uint32 一致**する。幾何が変えてよいのは担当割りだけ
-//    （ADR 0022 の数値契約）で、導出相がキー・WGSL・dispatch のどれか 1 つにだけ別の幾何を
-//    渡すと、出力タイルが欠けてここで値の差として出る。
-//    MUST: 値の一致だけでは結線の証拠にならない（プロファイルを無視しても一致する）ので、
-//    そのプロファイルの幾何判別子が**実際に走ったパイプラインキー**に載ったことも見る。
+// 1. The name of the selected profile appears in the diagnostics
+//    (`SessionDiagnostics.geometryProfile`).
+// 2. The output of a Session built with each built-in profile (src/kernels/geometry-profiles/)
+//    **matches the default profile's Session as Uint32 for the same inputs**. The geometry may
+//    change only the work split (the numeric contract of ADR 0022); if the derivation phase passes
+//    a different geometry to only one of the key, the WGSL or the dispatch, output tiles go missing
+//    and show up here as a difference in values.
+//    MUST: matching values alone are no evidence of the wiring (they also match if the profile is
+//    ignored), so it also checks that the profile's geometry discriminator appeared in **the
+//    pipeline keys that actually ran**.
 //
-// プロファイルは adapter の (vendor, architecture, description) で選ばれるので、2 は **device は
-// 実物のまま、adapterInfo だけをそのプロファイルの match に合わせた GpuContext** で Session を組む
-// （ここで走る GPU はプロファイルを作った機ではないが、幾何でビットが動かないことは機に依らない
-// 命題 — ADR 0022 追記）。`match` を省いた注入専用の表は adapter では選ばれないので、同じ偽装無しの
-// GpuContext に**注入の席**から渡して組む（全表を回す — 自動選択されない表も既定とビット同一で
-// なければ注入した利用者の出力が動く）。既定側も adapterInfo を空にした GpuContext で組み、実機の
-// adapter に将来プロファイルが当たっても比較の基準が既定のまま動かないようにする。
-// 埋め込みが 1 本も無い間は 2 を明示 SKIP する（空の一覧で緑にしない）。
+// A profile is selected by the adapter's (vendor, architecture, description), so 2 builds the
+// Session with **a GpuContext that keeps the real device and only sets adapterInfo to that
+// profile's match** (the GPU running here is not the machine the profile was made on, but that the
+// geometry does not move bits is a claim independent of the machine — ADR 0022 addendum). A table
+// for injection only, with `match` omitted, is never selected by an adapter, so it is passed
+// **through the injection field** of the same GpuContext without the disguise (every table runs —
+// unless a table that is never selected automatically is also bit-identical to the default, the
+// output of a user who injects it moves). The default side is also built with a GpuContext whose
+// adapterInfo is empty, so that the baseline of the comparison stays the default even if a profile
+// matches the real adapter in the future.
+// While there are no built-in profiles at all, 2 is SKIPped explicitly (an empty list is not
+// green).
 //
-// 3. `acquireGpu({ geometryProfile })` で注入した表は、adapter の (vendor, architecture, description) を見ずに
-//    使われる（`match` も見ない）。2 と同じ 3 点（診断の名前・実走キーの幾何判別子・既定との Uint32
-//    一致）に加え、i8a8 attention の dp4a カナリアがその表の幾何で撃つことを、カナリアが
-//    コンパイルした WGSL で見る。
-//    コールバック形（ADR 0117 決定 6）で返した表も同じ 3 点で使われ、`undefined` は自動選択になる。
+// 3. A table injected with `acquireGpu({ geometryProfile })` is used without looking at the
+//    adapter's (vendor, architecture, description) (nor at `match`). Besides the same 3 points as 2
+//    (the name in the diagnostics, the geometry discriminator of the keys that ran, Uint32
+//    agreement with the default), it checks in the WGSL the canary compiled that the dp4a canary of
+//    the i8a8 attention fires with that table's geometry.
+//    A table returned by the callback form (ADR 0117 decision 6) is used with the same 3 points,
+//    and `undefined` means automatic selection.
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { assert, assertEquals } from "@std/assert";
@@ -64,14 +74,20 @@ import {
   singleOpDeclaration,
 } from "./helpers/model-fixture.ts";
 
-/** 符号と大きさを散らした決定的な列（乱数は使わない — 失敗が再現しないため）。 */
+/**
+ * Deterministic sequences with spread signs and magnitudes (no random numbers — a failure would not
+ * reproduce).
+ */
 const SIGNED = (index: number): number => ((index % 11) - 5) * 0.375 + 0.125;
 const WEIGHT = (index: number): number => ((index % 7) - 3) * 0.5 - 0.0625;
 const BIAS = (index: number): number => ((index % 5) - 2) * 0.25;
 
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
-/** 実際に走ったキーのうち、`prefix` で始まり `parts` を全て含むものがあること。 */
+/**
+ * Asserts that one of the keys that actually ran starts with `prefix` and contains every one of
+ * `parts`.
+ */
 type ExpectedKey = { readonly prefix: string; readonly parts: readonly string[] };
 
 type ProfileCase = {
@@ -79,7 +95,7 @@ type ProfileCase = {
   readonly model: () => Promise<OpenedContainer>;
   readonly inputs: Readonly<Record<string, Tensor>>;
   readonly options?: SessionOptions;
-  /** そのプロファイルで走るはずの幾何の判別子。 */
+  /** The discriminator of the geometry that should run with that profile. */
   readonly expected: (profile: GeometryProfile) => readonly ExpectedKey[];
 };
 
@@ -99,9 +115,10 @@ const linearCase = (m: number): ProfileCase => {
 };
 
 /**
- * `gemmRows` の各規則の代表 M（DECIDED: ADR 0116 決定 7）。有限の規則はその上端（= `maxRows` — 段の
- * 上端は掃引で測った点）、末尾（Infinity）の規則は直前の境界 + 512。表から導くので、段数が変わっても
- * ケースが規則の数だけ追随する。
+ * The representative M of each `gemmRows` rule (DECIDED: ADR 0116 decision 7). A finite rule uses
+ * its upper end (= `maxRows` — the upper end of a bucket is a point measured by the sweep); the
+ * last (Infinity) rule uses the previous boundary + 512. Derived from the table, so the cases
+ * follow the number of rules when the bucket count changes.
  */
 const representativeRows = (rules: readonly GemmRowsRule[]): readonly number[] =>
   rules.map((rule, index) =>
@@ -111,9 +128,12 @@ const representativeRows = (rules: readonly GemmRowsRule[]): readonly number[] =
   );
 
 /**
- * 表の `gemmRows` の規則ごとに 1 ケース（代表 M の linear）。期待する判別子は `gemmRowsGeometry` で
- * 引き直さず**その規則の幾何**から取る — 代表 M が隣の規則に落ちる導出の誤りもキーの不一致で赤になる。
- * 既定と同じ幾何の規則では、判別子が既定の幾何のものになることを見ている（違う幾何なら違うキーの裏返し）。
+ * One case per `gemmRows` rule of the table (a linear with the representative M). The expected
+ * discriminator is taken from **that rule's geometry**, not looked up again with `gemmRowsGeometry`
+ * — a derivation error that lets the representative M fall into a neighbouring rule also turns red
+ * through a key mismatch. For a rule with the same geometry as the default, it checks that the
+ * discriminator is the default geometry's (the flip side of "a different geometry gives a
+ * different key").
  */
 const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =>
   representativeRows(rules).map((m, index) => {
@@ -127,7 +147,9 @@ const gemmRowsCases = (rules: readonly GemmRowsRule[]): readonly ProfileCase[] =
     };
   });
 
-/** conv2d の implicit GEMM キーは幾何を `igemm{tileM}x{tileN}` と `:wg{x}x{y}` で名乗る。 */
+/**
+ * The implicit GEMM key of conv2d names its geometry with `igemm{tileM}x{tileN}` and `:wg{x}x{y}`.
+ */
 const conv2dParts = (geometry: GemmGeometry): readonly string[] => [
   `igemm${gemmTileM(geometry)}x${gemmTileN(geometry)}`,
   `:wg${geometry.wgX}x${geometry.wgY}`,
@@ -136,7 +158,7 @@ const conv2dParts = (geometry: GemmGeometry): readonly string[] => [
 const conv2dCase = (channelsOut: number, rows: "rows64" | "rows32"): ProfileCase => {
   const channelsIn = 8;
   return {
-    name: `conv2d Cout=${channelsOut}（${rows} クラス）`,
+    name: `conv2d Cout=${channelsOut} (${rows} class)`,
     model: async () =>
       await openGraphModel(
         singleOpDeclaration(
@@ -182,7 +204,8 @@ const attentionCase = (compute: "f32" | "a8"): ProfileCase => {
       x1: fill([b, h, n, d], WEIGHT),
       x2: fill([b, h, n, d], BIAS),
     },
-    // 内積変種は両 Session で揃える（device 単位カナリアの判定を比較に混ぜない）。
+    // The dot-product variant is the same in both Sessions (the per-device canary's verdict stays
+    // out of the comparison).
     options: compute === "a8" ? { attentionCompute: "a8", [I8A8_DOT]: "emu" } : {},
     expected: (profile) =>
       compute === "a8"
@@ -209,7 +232,10 @@ const attentionCase = (compute: "f32" | "a8"): ProfileCase => {
   };
 };
 
-/** i8 常駐の linear（`linearCompute: "a8"` で i8a8 経路へ落ちる形）。 */
+/**
+ * A linear with i8 resident weights (the form that goes to the i8a8 path with `linearCompute:
+ * "a8"`).
+ */
 const linearI8a8Case = (): ProfileCase => {
   const [m, k, n] = [300, 64, 96];
   const weight = fill([n, k], (i) => WEIGHT(i) * (1 + (Math.floor(i / k) % 7) * 0.25));
@@ -336,7 +362,10 @@ const conv3dI8a8Case = (): ProfileCase => {
   };
 };
 
-/** linear の行数バケット以外のケース（per-profile 検査は linear を表の規則から作る — `gemmRowsCases`）。 */
+/**
+ * Cases other than the linear row-count buckets (the per-profile check builds its linears from the
+ * table's rules — `gemmRowsCases`).
+ */
 const OTHER_CASES: readonly ProfileCase[] = [
   {
     name: "matmul M=700",
@@ -372,7 +401,8 @@ const OTHER_CASES: readonly ProfileCase[] = [
   },
   attentionCase("f32"),
   attentionCase("a8"),
-  // Cout = 96 は M%64 = 32 なので 32 行クラス・128 は 64 行クラス（`conv2dIgemmMTile`）
+  // Cout = 96 has M%64 = 32, so it is the 32-row class; 128 is the 64-row class
+  // (`conv2dIgemmMTile`)
   conv2dCase(96, "rows32"),
   conv2dCase(128, "rows64"),
   linearI8a8Case(),
@@ -380,7 +410,7 @@ const OTHER_CASES: readonly ProfileCase[] = [
 ];
 
 const CASES: readonly ProfileCase[] = [
-  // 行数バケットの 3 段（≤ 64 / 65〜512 / 513〜）を 1 本ずつ
+  // One each for the 3 row-count buckets (≤ 64 / 65–512 / 513–)
   linearCase(40),
   linearCase(300),
   linearCase(1024),
@@ -388,13 +418,16 @@ const CASES: readonly ProfileCase[] = [
 ];
 
 /**
- * device は実物のまま、adapterInfo の vendor / architecture / description だけを差し替えた
- * GpuContext（プロファイルの選択は Session 構築で adapterInfo から 1 度だけ行われる）。description も
- * 明示で渡す — 実機の値を写すと、description で照合する表が走らせた機によって当たったり外れたりする。
- * `injected` は `acquireGpu({ geometryProfile })` が GpuContext に渡すのと同じ注入の席。
+ * A GpuContext that keeps the real device and replaces only the vendor / architecture /
+ * description of adapterInfo (the profile is selected once, from adapterInfo, while the Session is
+ * built). The description is also passed explicitly — copying the real machine's value would make a
+ * table that matches on description hit or miss depending on the machine it runs on.
+ * `injected` is the same injection field that `acquireGpu({ geometryProfile })` passes to the
+ * GpuContext.
  *
- * MUST: ここで作った GpuContext は destroy しない — device は元の GpuContext と共有で、破棄は
- * 元の側 1 箇所に置く（二重の destroy は消失通知を予期しない側へ流す）。
+ * MUST: do not destroy the GpuContext made here — the device is shared with the original
+ * GpuContext, and it is destroyed in one place on the original side (a double destroy sends the
+ * loss notification to a side that does not expect it).
  */
 const contextAs = (
   gpu: GpuContext,
@@ -440,14 +473,17 @@ const runCase = async (gpu: GpuContext, testCase: ProfileCase): Promise<CaseRun>
     const y = words((await session.run(testCase.inputs))["y"]);
     const diagnostics = session.diagnostics();
     const census = diagnostics.lastRunPipelines;
-    assert(census !== undefined, `${testCase.name}: 直近 run のパイプライン内訳が無い`);
+    assert(census !== undefined, `${testCase.name}: no pipeline breakdown for the latest run`);
     return { y, profile: diagnostics.geometryProfile, keys: census.map((row) => row.key) };
   } finally {
     await session.dispose();
   }
 };
 
-/** 1 ケースを既定の Session と比べ、`profile` の名前・幾何判別子のキー・Uint32 一致を見る。 */
+/**
+ * Compares 1 case with the default Session and checks `profile`'s name, the keys with the geometry
+ * discriminator and Uint32 agreement.
+ */
 const assertRunsWithProfile = async (
   baseline: GpuContext,
   subject: GpuContext,
@@ -463,27 +499,27 @@ const assertRunsWithProfile = async (
       actual.keys.some(
         (key) => key.startsWith(prefix) && parts.every((part) => key.includes(part)),
       ),
-      `${testCase.name}: ${prefix}…${parts.join("…")} のキーで走っていない` +
-        `（実際: ${actual.keys.join(" / ")}）`,
+      `${testCase.name}: did not run with a ${prefix}…${parts.join("…")} key` +
+        ` (actual: ${actual.keys.join(" / ")})`,
     );
   }
-  assertEquals(actual.y, expected.y, `${testCase.name}: 既定プロファイルとビット不一致`);
+  assertEquals(actual.y, expected.y, `${testCase.name}: bits differ from the default profile`);
 };
 
-describe("gemmRows の代表 M", () => {
+describe("representative M of gemmRows", () => {
   const rulesOf = (bounds: readonly number[]): GemmRowsRule[] =>
     bounds.map((maxRows) => ({ maxRows, geometry: DEFAULT_GEOMETRY_PROFILE.gemmRows[0].geometry }));
 
-  it("3 段の表（既定の 64 / 512 / ∞）では各段の上端と、末尾は直前の境界 + 512 になる", () => {
+  it("with the 3-bucket table (the default 64 / 512 / ∞) gives each bucket's upper end, and the previous boundary + 512 for the last", () => {
     assertEquals(representativeRows(DEFAULT_GEOMETRY_PROFILE.gemmRows), [64, 512, 1024]);
   });
 
-  it("7 段の表（16 / 32 / 64 / 128 / 256 / 512 / ∞）では規則の数だけ代表 M が出る", () => {
+  it("with the 7-bucket table (16 / 32 / 64 / 128 / 256 / 512 / ∞) gives as many representative M as there are rules", () => {
     const rules = rulesOf([16, 32, 64, 128, 256, 512, Number.POSITIVE_INFINITY]);
     assertEquals(representativeRows(rules), [16, 32, 64, 128, 256, 512, 1024]);
   });
 
-  it("規則ごとのケースは、その規則の幾何の判別子を期待する", () => {
+  it("each rule's case expects the discriminator of that rule's geometry", () => {
     const cases = gemmRowsCases(DEFAULT_GEOMETRY_PROFILE.gemmRows);
     assertEquals(
       cases.map((testCase) => testCase.expected(DEFAULT_GEOMETRY_PROFILE)[0].parts),
@@ -492,13 +528,14 @@ describe("gemmRows の代表 M", () => {
   });
 });
 
-describe.skipIf(!GPU_AVAILABLE)("幾何プロファイルの診断（実 GPU）", () => {
-  it("Session は実機の adapter から選ばれたプロファイルの名前を診断に出す", async () => {
+describe.skipIf(!GPU_AVAILABLE)("geometry profile diagnostics (real GPU)", () => {
+  it("the Session reports in its diagnostics the name of the profile selected from the real adapter", async () => {
     const gpu = await acquireGpu();
     try {
       const run = await runCase(gpu, linearCase(40));
       assertEquals(run.profile, selectGeometryProfile(gpu.adapterInfo).id);
-      // adapterInfo が空の機（古い Chromium の adapter.info 欠落）は既定に落ちる
+      // A machine with empty adapterInfo (adapter.info missing in old Chromium) falls back to the
+      // default
       const blank = await runCase(contextAs(gpu, "", "", ""), linearCase(40));
       assertEquals(blank.profile, DEFAULT_GEOMETRY_PROFILE.id);
     } finally {
@@ -508,16 +545,18 @@ describe.skipIf(!GPU_AVAILABLE)("幾何プロファイルの診断（実 GPU）"
 });
 
 describe.skipIf(!GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0)(
-  "埋め込みプロファイルの幾何は既定プロファイルとビット同一（実 GPU）",
+  "the geometry of the built-in profiles is bit-identical to the default profile (real GPU)",
   () => {
     for (const profile of BUILTIN_GEOMETRY_PROFILES) {
-      const route = profile.match === undefined ? "注入" : "adapter の選択";
-      it(`'${profile.id}'（${route}）の Session は全ケースで既定と Uint32 一致し、その幾何のキーで走る`, async () => {
+      const route = profile.match === undefined ? "injection" : "adapter selection";
+      it(`the Session of '${profile.id}' (${route}) matches the default as Uint32 in every case and runs with that geometry's keys`, async () => {
         const gpu = await acquireGpu();
         try {
           const baseline = contextAs(gpu, "", "", "");
-          // match のある表は adapter を偽装して選択の経路（description を含む）で、match を省いた
-          // 注入専用の表は注入の席で組む（adapter は空 — 選択では既定にしか落ちない）。
+          // A table with match is built through the selection path with a disguised adapter
+          // (description included); a table for injection only, with match omitted, is built
+          // through the injection field (the adapter is empty — selection would only fall back to
+          // the default).
           const subject =
             profile.match === undefined
               ? contextAs(gpu, "", "", "", profile)
@@ -528,7 +567,7 @@ describe.skipIf(!GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0)(
                   profile.match.description ?? "",
                 );
           const rowCases = gemmRowsCases(profile.gemmRows);
-          assertEquals(rowCases.length, profile.gemmRows.length, "gemmRows の規則を取りこぼした");
+          assertEquals(rowCases.length, profile.gemmRows.length, "missed some gemmRows rules");
           for (const testCase of [...rowCases, ...OTHER_CASES]) {
             await assertRunsWithProfile(baseline, subject, profile, testCase);
           }
@@ -540,10 +579,11 @@ describe.skipIf(!GPU_AVAILABLE || BUILTIN_GEOMETRY_PROFILES.length === 0)(
   },
 );
 
-describe.skipIf(!GPU_AVAILABLE)("acquireGpu で注入した幾何プロファイル（実 GPU）", () => {
-  it("apple-metal-3 を注入した device の Session は全ケースでその表の名前・幾何のキーで走り、既定と Uint32 一致する", async () => {
+describe.skipIf(!GPU_AVAILABLE)("geometry profile injected with acquireGpu (real GPU)", () => {
+  it("the Sessions of a device with apple-metal-3 injected run with that table's name and geometry keys in every case and match the default as Uint32", async () => {
     const plain = await acquireGpu();
-    // 渡した表は acquire 時に複製される — 後から書き換えても device の表（id）は変わらない
+    // The passed table is copied at acquire time — changing it afterwards does not change the
+    // device's table (id)
     const handedOver = structuredClone(APPLE_METAL_3);
     const injected = await acquireGpu({ geometryProfile: handedOver });
     (handedOver as { id: string }).id = "changed-after-acquire";
@@ -558,7 +598,7 @@ describe.skipIf(!GPU_AVAILABLE)("acquireGpu で注入した幾何プロファイ
     }
   });
 
-  it("コールバック形（ADR 0117 決定 6）: device の adapter 情報で 1 度呼ばれ、返した埋め込みの表で Session が走り既定と Uint32 一致する・undefined なら自動選択", async () => {
+  it("callback form (ADR 0117 decision 6): called once with the device's adapter information, the Session runs with the returned built-in table and matches the default as Uint32; undefined means automatic selection", async () => {
     const plain = await acquireGpu();
     const seen: GPUAdapterInfo[] = [];
     const injected = await acquireGpu({
@@ -572,7 +612,7 @@ describe.skipIf(!GPU_AVAILABLE)("acquireGpu で注入した幾何プロファイ
       assertEquals(seen.length, 1);
       assert(
         seen[0] === injected.adapterInfo,
-        "コールバックの adapterInfo が GpuContext のものと別物",
+        "the callback's adapterInfo is a different object from the GpuContext's",
       );
       const baseline = contextAs(plain, "", "", "");
       for (const testCase of [linearCase(40), linearCase(300), linearI8a8Case()]) {
@@ -587,11 +627,12 @@ describe.skipIf(!GPU_AVAILABLE)("acquireGpu で注入した幾何プロファイ
     }
   });
 
-  it("注入した表は adapter と match を見ない（apple-metal-3 に当たる adapter でも、別 vendor の表が使われる）", async () => {
+  it("an injected table ignores the adapter and match (a table of another vendor is used even on an adapter that apple-metal-3 matches)", async () => {
     const gpu = await acquireGpu();
     try {
       const baseline = contextAs(gpu, "", "", "");
-      // 埋め込みの選択なら apple-metal-3 が当たる adapter に、match が nvidia の表を注入する
+      // Inject a table whose match is nvidia into an adapter that the built-in selection would
+      // match with apple-metal-3
       const subject = contextAs(
         gpu,
         "apple",
@@ -610,14 +651,15 @@ describe.skipIf(!GPU_AVAILABLE)("acquireGpu で注入した幾何プロファイ
 });
 
 describe.skipIf(!GPU_AVAILABLE)(
-  "dp4a カナリアは注入した表の i8a8 attention 幾何で撃つ（実 GPU）",
+  "the dp4a canary fires with the injected table's i8a8 attention geometry (real GPU)",
   () => {
-    it("attentionCompute a8 の Session 構築で、カナリアが注入した表の ①QK / ③PV 幾何の WGSL をコンパイルする", async (context) => {
+    it("while building a Session with attentionCompute a8, the canary compiles WGSL with the injected table's ①QK / ③PV geometry", async (context) => {
       const gpu = await acquireGpu({ geometryProfile: APPLE_METAL_3 });
       try {
         if (!dp4aAvailable(gpu.wgslLanguageFeatures)) {
-          // 非広告の device ではカナリアが走らない（emu 直行）— 見る対象が無いので明示 SKIP
-          console.warn(`SKIP ${context.task.name}: dot4I8Packed が広告されていない`);
+          // On a device that does not advertise it the canary does not run (straight to emu) —
+          // nothing to check, so SKIP explicitly
+          console.warn(`SKIP ${context.task.name}: dot4I8Packed is not advertised`);
           return;
         }
         const compiled: string[] = [];
@@ -636,7 +678,7 @@ describe.skipIf(!GPU_AVAILABLE)(
         } finally {
           await session.dispose();
         }
-        // カナリアは dp4a の腕を必ず先に撃つ（v4 / S = f32 の組を含む）
+        // The canary always fires the dp4a arm first (including the v4 / S = f32 pair)
         const injectedQk = attentionQkI8a8Wgsl(true, true, "f32", APPLE_METAL_3.i8a8.attentionQk);
         const injectedPv = attentionPvI8a8Wgsl(true, true, "f32", APPLE_METAL_3.i8a8.attentionPv);
         const defaultQk = attentionQkI8a8Wgsl(
@@ -645,10 +687,19 @@ describe.skipIf(!GPU_AVAILABLE)(
           "f32",
           DEFAULT_GEOMETRY_PROFILE.i8a8.attentionQk,
         );
-        assert(injectedQk !== defaultQk, "注入した表の ①QK 幾何が既定と同じ（検査が空振りする）");
-        assert(compiled.includes(injectedQk), "カナリアが注入した表の ①QK 幾何を撃っていない");
-        assert(compiled.includes(injectedPv), "カナリアが注入した表の ③PV 幾何を撃っていない");
-        assert(!compiled.includes(defaultQk), "カナリアが既定の ①QK 幾何を撃った");
+        assert(
+          injectedQk !== defaultQk,
+          "the injected table's ①QK geometry equals the default (the check would miss)",
+        );
+        assert(
+          compiled.includes(injectedQk),
+          "the canary did not fire with the injected table's ①QK geometry",
+        );
+        assert(
+          compiled.includes(injectedPv),
+          "the canary did not fire with the injected table's ③PV geometry",
+        );
+        assert(!compiled.includes(defaultQk), "the canary fired with the default ①QK geometry");
       } finally {
         gpu.destroy();
       }

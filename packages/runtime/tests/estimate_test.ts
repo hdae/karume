@@ -1,18 +1,20 @@
-// メモリ必要量 estimator（ADR 0070 決定 5）の門。
+// Checks for the memory-requirement estimator (ADR 0070 decision 5).
 //
-// estimator は「必要側」の数字しか出さない純関数なので、固定するのは**カテゴリごとの算式が
-// 実装（executor / GenerationContext / RunArena）と同じ導出元から出ていること**に尽きる。
-// 期待値は全て**手計算した定数**で置く — 実装と同じ式で組み直すと恒真化して、算式がずれた
-// ときに 1 件も落ちない。
+// The estimator is a pure function that reports only the "required" side, so what is pinned comes
+// down to **each category's formula being derived from the same source as the implementation
+// (executor / GenerationContext / RunArena)**. Every expected value is a **hand-computed constant**
+// — rebuilding it with the implementation's formula would make the test a tautology that fails not
+// once when a formula drifts.
 //
-// 報告は常駐（`resident`）+ run の形ごと（`scenarios`）の 2 段。generation を渡さない見積りは
-// `"run"` の 1 本で、渡すと ADR 0066 決定 4 の実行 2 形（`"prefill"` / `"decode"`）が別々に
-// 並ぶ。`peakAccountedBytes` は常駐 + **`max(予算, 最大シナリオ)`**（シナリオの和ではない —
-// slot backing の保持集合はこの量を超えない: ADR 0095 決定 1 / 4。予算 0 = 常に 1 本なので、
-// 従来どおりシナリオ側の最大になる）。
+// The report has two levels: resident (`resident`) + per run shape (`scenarios`). An estimate
+// without generation has the single scenario `"run"`; with it, the two execution shapes of ADR 0066
+// decision 4 (`"prefill"` / `"decode"`) are listed separately. `peakAccountedBytes` is resident +
+// **`max(budget, largest scenario)`** (not the sum of the scenarios — the retained set of slot
+// backings never exceeds this amount: ADR 0095 decisions 1 / 4. Budget 0 = always one, so it is
+// the largest scenario as before).
 //
-// 実 GPU 突合は gpu_estimate_test.ts に分けてある（アダプタ無しは明示 SKIP）。ここは GPU を
-// 取らずに回る門だけ。
+// The real-GPU comparison lives in gpu_estimate_test.ts (explicitly skipped without an adapter).
+// This file holds only the checks that run without acquiring a GPU.
 
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
@@ -50,10 +52,10 @@ const i32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Int32Array.from(values).buffer);
 
 /**
- * シナリオが `"run"` の 1 本だけであることを確かめて、その 1 本を返す。
+ * Checks that the scenarios are exactly the single `"run"` and returns it.
  *
- * generation を渡さない見積りの io / workspace を引く唯一の口 — 「1 本だけ」の主張を
- * 引くたびに一緒に押さえる（2 本に増えたら黙って先頭だけ見る形にしない）。
+ * The only way to read io / workspace of an estimate without generation — it asserts "exactly one"
+ * every time it is read (if it grew to two, it would not silently look at the first only).
  */
 const runScenario = (report: AdmissionReport): AdmissionScenario => {
   assertEquals(
@@ -64,12 +66,12 @@ const runScenario = (report: AdmissionReport): AdmissionScenario => {
 };
 
 // ---------------------------------------------------------------------------
-// 重みのカテゴリ分け
+// Weight categories
 // ---------------------------------------------------------------------------
 
 /**
- * 圧縮しない格納だけのグラフ（f32 の matmul 重み・f32 の embedding 表・i32 の添字）。
- * `T` を持つので io と中間ピークの束縛依存もここで見る。
+ * A graph with uncompressed storage only (f32 matmul weight, f32 embedding table, i32 indices).
+ * It has `T`, so the binding dependence of io and the intermediate peak is checked here too.
  */
 const plainGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -103,22 +105,24 @@ const plainModel = (): PreparedModel =>
     weight("idx", i32Bytes([0, 1]), { codec: "i32" }),
   ]);
 
-test("圧縮しない格納（f32 / i32）は実バイトのまま非圧縮の欄に数える", () => {
+test("uncompressed storage (f32 / i32) is counted at its actual bytes in the uncompressed field", () => {
   const { resident } = plainModel().estimate({ bindings: { T: 7 } });
-  // w 4×3×4=48 + emb 5×3×4=60 + idx 2×4=8（いずれも 4 バイト整列済み）
+  // w 4×3×4=48 + emb 5×3×4=60 + idx 2×4=8 (all already 4-byte aligned)
   assertEquals(resident.weights.uncompressedBytes, 116);
   assertEquals(resident.weights.compressedBytes, 0);
   assertEquals(resident.weights.expandedBytes, 0);
-  // 3 欄の和が weights.totalBytes
+  // The sum of the three fields is weights.totalBytes
   assertEquals(resident.weights.totalBytes, 116);
   assertEquals(resident.stateBytes, 0);
 });
 
 /**
- * 実行できない意味論 dtype（matmul の重みが i32）を持つ合流後のグラフ。IR の語彙としては valid だが
- * matmul は f32 しか受けないので、`createSessionFromContainer` は必ず capability 不足で落ちる。
+ * A merged graph with a semantic dtype that cannot run (an i32 matmul weight). It is valid in the
+ * IR vocabulary, but matmul accepts only f32, so `createSessionFromContainer` always fails for lack
+ * of capability.
  *
- * NOTE: 格納 codec の側では作れない — 台帳の全 codec が実行できる（bf16 は ADR 0131 で開いた）。
+ * NOTE: it cannot be built from the storage codec side — every codec in the ledger can run (bf16
+ * was opened in ADR 0131).
  */
 const unsupportedGraph = (): IrGraph => {
   const declaration = plainGraph();
@@ -126,9 +130,10 @@ const unsupportedGraph = (): IrGraph => {
   return mergeGraph(declaration, { w: "i32" });
 };
 
-test("実構築が拒否する意味論 dtype に見積りを返さない", () => {
-  // 全量面（`estimateGraphMemory`）を直に呼ぶ — `PreparedModel` を経由すると
-  // `prepareContainer` の側の門が先に落とし、estimator 自身の門が空回りしていても緑になる。
+test("returns no estimate for a semantic dtype that the real build rejects", () => {
+  // Calls the full surface (`estimateGraphMemory`) directly — going through `PreparedModel` would
+  // let the check on the `prepareContainer` side fail first, and the test would be green even if
+  // the estimator's own check were a no-op.
   const graph = unsupportedGraph();
   assertThrows(
     () => estimateGraphMemory(graph, planWeightResidency(graph), { bindings: { T: 7 } }),
@@ -137,17 +142,17 @@ test("実構築が拒否する意味論 dtype に見積りを返さない", () =
   );
 });
 
-test("io は入力バッファ + 出力 readback staging（0 要素は 4 バイト床）", () => {
+test("io is the input buffers + the output readback staging (0 elements floor at 4 bytes)", () => {
   const model = plainModel();
   // x[7,4]=112 + h[7,3]=84 + g[2,3]=24
   assertEquals(runScenario(model.estimate({ bindings: { T: 7 } })).ioBytes, 220);
-  // T=0 では x も h も 0 要素 → 床の 4 バイトずつ。g は 24 のまま
+  // At T=0 both x and h have 0 elements → the 4-byte floor each. g stays 24
   assertEquals(runScenario(model.estimate({ bindings: { T: 0 } })).ioBytes, 32);
 });
 
-test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側の最大（従来の勘定）", () => {
-  // 予算 0 = slot backing を常に 1 本しか持たない形（ADR 0095 決定 1）。この形でだけ
-  // 「勘定側 = 常駐 + 最大シナリオ 1 本」が成り立つ。
+test("with budget 0, peakAccountedBytes is the resident total + the largest scenario (the old accounting)", () => {
+  // Budget 0 = always holding only one slot backing (ADR 0095 decision 1). Only in this form does
+  // "accounted = resident + the single largest scenario" hold.
   const report = plainModel().estimate({
     bindings: { T: 7 },
     planBackingBudgetBytes: 0,
@@ -166,28 +171,29 @@ test("予算 0 の peakAccountedBytes は常駐の総和 + シナリオ側の最
 });
 
 // ---------------------------------------------------------------------------
-// slot backing の保持予算（ADR 0095）
+// The slot backing retention budget (ADR 0095)
 // ---------------------------------------------------------------------------
 
-test("既定予算の peakAccountedBytes は常駐 + 予算（シナリオが予算に収まる形）", () => {
+test("with the default budget, peakAccountedBytes is resident + budget (a form whose scenarios fit in the budget)", () => {
   const report = plainModel().estimate({ bindings: { T: 7 } });
   assertEquals(report.planBackingBudgetBytes, DEFAULT_PLAN_BACKING_BUDGET_BYTES);
-  // The largest scenario, 328 (io 220 + workspace 108), fits in the 256 MiB budget, so the budget is
-  // what stands on the accounted side (the retained set never exceeds it = an accounted peak that
-  // errs on the large side).
+  // The largest scenario, 328 (io 220 + workspace 108), fits in the 256 MiB budget, so the budget
+  // is what stands on the accounted side (the retained set never exceeds it = an accounted peak
+  // that errs on the large side).
   assertEquals(report.peakAccountedBytes, 116 + DEFAULT_PLAN_BACKING_BUDGET_BYTES);
-  assertEquals(report.auxiliaryBytes, undefined, "単体Sessionは補助資源を報告しない");
+  assertEquals(report.auxiliaryBytes, undefined, "a single Session reports no auxiliary resources");
 });
 
-test("予算はシナリオごとの数字を動かさない（効くのはピークだけ）", () => {
+test("the budget does not move the per-scenario numbers (it affects only the peak)", () => {
   const at = (planBackingBudgetBytes: number): AdmissionReport =>
     plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes });
-  // 予算は「保持本数の側」の量なので、1 本の形の必要量（io / workspace / 常駐）には効かない。
+  // The budget is an amount on the "how many are retained" side, so it does not affect what one
+  // shape requires (io / workspace / resident).
   assertEquals(at(0).scenarios, at(DEFAULT_PLAN_BACKING_BUDGET_BYTES).scenarios);
   assertEquals(at(0).resident, at(DEFAULT_PLAN_BACKING_BUDGET_BYTES).resident);
 });
 
-test("予算が最大シナリオより小さいときは最大シナリオが立つ（max の切り替わり）", () => {
+test("when the budget is smaller than the largest scenario, the largest scenario stands (the max switches)", () => {
   const peak = (planBackingBudgetBytes: number): number =>
     plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes }).peakAccountedBytes;
   // The largest scenario is 328 (io 220 + workspace 108). A new backing that alone exceeds the
@@ -200,7 +206,7 @@ test("予算が最大シナリオより小さいときは最大シナリオが�
   assertEquals(peak(329), 116 + 329);
 });
 
-test("報告は使った予算をそのまま載せる（呼び手が組み直さずに読める）", () => {
+test("the report carries the budget it used as is (the caller can read it without recomputing)", () => {
   assertEquals(
     plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 4096 })
       .planBackingBudgetBytes,
@@ -212,8 +218,9 @@ test("報告は使った予算をそのまま載せる（呼び手が組み直�
   );
 });
 
-test("予算の値域は createSessionFromContainer と同じ門（非負の安全な整数以外は fail loudly）", () => {
-  // MUST: 見積りだけが「Session の作れない予算」を受けると、見積れたのに構築が落ちる形になる。
+test("the budget's value range is the same check as createSessionFromContainer (anything other than a non-negative safe integer fails loudly)", () => {
+  // MUST: if only the estimate accepted "a budget a Session cannot be built with", it would
+  // estimate and then the build would fail.
   for (const budget of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
     assertThrows(
       () =>
@@ -225,14 +232,15 @@ test("予算の値域は createSessionFromContainer と同じ門（非負の安�
       "non-negative safe integer",
     );
   }
-  // 対照: 0 は正当値（従来の容量 1）— 上の 4 本が「何を渡しても落ちる」ではないことの証明。
+  // Control: 0 is a valid value (the old capacity 1) — proof that the four above are not "fails
+  // whatever is passed".
   assertEquals(
     plainModel().estimate({ bindings: { T: 7 }, planBackingBudgetBytes: 0 }).peakAccountedBytes,
     444,
   );
 });
 
-test("予算の値域の診断は利用者の変換を呼ばず、非数値は型名だけを出す", () => {
+test("the diagnostic for the budget's value range does not call the user's conversion, and shows only the type name for non-numbers", () => {
   let conversions = 0;
   const object = {
     [Symbol.toPrimitive](): number {
@@ -255,8 +263,9 @@ test("予算の値域の診断は利用者の変換を呼ばず、非数値は�
 });
 
 /**
- * linear の重み（適格）と mul の被演算子（適格外）に**同じ格納**を置ける形のグラフ。
- * IR v2 の宣言は格納を持たないので、どちらに何の codec を載せるかは供給側が決める。
+ * A graph where the **same storage** can be placed on a linear weight (eligible) and on a mul
+ * operand (ineligible). An IR v2 declaration carries no storage, so the supply side decides which
+ * codec goes where.
  */
 const twoPathGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -283,22 +292,22 @@ const twoPathGraph = (): DeclarationJson => ({
   ],
 });
 
-test("f16 は適格なら 4 バイト切り上げで常駐・適格外なら f32 展開", () => {
+test("f16 is resident rounded up to 4 bytes when eligible, and f32-expanded when ineligible", () => {
   const model = openGraph(twoPathGraph(), [
     weight("b", f32Bytes([0, 0, 0])),
     weight("w", f16Zeros(9), { codec: "f16" }),
     weight("g", f16Zeros(3), { codec: "f16" }),
   ]);
   const { weights } = model.estimate().resident;
-  // w は numel 9 → 18 バイトを 4 バイトへ切り上げて 20
+  // w has numel 9 → 18 bytes, rounded up to 4 bytes = 20
   assertEquals(weights.compressedBytes, 20);
-  // b は f32 のまま 12（非圧縮の欄）
+  // b stays f32, 12 (the uncompressed field)
   assertEquals(weights.uncompressedBytes, 12);
-  // g は mul の被演算子なので適格外 → 3×4
+  // g is a mul operand, so ineligible → 3×4
   assertEquals(weights.expandedBytes, 12);
 });
 
-test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（奇数 numel）", () => {
+test("eligible i8 is numel rounded up to 4 bytes + per-channel scale (odd numel)", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -319,8 +328,8 @@ test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（奇�
   };
   const model = openGraph(graph, [
     weight("b", f32Bytes([0, 0, 0])),
-    // per-channel は groupSize = 行長・scale は `[rows, 1]` ぶんの f32（v1 の keepdim 形と同じ
-    // バイト列で、shape だけを捨てた形）。
+    // Per-channel means groupSize = row length and scale is `[rows, 1]` worth of f32 (the same
+    // bytes as v1's keepdim shape, with only the shape dropped).
     weight("w", new Uint8Array(new ArrayBuffer(15)), {
       codec: "int8-sym",
       groupSize: 5,
@@ -328,7 +337,7 @@ test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（奇�
     }),
   ]);
   const report = model.estimate();
-  // w numel 15 → 16（切り上げ）+ scale 3×4=12
+  // w numel 15 → 16 (rounded up) + scale 3×4=12
   assertEquals(report.resident.weights.compressedBytes, 28);
   assertEquals(report.resident.weights.uncompressedBytes, 12);
   assertEquals(report.resident.weights.expandedBytes, 0);
@@ -336,7 +345,7 @@ test("i8 適格は numel の 4 バイト切り上げ + per-channel scale（奇�
   assertEquals(runScenario(report).ioBytes, 64);
 });
 
-test("i4 適格は numel÷2 + group scale（展開経路を持つ重みスロット限定）", () => {
+test("eligible i4 is numel÷2 + group scale (only weight slots with a decode path)", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -364,14 +373,14 @@ test("i4 適格は numel÷2 + group scale（展開経路を持つ重みスロッ
     }),
   ]);
   const { weights } = model.estimate().resident;
-  // w numel 32 → 16 バイト + group scale 2×4=8
+  // w numel 32 → 16 bytes + group scale 2×4=8
   assertEquals(weights.compressedBytes, 24);
-  // b は f32 のまま 8
+  // b stays f32, 8
   assertEquals(weights.uncompressedBytes, 8);
   assertEquals(weights.expandedBytes, 0);
 });
 
-test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5 の embedding 追補）", () => {
+test("an i4 embedding also stays packed while resident (the embedding addendum to ADR 0069 decision 5)", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -396,13 +405,14 @@ test("i4 の embedding も packed のまま常駐する（ADR 0069 決定 5 の 
     }),
   ]);
   const { weights } = model.estimate().resident;
-  // 語彙表 numel 64 → 32 バイト + group scale 4×4=16（展開経路は embedding カーネルにもある）
+  // Vocabulary table numel 64 → 32 bytes + group scale 4×4=16 (the embedding kernel has a decode
+  // path too)
   assertEquals(weights.compressedBytes, 48);
   assertEquals(weights.uncompressedBytes, 0);
   assertEquals(weights.expandedBytes, 0);
 });
 
-/** `conv1d(x, w, b)` 1 本のグラフ（w は i4 + rank 2 の group scale — 波 J-5b）。 */
+/** A graph with a single `conv1d(x, w, b)` (w is i4 + a rank-2 group scale — step J-5b). */
 const i4Conv1dGraph = (groups: number): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -415,7 +425,7 @@ const i4Conv1dGraph = (groups: number): DeclarationJson => ({
     b: {},
   },
   values: {
-    // 行長 = Cin/groups · K（groups == 1 なら 32·2 = 64 = g16 が 4 つ）
+    // Row length = Cin/groups · K (with groups == 1, 32·2 = 64 = four g16 groups)
     w: { dtype: "f32", shape: [4, 32 / groups, 2] },
     b: { dtype: "f32", shape: [4] },
     y: { dtype: "f32", shape: [1, 4, 5] },
@@ -430,13 +440,17 @@ const i4Conv1dGraph = (groups: number): DeclarationJson => ({
   ],
 });
 
-/** {@link i4Conv1dGraph} の `w` の格納（合流後のグラフを直に組む口で使う）。 */
+/**
+ * The storage of `w` in {@link i4Conv1dGraph} (used by the path that builds the merged graph
+ * directly).
+ */
 const I4_CONV1D_STORAGE: StorageMap = { w: { codec: "int4-sym-g", groupSize: 16 } };
 
-test("i4 の conv1d(groups==1) も packed のまま常駐する（ADR 0069 決定 5 の conv1d 追補）", () => {
+test("an i4 conv1d (groups==1) also stays packed while resident (the conv1d addendum to ADR 0069 decision 5)", () => {
   const model = openGraph(i4Conv1dGraph(1), [
     weight("b", f32Bytes([0, 0, 0, 0])),
-    // scale は rank 非依存の rank 2 形 `[Cout, (Cin·K)/g]` = [4,4]（重みは rank 3）
+    // The scale is the rank-independent rank-2 shape `[Cout, (Cin·K)/g]` = [4,4] (the weight is
+    // rank 3)
     weight("w", new Uint8Array(new ArrayBuffer(128)), {
       codec: "int4-sym-g",
       groupSize: 16,
@@ -444,15 +458,15 @@ test("i4 の conv1d(groups==1) も packed のまま常駐する（ADR 0069 決�
     }),
   ]);
   const { weights } = model.estimate().resident;
-  // w numel 256 → 128 バイト + group scale 16×4 = 64
+  // w numel 256 → 128 bytes + group scale 16×4 = 64
   assertEquals(weights.compressedBytes, 192);
-  // b は f32 のまま 16
+  // b stays f32, 16
   assertEquals(weights.uncompressedBytes, 16);
   assertEquals(weights.expandedBytes, 0);
 });
 
-test("i4 の conv1d(groups>1) は適格外で f32 展開へ回る", () => {
-  // 直接カーネルに展開経路は無い（groups > 1 は igemm へ流れない — 波 J-5b）。
+test("an i4 conv1d (groups>1) is ineligible and goes to f32 expansion", () => {
+  // The direct kernel has no decode path (groups > 1 does not go to igemm — step J-5b).
   const model = openGraph(i4Conv1dGraph(2), [
     weight("b", f32Bytes([0, 0, 0, 0])),
     weight("w", new Uint8Array(new ArrayBuffer(64)), {
@@ -464,11 +478,11 @@ test("i4 の conv1d(groups>1) は適格外で f32 展開へ回る", () => {
   const { weights } = model.estimate().resident;
   assertEquals(weights.compressedBytes, 0);
   assertEquals(weights.uncompressedBytes, 16);
-  // w numel 128 → f32 展開で 512 バイト
+  // w numel 128 → 512 bytes with f32 expansion
   assertEquals(weights.expandedBytes, 128 * 4);
 });
 
-test("グラフ出力になった i4 は適格外で f32 展開へ回る", () => {
+test("an i4 weight that became a graph output is ineligible and goes to f32 expansion", () => {
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -499,12 +513,14 @@ test("グラフ出力になった i4 は適格外で f32 展開へ回る", () =>
 });
 
 /**
- * 5 席（`raw` / `f16` / `i8` / `i4` / `expanded`）を**1 グラフに同居**させた形。
+ * A form where all five `seat` values (`raw` / `f16` / `i8` / `i4` / `expanded`) **live in one
+ * graph**.
  *
- * linear 3 段で圧縮 3 席を重みスロットに置き（bias 3 本が `raw`）、最後の `mul` の被演算子に
- * f16 を置いて `expanded` を作る。上の各テストは席ごとに別グラフで欄を見ているので、
- * 「`planWeightBuffers` の全要素が 3 欄のどれかにちょうど 1 度数えられる」= 席を増やして
- * `weightEstimate` の分岐を直し忘れたら赤くなる、という網羅の主張は誰も見ていない。
+ * Three linear stages put the three compressed seats on weight slots (the three biases are `raw`),
+ * and f16 on the operand of the final `mul` makes `expanded`. Each test above checks the fields
+ * with a separate graph per seat, so nobody checks the exhaustiveness claim "every element of
+ * `planWeightBuffers` is counted in exactly one of the three fields" = adding a seat and forgetting
+ * to fix the branch of `weightEstimate` goes red.
  */
 const allSeatsModel = (): PreparedModel => {
   const graph: DeclarationJson = {
@@ -540,11 +556,11 @@ const allSeatsModel = (): PreparedModel => {
       { op: "linear", ins: ["x", "w4", "b4"], outs: ["h"], attrs: {} },
       { op: "linear", ins: ["h", "w8", "b8"], outs: ["i"], attrs: {} },
       { op: "linear", ins: ["i", "w16", "b16"], outs: ["j"], attrs: {} },
-      // 重みスロットではない消費なので、この f16 だけが f32 展開席へ回る。
+      // Not a weight-slot consumption, so only this f16 goes to the f32-expanded seat.
       { op: "mul", ins: ["j", "g"], outs: ["y"], attrs: {} },
     ],
   };
-  // 4 codec（f32 / f16 / int8-sym / int4-sym-g）を 1 本の供給に混ぜる。
+  // Mixes four codecs (f32 / f16 / int8-sym / int4-sym-g) into one supply.
   return openGraph(graph, [
     weight("b4", f32Bytes([0, 0, 0, 0])),
     weight("b8", f32Bytes([0, 0, 0, 0])),
@@ -564,22 +580,27 @@ const allSeatsModel = (): PreparedModel => {
   ]);
 };
 
-test("5 席同居のグラフで、常駐バッファは 3 欄のどれかにちょうど 1 度数えられる", () => {
+test("in a graph with all five seats, each resident buffer is counted in exactly one of the three fields", () => {
   const model = allSeatsModel();
   const { weights } = model.estimate().resident;
 
-  // 手計算: i4 payload 32 + i4 scale 16 + i8 payload 16 + i8 scale 16 + f16 payload 32
+  // By hand: i4 payload 32 + i4 scale 16 + i8 payload 16 + i8 scale 16 + f16 payload 32
   assertEquals(weights.compressedBytes, 112);
-  // bias 3 本（f32 [4]）
+  // Three biases (f32 [4])
   assertEquals(weights.uncompressedBytes, 48);
-  // mul の被演算子 f16 [4] を f32 展開した 16（整列前の宣言バイト数で数える欄）
+  // The mul operand f16 [4] f32-expanded = 16 (a field counted in declared bytes before alignment)
   assertEquals(weights.expandedBytes, 16);
   assertEquals(weights.totalBytes, 176);
 
-  // 網羅の門: 席の分岐（weightEstimate の switch）を通らなかったバッファが 1 本でもあれば、
-  // 総和がプランナ側の総和と合わなくなる。席を増やして分岐を直し忘れると赤くなる。
+  // The exhaustiveness check: if even one buffer did not go through the seat branch (the switch in
+  // weightEstimate), the total would not match the planner's total. Adding a seat and forgetting to
+  // fix the branch goes red.
   const buffers = planWeightBuffers(planWeightResidency(model.graph));
-  assertEquals(new Set(buffers.map((buffer) => buffer.seat)).size, 5, "5 席が同居していない");
+  assertEquals(
+    new Set(buffers.map((buffer) => buffer.seat)).size,
+    5,
+    "the five seats do not coexist",
+  );
   assertEquals(
     weights.totalBytes,
     buffers.reduce(
@@ -594,45 +615,46 @@ test("5 席同居のグラフで、常駐バッファは 3 欄のどれかにち
 });
 
 // ---------------------------------------------------------------------------
-// state スロット
+// State slots
 // ---------------------------------------------------------------------------
 
-test("state は記号容量を解決したスロット合計 + 論理長 uniform", () => {
+test("state is the slot total with symbolic capacities resolved + the logical-length uniform", () => {
   const report = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
-  // k 1×2×8×4=64 要素 + v 1×2×6×4=48 要素 → (64+48)×4 = 448、論理長 uniform 8
+  // k 1×2×8×4=64 elements + v 1×2×6×4=48 elements → (64+48)×4 = 448, logical-length uniform 8
   assertEquals(report.resident.stateBytes, 456);
 });
 
-test("state の記号容量は generation.bindings でしか動かない", () => {
+test("the symbolic capacity of state moves only with generation.bindings", () => {
   const model = stateModel();
   const at = (capacity: number): number =>
     model.estimate({
       bindings: { T: 2 },
       generation: { chunkLength: 4, bindings: { C: capacity } },
     }).resident.stateBytes;
-  // C だけが動く（v の 48 要素 + uniform 8 は固定）
+  // Only C moves (v's 48 elements + uniform 8 are fixed)
   assertEquals(at(16), (1 * 2 * 16 * 4 + 48) * 4 + 8);
   assertEquals(at(1), (1 * 2 * 1 * 4 + 48) * 4 + 8);
 });
 
-test("generation を渡さなければ state は数えない", () => {
+test("state is not counted without generation", () => {
   const report = plainModel().estimate({ bindings: { T: 7 } });
   assertEquals(report.resident.stateBytes, 0);
 });
 
 // ---------------------------------------------------------------------------
-// シナリオ（ADR 0066 決定 4 の実行 2 形）
+// Scenarios (the two execution shapes of ADR 0066 decision 4)
 // ---------------------------------------------------------------------------
 
 /**
- * 物理 chunk 行が**記号**で載っているグラフ（`state_append` の入力 `h` が `[1,2,M,4]`）。
+ * A graph whose physical chunk rows are **symbolic** (the input `h` of `state_append` is
+ * `[1,2,M,4]`).
  *
- * `stateGraph` の `chunk` は数値次元なので、prefill / decode で shape が動くのはこちら。
- * `M` は入力にも現れる（states 専用記号ではない）ので、束縛点が chunkLength 側であることも
- * この形でだけ観測できる。
+ * The `chunk` of `stateGraph` is a numeric dimension, so this is the one whose shape moves between
+ * prefill / decode. `M` also appears in an input (it is not a states-only symbol), so only this
+ * form can observe that the binding point is on the chunkLength side.
  */
 const chunkSymbolGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -654,31 +676,33 @@ const chunkSymbolGraph = (): DeclarationJson => ({
   ],
 });
 
-test("generation ありは prefill / decode の 2 本を自動導出する（chunk 記号だけが動く）", () => {
+test("with generation, the two scenarios prefill / decode are derived automatically (only the chunk symbol moves)", () => {
   const report = openGraph(chunkSymbolGraph()).estimate({
     generation: { chunkLength: 4, bindings: { C: 8 } },
-    // 予算 0 = 保持 1 本。シナリオ側の足し方（和ではなく max）だけを見たいので、予算の項が
-    // 立たない形で測る（予算そのものの門は「slot backing の保持予算」の節）。
+    // Budget 0 = one retained. Only the way scenarios combine (max, not sum) is of interest, so it
+    // is measured in a form where the budget term does not stand (the budget itself is checked in
+    // the "slot backing retention budget" section).
     planBackingBudgetBytes: 0,
   });
-  // prefill は M=4: x / y とも 1×2×4×4=32 要素 → io 128+128、中間は h と y の 128 ずつ
-  // （h は append と 2 本目の neg に消費されるので、y の確保時点でプールへ返っていない）。
-  // decode は M=1: 全て 1/4 の 8 要素ぶん。
+  // prefill is M=4: x / y are both 1×2×4×4=32 elements → io 128+128, intermediates are h and y at
+  // 128 each (h is consumed by append and by the second neg, so it has not returned to the pool
+  // when y is allocated). decode is M=1: everything is 1/4, 8 elements' worth.
   assertEquals(report.scenarios, [
     { name: "prefill", ioBytes: 256, workspaceBytes: 256 },
     { name: "decode", ioBytes: 64, workspaceBytes: 64 },
   ]);
-  // k 1×2×8×4=64 要素 ×4 = 256 + 論理長 uniform 8
+  // k 1×2×8×4=64 elements ×4 = 256 + logical-length uniform 8
   assertEquals(report.resident.stateBytes, 264);
   assertEquals(report.resident.weights.totalBytes, 0);
-  // 常駐 264 + max(512, 128) = 776。和で足すと 904 になる（backing は同時に 1 本）。
+  // Resident 264 + max(512, 128) = 776. Adding them up would give 904 (one backing at a time).
   assertEquals(report.peakAccountedBytes, 776);
 });
 
-test("chunk 行が数値次元のグラフでは prefill と decode が同じ数字になる", () => {
-  // `stateGraph` の append 入力は initializer の `[1,2,4,4]`。記号で動かない形の decode step は
-  // 物理 chunk 行を prefill と同じまま queryLength=1 で回る（assertGenerationRun は
-  // rows === chunkLength を decode でも許す）ので、2 本が一致するのが正しい。
+test("in a graph whose chunk rows are a numeric dimension, prefill and decode give the same numbers", () => {
+  // The append input of `stateGraph` is the initializer `[1,2,4,4]`. A decode step of a form that
+  // does not move symbolically runs with the same physical chunk rows as prefill and
+  // queryLength=1 (assertGenerationRun allows rows === chunkLength in decode too), so the two
+  // being equal is correct.
   const report = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
@@ -690,9 +714,10 @@ test("chunk 行が数値次元のグラフでは prefill と decode が同じ数
   assertEquals(prefill.workspaceBytes, decode.workspaceBytes);
 });
 
-test("数値で固定した chunk 行が context の許す行数に無い形は見積りも拒否する", () => {
-  // append 入力の物理 chunk 行は 4 で固定。chunkLength 8 の context が許すのは {1, 8} なので、
-  // run は最初の 1 回で必ず拒否する（assertGenerationRun）— 見積りだけが正常値を返さない。
+test("a form whose fixed numeric chunk rows are not a row count the context allows is rejected by the estimate too", () => {
+  // The physical chunk rows of the append input are fixed at 4. A context with chunkLength 8 allows
+  // {1, 8}, so run always rejects it on the first call (assertGenerationRun) — the estimate alone
+  // must not return a normal value.
   assertThrows(
     () =>
       stateModel().estimate({
@@ -702,7 +727,8 @@ test("数値で固定した chunk 行が context の許す行数に無い形は�
     ExecutionError,
     "physical chunk row count 4 of the state node does not match the fixed chunk contract",
   );
-  // 対照: 4 を明示のバケットに含めれば run も通る形なので、見積りも数を返す。
+  // Control: including 4 in the explicit buckets makes a form run accepts, so the estimate returns
+  // numbers too.
   const report = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 8, chunkBuckets: [4], bindings: { C: 8 } },
@@ -710,15 +736,16 @@ test("数値で固定した chunk 行が context の許す行数に無い形は�
   assertEquals(report.resident.stateBytes, 456);
 });
 
-test("generation なしの見積りはシナリオ 1 本（io / 中間の導出は従来と同じ）", () => {
+test("an estimate without generation has a single scenario (io / intermediates derived as before)", () => {
   const report = plainModel().estimate({ bindings: { T: 7 } });
   // x[7,4]=112 + h[7,3]=84 + g[2,3]=24 = 220 / the intermediates h and g live together (both are
-  // graph outputs). Behind h, g would sit at offset 256 (256-aligned — ADR 0093 decision 1) and grow
-  // h's region by 196 B, not less than g's own 24 B, so g opens a region of its own: 84 + 24 = 108.
+  // graph outputs). Behind h, g would sit at offset 256 (256-aligned — ADR 0093 decision 1) and
+  // grow h's region by 196 B, not less than g's own 24 B, so g opens a region of its own: 84 + 24 =
+  // 108.
   assertEquals(report.scenarios, [{ name: "run", ioBytes: 220, workspaceBytes: 108 }]);
 });
 
-test("chunk 行の記号を options.bindings で受けない（束縛点は chunkLength と decode の 1）", () => {
+test("the chunk-row symbol is not accepted in options.bindings (the binding points are chunkLength and decode's 1)", () => {
   assertThrows(
     () =>
       openGraph(chunkSymbolGraph()).estimate({
@@ -730,7 +757,7 @@ test("chunk 行の記号を options.bindings で受けない（束縛点は chun
   );
 });
 
-test("chunk 記号を持つグラフを generation 無しで見積らない", () => {
+test("a graph with a chunk symbol is not estimated without generation", () => {
   assertThrows(
     () => openGraph(chunkSymbolGraph()).estimate(),
     ExecutionError,
@@ -739,17 +766,19 @@ test("chunk 記号を持つグラフを generation 無しで見積らない", ()
 });
 
 // ---------------------------------------------------------------------------
-// 追加シナリオ（`generation.scenarios` — 投機デコードの verify 形）
+// Extra scenarios (`generation.scenarios` — the verify shape of speculative decoding)
 // ---------------------------------------------------------------------------
 
 /**
- * verify 形と同じ姿の最小グラフ — 物理 chunk 行 `M` の本体に、**行選択の記号 `R`** が載る
- * 出口 2 本（`logits[R,V]` / `hidden[R,H]`）と添字入力 `rows[R]` が付く（配布形は
- * `last_row[R]` → `logits[1,R,V]` + `hidden[1,R,H]` — ADR 0096）。
+ * The smallest graph with the same form as the verify shape — on a body with physical chunk rows
+ * `M`, two outlets carrying **the row-selection symbol `R`** (`logits[R,V]` / `hidden[R,H]`) and an
+ * index input `rows[R]` are attached (the distribution has `last_row[R]` → `logits[1,R,V]` +
+ * `hidden[1,R,H]` — ADR 0096).
  *
- * `R` は states 専用記号でも物理 chunk 行の記号でもないので、束縛点は `options.bindings` 側
- * （= 追加シナリオが `bindings` で上書きする軸）。`V=6` / `H=4` は 3 本の増え方を別々の
- * 定数で見分けるために違う値にしてある。
+ * `R` is neither a states-only symbol nor the physical chunk-row symbol, so its binding point is
+ * on the `options.bindings` side (= the axis an extra scenario overrides with `bindings`). `V=6` /
+ * `H=4` have different values so that the growth of the three tensors can be told apart by
+ * distinct constants.
  */
 const verifyRowsGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -789,7 +818,10 @@ const verifyRowsModel = (): PreparedModel =>
     weight("hid", f32Bytes(new Array(32).fill(0))),
   ]);
 
-/** 追加シナリオつきの見積り（`R` の既定は 1 = 非投機の decode と同じ行数）。 */
+/**
+ * An estimate with an extra scenario (`R` defaults to 1 = the same row count as non-speculative
+ * decode).
+ */
 const verifyRowsReport = (
   scenarios: readonly { name: string; chunkLength: number; bindings?: { R: number } }[],
   planBackingBudgetBytes?: number,
@@ -800,7 +832,7 @@ const verifyRowsReport = (
     planBackingBudgetBytes,
   });
 
-test("generation.scenarios は既存 2 形の後ろに宣言順で並ぶ（同じ計算経路・束縛は上書き）", () => {
+test("generation.scenarios follow the two existing shapes in declaration order (same computation path, bindings overridden)", () => {
   const report = verifyRowsReport([
     { name: "verify", chunkLength: 4, bindings: { R: 4 } },
     { name: "verify-tail", chunkLength: 1 },
@@ -810,20 +842,23 @@ test("generation.scenarios は既存 2 形の後ろに宣言順で並ぶ（同�
     ["prefill", "decode", "verify", "verify-tail"],
   );
   const [prefill, decode, verify, tail] = report.scenarios;
-  // io = x / y の 1×2×M×4 要素ずつ（32M バイト）+ rows 4R + logits 6R×4 + hidden 4R×4
-  //    = 64M + 44R。prefill は M=4 / R=1、decode は M=1 / R=1。
+  // io = x / y at 1×2×M×4 elements each (32M bytes) + rows 4R + logits 6R×4 + hidden 4R×4
+  //    = 64M + 44R. prefill is M=4 / R=1, decode is M=1 / R=1.
   assertEquals(prefill.ioBytes, 64 * 4 + 44);
   assertEquals(decode.ioBytes, 64 + 44);
-  // R を 4 へ上げて増えるのは行軸に載る 3 本だけ: 出口 2 本 (R−1)·(V+H)·4 = 3×40 = 120 と
-  // 添字入力 (R−1)·4 = 12。M は prefill と同じなので本体側は 1 バイトも動かない。
+  // Raising R to 4 grows only the three tensors on the row axis: the two outlets
+  // (R−1)·(V+H)·4 = 3×40 = 120 and the index input (R−1)·4 = 12. M is the same as prefill, so the
+  // body does not move by a single byte.
   assertEquals(verify.ioBytes, prefill.ioBytes + 120 + 12);
   assertEquals(verify.ioBytes, 432);
-  // 陰性対照: 束縛を上書きしなければ（R=1 のまま）同じ chunk 行の decode と 1 バイトも違わない。
+  // Negative control: without overriding the binding (R stays 1), it does not differ by a single
+  // byte from a decode with the same chunk rows.
   assertEquals(tail, { ...decode, name: "verify-tail" });
 });
 
-test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と同じ門を通る", () => {
-  // 予約名（generation ありでは並ばない "run" も含む）との衝突は fail loudly。
+test("an extra scenario's name, physical chunk rows and bindings go through the same checks as the two existing shapes", () => {
+  // A collision with a reserved name ("run" included, which is not listed with generation) fails
+  // loudly.
   for (const name of ["run", "prefill", "decode"]) {
     assertThrows(
       () => verifyRowsReport([{ name, chunkLength: 2 }]),
@@ -831,7 +866,8 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
       "the reserved names are run / prefill / decode",
     );
   }
-  // 追加名どうしの重複も同じ門（名前で引く呼び手が先頭だけを見る形を作らない）。
+  // A duplicate among the extra names goes through the same check (no form where a caller looking
+  // up by name sees only the first).
   assertThrows(
     () =>
       verifyRowsReport([
@@ -841,7 +877,7 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
     ExecutionError,
     "already exists",
   );
-  // 物理 chunk 行は 1..generation.chunkLength の整数。
+  // Physical chunk rows are an integer in 1..generation.chunkLength.
   for (const chunkLength of [0, -1, 1.5, 5]) {
     assertThrows(
       () => verifyRowsReport([{ name: "verify", chunkLength }]),
@@ -849,10 +885,11 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
       "is not an integer in 1..4 (generation.chunkLength)",
     );
   }
-  // 両端ちょうどは通る。
+  // Both ends exactly pass.
   assertEquals(verifyRowsReport([{ name: "verify", chunkLength: 1 }]).scenarios.length, 3);
   assertEquals(verifyRowsReport([{ name: "verify", chunkLength: 4 }]).scenarios.length, 3);
-  // 束縛の上書きも既存 2 形と同じ門 — 物理 chunk 行の記号は受けない（束縛点は chunkLength）。
+  // Binding overrides go through the same check as the two existing shapes — the physical
+  // chunk-row symbol is not accepted (its binding point is chunkLength).
   assertThrows(
     () =>
       verifyRowsModel().estimate({
@@ -868,8 +905,9 @@ test("追加シナリオの名前・物理 chunk 行・束縛は既存 2 形と�
   );
 });
 
-test("追加シナリオの物理 chunk 行も context の許す行数の中だけ", () => {
-  // chunkLength 4・バケット無しの context が許すのは {1, 4}。2 行の run は実行が拒否する形。
+test("an extra scenario's physical chunk rows are also limited to the row counts the context allows", () => {
+  // A context with chunkLength 4 and no buckets allows {1, 4}. A two-row run is a form execution
+  // rejects.
   const at = (chunkBuckets?: readonly number[]): AdmissionReport =>
     verifyRowsModel().estimate({
       bindings: { R: 1 },
@@ -885,35 +923,41 @@ test("追加シナリオの物理 chunk 行も context の許す行数の中だ�
     ExecutionError,
     "physical chunk row count 2 of the state node does not match the fixed chunk contract",
   );
-  // 対照: 2 をバケットに宣言した context なら run も通るので、見積りも 3 本を返す。
+  // Control: with a context that declares 2 as a bucket, run accepts it, so the estimate returns
+  // all three too.
   assertEquals(at([2]).scenarios.length, 3);
 });
 
-test("追加シナリオも peakAccountedBytes の最大に入る（予算 0）", () => {
+test("extra scenarios also enter the maximum of peakAccountedBytes (budget 0)", () => {
   const without = verifyRowsModel().estimate({
     bindings: { R: 1 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
     planBackingBudgetBytes: 0,
   });
-  // prefill と同じ chunk 行で R だけ 8 行 → io も中間も prefill より大きい形。
+  // Same chunk rows as prefill with only R at 8 rows → io and intermediates both larger than
+  // prefill.
   const withVerify = verifyRowsReport([{ name: "verify", chunkLength: 4, bindings: { R: 8 } }], 0);
-  // 常駐（重み・state）は run の形に依らないので、追加シナリオでは 1 バイトも動かない。
+  // Resident memory (weights, state) does not depend on the run shape, so an extra scenario does
+  // not move it by a single byte.
   assertEquals(withVerify.resident, without.resident);
   const verify = withVerify.scenarios[2];
   const resident = withVerify.resident.weights.totalBytes + withVerify.resident.stateBytes;
-  // 予算 0 = 保持 1 本なので、ピークに立つのは常駐 + 最大シナリオ = verify 形。
+  // Budget 0 = one retained, so what stands at the peak is resident + the largest scenario = the
+  // verify shape.
   assertEquals(withVerify.peakAccountedBytes, resident + verify.ioBytes + verify.workspaceBytes);
   assert(
     withVerify.peakAccountedBytes > without.peakAccountedBytes,
-    "追加シナリオがピークに効いていない",
+    "the extra scenario does not affect the peak",
   );
 });
 
 // ---------------------------------------------------------------------------
-// 中間（transient）ピーク
+// Intermediate (transient) peak
 // ---------------------------------------------------------------------------
 
-/** 単項の直列チェーン（`x → t1 → t2 → y`）。`outputs` を差し替えると pin の効きが見える。 */
+/**
+ * A serial chain of unary ops (`x → t1 → t2 → y`). Replacing `outputs` shows the effect of pinning.
+ */
 const chainGraph = (outputs: readonly string[]): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -935,7 +979,7 @@ const chainGraph = (outputs: readonly string[]): DeclarationJson => ({
 });
 
 /**
- * 3 本に分岐してから畳む形（同時生存が 4 本になる）。
+ * A form that fans out into three and folds back (four live at once).
  * A second graph output z (1,024 B) is written after the fan-out: its region is free before z is
  * born, so the fan-out's slots can stack in it — this is where the read / write rule costs a slot.
  */
@@ -968,8 +1012,8 @@ const fanOutGraph = (): DeclarationJson => ({
   ],
 });
 
-test("直列チェーンのピークは同時生存 2 本ぶん（消費が尽きた中間は解放される）", () => {
-  // 64 要素 = 256 バイト。t2 を確保した時点が 2 本 = 512
+test("the peak of a serial chain is two live at once (an intermediate whose consumers are done is released)", () => {
+  // 64 elements = 256 bytes. When t2 is allocated, two are live = 512
   assertEquals(runScenario(openGraph(chainGraph(["y"])).estimate()).workspaceBytes, 512);
 });
 
@@ -986,23 +1030,24 @@ test("a wide fan-out totals 1,536 B: the read / write rule costs one 256 B slot 
   assertEquals(runScenario(openGraph(fanOutGraph()).estimate()).workspaceBytes, 1536);
 });
 
-test("グラフ出力は消費が尽きても pinned のまま（解放されない）", () => {
-  // t1 を graph.outputs に載せると、t2 の消費後も t1 が居座って 3 本ぶん重なる
+test("a graph output stays pinned even after its consumers are done (not released)", () => {
+  // Putting t1 in graph.outputs makes t1 stay after t2 is consumed, so three overlap
   const report = openGraph(chainGraph(["t1", "y"])).estimate();
   assertEquals(runScenario(report).workspaceBytes, 768);
 });
 
-test("initializer とグラフ入力は中間ピークに数えない（重み・io 側の勘定）", () => {
+test("initializers and graph inputs are not counted in the intermediate peak (they are accounted on the weights / io side)", () => {
   // Only matmul's h (T=7 → 84) and embedding's g (24, in a region of its own — see the
   // generation-less estimate) are intermediates. x / w / emb / idx are not counted.
   const report = plainModel().estimate({ bindings: { T: 7 } });
   assertEquals(runScenario(report).workspaceBytes, 108);
 });
 
-test("配り直しはサイズに依らない（解放済みの 8 バイトの区間を 4 バイトの出力が掴む）", () => {
-  // 8 → 12 → 4 バイトの 3 段。t2 は t1 を読む dispatch が書くので別領域（12 / 8）。y は t2 を
-  // 読むので t2 の領域には置けず、生存を終えた t1 の区間（8 バイト）を掴む = 12 + 8 = 20
-  // （旧プールの exact-size 再利用では 24 だった — ADR 0093 決定 8）。
+test("reallocation does not depend on size (a 4-byte output takes a released 8-byte range)", () => {
+  // Three stages of 8 → 12 → 4 bytes. t2 is written by the dispatch that reads t1, so it is a
+  // separate region (12 / 8). y reads t2, so it cannot sit in t2's region and takes t1's range
+  // (8 bytes), whose lifetime has ended = 12 + 8 = 20 (it was 24 with the old pool's exact-size
+  // reuse — ADR 0093 decision 8).
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -1038,14 +1083,15 @@ test("配り直しはサイズに依らない（解放済みの 8 バイトの�
 });
 
 // ---------------------------------------------------------------------------
-// 中間ピークの別名（reshape / 恒等 expand — ADR 0011）
+// Aliases in the intermediate peak (reshape / identity expand — ADR 0011)
 // ---------------------------------------------------------------------------
 
 /**
- * 別名の鎖（`reshape` → `reshape`）と、鎖の**根**が生きたままの消費。
+ * A chain of aliases (`reshape` → `reshape`) and a consumption while the chain's **root** is alive.
  *
- * `h` は 2 度消費される（鎖の入口と末尾の `add`）ので、実行相では鎖のあいだ根の実体が
- * プールへ返らない。別名を独立した値として確保すると、この重なりぶんだけ slot が余計に生える。
+ * `h` is consumed twice (the chain's entry and the final `add`), so during execution the root's
+ * data does not return to the pool while the chain runs. Allocating the aliases as independent
+ * values would grow extra slots by the amount of this overlap.
  */
 const aliasChainGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -1069,14 +1115,14 @@ const aliasChainGraph = (): DeclarationJson => ({
   ],
 });
 
-test("別名の鎖は根の実体 1 本だけを数える（reshape → reshape）", () => {
-  // 確保が出るのは `h`（256）と `y`（256）の 2 本きり = 512。鎖の 2 本を確保すると、`h` が
-  // 生きている間は再利用できず 768 になる。
+test("a chain of aliases counts only the root's single allocation (reshape → reshape)", () => {
+  // Only two allocations appear, `h` (256) and `y` (256) = 512. Allocating the two chain values
+  // would prevent reuse while `h` is alive, giving 768.
   const report = openGraph(aliasChainGraph()).estimate();
   assertEquals(runScenario(report).workspaceBytes, 512);
 });
 
-/** `neg` → `expand` の 2 本。出力 shape で恒等 / 非恒等を切り替える。 */
+/** Two nodes, `neg` → `expand`. The output shape switches between identity and non-identity. */
 const aliasExpandGraph = (outShape: readonly number[]): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -1095,18 +1141,19 @@ const aliasExpandGraph = (outShape: readonly number[]): DeclarationJson => ({
   ],
 });
 
-test("恒等 expand は確保を出さず、複製軸のある expand は実体化ぶんを数える", () => {
+test("an identity expand allocates nothing, and an expand with a replicated axis counts its materialization", () => {
   const workspaceOf = (outShape: readonly number[]): number =>
     runScenario(openGraph(aliasExpandGraph(outShape)).estimate()).workspaceBytes;
-  // 恒等（[1,4] → [1,4]）は別名 = `h` の 16 バイト 1 本だけ。
+  // Identity ([1,4] → [1,4]) is an alias = only `h`'s single 16 bytes.
   assertEquals(workspaceOf([1, 4]), 16);
-  // 複製軸あり（[1,4] → [3,4]）は strided 実体化コピーへ戻る = 16 + 48。
+  // With a replicated axis ([1,4] → [3,4]) it goes back to a strided materializing copy = 16 + 48.
   assertEquals(workspaceOf([3, 4]), 64);
 });
 
 /**
- * グラフ出力が**別名名義**の形。`p` は `h` の実体そのものなので、pin が効くのは根の側。
- * `h` の消費が尽きても根はプールへ戻らず、後続の `t` / `y` は新しい slot を掴む。
+ * A form where a graph output is **named by an alias**. `p` is `h`'s data itself, so the pin
+ * applies to the root. Even after `h`'s consumers are done the root does not return to the pool,
+ * and the later `t` / `y` take new slots.
  */
 const pinnedAliasGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -1130,20 +1177,21 @@ const pinnedAliasGraph = (): DeclarationJson => ({
   ],
 });
 
-test("グラフ出力が別名名義でも pin が効くのは根の実体（プールへ返らない）", () => {
-  // `h`（pin された根）+ `t` + `y` の 3 本 = 768。pin が根へ届かないと `h` がプールへ戻って
-  // `t` に配り直され、512 に縮む（= readback 可能な実体を他の値と共有する誤り）。
+test("even when a graph output is named by an alias, the pin applies to the root's data (it does not return to the pool)", () => {
+  // `h` (the pinned root) + `t` + `y` = 768. If the pin did not reach the root, `h` would return to
+  // the pool and be reallocated to `t`, shrinking to 512 (= the error of sharing readback-able data
+  // with another value).
   const report = openGraph(pinnedAliasGraph()).estimate();
   assertEquals(runScenario(report).workspaceBytes, 768);
 });
 
 // ---------------------------------------------------------------------------
-// 実行計画（derivePlanSlots）との相互検証
+// Cross-check against the execution plan (derivePlanSlots)
 // ---------------------------------------------------------------------------
 
 /**
- * 判定に使う device の能力（WebGPU core 既定 — 128MiB / 65535）。行ブロック分割の枚数だけが
- * これを読む。
+ * The device capabilities used for the decision (WebGPU core defaults — 128MiB / 65535). Only the
+ * number of row blocks in the row-block split reads them.
  */
 const TEST_LIMITS = {
   maxStorageBufferBindingSize: 128 * 1024 * 1024,
@@ -1151,20 +1199,21 @@ const TEST_LIMITS = {
 } as const;
 
 /**
- * 素のノード列 → 計画用のレシピ列。GPU に触らずに recipe-builder の `#buildStep` の
- * **簿記面だけ**（確保仕様・`uses` / `pinned`・消費の延べ列・dispatch の読み書き）を写す。
- * dispatch は 1 ノード 1 本（入力を読み・出力を書く）で、estimator が組む確保プログラムと同じ
- * 向きの usage scope 規則が計画に効く。
+ * Plain node list → recipe list for the plan. Copies **only the bookkeeping side** of
+ * recipe-builder's `#buildStep` (allocation specs, `uses` / `pinned`, the flattened consumption
+ * list, dispatch reads and writes) without touching the GPU. Each node is one dispatch (reading the
+ * inputs, writing the outputs), so the usage scope rule applies to the plan in the same direction
+ * as in the allocation program the estimator builds.
  *
- * NOTE: 別名元は `#buildStep` と同じく入力の先頭。initializer を指す形だけは `#buildStep` が
- * `{ kind: "resident" }` を作るが、計画は env に載らない値をどちらも「slot 無し」と扱うので、
- * 計画の観点では `{ kind: "value" }` と同値。
+ * NOTE: the alias source is the first input, as in `#buildStep`. Only for the form pointing at an
+ * initializer does `#buildStep` create `{ kind: "resident" }`, but the plan treats any value not
+ * in env as "no slot", so from the plan's point of view it is equivalent to `{ kind: "value" }`.
  */
 const slotRecipes = (steps: readonly ExecStep[], graph: IrGraph): readonly StepRecipe[] => {
   const uses = countUses(graph);
   const outputNames = new Set(graph.outputs);
   return steps.map((step) => {
-    if (step.kind !== "node") throw new Error("融合ステップの写しはここでは作らない");
+    if (step.kind !== "node") throw new Error("copies of fused steps are not built here");
     const outputs: readonly StepOutput[] = step.plan.outputs.map(({ name, shape }) => {
       const bookkeeping = { name, uses: uses.get(name) ?? 0, pinned: outputNames.has(name) };
       return step.aliasesInput
@@ -1204,9 +1253,10 @@ const slotRecipes = (steps: readonly ExecStep[], graph: IrGraph): readonly StepR
 };
 
 /**
- * 別名 3 種（鎖 / 恒等 expand / pin された別名）と非恒等 expand を 1 本に混ぜた形。**5 ルールの
- * どの先頭 op にも掛からない**ように組んである（`reshape` は upsample2x の先頭 op だが、続く
- * 並びが合わないので窓を掴まない — テスト本体が機械的に確認する）。
+ * A form mixing three kinds of aliases (chain / identity expand / pinned alias) and a non-identity
+ * expand. It is built so that **it matches none of the five rules' leading ops** (`reshape` is the
+ * leading op of upsample2x, but the following sequence does not match, so no window is taken — the
+ * test body checks this mechanically).
  */
 const aliasMixGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -1239,41 +1289,44 @@ const aliasMixGraph = (): DeclarationJson => ({
   },
   nodes: [
     { op: "neg", ins: ["x"], outs: ["h"], attrs: {} },
-    // 別名の鎖（根は `h`）。
+    // A chain of aliases (the root is `h`).
     { op: "reshape", ins: ["h"], outs: ["r1"], attrs: {} },
     { op: "reshape", ins: ["r1"], outs: ["r2"], attrs: {} },
-    // 恒等 expand（同じ根を指す 3 本目の別名）。
+    // Identity expand (a third alias pointing at the same root).
     { op: "expand", ins: ["h"], outs: ["e1"], attrs: {} },
     { op: "neg", ins: ["z"], outs: ["g"], attrs: {} },
-    // 複製軸あり = 実体化コピー（別名にならない）。
+    // With a replicated axis = a materializing copy (not an alias).
     { op: "expand", ins: ["g"], outs: ["w"], attrs: {} },
     { op: "neg", ins: ["w"], outs: ["v"], attrs: {} },
     { op: "add", ins: ["h", "r2"], outs: ["s"], attrs: {} },
     { op: "add", ins: ["s", "e1"], outs: ["y"], attrs: {} },
-    // グラフ出力が別名名義（pin は根の `y` の実体へ効く）。
+    // A graph output named by an alias (the pin applies to the data of the root `y`).
     { op: "reshape", ins: ["y"], outs: ["yv"], attrs: {} },
-    // 同じ形をこのグラフで唯一のサイズクラス（20 バイト）で作り直す。pin が根へ届かないと
-    // `k` の実体がプールへ戻って `m` に配り直され、slot が 1 本減る。
+    // The same form rebuilt with the only size class in this graph (20 bytes). If the pin did not
+    // reach the root, `k`'s data would return to the pool and be reallocated to `m`, one slot
+    // fewer.
     { op: "neg", ins: ["q"], outs: ["k"], attrs: {} },
     { op: "reshape", ins: ["k"], outs: ["kv"], attrs: {} },
     { op: "neg", ins: ["q"], outs: ["m"], attrs: {} },
-    // 末尾の 256 バイト 2 本は、鎖が返した slot を**ちょうど汲み尽くす**位置に置いてある。
-    // 別名の消費が根へ合算されないと 1 本足りず、ここで新しい slot が生える。
+    // The two trailing 256-byte values are placed where they **exactly use up** the slots the chain
+    // returned. If the alias consumptions were not added to the root, one would be missing and a
+    // new slot would grow here.
     { op: "neg", ins: ["x"], outs: ["p1"], attrs: {} },
     { op: "neg", ins: ["x"], outs: ["p2"], attrs: {} },
   ],
 });
 
 /**
- * estimator の中間総量と、実行計画（`planRecipes` — 同じパッカー ADR 0093 決定 4）の領域総和を
- * 突き合わせる。
+ * Cross-checks the estimator's intermediate total against the region total of the execution plan
+ * (`planRecipes` — the same packer, ADR 0093 decision 4).
  *
- * 融合が 1 本も掛からない形でだけ主張できる**厳密一致** — 融合が掴む形では実行側が中間を
- * 消し、行ブロック分割が一時を足すので、estimator の `unaccounted` が認めている差になる。
- * 別名の扱いや dispatch の読み書きの向きが 2 実装で割れると、ここが例外なしで割れる
- * （それが起票 R6V-2 の姿）。
+ * An **exact match** that can be claimed only in a form where no fusion applies — in forms a fusion
+ * takes, the execution side removes intermediates and the row-block split adds temporaries, which
+ * is the difference the estimator's `unaccounted` admits. If the two implementations split on how
+ * aliases are handled or on the direction of dispatch reads and writes, this splits without an
+ * exception (that is what issue R6V-2 looked like).
  */
-test("融合が掛からない形では estimator の中間総量と実行計画の領域総和が一致する", () => {
+test("in a form where no fusion applies, the estimator's intermediate total equals the execution plan's region total", () => {
   const model = openGraph(aliasMixGraph());
   const plan = planGraph(model.graph, {});
   const fusion = planFusions(plan.nodes, {
@@ -1281,17 +1334,19 @@ test("融合が掛からない形では estimator の中間総量と実行計画
     outputNames: new Set(model.graph.outputs),
     limits: TEST_LIMITS,
   });
-  // 前提の確認: 融合が 1 本でも掛かると「融合前の列を歩く」estimator の勘定と比べられない。
+  // Precondition check: if even one fusion applied, it could not be compared with the estimator's
+  // accounting, which "walks the pre-fusion list".
   assertEquals(
     fusion.steps.every((step) => step.kind === "node"),
     true,
-    "融合が掛かっている",
+    "a fusion applies",
   );
   assertEquals(fusion.counts.identityExpand, 1);
 
   const transientPlan = planRecipes(slotRecipes(fusion.steps, model.graph), CORE_TRANSIENT_LIMITS);
-  // 確保の区間は h / g / w / v / s / y / k / m / p1 / p2 の 10 本（別名 r1 / r2 / e1 / yv / kv は
-  // 1 本も生やさない）。領域総和は estimator と同じパッカーから出るので厳密一致。
+  // The allocation ranges are the ten of h / g / w / v / s / y / k / m / p1 / p2 (the aliases r1 /
+  // r2 / e1 / yv / kv grow none). The region total comes from the same packer as the estimator, so
+  // it is an exact match.
   assertEquals(transientPlan.slots.length, 10);
   assertEquals(
     transientPlan.slots.map((slot) => slot.byteLength),
@@ -1301,7 +1356,7 @@ test("融合が掛からない形では estimator の中間総量と実行計画
 });
 
 // ---------------------------------------------------------------------------
-// 分解 attention（行ブロック attention の融合 — ADR 0060）
+// Decomposed attention (fusion into row-block attention — ADR 0060)
 // ---------------------------------------------------------------------------
 
 // The binding limit of a device granted exactly the WebGPU core default. LARGE_SCORES splits into
@@ -1309,29 +1364,32 @@ test("融合が掛からない形では estimator の中間総量と実行計画
 // (ADR 0124 decision 7).
 const CORE_LIMIT = CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize;
 
-// スコア 1 本 = 4×2048×4200×4 = 137,625,600B > 束縛上限 128 MiB（WebGPU core 既定）。
+// One score tensor = 4×2048×4200×4 = 137,625,600B > the binding limit of 128 MiB (WebGPU core
+// default).
 const LARGE_SCORES = { heads: 4, queries: 2048, keys: 4200, headDim: 8 } as const;
 
-describe("分解 attention の中間（融合後に束縛するバッファで数える）", () => {
-  describe("融合前のスコアが束縛上限を超え、行ブロック attention に融合される形", () => {
-    it("例外を投げず、行ブロック 1 枚ぶんの一時と出力で中間を数える", () => {
+describe("intermediates of decomposed attention (counted with the buffers bound after fusion)", () => {
+  describe("a form whose pre-fusion scores exceed the binding limit and are fused into row-block attention", () => {
+    it("does not throw, and counts intermediates as one row block's temporaries plus the output", () => {
       const scenario = runScenario(
         openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
           maxStorageBufferBindingSize: CORE_LIMIT,
         }),
       );
-      // 1 行 = 4×4200×4 = 67,200B → 上限に 1,997 行入るので 2 枚（1024 + 1024 行）に等分。
-      // 一時 S / mask 加算後 / P は各 4×1024×4200×4 = 68,812,800B で、同時生存は 2 本まで
-      // （読む側と書く側は同じ dispatch なので別領域 — 2 枚目は 1 枚目の区間を配り直す）。
+      // One row = 4×4200×4 = 67,200B → 1,997 rows fit in the limit, so it is split evenly into 2
+      // blocks (1024 + 1024 rows). The temporaries S / after mask addition / P are
+      // 4×1024×4200×4 = 68,812,800B each, with at most two live at once (the reading and writing
+      // sides are the same dispatch, so separate regions — the second block reuses the ranges of
+      // the first).
       // The output y = 4×2048×8×4 = 262,144B is written by the dispatch that reads P, so it avoids
-      // P's region; behind the masked scores (at 68,812,800B, already 256B-aligned) it would grow that
-      // region by its full size, so it opens a region of its own.
+      // P's region; behind the masked scores (at 68,812,800B, already 256B-aligned) it would grow
+      // that region by its full size, so it opens a region of its own.
       assertEquals(scenario.workspaceBytes, 68_812_800 * 2 + 262_144);
     });
   });
 
-  describe("融合が成立しない形で中間が束縛上限を超えるとき", () => {
-    it("従来どおり上限超過を全件列挙して fail loudly（警告に落とさない）", () => {
+  describe("when intermediates exceed the binding limit in a form where fusion does not apply", () => {
+    it("lists every limit overrun and fails loudly as before (not downgraded to a warning)", () => {
       assertThrows(
         () => openGraph(decomposedAttentionGraph(LARGE_SCORES, true)).estimate(),
         ExecutionError,
@@ -1342,12 +1400,13 @@ describe("分解 attention の中間（融合後に束縛するバッファで�
 });
 
 // ---------------------------------------------------------------------------
-// 融合 attention op のノード内一時（ADR 0124 決定 7）
+// In-node temporaries of the fused attention op (ADR 0124 decision 7)
 // ---------------------------------------------------------------------------
 
 /**
- * 融合 attention op（states 欄なし）1 ノードのグラフ。q `[1,2,8,4]`・k / v `[1,2,6,4]`（B·H = 2・M = 8・
- * N = 6・D = 4）。D % 4 == 0 で N % 4 != 0 なので、a8 は ①QK だけが i8a8・s16 は不適格（f32 格納へ縮退）。
+ * A one-node graph of the fused attention op (no states field). q `[1,2,8,4]`, k / v `[1,2,6,4]`
+ * (B·H = 2, M = 8, N = 6, D = 4). D % 4 == 0 and N % 4 != 0, so with a8 only ①QK is i8a8, and s16
+ * is ineligible (degrades to f32 storage).
  */
 const fusedAttentionModel = (mask = false): PreparedModel =>
   openGraph(
@@ -1359,24 +1418,25 @@ const fusedAttentionModel = (mask = false): PreparedModel =>
     ),
   );
 
-describe("融合 attention op のノード内一時を実行と同じ純関数で数える", () => {
-  // 出力 y = 2×8×4×4 = 256B。①QK が S を書き、②が S を読んで行統計を書き、③が S と行統計を読んで y を
-  // 書くので、S・行統計・y は互いに同じ領域に置けない（usage scope — 3 領域）。
+describe("counts the in-node temporaries of the fused attention op with the same pure function as execution", () => {
+  // Output y = 2×8×4×4 = 256B. ①QK writes S, ② reads S and writes the row statistics, and ③ reads
+  // S and the row statistics and writes y, so S, the row statistics and y cannot share a region
+  // (usage scope — 3 regions).
 
-  it("f32 は S 2×8×6×4 = 384B と行統計 2×8×2×4 = 128B を出力 256B に足す", () => {
+  it("f32 adds S 2×8×6×4 = 384B and row statistics 2×8×2×4 = 128B to the 256B output", () => {
     assertEquals(runScenario(fusedAttentionModel().estimate()).workspaceBytes, 256 + 384 + 128);
   });
 
-  it("予算で割ると行ブロック 1 枚ぶんの一時だけが数えられる（1 行 48B → 予算 192B は 4 行 × 2 枚・96B は 2 行 × 4 枚）", () => {
+  it("split by a budget, only one row block's temporaries are counted (1 row is 48B → a 192B budget is 4 rows × 2 blocks, 96B is 2 rows × 4 blocks)", () => {
     const at = (budget: number): number =>
       runScenario(fusedAttentionModel().estimate({ attentionRowBlockMaxBytes: budget }))
         .workspaceBytes;
-    // 4 行: S 2×4×6×4 = 192 / 行統計 64。2 行: S 96 / 行統計 32。
+    // 4 rows: S 2×4×6×4 = 192 / row statistics 64. 2 rows: S 96 / row statistics 32.
     assertEquals(at(192), 256 + 192 + 64);
     assertEquals(at(96), 256 + 96 + 32);
   });
 
-  it("f16 計算は S を 2B で数え、s16 は不適格な形（N % 4 != 0）で f32 格納のまま数える", () => {
+  it("f16 compute counts S at 2B, and s16 in an ineligible form (N % 4 != 0) is counted with f32 storage", () => {
     assertEquals(
       runScenario(fusedAttentionModel().estimate({ attentionCompute: "f16" })).workspaceBytes,
       256 + 192 + 128,
@@ -1387,8 +1447,9 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
     );
   });
 
-  it("a8 は ①QK の量子化の一時（qq / qs / kq / ks）をノード末尾まで数える", () => {
-    // qq 2×8×4 = 64・qs 2×8×4 = 64・kq 2×6×4 = 48・ks 2×6×4 = 48（③PV は N % 4 != 0 で f32 のまま）。
+  it("a8 counts the quantization temporaries of ①QK (qq / qs / kq / ks) until the end of the node", () => {
+    // qq 2×8×4 = 64, qs 2×8×4 = 64, kq 2×6×4 = 48, ks 2×6×4 = 48 (③PV stays f32 because
+    // N % 4 != 0).
     // All seven slots (y, S, row statistics and the four) are live at once (nested lifetimes inside
     // the node), so the live peak is their sum and no placement is smaller; the estimate shows only
     // the total, which meets it:
@@ -1399,11 +1460,11 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
     );
   });
 
-  it("加算 mask は ①QK の読みが 1 本増えるだけで一時は増えない", () => {
+  it("an additive mask adds only one more read to ①QK and no temporaries", () => {
     assertEquals(runScenario(fusedAttentionModel(true).estimate()).workspaceBytes, 256 + 384 + 128);
   });
 
-  describe("実行が拒否する組には数を返さない（実行と同じ判定・同じ文言）", () => {
+  describe("returns no numbers for combinations execution rejects (the same decision and the same message as execution)", () => {
     it("mask × a8", () => {
       assertThrows(
         () => fusedAttentionModel(true).estimate({ attentionCompute: "a8" }),
@@ -1412,7 +1473,7 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       );
     });
 
-    it("states 形 × f32 以外", () => {
+    it("states form × anything other than f32", () => {
       assertThrows(
         () =>
           openGraph(stateAttentionGraph()).estimate({
@@ -1425,8 +1486,9 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       );
     });
 
-    it("綴りの外と c16 × s16 は Session 構築と同じ門", () => {
-      // 型の外から来る呼び手（JS の消費者）の綴り — 改名前の 'i8a8'。
+    it("spellings outside the type and c16 × s16 go through the same check as Session build", () => {
+      // A spelling from a caller outside the type (a JS consumer) — 'i8a8', the name before the
+      // rename.
       const options: EstimateOptions = {};
       Object.defineProperty(options, "attentionCompute", { value: "i8a8", enumerable: true });
       assertThrows(
@@ -1452,9 +1514,10 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
     });
   });
 
-  describe("束縛上限を渡さない見積りは、枚数がどの device でも同じ形だけを数える", () => {
-    // q / k / v `[1,1,8192,4]`: S 1 枚 = 8,192 × 8,192 × 4 = 256 MiB（core 既定 128 MiB に 1 枚では
-    // 収まらない）・1 行 = 8,192 × 4 = 32,768B・出力 y = 8,192 × 4 × 4 = 131,072B・行統計 1 行 8B。
+  describe("an estimate without a binding limit counts only shapes whose row-block count is the same on every device", () => {
+    // q / k / v `[1,1,8192,4]`: one S block = 8,192 × 8,192 × 4 = 256 MiB (does not fit in one
+    // block under the core default of 128 MiB), one row = 8,192 × 4 = 32,768B, output y = 8,192 × 4
+    // × 4 = 131,072B, row statistics 8B per row.
     const wideAttention = (): PreparedModel =>
       openGraph(
         singleOpDeclaration(
@@ -1470,13 +1533,14 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       );
     const GRANTED = 2_147_483_644;
 
-    it("core 既定で 1 枚に収まらない形は、上限を名指して fail loudly（core 既定で割った枚数を名乗らない）", () => {
+    it("a shape that does not fit in one block under the core default fails loudly naming the limit (it does not claim a block count split by the core default)", () => {
       assertThrows(
         () => wideAttention().estimate(),
         ExecutionError,
         `do not fit in one block under the WebGPU core default binding limit (${CORE_TRANSIENT_LIMITS.maxStorageBufferBindingSize}B), so options.maxStorageBufferBindingSize is needed`,
       );
-      // 予算が core 既定より大きくても、上限は device の granted 値で変わるので同じ。
+      // Even with a budget larger than the core default the result is the same, because the limit
+      // changes with the device's granted value.
       assertThrows(
         () => wideAttention().estimate({ attentionRowBlockMaxBytes: 512 * 1024 * 1024 }),
         ExecutionError,
@@ -1484,7 +1548,7 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       );
     });
 
-    it("上限を渡せば同じ形を数える（2 GiB 級の上限では 1 枚）", () => {
+    it("passing the limit counts the same shape (one block with a 2 GiB-class limit)", () => {
       assertEquals(
         runScenario(wideAttention().estimate({ maxStorageBufferBindingSize: GRANTED }))
           .workspaceBytes,
@@ -1492,7 +1556,7 @@ describe("融合 attention op のノード内一時を実行と同じ純関数�
       );
     });
 
-    it("予算が core 既定以下なら上限なしでも数え、上限を渡したときと同じ値（64 MiB → 2,048 行 × 4 枚）", () => {
+    it("a budget at or below the core default is counted even without a limit, with the same value as with the limit (64 MiB → 2,048 rows × 4 blocks)", () => {
       const budget = 64 * 1024 * 1024;
       const without = runScenario(wideAttention().estimate({ attentionRowBlockMaxBytes: budget }));
       const withLimit = runScenario(
@@ -1641,28 +1705,29 @@ describe("the online attention kernel counts the a8 quantisation temporaries and
 });
 
 // ---------------------------------------------------------------------------
-// 行ブロックの一時 1 本ごとの予算（attentionRowBlockMaxBytes — ADR 0124）
+// The budget per row-block temporary (attentionRowBlockMaxBytes — ADR 0124)
 // ---------------------------------------------------------------------------
 
-describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同じ導出で枚数を決める", () => {
-  describe("分解 attention（ADR 0093 追記 2026-10-10 の例に予算 64 MiB を掛ける）", () => {
-    it("束縛上限 128 MiB の 2 枚が 3 枚に割れ、行ブロック 1 枚ぶんの一時が縮む", () => {
+describe("the row-block budget (attentionRowBlockMaxBytes) decides the block count with the same derivation as execution", () => {
+  describe("decomposed attention (a 64 MiB budget applied to the example in the ADR 0093 addendum of 2026-10-10)", () => {
+    it("the 2 blocks under the 128 MiB binding limit become 3, and one row block's temporaries shrink", () => {
       const scenario = runScenario(
         openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
           attentionRowBlockMaxBytes: 64 * 1024 * 1024,
         }),
       );
-      // 1 行 = 4×4200×4 = 67,200B → 予算 67,108,864B に 998 行入るので ceil(2048 / 998) = 3 枚
-      // （683 + 683 + 682 行）。一時は最大 4×683×4200×4 = 45,897,600B で、同時生存は 2 本（2 領域）。
-      // The output y 262,144B is written by the dispatch that reads P, so it avoids P's region; behind
-      // the masked scores it would start at the 256B-aligned 45,897,728B (45,897,600B is not a
-      // multiple of 256) and grow that region by 262,272B, more than its own size, so it opens a
+      // One row = 4×4200×4 = 67,200B → 998 rows fit in the 67,108,864B budget, so
+      // ceil(2048 / 998) = 3 blocks (683 + 683 + 682 rows). The temporaries are at most
+      // 4×683×4200×4 = 45,897,600B, with two live at once (2 regions).
+      // The output y 262,144B is written by the dispatch that reads P, so it avoids P's region;
+      // behind the masked scores it would start at the 256B-aligned 45,897,728B (45,897,600B is not
+      // a multiple of 256) and grow that region by 262,272B, more than its own size, so it opens a
       // region of its own (both orders). Down from 68,812,800 × 2 + 262,144 = 137,887,744B without
       // the budget.
       assertEquals(scenario.workspaceBytes, 45_897_600 * 2 + 262_144);
     });
 
-    it("予算なしの値は予算の欄を足す前と同じ（既定は不変）", () => {
+    it("the value without a budget is the same as before the budget field was added (the default is unchanged)", () => {
       const scenario = runScenario(
         openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
           maxStorageBufferBindingSize: CORE_LIMIT,
@@ -1672,25 +1737,28 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
     });
   });
 
-  describe("states 形 attention", () => {
-    it("prefill（M = 4）は予算 512B で 2 枚に割れ、decode（M = 1）は 1 枚のまま", () => {
+  describe("states-form attention", () => {
+    it("prefill (M = 4) splits into 2 blocks under a 512B budget, and decode (M = 1) stays at 1 block", () => {
       const { prefill, decode } = bothScenarios(
         openGraph(stateAttentionGraph()).estimate({
           generation: { chunkLength: 4, bindings: { C: 16 } },
-          // 束縛上限は効かない大きさ（下の states 形の節の WIDE_LIMIT と同じ値）— 予算だけが枚数を動かす。
+          // A size where the binding limit has no effect (the same value as WIDE_LIMIT in the
+          // states-form section below) — only the budget moves the block count.
           maxStorageBufferBindingSize: 1 << 20,
           attentionRowBlockMaxBytes: 512,
         }),
       );
-      // B·H = 4・列容量 16 → 1 行 4×16×4 = 256B。予算 512B に 2 行 → 2 枚。
-      //   出力 o 512 / S 1 枚 = 4×2×16×4 = 512 / 行統計 1 枚 = 4×2×2×4 = 64（予算なしは 1024 / 128）
+      // B·H = 4, column capacity 16 → one row 4×16×4 = 256B. 2 rows in the 512B budget → 2 blocks.
+      //   output o 512 / one S block = 4×2×16×4 = 512 / one row-statistics block = 4×2×2×4 = 64
+      //   (1024 / 128 without a budget)
       assertEquals(prefill.workspaceBytes, 512 + 512 + 64);
-      // decode は 1 行 256B ≤ 512B なので 1 枚（予算なしと同じ 128 + 256 + 32）。
+      // decode has one row of 256B ≤ 512B, so 1 block (the same 128 + 256 + 32 as without a
+      // budget).
       assertEquals(decode.workspaceBytes, 128 + 256 + 32);
     });
   });
 
-  it("1 行ぶんにも満たない予算は、実行の計画導出と同じく予算を名指して fail loudly", () => {
+  it("a budget smaller than one row fails loudly naming the budget, as in the execution plan derivation", () => {
     assertThrows(
       () =>
         openGraph(decomposedAttentionGraph(LARGE_SCORES)).estimate({
@@ -1701,7 +1769,7 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
     );
   });
 
-  it("値域は Session 構築と同じ門で、行ブロックを持たないグラフでも見る", () => {
+  it("the value range is the same check as Session build, and is checked even on graphs without row blocks", () => {
     for (const value of [0, -1, 1.5, Number.NaN]) {
       assertThrows(
         () => plainModel().estimate({ bindings: { T: 7 }, attentionRowBlockMaxBytes: value }),
@@ -1713,10 +1781,10 @@ describe("行ブロックの予算（attentionRowBlockMaxBytes）は実行と同
 });
 
 // ---------------------------------------------------------------------------
-// states 形 attention のノード内一時（スコア S / 行統計）
+// In-node temporaries of states-form attention (score S / row statistics)
 // ---------------------------------------------------------------------------
 
-/** ストレージ束縛の上限が効かない大きさ（行ブロックが常に 1 枚になる）。 */
+/** A size where the storage binding limit has no effect (always one row block). */
 const WIDE_LIMIT = 1 << 20;
 
 const stateAttentionReport = (options: {
@@ -1731,31 +1799,34 @@ const stateAttentionReport = (options: {
     maxStorageBufferBindingSize: options.limit ?? WIDE_LIMIT,
   });
 
-test("states 形 attention の S / 行統計が中間に乗る（full 変種・行ブロック 1 枚）", () => {
+test("the S / row statistics of states-form attention are added to the intermediates (full variant, one row block)", () => {
   const { prefill, decode } = bothScenarios(stateAttentionReport({ capacity: 16, chunkLength: 4 }));
-  // B·H = 4・列容量 = C = 16。prefill（M=4）は 1 行 4×16×4=256B で上限に余裕があり 1 枚。
-  //   出力 o [1,4,4,8]=128 要素 → 512 / S = 4×4×16×4 = 1024 / 行統計 = 4×4×2×4 = 128
+  // B·H = 4, column capacity = C = 16. prefill (M=4) has one row of 4×16×4=256B, well within the
+  // limit, so 1 block.
+  //   output o [1,4,4,8]=128 elements → 512 / S = 4×4×16×4 = 1024 / row statistics = 4×4×2×4 = 128
   assertEquals(prefill.workspaceBytes, 512 + 1024 + 128);
-  // io は q 512 + k 256 + v 256 + o 512
+  // io is q 512 + k 256 + v 256 + o 512
   assertEquals(prefill.ioBytes, 1536);
-  // decode（M=1）: o 128 / S = 4×1×16×4 = 256 / 行統計 = 4×1×2×4 = 32
+  // decode (M=1): o 128 / S = 4×1×16×4 = 256 / row statistics = 4×1×2×4 = 32
   assertEquals(decode.workspaceBytes, 128 + 256 + 32);
   assertEquals(decode.ioBytes, 384);
 });
 
-test("S は capacity に比例して増える（full 変種は列容量 = スロット容量）", () => {
+test("S grows in proportion to capacity (in the full variant, column capacity = slot capacity)", () => {
   const at = (capacity: number): number =>
     bothScenarios(stateAttentionReport({ capacity, chunkLength: 4 })).prefill.workspaceBytes;
-  // 出力 512 + 行統計 128 は動かず、S だけが C に比例する（1024 → 2048 → 4096）。
+  // The output 512 + row statistics 128 do not move; only S is proportional to C (1024 → 2048 →
+  // 4096).
   assertEquals(at(16), 512 + 1024 + 128);
   assertEquals(at(32), 512 + 2048 + 128);
   assertEquals(at(64), 512 + 4096 + 128);
 });
 
-test("readonly 変種（借り手の cross-attention・ins は q だけ）の S / 行統計も数える", () => {
-  // drafter の最小形（ADR 0096 段 2）: 借り物の external スロット 2 本を readonly attention 1 本が
-  // 読むだけ。今 step の k / v 入力が無いので、実行相の 3 dispatch の読みは q と一時だけになる —
-  // ここが「k / v が ins に在る」前提で組まれていると、transient 計画が未定義の参照で落ちる。
+test("the S / row statistics of the readonly variant (a borrower's cross-attention, ins is q only) are counted too", () => {
+  // The smallest drafter form (ADR 0096 stage 2): one readonly attention only reads two borrowed
+  // external slots. There are no k / v inputs for the current step, so the three dispatches during
+  // execution read only q and the temporaries — if this were built assuming "k / v are in ins", the
+  // transient plan would fail on an undefined reference.
   const graph: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -1784,64 +1855,70 @@ test("readonly 変種（借り手の cross-attention・ins は q だけ）の S 
     maxStorageBufferBindingSize: WIDE_LIMIT,
   });
   const { prefill, decode } = bothScenarios(report);
-  // 借り手は自前スロットを持たない — state は lengths（8 バイト）だけ。
+  // A borrower has no slots of its own — state is only lengths (8 bytes).
   assertEquals(report.resident.stateBytes, 8);
-  // io は q 128 + o 128（k / v の入力が無い）。中間は o 128 / S = 4×1×16×4 = 256 / 行統計 = 32。
+  // io is q 128 + o 128 (no k / v inputs). Intermediates are o 128 / S = 4×1×16×4 = 256 / row
+  // statistics = 32.
   assertEquals(decode.ioBytes, 256);
   assertEquals(decode.workspaceBytes, 128 + 256 + 32);
-  // chunk 行の記号が無いグラフでは 2 形が同じ数字になる（estimator の契約）。
+  // In a graph without a chunk-row symbol the two shapes give the same numbers (the estimator's
+  // contract).
   assertEquals(prefill.workspaceBytes, decode.workspaceBytes);
   assertEquals(prefill.ioBytes, decode.ioBytes);
 });
 
-test("S と行統計は chunkLength に比例して増える（prefill 側だけ・decode は M=1 固定）", () => {
+test("S and the row statistics grow in proportion to chunkLength (prefill only — decode is fixed at M=1)", () => {
   const at = (chunkLength: number): AdmissionScenario =>
     bothScenarios(stateAttentionReport({ capacity: 32, chunkLength })).prefill;
-  // M=4: o 512 + S 4×4×32×4=2048 + 行統計 4×4×2×4=128
+  // M=4: o 512 + S 4×4×32×4=2048 + row statistics 4×4×2×4=128
   assertEquals(at(4).workspaceBytes, 512 + 2048 + 128);
-  // M=8: 3 項とも 2 倍（列容量は C のままなので S も行数ぶんだけ伸びる）
+  // M=8: all three terms double (the column capacity stays C, so S grows only by the row count)
   assertEquals(at(8).workspaceBytes, 1024 + 4096 + 256);
-  // decode は chunkLength に依らず M=1
+  // decode is M=1 regardless of chunkLength
   const decode = (chunkLength: number): number =>
     bothScenarios(stateAttentionReport({ capacity: 32, chunkLength })).decode.workspaceBytes;
   assertEquals(decode(4), 128 + 512 + 32);
   assertEquals(decode(8), 128 + 512 + 32);
 });
 
-test("sliding 変種の列容量は W−1+M（capacity を上げても S は動かない）", () => {
+test("the column capacity of the sliding variant is W−1+M (raising capacity does not move S)", () => {
   const at = (capacity: number): AdmissionScenario =>
     bothScenarios(stateAttentionReport({ capacity, chunkLength: 4, window: 6 })).prefill;
-  // 列容量 = 6−1+4 = 9 → S = 4×4×9×4 = 576（C に依存しない）
+  // Column capacity = 6−1+4 = 9 → S = 4×4×9×4 = 576 (independent of C)
   assertEquals(at(16).workspaceBytes, 512 + 576 + 128);
   assertEquals(at(32).workspaceBytes, 512 + 576 + 128);
-  // state スロットは C に比例したまま（S だけが窓で頭打ちになる）
+  // The state slots stay proportional to C (only S is capped by the window)
   assertEquals(
     stateAttentionReport({ capacity: 32, chunkLength: 4, window: 6 }).resident.stateBytes,
     1 * 2 * 32 * 8 * 4 * 2 + 8,
   );
 });
 
-test("行ブロックの枚数は maxStorageBufferBindingSize で変わる（1 枚ぶんだけが同時生存）", () => {
-  // MUST: 絞りは**スロットが束縛できる**範囲に留める（H=64 で S の 1 行だけを上限の外へ出す —
-  // 実 GPU 側の複数枚テストと同じ形）。上限をスロット（1024B）より下げた形は
-  // `GenerationContext.create` が拒否する device なので、見積りも同じ門で落とす（ADR 0066 追記 5）。
+test("the row-block count changes with maxStorageBufferBindingSize (only one block's worth is live at once)", () => {
+  // MUST: keep the narrowing within the range **the slots can bind** (with H=64 only one row of S
+  // is pushed beyond the limit — the same form as the multi-block test on the real GPU). A limit
+  // below the slot (1024B) is a device `GenerationContext.create` rejects, so the estimate fails at
+  // the same check (ADR 0066 addendum 5).
   const at = (limit: number): number =>
     bothScenarios(stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64, limit })).prefill
       .workspaceBytes;
-  // 1 行 = 64×16×4 = 4096B・出力 o [1,64,4,8] = 2048 要素 → 8192B。
-  // 上限に余裕があれば 1 枚（4 行）: S 16384 + 行統計 64×4×2×4 = 2048
+  // One row = 64×16×4 = 4096B, output o [1,64,4,8] = 2048 elements → 8192B.
+  // With room in the limit, 1 block (4 rows): S 16384 + row statistics 64×4×2×4 = 2048
   assertEquals(at(WIDE_LIMIT), 8192 + 16384 + 2048);
-  // 8192B → 1 枚 2 行の 2 枚。2 枚目は 1 枚目が生存を終えた区間を掴むので総バイトは 1 枚ぶん。
+  // 8192B → 2 blocks of 2 rows each. The second block takes the ranges whose lifetime the first one
+  // ended, so the total bytes are one block's worth.
   assertEquals(at(8192), 8192 + 8192 + 1024);
-  // 4096B → 1 枚 1 行の 4 枚に割れるが、出力 o（8192B）自体が束縛上限に入らないので計画の
-  // preflight（ADR 0093 決定 5）が数を返さず落とす。
+  // 4096B → splits into 4 blocks of 1 row each, but the output o (8192B) itself does not fit in the
+  // binding limit, so the plan's preflight (ADR 0093 decision 5) fails without returning numbers.
   assertThrows(() => at(4096), ExecutionError, "'o' 8192B");
 });
 
-test("端数で 1 行狭いブロックが混ざっても広い枚の区間を配り直すので総和は広い枚 1 枚ぶん", () => {
-  // M=3・H=64・上限 8192B（1 行 4096B）→ 1 枚 2 行で 2 枚（等分は 2 行 + 1 行）。2 枚目の狭い
-  // S / 行統計は 1 枚目が生存を終えた区間を掴む（配り直しはサイズに依らない — ADR 0093 決定 8）
-  // ので、領域は広い枚の S 8192 + 行統計 1024 + 出力 o [1,64,3,8]=1536 要素 → 6144 の 3 本。
+test("even when a block one row narrower is mixed in by the remainder, it reuses the wide block's ranges, so the total is one wide block's worth", () => {
+  // M=3, H=64, limit 8192B (4096B per row) → 2 rows per block, 2 blocks (an even split of 2 rows +
+  // 1 row). The second, narrower S / row statistics take the ranges whose lifetime the first block
+  // ended (reallocation does not depend on size — ADR 0093 decision 8), so the regions are the
+  // three of the wide block's S 8192 + row statistics 1024 + output o [1,64,3,8]=1536 elements →
+  // 6144.
   const { prefill } = bothScenarios(
     stateAttentionReport({ capacity: 16, chunkLength: 3, heads: 64, limit: 8192 }),
   );
@@ -1849,9 +1926,10 @@ test("端数で 1 行狭いブロックが混ざっても広い枚の区間を�
   assertEquals(prefill.workspaceBytes, 6144 + wide);
 });
 
-test("上限が動かすのは中間だけ（io・state・重みの欄は 1 バイトも動かない）", () => {
+test("the limit moves only the intermediates (the io, state and weight fields do not move by a single byte)", () => {
   const wide = stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64 });
-  // 8192B = 出力 o（8192B）が束縛上限に収まる最小の絞り（S は 2 枚に割れる）
+  // 8192B = the smallest narrowing at which the output o (8192B) fits in the binding limit (S
+  // splits into 2 blocks)
   const narrow = stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64, limit: 8192 });
   assertEquals(wide.resident, narrow.resident);
   assertEquals(
@@ -1861,14 +1939,14 @@ test("上限が動かすのは中間だけ（io・state・重みの欄は 1 バ�
   assert(wide.scenarios[0].workspaceBytes > narrow.scenarios[0].workspaceBytes);
 });
 
-test("states 形 attention を持たないグラフは上限を渡しても数字が変わらない", () => {
+test("a graph without states-form attention gives the same numbers even when a limit is passed", () => {
   const without = plainModel().estimate({ bindings: { T: 7 } });
   const with_ = plainModel().estimate({
     bindings: { T: 7 },
     maxStorageBufferBindingSize: 256,
   });
   assertEquals(without, with_);
-  // state_append だけを持つグラフ（一時を出さないノード）も同じ。
+  // The same holds for a graph with only state_append (a node that produces no temporaries).
   const generation = { chunkLength: 4, bindings: { C: 8 } };
   assertEquals(
     stateModel().estimate({ bindings: { T: 2 }, generation }),
@@ -1880,9 +1958,9 @@ test("states 形 attention を持たないグラフは上限を渡しても数�
   );
 });
 
-test("上限の値域はグラフの形に依らず入口で見る（読まない形でも黙って受理しない）", () => {
-  // 読み手（stateAttentionTemps）の内側だけに置くと、states 形 attention を持たないこの
-  // グラフでは 1 度も実行されず、不正値が「読まないから無害」として黙って通る。
+test("the limit's value range is checked at the entry regardless of the graph's shape (not silently accepted even by shapes that do not read it)", () => {
+  // Placed only inside the reader (stateAttentionTemps), it would never run for this graph without
+  // states-form attention, and an invalid value would pass silently as "harmless because unread".
   for (const limit of [-1, 0, 1.5, Number.NaN]) {
     assertThrows(
       () =>
@@ -1894,7 +1972,8 @@ test("上限の値域はグラフの形に依らず入口で見る（読まな�
       "positive safe integer",
     );
   }
-  // 対照: 正当値は従来どおり通る（上の 4 本が「何を渡しても落ちる」ではないことの証明）。
+  // Control: valid values pass as before (proof that the four above are not "fails whatever is
+  // passed").
   assertEquals(
     plainModel().estimate({
       bindings: { T: 7 },
@@ -1904,7 +1983,7 @@ test("上限の値域はグラフの形に依らず入口で見る（読まな�
   );
 });
 
-test("states 形 attention の見積りに上限を渡さないのは fail loudly", () => {
+test("estimating states-form attention without passing a limit fails loudly", () => {
   assertThrows(
     () =>
       openGraph(stateAttentionGraph()).estimate({
@@ -1915,10 +1994,11 @@ test("states 形 attention の見積りに上限を渡さないのは fail loudl
   );
 });
 
-test("1 行でも上限に入らない形は fail loudly（行ブロックでは割り切れない）", () => {
+test("a shape where even one row does not fit in the limit fails loudly (row blocks cannot divide it)", () => {
   assertThrows(
-    // 1 行 = 64×16×4 = 4096B > 2048B（state スロットの 1024B は収まるので、落ちるのは行ブロック
-    // の側だけ — スロットが上限を割る形は 1 段手前の門が先に落とす）
+    // One row = 64×16×4 = 4096B > 2048B (the state slot's 1024B fits, so only the row-block side
+    // fails — a shape where a slot breaks the limit is rejected first by the check one step
+    // earlier)
     () => stateAttentionReport({ capacity: 16, chunkLength: 4, heads: 64, limit: 2048 }),
     ExecutionError,
     "already exceeds the storage binding limit",
@@ -1926,12 +2006,13 @@ test("1 行でも上限に入らない形は fail loudly（行ブロックでは
 });
 
 // ---------------------------------------------------------------------------
-// prefill バケット形（`chunkBuckets`）のピーク
+// The peak of prefill bucket shapes (`chunkBuckets`)
 // ---------------------------------------------------------------------------
 
 /**
- * B = H = Hkv = D = 1 の full states attention + `state_append` 2 本。S の 1 行 = 容量 `C` × 4 バイト
- * だけが動くので、行ブロックの枚数が 1 → 2 に割れる境界を容量 1 本で作れる。
+ * A full states attention with B = H = Hkv = D = 1 + two `state_append`. Only one row of S =
+ * capacity `C` × 4 bytes moves, so the boundary where the row-block count splits from 1 → 2 can be
+ * made with the capacity alone.
  */
 const unitStateAttentionGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -1963,11 +2044,11 @@ const unitStateAttentionGraph = (): DeclarationJson => ({
   ],
 });
 
-describe("chunkBuckets を渡した見積りのピーク", () => {
+describe("the peak of an estimate given chunkBuckets", () => {
   const MIB = 1024 * 1024;
-  // C = 1,048,576 → S の 1 行 = 4 MiB。束縛上限 128 MiB には 32 行まで入るので、M = 32 は 1 枚
-  // （128 MiB）、M = 33 は 17 + 16 行の 2 枚（広い枚 68 MiB）に割れる — 行数の少ない形のほうが
-  // 一時が大きい（等分の境界）。
+  // C = 1,048,576 → one row of S = 4 MiB. Up to 32 rows fit in the 128 MiB binding limit, so
+  // M = 32 is 1 block (128 MiB) and M = 33 splits into 2 blocks of 17 + 16 rows (a 68 MiB wide
+  // block) — the shape with fewer rows has larger temporaries (the even-split boundary).
   const estimate = (chunkBuckets?: readonly number[]): AdmissionReport =>
     openGraph(unitStateAttentionGraph()).estimate({
       generation: {
@@ -1977,33 +2058,34 @@ describe("chunkBuckets を渡した見積りのピーク", () => {
       },
       maxStorageBufferBindingSize: 128 * MIB,
       maxBufferSize: 256 * MIB,
-      // 予算 0 = ピークはシナリオ側の最大そのもの（予算の項に隠れない形）。
+      // Budget 0 = the peak is the largest scenario itself (a form not hidden by the budget term).
       planBackingBudgetBytes: 0,
     });
-  // k / v スロット [1,1,C,1] 各 4,194,304 + 論理長 uniform 8。
+  // k / v slots [1,1,C,1], 4,194,304 each + logical-length uniform 8.
   const STATE_BYTES = 8_388_616;
 
-  describe("バケット形が行ブロック 1 枚に収まり、prefill 形が 2 枚に割れるとき", () => {
-    it("バケット形（M = 32）の io + 中間がピークに立つ", () => {
+  describe("when the bucket shape fits in one row block and the prefill shape splits into 2", () => {
+    it("the io + intermediates of the bucket shape (M = 32) stand at the peak", () => {
       const report = estimate([32]);
       assertEquals(report.resident.stateBytes, STATE_BYTES);
-      // M = 32: io = q / k / v / o 各 128 = 512。中間 = o 128 + S 32×C×4 = 134,217,728 +
-      // 行統計 32×2×4 = 256（3 本は同じ dispatch の読み書きなので別領域）。
+      // M = 32: io = q / k / v / o at 128 each = 512. Intermediates = o 128 + S 32×C×4 =
+      // 134,217,728 + row statistics 32×2×4 = 256 (the three are read and written by the same
+      // dispatch, so separate regions).
       assertEquals(report.peakAccountedBytes, STATE_BYTES + 512 + 128 + 134_217_728 + 256);
     });
 
-    it("公開のシナリオは prefill / decode の 2 本のまま（バケット形を列挙しない）", () => {
+    it("the public scenarios stay the two prefill / decode (bucket shapes are not listed)", () => {
       const { prefill, decode } = bothScenarios(estimate([32]));
-      // M = 33: io = 4×132 = 528。中間 = o 132 + 広い枚の S 17×C×4 = 71,303,168 + 行統計 17×8 = 136
-      // （狭い枚は広い枚の区間を配り直す）。
+      // M = 33: io = 4×132 = 528. Intermediates = o 132 + the wide block's S 17×C×4 = 71,303,168 +
+      // row statistics 17×8 = 136 (the narrow block reuses the wide block's ranges).
       assertEquals(prefill.ioBytes + prefill.workspaceBytes, 528 + 132 + 71_303_168 + 136);
-      // M = 1: io = 4×4 = 16。中間 = o 4 + S C×4 = 4,194,304 + 行統計 8。
+      // M = 1: io = 4×4 = 16. Intermediates = o 4 + S C×4 = 4,194,304 + row statistics 8.
       assertEquals(decode.ioBytes + decode.workspaceBytes, 16 + 4 + 4_194_304 + 8);
     });
   });
 
-  describe("バケットを宣言しないとき", () => {
-    it("ピークは prefill 形のまま（宣言していない行数を足さない）", () => {
+  describe("when no buckets are declared", () => {
+    it("the peak stays the prefill shape (undeclared row counts are not added)", () => {
       assertEquals(estimate().peakAccountedBytes, STATE_BYTES + 528 + 132 + 71_303_168 + 136);
     });
   });
@@ -2013,19 +2095,21 @@ describe("chunkBuckets を渡した見積りのピーク", () => {
 // fail loudly
 // ---------------------------------------------------------------------------
 
-test("未束縛の記号次元は fail loudly（黙って 0 で埋めない）", () => {
+test("an unbound symbolic dimension fails loudly (not silently filled with 0)", () => {
   assertThrows(() => plainModel().estimate(), ExecutionError, "Symbol 'T' is not bound");
 });
 
-test("契約違反のグラフは常駐計画より先に契約検査で落ちる（nodes[i] (op) を名乗る）", () => {
-  // conv1d の attrs から `groups` を落とした形（ADR 0015 の「既定値補完をしない」）。
-  // 常駐計画（planWeightResidency → i4 適格判定）が先に走ると `nodes (conv1d)` という
-  // 添字を持たない診断になり、実構築（PreparedModel）と別の文言で落ちる。
+test("a graph that breaks a contract fails at the contract check before the residency plan (naming nodes[i] (op))", () => {
+  // The form with `groups` dropped from conv1d's attrs (ADR 0015's "no default filling").
+  // If the residency plan (planWeightResidency → i4 eligibility) ran first, the diagnostic would be
+  // `nodes (conv1d)` without an index, failing with a different message from the real build
+  // (PreparedModel).
   //
-  // NOTE: 全量面（`estimateGraphMemory`）側の契約門そのものは、この主張では観測できない —
-  // 同じ関数の内側の `planGraph` が**同一文言**の `OpContractError` を出すので、estimator の
-  // 契約検査を外しても下の assertThrows は緑のままになる。順序（「常駐計画より先」）を固定
-  // しているのは後半の `prepareContainer` 側の assert だけで、テスト名の根拠はそちらにある。
+  // NOTE: the contract check of the full surface (`estimateGraphMemory`) itself cannot be observed
+  // by this claim — `planGraph` inside the same function raises an `OpContractError` with **the
+  // same message**, so the assertThrows below stays green even without the estimator's contract
+  // check. Only the `prepareContainer`-side assert in the second half pins the order ("before the
+  // residency plan"), and that is where the test name's basis lies.
   const graph = i4Conv1dGraph(1);
   const broken = mergeGraph(
     {
@@ -2034,9 +2118,9 @@ test("契約違反のグラフは常駐計画より先に契約検査で落ち�
     },
     I4_CONV1D_STORAGE,
   );
-  // 常駐計画は**壊れていない**グラフから採る。壊れたグラフで `planWeightResidency` を呼ぶと
-  // 落ちるのは計画の側（添字の無い `nodes (conv1d)`）なので、estimator が計画を使う前に
-  // 自分で契約検査を通すことを見られない。
+  // The residency plan is taken from the **unbroken** graph. Calling `planWeightResidency` on the
+  // broken graph would fail on the plan side (`nodes (conv1d)` without an index), so it could not
+  // show that the estimator runs its own contract check before using the plan.
   const residency = planWeightResidency(mergeGraph(graph, I4_CONV1D_STORAGE));
   const error = assertThrows(
     () => estimateGraphMemory(broken, residency, {}),
@@ -2044,8 +2128,8 @@ test("契約違反のグラフは常駐計画より先に契約検査で落ち�
     "nodes[",
   );
   assert(error.message.includes("conv1d"), error.message);
-  // admission 相（`prepareContainer`）も同じ順序 — ここが常駐計画を先に走らせると、
-  // 同じグラフが添字を持たない `nodes (conv1d)` で落ちるようになる。
+  // The admission phase (`prepareContainer`) has the same order — if it ran the residency plan
+  // first, the same graph would start failing with `nodes (conv1d)` without an index.
   const prepared = assertThrows(
     () =>
       openGraph(
@@ -2068,7 +2152,7 @@ test("契約違反のグラフは常駐計画より先に契約検査で落ち�
   assert(prepared.message.includes("conv1d"), prepared.message);
 });
 
-test("states 専用記号を options.bindings で受けない（束縛点は generation の側）", () => {
+test("states-only symbols are not accepted in options.bindings (their binding point is on the generation side)", () => {
   assertThrows(
     () => stateModel().estimate({ bindings: { T: 2, C: 8 } }),
     ExecutionError,
@@ -2076,11 +2160,11 @@ test("states 専用記号を options.bindings で受けない（束縛点は gen
   );
 });
 
-test("states 形グラフを generation 無しで見積らない（context が要る旨で落ちる）", () => {
+test("a states-form graph is not estimated without generation (fails saying a context is needed)", () => {
   assertThrows(() => stateModel().estimate({ bindings: { T: 2 } }), Error, "GenerationContext");
 });
 
-test("states 宣言の無いグラフに generation を渡すと fail loudly", () => {
+test("passing generation to a graph without states declarations fails loudly", () => {
   assertThrows(
     () =>
       plainModel().estimate({
@@ -2092,7 +2176,7 @@ test("states 宣言の無いグラフに generation を渡すと fail loudly", (
   );
 });
 
-test("実構築が拒否する chunkLength に見積りを返さない", () => {
+test("returns no estimate for a chunkLength the real build rejects", () => {
   assertThrows(
     () =>
       stateModel().estimate({
@@ -2104,8 +2188,9 @@ test("実構築が拒否する chunkLength に見積りを返さない", () => {
   );
 });
 
-test("states と入力の両方に現れる記号の食い違いは fail loudly（run と同じ門）", () => {
-  // v の容量を T にして共有記号を作る（k は C のまま — states 専用記号の分担は不変）
+test("a disagreement on a symbol appearing in both states and inputs fails loudly (the same check as run)", () => {
+  // Make v's capacity T to create a shared symbol (k stays C — the division of states-only symbols
+  // is unchanged)
   const graph = stateGraph();
   graph.states = {
     ...graph.states,
@@ -2123,20 +2208,25 @@ test("states と入力の両方に現れる記号の食い違いは fail loudly�
   );
 });
 
-test("グラフに無い記号の束縛は fail loudly", () => {
+test("binding a symbol that is not in the graph fails loudly", () => {
   assertThrows(() => plainModel().estimate({ bindings: { T: 7, Z: 3 } }), ExecutionError, "'Z'");
 });
 
 // ---------------------------------------------------------------------------
-// 実構築と同じ門（グラフ全体を見ないと決まらない契約）
-// ---------------------------------------------------------------------------
+// The same checks as the real build (contracts that cannot be decided without looking at the whole
+// graph) ---------------------------------------------------------------------------
 
-// 全量面（`estimateGraphMemory`）は `PreparedModel` を経由しないので、契約検査を estimator 側で
-// 通していないと「createSessionFromContainer が必ず落ちるモデル」に完全な AdmissionReport を返す
-// （admission の目的と逆）。この節の 3 本は**その口を直に呼ぶ** — `PreparedModel.estimate` から
-// 呼ぶと `prepareContainer` の側が先に落とすので、estimator 側の門を外しても緑のままになる。
+// The full surface (`estimateGraphMemory`) does not go through `PreparedModel`, so without running
+// the contract checks on the estimator side it would return a complete AdmissionReport for "a model
+// on which createSessionFromContainer always fails" (the opposite of admission's purpose). The
+// three tests in this section **call that surface directly** — calling through
+// `PreparedModel.estimate` would let the `prepareContainer` side fail first, and the test would
+// stay green even with the estimator's check removed.
 
-/** `kv` スロットに読者だけが居て `state_append` を 1 本も持たないグラフ（決定 5b 違反）。 */
+/**
+ * A graph where the `kv` slot has only readers and no `state_append` at all (a violation of
+ * decision 5b).
+ */
 const readerOnlyStateGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -2165,7 +2255,7 @@ const readerOnlyStateGraph = (): DeclarationJson => ({
   ],
 });
 
-test("読者だけの state スロットを持つグラフに見積りを返さない（実構築と同じ契約検査）", () => {
+test("returns no estimate for a graph with a reader-only state slot (the same contract check as the real build)", () => {
   const graph = mergeGraph(readerOnlyStateGraph());
   const error = assertThrows(
     () =>
@@ -2178,7 +2268,7 @@ test("読者だけの state スロットを持つグラフに見積りを返さ�
   assert(error.message.includes("kv.k"), error.message);
 });
 
-/** 連結軸に異なるシンボルが混ざった cat（ADR 0046 の残る拒否）。 */
+/** A cat whose concatenation axis mixes different symbols (the remaining rejection of ADR 0046). */
 const mixedSymbolCatGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -2194,7 +2284,7 @@ const mixedSymbolCatGraph = (): DeclarationJson => ({
   nodes: [{ op: "cat", ins: ["a", "b"], outs: ["y"], attrs: { dim: 0 } }],
 });
 
-test("cat の連結軸に異なるシンボルが混ざるグラフに見積りを返さない", () => {
+test("returns no estimate for a graph whose cat concatenation axis mixes different symbols", () => {
   const graph = mergeGraph(mixedSymbolCatGraph());
   assertThrows(
     () => estimateGraphMemory(graph, planWeightResidency(graph), { bindings: { T: 2, U: 3 } }),
@@ -2207,7 +2297,7 @@ test("cat の連結軸に異なるシンボルが混ざるグラフに見積り�
 // unaccounted
 // ---------------------------------------------------------------------------
 
-test("unaccounted は勘定に入っていないものを明示する（見積りは絶対保証ではない）", () => {
+test("unaccounted states explicitly what is not accounted for (the estimate is not an absolute guarantee)", () => {
   const { unaccounted } = plainModel().estimate({ bindings: { T: 7 } });
   const joined = unaccounted.join("\n");
   assert(joined.includes("fusion"), joined);
@@ -2215,17 +2305,19 @@ test("unaccounted は勘定に入っていないものを明示する（見積�
   assert(joined.includes("writeBuffer"), joined);
 });
 
-// attention のノード内一時は**勘定に入った** — states 形の S / 行統計に続き、融合 attention op の S・行統計・
-// i8a8 の量子化中間も実行と同じ純関数で数える（ADR 0124 決定 7）。残る非勘定は linear の i8a8 量子化中間で、
-// unaccounted はそれを名乗り、attention の一時を非勘定と書かない（勘定済みの項を「入っていない」と
-// 名乗ると、見積りの読み手が実際より余裕を見込む）。
-test("unaccounted は linear i8a8 の量子化中間を名乗り、attention の一時（states 形・融合 op）は勘定済みと書く", () => {
+// The in-node temporaries of attention **are now accounted for** — after the S / row statistics of
+// states-form attention, the S, row statistics and i8a8 quantized intermediates of the fused
+// attention op are also counted with the same pure function as execution (ADR 0124 decision 7).
+// What remains unaccounted is the i8a8 quantized intermediates of linear; unaccounted names them
+// and does not list attention's temporaries as unaccounted (naming an accounted item as "not
+// included" would make readers of the estimate assume more headroom than there is).
+test("unaccounted names the linear i8a8 quantized intermediates and says attention's temporaries (states form, fused op) are accounted for", () => {
   const { unaccounted } = stateModel().estimate({
     bindings: { T: 2 },
     generation: { chunkLength: 4, bindings: { C: 8 } },
   });
   const joined = unaccounted.join("\n");
-  assert(!joined.includes("states 形でない attention のノード内一時"), joined);
+  assert(!joined.includes("in-node temporaries of attention that is not states-form"), joined);
   assert(joined.includes("Quantized intermediates of linear i8a8"), joined);
   assert(joined.includes("The in-node temporaries of attention are counted"), joined);
   assert(
@@ -2240,7 +2332,7 @@ test("unaccounted は linear i8a8 の量子化中間を名乗り、attention の
 // stateAttentionReduce
 // ---------------------------------------------------------------------------
 
-test("parallel-fused の一時見積りは行統計の割当だけを取り除く", () => {
+test("the parallel-fused temporary estimate removes only the row-statistics allocation", () => {
   const model = openGraph(stateAttentionGraph());
   const options = {
     generation: { chunkLength: 4, bindings: { C: 16 } },
@@ -2265,7 +2357,7 @@ test("parallel-fused の一時見積りは行統計の割当だけを取り除�
   assertThrows(() => model.estimate(options), ExecutionError, "stateAttentionReduce");
 });
 
-test("attentionの見積り設定は文字列への変換前に型を拒否する", () => {
+test("attention estimate settings reject wrong types before converting to a string", () => {
   const model = plainModel();
   let conversions = 0;
   const object = {

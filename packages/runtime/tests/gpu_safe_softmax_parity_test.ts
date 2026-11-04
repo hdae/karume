@@ -1,23 +1,25 @@
-// safe_softmax（ADR 0044）の**ビット同一の門**。
+// The **bit-identity check** of safe_softmax (ADR 0044).
 //
-// 同じ入力に対し、
+// For the same input,
 //
-//   ① 既存 GPU op 列で組んだ「分解ガード相当」の参照
-//      （`ge_scalar → sum → cast → bitwise_not → masked_fill(softmax(x), 空行, 0)`）
-//   ② `safe_softmax` op 1 ノード
+//   ① a reference equivalent to the "decomposed guard", built from the existing GPU op sequence
+//      (`ge_scalar → sum → cast → bitwise_not → masked_fill(softmax(x), empty row, 0)`)
+//   ② a single `safe_softmax` op node
 //
-// を**同じ実 GPU**で流し、出力を **f32 のビット列**で突き合わせる。allclose ではなく
-// `Uint32Array` の完全一致で見るのが要点で、tolerance に隠れる丸め列の変化（例: ②③ の縮約
-// 順序が素の softmax からずれる / `1.0 / Σ` を割り算へ戻す）はここでしか検出できない。
+// run on **the same real GPU**, and their outputs are compared as **f32 bit patterns**. The point
+// is exact `Uint32Array` equality rather than allclose: a change in the rounding sequence that a
+// tolerance would hide (e.g. the reduction order of ②③ drifting from plain softmax / turning
+// `1.0 / Σ` back into a division) is detected only here.
 //
-// ① が torch のガード `where(¬any(¬eq(src,−inf)), 0, softmax(src))` の op ごとの写しである
-// ことは {@link guardedGraph} の対応表が示す。
+// The mapping table of {@link guardedGraph} shows that ① copies torch's guard
+// `where(¬any(¬eq(src,−inf)), 0, softmax(src))` op by op.
 //
-// MUST: 恒真化しないこと。①② は**別々のグラフ**を別々の Session で走らせる（safe_softmax の
-// CPU 参照と突き合わせるだけでは、GPU 側の空行分岐が「素の softmax と同じ経路を通っている」
-// ことを確かめられない）。
-// MUST: **全 −inf 行を含むケース**を必ず回す（故障注入 — この行が無いと ① の masked_fill が
-// 一度も発火せず、両者が素の softmax として一致するだけの恒真テストになる）。
+// MUST: do not let this become a tautology. ① and ② run as **separate graphs** in separate
+// Sessions (comparing against safe_softmax's CPU reference alone cannot confirm that the GPU side's
+// empty-row branch "takes the same path as plain softmax").
+// MUST: always run **a case with an all −inf row** (fault injection — without such a row the
+// masked_fill of ① never fires, and the test degenerates into a tautology where both merely agree
+// as plain softmax).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -33,27 +35,28 @@ import {
 } from "./helpers/model-fixture.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** f32 の最小有限値。「行 max が −inf でない」は `amax_row >= この値` と同値。 */
+/** The smallest finite f32. "The row max is not −inf" is equivalent to `amax_row >= this value`. */
 const NEG_F32_MAX = -3.4028234663852886e38;
 
 /**
- * 分解ガード相当の参照グラフ（既存語彙だけで組む）。
+ * The reference graph equivalent to the decomposed guard (built from the existing vocabulary only).
  *
- * torch のガード `where(¬any(¬eq(src,−inf)), 0, softmax(src))` を op ごとに写したもの:
+ * torch's guard `where(¬any(¬eq(src,−inf)), 0, softmax(src))`, copied op by op:
  *
- * | torch                 | ここ                                    |
- * | --------------------- | --------------------------------------- |
- * | `¬eq(src, −inf)`      | `ge_scalar(src, −F32_MAX)`（bool）      |
- * | `any(…, −1)`          | `sum`（bool → i32）→ `cast` to bool     |
- * | `logical_not`         | `bitwise_not`                           |
- * | `where(…, 0, softmax)`| `masked_fill(softmax(src), 空行, 0)`    |
+ * | torch                  | here                                      |
+ * | ---------------------- | ----------------------------------------- |
+ * | `¬eq(src, −inf)`       | `ge_scalar(src, −F32_MAX)` (bool)         |
+ * | `any(…, −1)`           | `sum` (bool → i32) → `cast` to bool       |
+ * | `logical_not`          | `bitwise_not`                             |
+ * | `where(…, 0, softmax)` | `masked_fill(softmax(src), empty row, 0)` |
  *
- * `ge_scalar(v, −F32_MAX)` が `¬eq(v, −inf)` と同値なのは、f32 の有限値が必ず −F32_MAX 以上
- * だから（入力は「有限か −inf」— ADR 0044 決定 3 の契約）。
+ * `ge_scalar(v, −F32_MAX)` is equivalent to `¬eq(v, −inf)` because every finite f32 is at least
+ * −F32_MAX (the input is "finite or −inf" — the contract of ADR 0044 decision 3).
  *
- * MUST: 行 max（`amax`）で空行を判定しない。ランタイムの行 reduce は identity が ±F32_MAX で
- * （limitations.md）、全 −inf 行の `amax` は −inf ではなく −F32_MAX を返す — masked_fill の
- * 埋め値と区別が付かない。要素ごとに判定してから畳むこの形が正しい写像。
+ * MUST: do not detect an empty row with the row max (`amax`). The runtime's row reduce has the
+ * identity ±F32_MAX (limitations.md), so `amax` of an all −inf row returns −F32_MAX rather than
+ * −inf — indistinguishable from masked_fill's fill value. Testing each element and then reducing,
+ * as here, is the correct mapping.
  */
 const guardedGraph = (rows: number, dim: number): DeclarationJson => ({
   format: "karume-ir",
@@ -81,7 +84,7 @@ const guardedGraph = (rows: number, dim: number): DeclarationJson => ({
     { op: "cast", ins: ["count"], outs: ["anyFinite"], attrs: { to: "bool" } },
     { op: "bitwise_not", ins: ["anyFinite"], outs: ["emptyRow"], attrs: {} },
     { op: "reshape", ins: ["emptyRow"], outs: ["empty"], attrs: {} },
-    // mask は [rows,1] を右詰め broadcast で [rows,dim] へ広げて読む
+    // The mask [rows,1] is read widened to [rows,dim] by right-aligned broadcasting
     { op: "masked_fill", ins: ["probs", "empty"], outs: ["y"], attrs: { value: 0 } },
   ],
 });
@@ -103,53 +106,56 @@ const run = async (
   }
 };
 
-/** f32 のビット列（`0.0` と `-0.0` の差も、末尾 1 ulp の差も見える形）。 */
+/**
+ * The f32 bit patterns (a form where both `0.0` vs `-0.0` and a last-place 1 ulp difference show).
+ */
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
-/** 決定的なスコア列（乱数は使わない — 失敗が再現しないため）。 */
+/** A deterministic score sequence (no random numbers — a failure would not reproduce). */
 const SCORE = (i: number): number => (((i * 13) % 29) - 14) * 0.37;
 
 type Case = {
   readonly name: string;
   readonly rows: number;
   readonly dim: number;
-  /** 全要素 −inf にする行の集合。 */
+  /** The set of rows whose elements are all set to −inf. */
   readonly emptyRows: readonly number[];
-  /** 行内で個別に −inf にする列の判定（加算マスクの穴あき部分）。 */
+  /** Which columns within a row are set to −inf individually (the holes of an additive mask). */
   readonly blocked: (row: number, col: number) => boolean;
 };
 
 const CASES: readonly Case[] = [
-  // 空行なし — ここは素の softmax とビット同一になる（変種が別実装へ退化していない門）
-  { name: "空行なし [5,9]", rows: 5, dim: 9, emptyRows: [], blocked: () => false },
-  // 実行時 bool マスクの実測形: 一部の列が −inf で、1 行だけ全 −inf
+  // No empty row — this is bit-identical to plain softmax (a check that the variant has not
+  // degenerated into another implementation)
+  { name: "no empty row [5,9]", rows: 5, dim: 9, emptyRows: [], blocked: () => false },
+  // The observed shape of a run-time bool mask: some columns are −inf, and one row is all −inf
   {
-    name: "全 −inf 行 1 本 [4,7]",
+    name: "one all −inf row [4,7]",
     rows: 4,
     dim: 7,
     emptyRows: [2],
     blocked: (row, col) => (row + col) % 3 === 2,
   },
-  // 空行が連続する形（CFG の uncond バッチのように行がまとまって落ちる）
+  // Consecutive empty rows (rows drop out together, as in the uncond batch of CFG)
   {
-    name: "空行 2 本連続 [6,5]",
+    name: "two consecutive empty rows [6,5]",
     rows: 6,
     dim: 5,
     emptyRows: [1, 2],
     blocked: (_, col) => col === 0,
   },
-  // 行長 > workgroup 幅（256）— ① の grid-stride 走査とツリー縮約の両方を通る
+  // Row length > workgroup width (256) — exercises both ①'s grid-stride scan and the tree reduction
   {
-    name: "行長 300（workgroup 超え）[3,300]",
+    name: "row length 300 (wider than a workgroup) [3,300]",
     rows: 3,
     dim: 300,
     emptyRows: [1],
     blocked: (_, col) => col % 5 === 4,
   },
-  // 行数 > workgroup 数の grid-stride も踏む（1 workgroup が複数行を畳む）
+  // Also exercises grid-stride with rows > workgroups (one workgroup reduces several rows)
   {
-    name: "行数 130（grid-stride）[130,4]",
+    name: "130 rows (grid-stride) [130,4]",
     rows: 130,
     dim: 4,
     emptyRows: [0, 65, 129],
@@ -158,7 +164,7 @@ const CASES: readonly Case[] = [
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "safe_softmax 1 ノードの出力が分解ガード相当（softmax + masked_fill）と**ビット単位で一致**する（実 GPU）",
+  "the output of a single safe_softmax node is **bit-identical** to the decomposed-guard equivalent (softmax + masked_fill) (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -188,24 +194,28 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           mismatches.length,
           0,
-          `${name}: ${mismatches.length} 要素がビット不一致（先頭 ${mismatches
+          `${name}: ${mismatches.length} elements differ in bits (first: ${mismatches
             .slice(0, 4)
             .map((i) => `#${i} safe=0x${a[i].toString(16)} guarded=0x${b[i].toString(16)}`)
-            .join(" / ")}）`,
+            .join(" / ")})`,
         );
 
-        // 故障注入の確認: 空行が本当に 0 で、非空行は 0 でない（両者が「素の softmax の
-        // NaN 同士」で一致しているだけの状態を排除する）。
+        // Confirm the fault injection: empty rows really are 0 and non-empty rows are not (rules
+        // out the state where both merely agree as "plain softmax NaN against NaN").
         const values = safe.data as Float32Array;
         for (let row = 0; row < rows; row += 1) {
           const slice = [...values.slice(row * dim, (row + 1) * dim)];
-          assertEquals(slice.every(Number.isFinite), true, `${name}: 行 ${row} に非有限値`);
+          assertEquals(
+            slice.every(Number.isFinite),
+            true,
+            `${name}: non-finite value in row ${row}`,
+          );
           if (empty.has(row)) {
-            assertEquals(slice, Array(dim).fill(0), `${name}: 空行 ${row} が 0 でない`);
+            assertEquals(slice, Array(dim).fill(0), `${name}: empty row ${row} is not 0`);
           } else {
             assert(
               slice.some((v) => v > 0),
-              `${name}: 非空行 ${row} が全 0`,
+              `${name}: non-empty row ${row} is all 0`,
             );
           }
         }
@@ -216,11 +226,11 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-// 空行を持たない入力では safe_softmax は**素の softmax とビット同一**でなければならない
-// （① の identity を −inf に変えた影響が有限行へ漏れていないことの直接の門 — 上の parity は
-// masked_fill を挟むので、素の softmax そのものとの一致は別に見る）。
+// On input without empty rows, safe_softmax MUST be **bit-identical to plain softmax** (the direct
+// check that changing ①'s identity to −inf has not leaked into finite rows — the parity above goes
+// through masked_fill, so equality with plain softmax itself is checked separately).
 test.skipIf(!GPU_AVAILABLE)(
-  "safe_softmax は −inf を含まない入力で素の softmax とビット単位で一致する（実 GPU）",
+  "safe_softmax is bit-identical to plain softmax on input without −inf (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {

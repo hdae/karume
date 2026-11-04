@@ -1,32 +1,37 @@
 /**
- * 融合 attention（ADR 0023）の**クエリ行ブロック実行**の実 GPU 門。分解経路の行ブロック
- * （融合ルール `rowBlockAttention` — tests/gpu_row_block_attention_test.ts）と同じ 2 本
- * （①強制分割 parity / ②ポータビリティ）に、融合経路だけが持つ 2 本
- * （ヒット run の slot 導出・行窓キーの census）を足した 4 本。
+ * Real-GPU checks of **query row-block execution** in fused attention (ADR 0023). The same 2 as the
+ * row blocks of the decomposed path (fusion rule `rowBlockAttention` —
+ * tests/gpu_row_block_attention_test.ts) (① forced-split parity / ② portability), plus 2 that only
+ * the fused path has (slot derivation of hit runs, census of the row-window keys) — 4 in all.
  *
- * ① **強制分割 parity**: 同じ入力・同じ Session 設定で
- *    - 既定（= 上限に余裕がある機では 1 枚 = 分割前と完全に同一の経路）
- *    - `ROW_BLOCK_SPLIT` で 2 / 3 / 5 枚を強制した形
- *    を回して **f32 のビット列**で突き合わせる。allclose ではなく `Uint32Array` の完全一致で
- *    見るのが要点 — 行ブロック化は「どの workgroup がどの行を担当するか」しか変えないので、
- *    1 ulp でも動いたら K 縮約順か丸め列（あるいは行 / 統計の添字）が動いている。
- *    変種（s16 格納 / i8a8 / 加算 mask / GQA）を横断で回すのは、行窓が**段ごとに別の側**
- *    （①QK は A 側 = q、③PV は C 側 = O）へ入るため、片側だけ写し忘れた実装が
- *    「値は合っているのに片方の変種だけ壊れる」形で残るから。
+ * ① **Forced-split parity**: with the same inputs and the same Session settings, run
+ *    - the default (= 1 block on a machine with headroom under the limit = exactly the path before
+ *      splitting)
+ *    - the form forced to 2 / 3 / 5 blocks with `ROW_BLOCK_SPLIT`
+ *    and compare them as **f32 bits**. The point is the exact equality of `Uint32Array`, not
+ *    allclose — row blocking only changes "which workgroup handles which row", so a move of even 1
+ *    ulp means the K reduction order or the rounding sequence (or a row / statistics index) moved.
+ *    The variants (s16 storage / i8a8 / additive mask / GQA) are run across because the row window
+ *    enters **a different side per stage** (the A side = q for ①QK, the C side = O for ③PV), so an
+ *    implementation that forgets one side survives as "the values are right but one variant
+ *    breaks".
  *
- * ② **ポータビリティ門**: `maxStorageBufferBindingSize` を WebGPU core 既定（128MiB）へ絞った
- *    device で、S が 128MiB を超える形が通ること。**同じ device・同じ形で `ROW_BLOCK_SPLIT: 1`
- *    を強制すると fail loudly になる**ことも対で見る（落ちない形を緑にしても、行ブロックが
- *    効いている証拠にならない）。
+ * ② **Portability check**: on a device with `maxStorageBufferBindingSize` narrowed to the WebGPU
+ *    core default (128MiB), a shape whose S exceeds 128MiB passes. As a pair, **forcing
+ *    `ROW_BLOCK_SPLIT: 1` on the same device and shape fails loudly** (a shape that does not fail
+ *    being green is no evidence that row blocking works).
  *
- * ③ **予算分割 parity**（ADR 0124）: `SessionOptions.attentionRowBlockMaxBytes` で束縛上限より細かく
- *    割った形が、予算なし（1 枚）と Uint32 で一致すること。f16 計算の 2 変種（`shader-f16` を要る）は
- *    別の `Deno.test` で強制分割と予算分割の両方を回す（ADR 0124 決定 4 の変種の列挙）。
+ * ③ **Budget-split parity** (ADR 0124): a split finer than the binding limit made by
+ *    `SessionOptions.attentionRowBlockMaxBytes` equals the unbudgeted run (1 block) as Uint32. The
+ *    2 f16-compute variants (which need `shader-f16`) run both the forced split and the budget
+ *    split in a separate `Deno.test` (the variant enumeration of ADR 0124 decision 4).
  *
- * MUST: 恒真化しないこと。①は中間ピーク（`peakTransientBytes`）が枚数とともに**単調に縮む**
- * ことを同時に見る — 見なければ「分割が発火しないまま 2 回同じ経路を撃った」形が常に緑になる。
- * ③は予算つきの枚数（行窓のキーの dispatch 本数）が 2 以上で、ピークが予算なしより厳密に小さいことを
- * 同時に見る（予算が導出に届かないまま 1 枚で回った形を緑にしない）。出力が定数でないことも毎回確かめる。
+ * MUST: do not make it tautological. ① also checks that the intermediate peak
+ * (`peakTransientBytes`) **shrinks monotonically** with the block count — without it, "the split
+ * never fired and the same path was hit twice" is always green. ③ also checks that the budgeted
+ * block count (the dispatch count of the row-window keys) is at least 2 and that the peak is
+ * strictly smaller than unbudgeted (a run where the budget never reached the derivation and ran as
+ * 1 block is not green). Every time, the output is also confirmed not to be constant.
  */
 
 import { test } from "vite-plus/test";
@@ -50,13 +55,16 @@ import {
 import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
-/** WebGPU core 既定のストレージ束縛上限。ポータビリティ門はここを再現する。 */
+/** The storage binding limit of the WebGPU core defaults. The portability check reproduces it. */
 const CORE_STORAGE_BINDING_LIMIT = 128 * 1024 * 1024;
 
-/** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
+/**
+ * The half scale (`√scale_factor` of torch's math decomposition). The value derived from D per the
+ * contract.
+ */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data sequences (no random numbers — failures would not reproduce). */
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.23;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
@@ -65,7 +73,7 @@ type Shape = {
   readonly name: string;
   readonly b: number;
   readonly h: number;
-  /** K / V の head 数（`h` と違えば GQA — ADR 0067）。 */
+  /** Head count of K / V (GQA if it differs from `h` — ADR 0067). */
   readonly kv: number;
   readonly m: number;
   readonly n: number;
@@ -75,16 +83,22 @@ type Shape = {
 type Variant = {
   readonly name: string;
   readonly options: SessionOptions;
-  /** 加算 mask `[1,1,M,N]` を付けるか（**行ごとに違う** mask = 行オフセットの検出器）。 */
+  /**
+   * Whether to add an additive mask `[1,1,M,N]` (a mask **differing per row** = a detector of the
+   * row offset).
+   */
   readonly mask?: boolean;
-  /** GQA 形（`h != kv`）で回せるか（i8a8 は GQA と組めない — ADR 0067 決定 3）。 */
+  /**
+   * Whether it can run on a GQA shape (`h != kv`) (i8a8 cannot be combined with GQA — ADR 0067
+   * decision 3).
+   */
   readonly gqa?: boolean;
 };
 
 /**
- * 変種の横断。行窓は ①QK（A 側 = q / mask の行）と ③PV（C 側 = O）で**別の場所**に入り、
- * i8a8 では更に別カーネル（q の量子化結果を全 M ストライドで読む）になるので、
- * 経路ごとに 1 本ずつ通す。
+ * Across the variants. The row window enters **different places** in ①QK (the A side = rows of q /
+ * mask) and ③PV (the C side = O), and with i8a8 it becomes yet another kernel (reading the
+ * quantized q with the full-M stride), so each path is run once.
  */
 const VARIANTS: readonly Variant[] = [
   { name: "f32", options: {}, gqa: true },
@@ -95,9 +109,10 @@ const VARIANTS: readonly Variant[] = [
 ];
 
 /**
- * f16 計算の変種（ADR 0028 — S を `array<f16>` で受け渡す別の格納形）。`shader-f16` を要るので、
- * `acquireGpu({ shaderF16: true })` の device を取る別の `Deno.test` で回す（{@link VARIANTS} の device は
- * feature なしで取る）。mask と GQA とは組める。
+ * The f16-compute variants (ADR 0028 — another storage form passing S as `array<f16>`). They need
+ * `shader-f16`, so they run in a separate `Deno.test` that takes the device of
+ * `acquireGpu({ shaderF16: true })` (the device of {@link VARIANTS} is taken without the feature).
+ * They can be combined with the mask and GQA.
  */
 const F16_VARIANTS: readonly Variant[] = [
   { name: "f16", options: { attentionCompute: "f16" }, gqa: true },
@@ -105,26 +120,28 @@ const F16_VARIANTS: readonly Variant[] = [
 ];
 
 const SHAPES: readonly Shape[] = [
-  // 全軸が端数（D % 4 ≠ 0 / N % 4 ≠ 0 = ①③ ともスカラ変種・s16 も i8a8 も縮退する経路）。
-  // M = 17 は 2 / 3 / 5 枚のどれでも端数割になる。
-  { name: "端数 B2 H3 M17 N19 D13", b: 2, h: 3, kv: 3, m: 17, n: 19, d: 13 },
-  // v4 経路（D % 4 == 0 && N % 4 == 0）で M が行タイル 2 枚を跨ぐ。
+  // Remainders on every axis (D % 4 ≠ 0 / N % 4 ≠ 0 = scalar variant for both ①③; the path where
+  // s16 and i8a8 both degrade). M = 17 splits with a remainder for each of 2 / 3 / 5 blocks.
+  { name: "remainders B2 H3 M17 N19 D13", b: 2, h: 3, kv: 3, m: 17, n: 19, d: 13 },
+  // The v4 path (D % 4 == 0 && N % 4 == 0) with M spanning 2 row tiles.
   { name: "v4 B1 H2 M68 N20 D12", b: 1, h: 2, kv: 2, m: 68, n: 20, d: 12 },
-  // DiT の self-attention を縮めた形（D = 128・M / N とも 64 の倍数 = 実モデルの経路）。
-  { name: "DiT 形 B1 H4 M64 N64 D128", b: 1, h: 4, kv: 4, m: 64, n: 64, d: 128 },
-  // GQA（r = 4）。①QK と ③PV で kv-head への写像が入ったまま行窓が乗る形。
+  // A shrunk DiT self-attention shape (D = 128, M / N both multiples of 64 = the real model's
+  // path).
+  { name: "DiT shape B1 H4 M64 N64 D128", b: 1, h: 4, kv: 4, m: 64, n: 64, d: 128 },
+  // GQA (r = 4). The row window sits on top of the kv-head mapping in both ①QK and ③PV.
   { name: "GQA B1 H8 Hkv2 M40 N24 D16", b: 1, h: 8, kv: 2, m: 40, n: 24, d: 16 },
 ];
 
-/** 強制する枚数（1 = 既定と同じ形・2/3 は等分・5 は端数割）。 */
+/** Block counts to force (1 = same as the default, 2/3 split evenly, 5 splits with a remainder). */
 const SPLITS: readonly number[] = [2, 3, 5];
 
 /**
- * 実測形の band mask（行ごとに中心が動く = **行オフセットを取り違えたら必ず値が変わる**）。
+ * The measured band mask (the centre moves per row = **a mixed-up row offset always changes the
+ * values**).
  *
- * MUST: **全ての行に非マスク列が 1 本以上**あること（行が丸ごと −inf だと amax が −inf に
- * なり `exp(−inf −(−inf))` が NaN — 分割側も非分割側も同じ NaN を出すのでビット比較は
- * 通ってしまい、検証としては何も見ていない状態になる）。対称バンドは中心が必ず非マスク。
+ * MUST: **every row has at least one unmasked column** (if a whole row is −inf, amax becomes −inf
+ * and `exp(−inf −(−inf))` is NaN — the split and unsplit sides produce the same NaN, so the bit
+ * comparison passes, but it verifies nothing). A symmetric band always leaves its centre unmasked.
  */
 const bandMask = (m: number, n: number): FilledTensor => {
   const width = Math.max(1, Math.floor(n / 4));
@@ -136,14 +153,19 @@ const bandMask = (m: number, n: number): FilledTensor => {
   });
 };
 
-/** 出力と、その run が実際に確保した中間バッファのピーク（行ブロックの効きの観測点）。 */
+/**
+ * The output and the peak of the intermediate buffers that run actually allocated (where the effect
+ * of row blocking is observed).
+ */
 type RunResult = {
-  /** run ごとの出力（2 本目以降は導出済み計画のヒット run — 別の束縛経路を通る）。 */
+  /**
+   * The outputs per run (from the 2nd on, hit runs of the derived plan — a different binding path).
+   */
   readonly outputs: readonly Tensor[];
   readonly output: Tensor;
-  /** **1 run 目**（アリーナ経路）の中間ピーク。 */
+  /** The intermediate peak of **the 1st run** (the arena path). */
   readonly peakTransientBytes: number;
-  /** パイプラインキー別の dispatch 回数（census — 計測に依らない）。 */
+  /** Dispatch counts per pipeline key (census — independent of timing). */
   readonly dispatchCounts: ReadonlyMap<string, number>;
 };
 
@@ -184,8 +206,9 @@ const runAttention = async (
     for (let run = 0; run < runs; run += 1) {
       outputs.push((await session.run(inputs))["y"]);
       const diagnostics = session.diagnostics();
-      // MUST: ピークと内訳は **1 run 目**（アリーナ経路）のもの。ヒット run は常駐 backing を
-      // 使い回すので一時の確保が出ず、上書きすると観測点が空振りする。
+      // MUST: the peak and the breakdown are those of **the 1st run** (the arena path). Hit runs
+      // reuse the resident backing and allocate no temporaries, so overwriting them would make the
+      // observation a no-op.
       if (run > 0) continue;
       peakTransientBytes = diagnostics.lastRun?.peakTransientBytes ?? 0;
       dispatchCounts = new Map(
@@ -201,7 +224,7 @@ const runAttention = async (
   }
 };
 
-/** f32 のビット列（`0.0` と `-0.0` の差も、末尾 1 ulp の差も見える形）。 */
+/** The f32 bits (a form in which both `0.0` vs `-0.0` and a 1-ulp difference are visible). */
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
@@ -216,15 +239,18 @@ const assertSameBits = (actual: Tensor, expected: Tensor, label: string): void =
   assertEquals(
     mismatches,
     [],
-    `${label}: ビット列が違う（最初の食い違い: ${mismatches
+    `${label}: bits differ (first mismatches: ${mismatches
       .map((i) => `[${i}] ${actual.data[i]} vs ${expected.data[i]}`)
-      .join(" / ")}）`,
+      .join(" / ")})`,
   );
-  // 恒真化の門: 出力が定数なら「一致」は何も検証していない。
-  assert(new Set(a).size > 1, `${label}: 出力が定数（ビット一致が恒真になっている）`);
+  // Tautology guard: if the output is constant, "equal" verifies nothing.
+  assert(new Set(a).size > 1, `${label}: the output is constant (bit equality is a tautology)`);
 };
 
-/** 変種が回せる形だけを並べる（GQA 形は GQA と組める変種だけ — i8a8 × GQA は fail loudly）。 */
+/**
+ * Lists only the shapes a variant can run (GQA shapes only with variants combinable with GQA — i8a8
+ * × GQA fails loudly).
+ */
 const shapeVariants = (
   variants: readonly Variant[],
 ): readonly { readonly shape: Shape; readonly variant: Variant }[] =>
@@ -234,25 +260,30 @@ const shapeVariants = (
       .map((variant) => ({ shape, variant })),
   );
 
-/** ① 強制分割 parity（2 / 3 / 5 枚を 1 枚実行と Uint32 で突き合わせ、ピークの単調減少も見る）。 */
+/**
+ * ① Forced-split parity (compares 2 / 3 / 5 blocks against the 1-block run as Uint32 and checks the
+ * peak decreases monotonically).
+ */
 const assertForcedSplitParity = async (
   gpu: GpuContext,
   variants: readonly Variant[],
 ): Promise<void> => {
   for (const { shape, variant } of shapeVariants(variants)) {
     const label = `${shape.name} / ${variant.name}`;
-    // 正本 = 分割前（上限に余裕がある実機では 1 枚 = 行窓を立てない既存の経路そのもの）。
+    // The reference = before splitting (on a real machine with headroom under the limit, 1 block =
+    // exactly the existing path without a row window).
     const reference = await runAttention(gpu, shape, variant);
     let previousPeak = reference.peakTransientBytes;
-    assert(previousPeak > 0, `${label}: 中間ピークが 0（観測点が空振りしている）`);
+    assert(previousPeak > 0, `${label}: the intermediate peak is 0 (the observation is a no-op)`);
     for (const split of SPLITS) {
       const blocked = await runAttention(gpu, shape, variant, split);
-      assertSameBits(blocked.output, reference.output, `${label} / ${split} 枚`);
-      // 枚数を増やすほど S の実体化幅は縮む（値が同じでも**実体化幅が縮んでいる**ことの
-      // 観測点 — ここが単調でなければ一時の寿命宣言かプール再利用が壊れている）。
+      assertSameBits(blocked.output, reference.output, `${label} / ${split} blocks`);
+      // More blocks shrink the materialized width of S (the observation that **the materialized
+      // width shrinks** even with the same values — if it is not monotonic, the temporary lifetime
+      // declarations or the pool reuse are broken).
       assert(
         blocked.peakTransientBytes < previousPeak,
-        `${label} / ${split} 枚: 中間ピーク ${blocked.peakTransientBytes}B が ${previousPeak}B から縮んでいない`,
+        `${label} / ${split} blocks: the intermediate peak ${blocked.peakTransientBytes}B did not shrink from ${previousPeak}B`,
       );
       previousPeak = blocked.peakTransientBytes;
     }
@@ -260,16 +291,18 @@ const assertForcedSplitParity = async (
 };
 
 /**
- * 予算分割に使う予算（ADR 0124）。S を 2 B で格納したときに 1 枚 ⌈M/3⌉ 行になる値 — 2 B の変種
- * （s16 / f16）は 3 枚、4 B の変種（f32 / a8）はそれより多い枚数に割れる（どの形でも 2 枚以上）。
- * 形の 1 行は N ≥ 4 なので行統計 8 B よりスコアが大きく、枚数は S だけで決まる。
+ * The budget used for the budget split (ADR 0124). The value giving ⌈M/3⌉ rows per block when S is
+ * stored in 2 B — the 2 B variants (s16 / f16) split into 3 blocks, the 4 B variants (f32 / a8)
+ * into more (2 or more on every shape). Every shape has N ≥ 4, so one row of scores is larger than
+ * the 8 B of row statistics and the block count is decided by S alone.
  */
 const budgetFor = (shape: Shape): number =>
   shape.b * shape.h * shape.n * 2 * Math.ceil(shape.m / 3);
 
 /**
- * ③ 予算分割 parity。予算なし（1 枚）と Uint32 で一致し、予算つきの枚数（行窓のキー ①QK / ③PV の
- * dispatch 本数 — 計測に依らない census）が 2 以上で、ピークが予算なしより厳密に小さいこと。
+ * ③ Budget-split parity. Equal to the unbudgeted run (1 block) as Uint32, the budgeted block count
+ * (the dispatch count of the row-window keys ①QK / ③PV — a census independent of timing) is at
+ * least 2, and the peak is strictly smaller than unbudgeted.
  */
 const assertBudgetSplitParity = async (
   gpu: GpuContext,
@@ -277,12 +310,12 @@ const assertBudgetSplitParity = async (
 ): Promise<void> => {
   for (const { shape, variant } of shapeVariants(variants)) {
     const budget = budgetFor(shape);
-    const label = `${shape.name} / ${variant.name} / 予算 ${budget}B`;
+    const label = `${shape.name} / ${variant.name} / budget ${budget}B`;
     const reference = await runAttention(gpu, shape, variant);
     assertEquals(
       [...reference.dispatchCounts.keys()].filter((key) => key.includes(":rw")),
       [],
-      `${label}: 予算なしで行窓のキーが立っている（正本が 1 枚でない）`,
+      `${label}: row-window keys are set without a budget (the reference is not 1 block)`,
     );
     const budgeted = await runAttention(gpu, shape, {
       ...variant,
@@ -290,19 +323,22 @@ const assertBudgetSplitParity = async (
     });
     assertSameBits(budgeted.output, reference.output, label);
     const windowed = [...budgeted.dispatchCounts].filter(([key]) => key.includes(":rw"));
-    assertEquals(windowed.length, 2, `${label}: 行窓のキーは ①QK と ③PV の 2 本`);
+    assertEquals(windowed.length, 2, `${label}: the row-window keys are the 2 of ①QK and ③PV`);
     const blocks = windowed[0][1];
-    assert(blocks >= 2, `${label}: 予算つきの枚数 ${blocks} が 2 未満（予算が導出に届いていない）`);
-    assertEquals(windowed[1][1], blocks, `${label}: ①QK と ③PV の枚数が食い違う`);
+    assert(
+      blocks >= 2,
+      `${label}: the budgeted block count ${blocks} is below 2 (the budget did not reach the derivation)`,
+    );
+    assertEquals(windowed[1][1], blocks, `${label}: the block counts of ①QK and ③PV disagree`);
     assert(
       budgeted.peakTransientBytes < reference.peakTransientBytes,
-      `${label}: 中間ピーク ${budgeted.peakTransientBytes}B が予算なしの ${reference.peakTransientBytes}B から縮んでいない`,
+      `${label}: the intermediate peak ${budgeted.peakTransientBytes}B did not shrink from the unbudgeted ${reference.peakTransientBytes}B`,
     );
   }
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "融合 attention の行ブロック実行は枚数を変えても 1 枚実行と**ビット単位で一致**する（実 GPU）",
+  "row-block execution of fused attention is **bit-for-bit equal** to the 1-block run whatever the block count (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -314,7 +350,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "予算 attentionRowBlockMaxBytes で割った融合 attention は 1 枚実行と**ビット単位で一致**し、枚数が増えピークが縮む（実 GPU）",
+  "fused attention split by the budget attentionRowBlockMaxBytes is **bit-for-bit equal** to the 1-block run, with more blocks and a smaller peak (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -326,7 +362,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
-  "f16 計算（f16 / f16 + mask・GQA 形を含む）の行ブロック実行も、強制分割と予算分割の両方で 1 枚実行と**ビット単位で一致**する（実 GPU・shader-f16）",
+  "row-block execution of f16 compute (f16 / f16 + mask, including GQA shapes) is **bit-for-bit equal** to the 1-block run under both the forced split and the budget split (real GPU, shader-f16)",
   async () => {
     const gpu = await acquireGpu({ shaderF16: true });
     try {
@@ -339,23 +375,25 @@ test.skipIf(!GPU_AVAILABLE || !SHADER_F16_AVAILABLE)(
 );
 
 /**
- * **ヒット run**（導出済み計画 = 常駐 backing + 焼き込み bind group — src/runtime/executor.ts の
- * `#activateBacking`）でも、行ブロックの一時がミス run と同じ slot 割りになること。
+ * Even on **hit runs** (the derived plan = resident backing + baked bind groups —
+ * `#activateBacking` of src/runtime/executor.ts), the row-block temporaries get the same slot
+ * assignment as on a miss run.
  *
- * 行ブロック化はステップ内一時の**本数と寿命**を変えるので、slot 導出（`derivePlanSlots`）が
- * アリーナ経路と食い違うと「2 run 目だけ別のバッファへ書く」形の沈黙誤値になる — 例外は
- * 出ないので、ビット比較でしか見えない。
+ * Row blocking changes **the count and lifetimes** of the temporaries within a step, so if slot
+ * derivation (`derivePlanSlots`) disagrees with the arena path, it becomes the silent wrong value
+ * "only the 2nd run writes to another buffer" — no exception is thrown, so only a bit comparison
+ * can see it.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロック実行はヒット run（導出済み計画）でもミス run とビット単位で一致する（実 GPU）",
+  "row-block execution is bit-for-bit equal between hit runs (the derived plan) and miss runs (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       const shape = SHAPES[2];
       for (const variant of [VARIANTS[0], VARIANTS[4]]) {
         const reference = await runAttention(gpu, shape, variant);
-        // 端数割（M=64 → 22/21/21）で回す — 等分だとブロック間で slot が使い回されるので、
-        // サイズが違う 2 種類の slot が並ぶ形の方が導出の食い違いが出やすい。
+        // Run with an uneven split (M=64 → 22/21/21) — an even split reuses slots across blocks, so
+        // a layout with 2 slot sizes side by side more easily exposes a derivation mismatch.
         const blocked = await runAttention(gpu, shape, variant, 3, 2);
         assertEquals(blocked.outputs.length, 2);
         for (const [index, output] of blocked.outputs.entries()) {
@@ -373,14 +411,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **census**（ADR 0058 決定 4）。行窓変種のキー（`:rwa` / `:rwc`）が n ≥ 2 で**実際に走り**、
- * その dispatch 回数がちょうど枚数になること・1 枚では 1 本も立たないこと。
+ * **census** (ADR 0058 decision 4). The keys of the row-window variants (`:rwa` / `:rwc`)
+ * **actually run** for n ≥ 2, their dispatch count equals the block count exactly, and none is set
+ * for 1 block.
  *
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る — 空の census は
- * tests/helpers/pipeline-census.ts の `requireCensus` が落とす）。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing (runs on machines without
+ * timing too — an empty census is rejected by `requireCensus` of tests/helpers/pipeline-census.ts).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "行窓のキーは n ≥ 2 でだけ立ち、dispatch 回数が枚数と一致する（実 GPU）",
+  "row-window keys are set only for n ≥ 2 and their dispatch count equals the block count (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -388,11 +427,14 @@ test.skipIf(!GPU_AVAILABLE)(
       for (const variant of VARIANTS) {
         const label = `${shape.name} / ${variant.name}`;
         const single = await runAttention(gpu, shape, variant);
-        assert(single.dispatchCounts.size > 0, `${label}: 内訳が空（キー検査が空振りしている）`);
+        assert(
+          single.dispatchCounts.size > 0,
+          `${label}: the breakdown is empty (the key check is a no-op)`,
+        );
         assertEquals(
           [...single.dispatchCounts.keys()].filter((key) => key.includes(":rw")),
           [],
-          `${label}: 1 枚なのに行窓のキーが立っている`,
+          `${label}: row-window keys are set for 1 block`,
         );
         for (const split of SPLITS) {
           const blocked = await runAttention(gpu, shape, variant, split);
@@ -400,12 +442,12 @@ test.skipIf(!GPU_AVAILABLE)(
           assertEquals(
             windowed.length,
             2,
-            `${label} / ${split} 枚: 行窓のキーは ①QK と ③PV の 2 本（実際は ${windowed
+            `${label} / ${split} blocks: the row-window keys are the 2 of ①QK and ③PV (actually ${windowed
               .map(([key]) => key)
-              .join(" / ")}）`,
+              .join(" / ")})`,
           );
           for (const [key, count] of windowed) {
-            assertEquals(count, split, `${label} / ${split} 枚: ${key} の dispatch 回数`);
+            assertEquals(count, split, `${label} / ${split} blocks: dispatch count of ${key}`);
           }
         }
       }
@@ -416,12 +458,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * ポータビリティ門の形。**実資産を要らない**形で `S = B·H·M·N·4` を 128MiB 超へ持ち上げる
- * （4 × 2048 × 4200 × 4 = 137,625,600B）。D を 8 に絞ってあるので GEMM の仕事量自体は小さく、
- * 見ているのは「上限を超える中間を実体化せずに済むか」の 1 点だけ。
+ * The shape of the portability check. Lifts `S = B·H·M·N·4` above 128MiB with a shape that **needs
+ * no real assets** (4 × 2048 × 4200 × 4 = 137,625,600B). D is narrowed to 8, so the GEMM work
+ * itself is small; the one thing checked is "whether it avoids materializing an intermediate above
+ * the limit".
  */
 const OVERSIZE: Shape = {
-  name: "上限超 B1 H4 M2048 N4200 D8",
+  name: "over-limit B1 H4 M2048 N4200 D8",
   b: 1,
   h: 4,
   kv: 4,
@@ -431,18 +474,18 @@ const OVERSIZE: Shape = {
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "maxStorageBufferBindingSize=128MiB へ絞った device で、S が上限を超える融合 attention が行ブロックで通る（実 GPU）",
+  "on a device narrowed to maxStorageBufferBindingSize=128MiB, fused attention whose S exceeds the limit passes through row blocks (real GPU)",
   async () => {
     const { b, h, m, n } = OVERSIZE;
     const scoreBytes = b * h * m * n * 4;
     assert(
       scoreBytes > CORE_STORAGE_BINDING_LIMIT,
-      `合成グラフの S ${scoreBytes}B が core 既定の上限を超えていない（門が空振りする）`,
+      `S of the synthetic graph, ${scoreBytes}B, does not exceed the core default limit (the check would be a no-op)`,
     );
-    // 実行が読むのと**同じ純関数**で、この形が 2 枚に割れて 1 枚が上限の内側へ収まることを
-    // 先に固定する（GPU 側が緑になった理由を「たまたま」にしない）。
+    // With **the same pure function** the execution reads, first pin that this shape splits into 2
+    // blocks and one block fits inside the limit (so the GPU side going green is not "by chance").
     const blocks = planRowBlocks(m, b * h * n * 4, CORE_STORAGE_BINDING_LIMIT);
-    assertEquals(blocks.length, 2, "上限に収まる最小枚数");
+    assertEquals(blocks.length, 2, "the smallest block count that fits the limit");
     const gpu = await acquireGpu({
       [LIMIT_CAPS]: { maxStorageBufferBindingSize: CORE_STORAGE_BINDING_LIMIT },
     });
@@ -450,14 +493,18 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         gpu.limits.maxStorageBufferBindingSize,
         CORE_STORAGE_BINDING_LIMIT,
-        "requiredLimits が絞られていない（絞れていなければ門は何も見ていない）",
+        "requiredLimits is not narrowed (if not narrowed, the check sees nothing)",
       );
       const blocked = await runAttention(gpu, OVERSIZE, VARIANTS[0]);
       assertEquals(blocked.output.shape, [b, h, m, OVERSIZE.d]);
-      assert(new Set(bits(blocked.output)).size > 1, "出力が定数（門が空振りしている）");
+      assert(
+        new Set(bits(blocked.output)).size > 1,
+        "the output is constant (the check is a no-op)",
+      );
 
-      // 門の効力証明: **同じ device・同じ形**でも 1 枚を強制すると、S を丸ごと実体化する形に
-      // なるので fail loudly になる。ここが緑のままなら上の緑は行ブロックのおかげではない。
+      // Proof that the check has teeth: on **the same device and shape**, forcing 1 block
+      // materializes S whole and so fails loudly. If this stays green, the green above is not
+      // thanks to row blocking.
       await assertRejects(
         () => runAttention(gpu, OVERSIZE, VARIANTS[0], 1),
         ExecutionError,

@@ -1,16 +1,20 @@
-// 掃引の計測核（src/tune/harness.ts の sweepCase / runSweep）の制御の流れを、偽の device で固定する（GPU 不要）。
+// Pins the control flow of the sweep's measurement core (sweepCase / runSweep of
+// src/tune/harness.ts) on a fake device (no GPU needed).
 //
-// 固定するのは 2 点:
+// Two things are pinned:
 //
-// 1. **利用者のコールバックの例外はそのまま呼び手へ届く** — 進捗（onProgress の各位置）・行（onRow）・ケース
-//    （onCase）のどこで投げても、計測の失敗（失敗の行・defaultRepeatError）に化けず、onCase は 2 度呼ばれず、
-//    確保した資源は返る。
-// 2. **perDispatch が 0 の既定（timestamp の差が 0）は比の土台にしない** — 候補の行は既定比を持たず、既定の
-//    再測定も無く（driftRatio を書かない）、記録は JSON を往復しても生成器に読め、そのケースは比の材料から外れる。
-//    再測定だけが 0 なら再測定の失敗として残る。
+// 1. **An exception from a user callback reaches the caller as is** — wherever it is thrown, in the
+//    progress (each onProgress position), a row (onRow) or a case (onCase), it does not turn into a
+//    measurement failure (a failed row, defaultRepeatError), onCase is not called twice, and the
+//    allocated resources are returned.
+// 2. **A default whose perDispatch is 0 (a timestamp difference of 0) is not a basis for ratios** —
+//    the candidate rows carry no ratio to the default, there is no re-measurement of the default
+//    (driftRatio is not written), the record stays readable by the generator after a JSON round
+//    trip, and that case drops out of the ratio inputs. If only the re-measurement is 0, it remains
+//    as a re-measurement failure.
 //
-// GpuContext は本物（ロック・errorScope・パイプラインキャッシュ）で、差し替えるのは device だけ。timestamp の差は
-// pass が最後に set したパイプライン（= パイプラインキー）ごとに、テストが決める。
+// GpuContext is the real one (lock, errorScope, pipeline cache); only the device is replaced. The
+// test decides the timestamp difference per pipeline the pass set last (= the pipeline key).
 //
 // The last three describe blocks pin the pure report helpers the sweep writes through
 // (compareToDefault / roundsLookQuantized / driftOutOfRange) on a hand-written row, without the
@@ -39,10 +43,13 @@ import {
   type SweepRow,
 } from "../src/tune/report.ts";
 
-/** pass の timestamp の差（`key` = pass が set したパイプラインのキー・`read` = そのキーの何度目の読み戻しか）。 */
+/**
+ * A pass's timestamp difference (`key` = the key of the pipeline the pass set, `read` = which
+ * readback of that key it is).
+ */
 type DeltaOf = (key: string, read: number) => number;
 
-/** 偽の device が作ったバッファ（破棄の数え上げ用）。 */
+/** A buffer the fake device created (for counting destroys). */
 type FakeBuffer = { readonly label: string; destroyed: boolean };
 
 const LIMITS: RequiredLimits = {
@@ -60,8 +67,9 @@ const LIMITS: RequiredLimits = {
 };
 
 /**
- * 掃引の計測核が触る面だけを持つ偽の device（timestamp-query あり）。submit は即座に完了し、timestamp の
- * 読み戻しは `delta` が決めた差を返し、出力の読み戻しは 0 埋めを返す。
+ * A fake device with only the surface the sweep's measurement core touches (with timestamp-query).
+ * submit completes at once, a timestamp readback returns the difference `delta` decides, and an
+ * output readback returns zeros.
  */
 const fakeSweepDevice = (delta: DeltaOf): { device: GPUDevice; buffers: FakeBuffer[] } => {
   const buffers: FakeBuffer[] = [];
@@ -120,11 +128,12 @@ const fakeSweepDevice = (delta: DeltaOf): { device: GPUDevice; buffers: FakeBuff
       onSubmittedWorkDone: (): Promise<void> => Promise.resolve(),
     },
   };
-  // テスト専用の境界: DOM の GPUDevice 型全体は再現しない（掃引の計測核が触る面だけ）
+  // Test-only boundary: the whole DOM GPUDevice type is not reproduced (only the surface the
+  // sweep's measurement core touches)
   return { device: device as unknown as GPUDevice, buffers };
 };
 
-/** 資源の最も小さいケース（偽の device でも入力の充填が速い）。 */
+/** The case with the smallest resources (filling its inputs is fast even on the fake device). */
 const SMALLEST: SweepCase = SWEEP_CASES.map((sweepCase) => ({
   sweepCase,
   bytes: casePlan(sweepCase, 65535, false).resources.reduce((sum, spec) => sum + spec.bytes, 0),
@@ -134,7 +143,10 @@ const DEFAULT_KEY = casePlan(SMALLEST, 65535, false).launch(
   casePlan(SMALLEST, 65535, false).defaultCandidate,
 ).key;
 
-/** 偽の device の上で掃引の文脈を作って `body` を走らせ、文脈を返した後に全てのバッファが返ったかを返す。 */
+/**
+ * Builds a sweep context on the fake device, runs `body`, and reports whether every buffer was
+ * returned after the context was released.
+ */
 const withSweepContext = async (
   delta: DeltaOf,
   body: (context: SweepContext) => Promise<void>,
@@ -152,14 +164,17 @@ const withSweepContext = async (
 
 const SETTINGS = { rounds: 2, candidateSet: "quick", timestampUnit: "deno-raw-tick" } as const;
 
-/** 最小のケースを quick の候補で掃引する（既定の行が先頭・候補の行が続く）。 */
+/**
+ * Sweeps the smallest case with the quick candidates (the default row first, the candidate rows
+ * after it).
+ */
 const sweepSmallest = (context: SweepContext, hooks: SweepHooks) =>
   runSweep(context, [SMALLEST], SETTINGS, hooks);
 
 class HookError extends Error {}
 
-describe("利用者のコールバックの例外は計測の失敗に化けずに呼び手へ届く", () => {
-  it("投げなければ、ケースは既定の再測定（driftRatio）を持ち、onCase は 1 度だけ呼ばれる（対照）", async () => {
+describe("an exception from a user callback reaches the caller without turning into a measurement failure", () => {
+  it("without a throw, the case has the default's re-measurement (driftRatio) and onCase is called once (control)", async () => {
     const summaries: CaseSummary[] = [];
     const { leaked } = await withSweepContext(
       () => 1000,
@@ -172,7 +187,7 @@ describe("利用者のコールバックの例外は計測の失敗に化けず�
         assertEquals(result.cases[0].defaultRepeatError, undefined);
         assert(
           result.rows.every((row) => row.error === undefined),
-          "失敗の行がある",
+          "there is a failed row",
         );
       },
     );
@@ -182,26 +197,26 @@ describe("利用者のコールバックの例外は計測の失敗に化けず�
 
   const positions: readonly (readonly [string, (throwIt: () => never) => SweepHooks])[] = [
     [
-      "onProgress: 入力を用意中",
+      "onProgress: preparing inputs",
       (throwIt) => ({
         onProgress: (message) => (message.endsWith("preparing inputs") ? throwIt() : undefined),
       }),
     ],
     [
-      "onProgress: 候補（1/n）",
+      "onProgress: candidate (1/n)",
       (throwIt) => ({
         onProgress: (message) => (message.includes(" (1/") ? throwIt() : undefined),
       }),
     ],
     [
-      "onProgress: 既定幾何の再測定",
+      "onProgress: re-measuring the default geometry",
       (throwIt) => ({
         onProgress: (message) =>
           message.endsWith("re-measuring the default geometry") ? throwIt() : undefined,
       }),
     ],
     [
-      "onRow: 2 行目",
+      "onRow: the second row",
       (throwIt) => {
         let seen = 0;
         return {
@@ -216,7 +231,7 @@ describe("利用者のコールバックの例外は計測の失敗に化けず�
   ];
 
   for (const [position, hooksOf] of positions) {
-    it(`${position} で投げた例外はそのまま届き、onCase は 2 度呼ばれず、資源は返る`, async () => {
+    it(`an exception thrown at ${position} arrives as is, onCase is not called twice, and the resources are returned`, async () => {
       const thrown = new HookError(position);
       let caseCalls = 0;
       const hooks = hooksOf(() => {
@@ -237,13 +252,16 @@ describe("利用者のコールバックの例外は計測の失敗に化けず�
           assertStrictEquals(caught, thrown);
         },
       );
-      assert(caseCalls <= 1, `onCase が ${caseCalls} 回呼ばれた`);
-      assertEquals(leaked, [], "確保した資源が返っていない");
+      assert(caseCalls <= 1, `onCase was called ${caseCalls} times`);
+      assertEquals(leaked, [], "allocated resources were not returned");
     });
   }
 });
 
-/** runSweep の結果を、runGeometrySweep と同じ形の記録にする（生成器が読む欄 — 書き手の焼く指紋を含む）。 */
+/**
+ * Turns a runSweep result into a record of the same shape as runGeometrySweep's (the fields the
+ * generator reads — including the fingerprints the writer bakes in).
+ */
 const recordOf = (
   rows: readonly SweepRow[],
   cases: readonly CaseSummary[],
@@ -261,8 +279,8 @@ const recordOf = (
   rows,
 });
 
-describe("perDispatch が 0 の既定（timestamp の差が 0）は比の土台にしない", () => {
-  it("候補の行は既定比を持たず、再測定も無く、記録は JSON を往復しても読めてそのケースは比の材料から外れる", async () => {
+describe("a default whose perDispatch is 0 (a timestamp difference of 0) is not a basis for ratios", () => {
+  it("the candidate rows have no ratio to the default, there is no re-measurement, the record is readable after a JSON round trip, and that case drops out of the ratio inputs", async () => {
     await withSweepContext(
       (key) => (key === DEFAULT_KEY ? 0 : 1000),
       async (context) => {
@@ -270,14 +288,18 @@ describe("perDispatch が 0 の既定（timestamp の差が 0）は比の土台�
         const [base, candidate] = rows;
         assertEquals(base.isDefault, true);
         assertEquals(base.perDispatch, 0);
-        assert(candidate !== undefined && (candidate.perDispatch ?? 0) > 0, "候補の行が正でない");
+        assert(
+          candidate !== undefined && (candidate.perDispatch ?? 0) > 0,
+          "the candidate row is not positive",
+        );
         assertEquals(candidate.speedupVsDefault, undefined);
         assertEquals(cases, [{ caseId: SMALLEST.id, elapsedMs: cases[0].elapsedMs }]);
         for (const gpuTiming of [
           { unit: "deno-raw-tick", quantized: false },
           { unit: "ns", quantized: true },
         ] as const) {
-          // 書き手は素の JSON.stringify（NaN / Infinity は null に化ける）— 往復させてから読む
+          // The writer is plain JSON.stringify (NaN / Infinity turn into null) — round-trip, then
+          // read
           const text = JSON.stringify(recordOf(rows, cases, context.dp4a, gpuTiming));
           const source = parseSweepReport(JSON.parse(text), { path: "zero.json", sha256: "sha" });
           const verdicts = deriveProfile([source], {
@@ -296,7 +318,7 @@ describe("perDispatch が 0 の既定（timestamp の差が 0）は比の土台�
     );
   });
 
-  it("初回が正で再測定だけが 0 なら、比 0 を書かずに再測定の失敗として残す（ケースだけが外れる）", async () => {
+  it("when the first measurement is positive and only the re-measurement is 0, it writes no ratio of 0 and keeps a re-measurement failure (only the case drops out)", async () => {
     await withSweepContext(
       (key, read) => (key === DEFAULT_KEY && read >= SETTINGS.rounds ? 0 : 1000),
       async (context) => {
@@ -329,30 +351,31 @@ const ROW: SweepRow = {
 };
 
 describe("compareToDefault", () => {
-  it("既定より速い行は 1 より大きい比になり、digest の一致を記録する", () => {
+  it("a row faster than the default gets a ratio above 1 and records the digest match", () => {
     const row = compareToDefault(ROW, { perDispatch: 300_000, outputSha256: "a" });
     assertEquals(row.speedupVsDefault, 2);
     assertEquals(row.identicalToDefault, true);
   });
 
-  it("digest が違えば不一致を記録する（幾何が値を変えた — 採用不可の印）", () => {
+  it("records a mismatch when the digest differs (the geometry changed the values — the mark of not adoptable)", () => {
     assertEquals(
       compareToDefault(ROW, { perDispatch: 150_000, outputSha256: "b" }).identicalToDefault,
       false,
     );
   });
 
-  it("既定の行が失敗していれば比較を足さない（不一致と読ませない）", () => {
+  it("adds no comparison when the default row failed (so it does not read as a mismatch)", () => {
     const row = compareToDefault(ROW, {});
     assertEquals(row.speedupVsDefault, undefined);
     assertEquals(row.identicalToDefault, undefined);
   });
 
-  it("既定かこの行の perDispatch が 0（timestamp の差が 0）なら速さの比を書かない — 出力の一致は書く", () => {
-    // 比が 0 や無限大に化けると、正の比だけを受ける生成器が記録ごと拒む
+  it("writes no speed ratio when the default's or this row's perDispatch is 0 (a timestamp difference of 0) — the output match is written", () => {
+    // A ratio that turns into 0 or infinity makes the generator, which accepts only positive
+    // ratios, reject the whole record
     for (const [name, row, reference] of [
-      ["既定が 0", ROW, { perDispatch: 0, outputSha256: "a" }],
-      ["この行が 0", { ...ROW, perDispatch: 0 }, { perDispatch: 300_000, outputSha256: "a" }],
+      ["the default is 0", ROW, { perDispatch: 0, outputSha256: "a" }],
+      ["this row is 0", { ...ROW, perDispatch: 0 }, { perDispatch: 300_000, outputSha256: "a" }],
     ] as const) {
       const compared = compareToDefault(row, reference);
       assertEquals(compared.speedupVsDefault, undefined, name);
@@ -362,23 +385,23 @@ describe("compareToDefault", () => {
 });
 
 describe("roundsLookQuantized", () => {
-  it("単位 ns で全 round が 100 µs の倍数なら量子化の疑いにする", () => {
+  it("suspects quantization when the unit is ns and every round is a multiple of 100 µs", () => {
     assertEquals(roundsLookQuantized([ROW], "ns"), true);
     assertEquals(roundsLookQuantized([{ ...ROW, rounds: [400_000, 300_001] }], "ns"), false);
   });
 
-  it("raw tick と壁時計は判定しない", () => {
+  it("does not judge raw ticks or the wall clock", () => {
     assertEquals(roundsLookQuantized([ROW], "deno-raw-tick"), false);
     assertEquals(roundsLookQuantized([ROW], "wall"), false);
   });
 });
 
 describe("driftOutOfRange", () => {
-  it("既定の再測定の比が 0.9〜1.1 の内なら警告しない（境界を含む）", () => {
+  it("does not warn when the default's re-measurement ratio is within 0.9–1.1 (boundaries included)", () => {
     for (const ratio of [0.9, 1, 1.1]) assertEquals(driftOutOfRange(ratio), false, String(ratio));
   });
 
-  it("範囲の外と、比が数でないときは測り直しの目安として警告する", () => {
+  it("warns, as a hint to re-measure, outside the range and when the ratio is not a number", () => {
     for (const ratio of [0.89, 1.11, Number.NaN]) {
       assertEquals(driftOutOfRange(ratio), true, String(ratio));
     }

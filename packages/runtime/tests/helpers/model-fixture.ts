@@ -1,11 +1,14 @@
-// 容器面テストの組み立てヘルパ（IR v2 の宣言 JSON → `krm` のバイト列 / 開いた容器）。
+// Builders for container-surface tests (IR v2 declaration JSON → `krm` bytes / an opened
+// container).
 //
-// テストが期待する「正しい形」を 1 箇所に置き、異常系は各テストがそこから 1 点だけ壊す。
-// 同じ入力から **krm 経路**（`writeModelContainer` → `openContainer`）と**メモリ内容器**
-// （`openMemoryContainer`）の両方を作れるので、2 つの供給元の A/B もここ 1 本で組める。
+// The "correct shape" the tests expect lives in one place, and each failure-case test breaks
+// exactly one point of it. The same input builds both the **krm path** (`writeModelContainer` →
+// `openContainer`) and the **in-memory container** (`openMemoryContainer`), so an A/B of the two
+// sources is built from this one file too.
 //
-// 宣言そのものを組む小道具（`fill` / `f32Bytes` / `singleOpDeclaration` / `withStateReaders`）も
-// ここ 1 本きり。合流後の `IrGraph` が要るテストは `helpers/merged-graph.ts` を使う。
+// The small tools that build the declarations themselves (`fill` / `f32Bytes` /
+// `singleOpDeclaration` / `withStateReaders`) live only here as well. Tests that need the joined
+// `IrGraph` use `helpers/merged-graph.ts`.
 
 import type { BoundContainer } from "../../src/format/container/bind.ts";
 import { openContainer, type OpenedContainer } from "../../src/format/container/open.ts";
@@ -13,14 +16,16 @@ import { type MemoryTensor, openMemoryContainer } from "../../src/format/contain
 import { type IrDeclaration, parseIrDeclarationValue } from "../../src/format/ir.ts";
 import { type TensorInput, writeModelContainer, type WriteOptions } from "./container-write.ts";
 
-/** このヘルパが書くグラフの名前（容器は複数グラフを持てるが、fixture は 1 本きり）。 */
+/**
+ * Name of the graph this helper writes (a container can hold several graphs; the fixture has one).
+ */
 export const GRAPH_NAME = "model";
 
-/** f32 の値列をそのままバイト列にする（重み / scale の実体を組む最小の道具）。 */
+/** f32 values as raw bytes (the smallest tool for building weight / scale data). */
 export const f32Bytes = (values: ArrayLike<number>): Uint8Array<ArrayBuffer> =>
   new Uint8Array(Float32Array.from(values).buffer);
 
-/** IR v2 の宣言 JSON の可変な写し（テストが 1 点だけ壊せるよう型は緩く持つ）。 */
+/** Mutable copy of an IR v2 declaration JSON (loosely typed so a test can break one point). */
 export type DeclarationJson = {
   format: string;
   version: number;
@@ -28,27 +33,31 @@ export type DeclarationJson = {
   symbols: string[];
   inputs: { name: string; dtype: string; shape: (number | string)[] }[];
   outputs: string[];
-  /** IR v2 の initializer 宣言は `{}`（実体を持つ）か `{ shared: true }`（借り物）の 2 形だけ。 */
+  /**
+   * An IR v2 initializer declaration has only two forms: `{}` (owns data) or `{ shared: true }`
+   * (borrowed).
+   */
   initializers: Record<string, { shared?: true }>;
   values: Record<string, { dtype: string; shape: (number | string)[] }>;
-  /** 省略可能な state スロット節（ADR 0066 決定 2）— 既定の宣言は持たない。 */
+  /** Optional state slot section (ADR 0066 decision 2) — the default declaration has none. */
   states?: Record<string, { dtype: string; shape: (number | string)[]; external?: boolean }>;
   nodes: {
     op: string;
     ins: string[];
     outs: string[];
     attrs: unknown;
-    /** state スロットの名前参照（ADR 0067 決定 4）— 既定のノードは持たない。 */
+    /** References to state slots by name (ADR 0067 decision 4) — the default nodes have none. */
     states?: Record<string, string>;
   }[];
 };
 
-/** 最小の正常系グラフ: y = x·w + b（x: T×4 → y: T×3）。 */
+/** Smallest valid graph: y = x·w + b (x: T×4 → y: T×3). */
 export const baseDeclaration = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
-  // MUST: 集合として扱う欄（`requires.ops` / `symbols`）は code point 順で書く。`krm` は正準
-  // 直列化を通るので並びが揃い、krm 経路とメモリ経路のグラフを丸ごと比較できる。
+  // MUST: fields treated as sets (`requires.ops` / `symbols`) are written in code point order.
+  // `krm` goes through canonical serialization, so the order matches and the graphs of the krm
+  // path and the memory path can be compared whole.
   requires: { ops: ["add", "matmul"] },
   symbols: ["T"],
   inputs: [{ name: "x", dtype: "f32", shape: ["T", 4] }],
@@ -66,7 +75,7 @@ export const baseDeclaration = (): DeclarationJson => ({
   ],
 });
 
-/** {@link baseDeclaration} に対応する重み（f32 の丸ごと 1 本ずつ）。 */
+/** Weights for {@link baseDeclaration} (one whole f32 tensor each). */
 export const baseTensors = (): readonly TensorInput[] => [
   {
     graph: GRAPH_NAME,
@@ -84,7 +93,7 @@ export const baseTensors = (): readonly TensorInput[] => [
 
 const declarationOf = (graph: DeclarationJson): IrDeclaration => parseIrDeclarationValue(graph);
 
-/** 宣言 + 重みを `krm`（単一形）のバイト列にする。 */
+/** Declaration + weights as `krm` bytes (single-file form). */
 export const modelBytes = async (
   graph: DeclarationJson = baseDeclaration(),
   tensors: readonly TensorInput[] = baseTensors(),
@@ -103,7 +112,10 @@ export const modelBytes = async (
   return written.single;
 };
 
-/** {@link modelBytes} を開いたもの（2 文書の期待値は渡さない — テストとローカル読み込みの面）。 */
+/**
+ * {@link modelBytes}, opened (no expected values for the two documents — the test / local-load
+ * surface).
+ */
 export const openModelBytes = async (
   graph: DeclarationJson = baseDeclaration(),
   tensors: readonly TensorInput[] = baseTensors(),
@@ -111,16 +123,17 @@ export const openModelBytes = async (
 ): Promise<OpenedContainer> =>
   await openContainer({ kind: "bytes", bytes: await modelBytes(graph, tensors, options) });
 
-/** 任意のグラフ（重み 0 本でもよい）を `krm` のバイト列にする。 */
+/** Any graph (zero weights is fine) as `krm` bytes. */
 export const graphModelBytes = (
   graph: DeclarationJson,
   tensors: readonly TensorInput[] = [],
 ): Promise<Uint8Array<ArrayBuffer>> => modelBytes(graph, tensors);
 
 /**
- * 任意のグラフを `krm` に焼いて開く（重みを持たないグラフは `tensors` を省く）。
+ * Writes any graph to `krm` and opens it (a graph without weights omits `tensors`).
  *
- * {@link openModelBytes} との違いは既定の供給だけ — あちらは {@link baseTensors}、ここは 0 本。
+ * The only difference from {@link openModelBytes} is the default supply — {@link baseTensors}
+ * there, none here.
  */
 export const openGraphModel = async (
   graph: DeclarationJson,
@@ -128,7 +141,7 @@ export const openGraphModel = async (
 ): Promise<OpenedContainer> =>
   await openContainer({ kind: "bytes", bytes: await graphModelBytes(graph, tensors) });
 
-/** 容器の書き手と同じ入力を、メモリ内容器の供給（丸ごと 1 本ずつ）へ写す。 */
+/** Maps the container writer's input to an in-memory container supply (one whole tensor each). */
 export const memoryTensorOf = (tensor: TensorInput): MemoryTensor => ({
   bytes: tensor.bytes,
   encoding: {
@@ -139,7 +152,10 @@ export const memoryTensorOf = (tensor: TensorInput): MemoryTensor => ({
   },
 });
 
-/** {@link modelBytes} と**同じ入力**からメモリ内容器を組む（krm 経路との A/B の片側）。 */
+/**
+ * Builds an in-memory container from **the same input** as {@link modelBytes} (one side of the A/B
+ * with the krm path).
+ */
 export const memoryModel = (
   graph: DeclarationJson = baseDeclaration(),
   tensors: readonly TensorInput[] = baseTensors(),
@@ -153,7 +169,7 @@ export const memoryModel = (
     },
   });
 
-/** 意味論 dtype ごとのホスト側 TypedArray（bool は u32 の 0/1 — ADR 0009）。 */
+/** Host-side TypedArray per semantic dtype (bool is u32 0/1 — ADR 0009). */
 export type FilledTensor =
   | {
       readonly dtype: "f32";
@@ -171,7 +187,7 @@ export type FilledTensor =
       readonly data: Uint32Array<ArrayBuffer>;
     };
 
-/** 決定的なデータ生成（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data generation (no random numbers — a failure would not reproduce). */
 export const fill = (
   shape: readonly number[],
   generator: (index: number) => number,
@@ -190,24 +206,28 @@ export const fill = (
 };
 
 /**
- * 出力 slot の値名。slot 0 は `y`（既存テストがそのまま `outputs["y"]` を読む）で、
- * slot 1 以降は `y1`, `y2`, …（多出力 op — ADR 0068 決定 1）。
+ * Value name of an output slot. Slot 0 is `y` (existing tests read `outputs["y"]` as is), and
+ * slot 1 onward are `y1`, `y2`, … (multi-output ops — ADR 0068 decision 1).
  */
 export const outputName = (slot: number): string => (slot === 0 ? "y" : `y${slot}`);
 
-/** 単一ノード宣言の dtype / attrs 指定（既定は全て f32・attrs 空）。 */
+/** dtype / attrs options of a single-node declaration (default: all f32, empty attrs). */
 export type SingleOpOptions = {
   readonly inDtypes?: readonly string[];
-  /** 出力 slot 昇順の dtype（既定は全 slot f32 — {@link singleOpDeclaration}）。 */
+  /**
+   * dtypes in ascending output-slot order (default: f32 for every slot — {@link
+   * singleOpDeclaration}).
+   */
   readonly outDtypes?: readonly string[];
   readonly attrs?: Record<string, unknown>;
   readonly symbols?: readonly string[];
 };
 
 /**
- * 入力だけを取る単一ノードの宣言（op 単位の数値検証用）。
+ * Declaration of a single node that takes only inputs (for per-op numeric checks).
  *
- * `outShapes` は**出力 slot 昇順の列**（ADR 0068 決定 1 — 単一出力 op では長さ 1）。
+ * `outShapes` is **a list in ascending output-slot order** (ADR 0068 decision 1 — length 1 for a
+ * single-output op).
  */
 export const singleOpDeclaration = (
   op: string,
@@ -243,15 +263,16 @@ export const singleOpDeclaration = (
 });
 
 /**
- * 宣言済みの各 state スロットへ、それを参照する最小の `state_append` ノードを足す
- * （参照完全性 — ADR 0067 決定 4 / 5）。
+ * Adds to each declared state slot the smallest `state_append` node that references it
+ * (referential completeness — ADR 0067 decisions 4 / 5).
  *
- * 宣言だけのグラフは「どのノードからも参照されない宣言」で落ちるので、**スロット宣言そのもの**
- * を見たいテストはこれで参照側を用意する。パーサは shape も契約も見ない層なので、`ins` に
- * 何を置くかは「定義済みの値名であること」しか効かない（形の検査は shape 計算 / 契約層の担当）。
+ * A graph with declarations only fails with "a declaration no node references", so tests that want
+ * to look at **the slot declaration itself** use this to provide the referencing side. The parser
+ * is a layer that checks neither shapes nor contracts, so the only thing that matters about `ins`
+ * is "it is a defined value name" (shape checks belong to shape inference / the contract layer).
  *
- * スロットが 1 本も無いグラフには何も足さない（`requires.ops` にだけ `state_append` が増えると、
- * 参照するノードが無いぶん「余剰」で宣言が落ちる）。
+ * A graph without any slot gets nothing added (if only `requires.ops` gained `state_append`, the
+ * declaration would fail as "unused", since no node references it).
  */
 export const withStateReaders = (graph: DeclarationJson): DeclarationJson => {
   const slots = Object.keys(graph.states ?? {});

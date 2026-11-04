@@ -10,7 +10,7 @@ import {
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 test.skipIf(!GPU_AVAILABLE)(
-  "topk k=1: 分割境界と大語彙でNaN・同点・符号付きゼロの値ビットを保つ",
+  "topk k=1: keeps the value bits of NaN, ties and signed zeros across split boundaries and large vocabularies",
   async function () {
     const gpu = await acquireGpu();
     try {
@@ -95,7 +95,7 @@ const intermediateGraph = (rows: number, dim: number): DeclarationJson => ({
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "topk k=1: 中間入力をmergeまで保ち初回とbacking再利用で同じ値を返す",
+  "topk k=1: keeps the intermediate input alive until the merge and returns the same values on the first run and on backing reuse",
   async function () {
     const rows = 8,
       dim = 32769;
@@ -129,19 +129,20 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test("topk1 mergeで同時に必要な元入力・部分結果・2出力を見積りに含める", async () => {
+test("topk1: the estimate includes the source input, partial results and both outputs the merge needs at the same time", async () => {
   const rows = 512,
     dim = 16384;
   const opened = await openModelBytes(intermediateGraph(rows, dim), []);
   const estimate = prepareContainer(opened, GRAPH_NAME).estimate();
-  // mergeは元入力と部分結果を読みつつ、値と添字を別の領域に書く必要がある。
+  // The merge reads the source input and the partial results while writing the values and indices
+  // to separate regions.
   const minimum = rows * dim * 4 + rows * 4 * 8 + rows * 8;
   const workspace = estimate.scenarios[0].workspaceBytes;
   assert(workspace >= minimum, `workspace ${workspace} < simultaneously live ${minimum}`);
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "topk k=1: 外側が空なら分割用一時を作らず空の2出力を返す",
+  "topk k=1: with an empty outer extent, makes no split temporaries and returns two empty outputs",
   async function () {
     const gpu = await acquireGpu();
     try {

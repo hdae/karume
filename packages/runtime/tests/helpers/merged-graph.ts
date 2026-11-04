@@ -1,12 +1,14 @@
-// 宣言（IR v2）→ 合流後の `IrGraph` を組む小物。
+// Small helpers that build the joined `IrGraph` from a declaration (IR v2).
 //
-// IR v2 の宣言は格納を持たないので、plan / fusion / 契約検査のように**格納つきグラフの形**
-// だけを見るテストでも、`IrGraph` を得るには供給が 1 本ずつ要る。ここが作るのは
-// 「中身を見ない供給」— 宣言 shape と codec から決まる長さの 0 埋めバイト列で、合流は
-// メモリ内容器 1 本（`openMemoryContainer` → `bindDeclarations`）を通す。
+// An IR v2 declaration has no storage, so even tests that only look at **the shape of a graph
+// with storage** (plan / fusion / contract checks) need one supply per initializer to get an
+// `IrGraph`. What this builds is "a supply whose contents nobody reads" — zero-filled bytes of the
+// length the declared shape and codec determine — and the join goes through one in-memory
+// container (`openMemoryContainer` → `bindDeclarations`).
 //
-// MUST: 長さの式は台帳（`codecs.ts`）から引く。テスト側で数え直すと、合流層が期待する長さと
-// 供給の長さが**同じ誤りを共有**して突合が恒真になる。
+// MUST: the length formulas come from the codec table (`codecs.ts`). Recounting them in the tests
+// would let the length the join layer expects and the supplied length **share the same mistake**,
+// making the comparison tautological.
 
 import { mergedGraph } from "../../src/format/container/bind.ts";
 import {
@@ -22,12 +24,12 @@ import type { IrGraph } from "../../src/format/ir.ts";
 import type { EncodingInput, TensorInput } from "./container-write.ts";
 import { type DeclarationJson, GRAPH_NAME, memoryModel } from "./model-fixture.ts";
 
-/** 格納の指定（量子化 codec は group codec だけが `groupSize` を要る）。 */
+/** Storage spec (among the quantized codecs only the group codecs need `groupSize`). */
 export type StorageSpec =
   | CodecName
   | { readonly codec: CodecName; readonly groupSize?: number; readonly rowAxis?: 0 | 1 };
 
-/** initializer 名 → 格納。省略した名前は値の意味論 dtype から `f32` / `i32`。 */
+/** Initializer name → storage. Names left out get `f32` / `i32` from the value's semantic dtype. */
 export type StorageMap = Readonly<Record<string, StorageSpec>>;
 
 const zeros = (length: number): Uint8Array<ArrayBuffer> => new Uint8Array(new ArrayBuffer(length));
@@ -64,7 +66,7 @@ const encodingOf = (
       bytes: zeros(
         scaleBytes(
           groupScaleShape(shape, rowAxis, groupSize).reduce((count, dim) => count * dim, 1),
-          `${name} の scale`,
+          `scale of ${name}`,
         ),
       ),
       dtype: "f32",
@@ -72,7 +74,7 @@ const encodingOf = (
   };
 };
 
-/** 宣言の全 initializer（`shared` を除く）に、中身を見ない供給を 1 本ずつ作る。 */
+/** Builds one contents-unread supply for every initializer of the declaration (except `shared`). */
 export const autoTensors = (
   declaration: DeclarationJson,
   storage: StorageMap = {},
@@ -93,8 +95,9 @@ export const autoTensors = (
     });
 
 /**
- * 宣言 + **明示の供給** → 合流後の `IrGraph`。中身のあるバイト列（実際に量子化した重みなど）を
- * 渡したいテストはこちら。中身を見ないテストは {@link mergeGraph}。
+ * Declaration + **explicit supply** → the joined `IrGraph`. For tests that pass bytes with real
+ * contents (actually quantized weights and the like). Tests that do not read the contents use
+ * {@link mergeGraph}.
  */
 export const mergeTensors = (
   declaration: DeclarationJson,
@@ -102,8 +105,8 @@ export const mergeTensors = (
 ): IrGraph => mergedGraph(memoryModel(declaration, tensors).graphs[GRAPH_NAME], GRAPH_NAME);
 
 /**
- * 宣言 → 合流後の `IrGraph`。供給は {@link autoTensors} が宣言から作る（中身は 0 埋め）。
- * 格納を動かしたいテストは `storage` に initializer 名で codec を渡す。
+ * Declaration → the joined `IrGraph`. {@link autoTensors} builds the supply from the declaration
+ * (zero-filled). Tests that vary the storage pass a codec per initializer name in `storage`.
  */
 export const mergeGraph = (declaration: DeclarationJson, storage: StorageMap = {}): IrGraph =>
   mergeTensors(declaration, autoTensors(declaration, storage));

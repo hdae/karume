@@ -1,24 +1,26 @@
 /**
- * 供給元 A/B — `krm`（`openContainer`）とメモリ内容器（`openMemoryContainer`）が**同じ重みバイト列**
- * から**同じ出力バイト列**を出すこと。片方だけが CPU 展開 / GPU 常駐へ倒れると、診断の常駐
- * バイト数で差が出る。
+ * Source A/B — `krm` (`openContainer`) and the in-memory container (`openMemoryContainer`) must produce **the
+ * same output bytes** from **the same weight bytes**. If only one of them falls back to CPU decoding / GPU
+ * residency, the resident byte counts of the diagnostics differ.
  *
- * 合成モデル: linear（i4 + group scale）→ add（f16 重み）→ linear（i8 + per-channel scale・bias f32）。
- * 3 codec の供給計画・scale の正規化（rank 2）・piece 分割を 1 本で通す。
+ * Synthetic model: linear (i4 + group scale) → add (f16 weights) → linear (i8 + per-channel scale, bias f32).
+ * One model exercises the supply plans of 3 codecs, scale normalization (rank 2) and piece splitting.
  *
- * MUST: 2 経路の piece の割り方を**わざと違える**（`krm` は block 上限 128 B から書き手が決め、
- * メモリ側は行範囲を明示して 4 行ずつ）。同じ割り方で比べると「分割は GPU 側の配置を 1 バイトも
- * 変えない」という不変条件が検出器の外に出てしまう。
+ * MUST: the two paths **deliberately split pieces differently** (`krm` lets the writer decide from a 128 B block
+ * limit; the memory side states the row ranges explicitly, 4 rows each). Comparing with the same split would put
+ * the invariant "splitting does not change a single byte of the GPU-side layout" outside the detector.
  *
- * もう 1 組: 同じ `krm` を、block を写して返す取得元と、hub の scan 経路と同じく part の器の view を
- * 返す取得元（器の block の外は毒）から読み、出力と常駐バイト数が一致すること。読み手のどこかが
- * byteOffset を落とすと、器の先頭や毒を読んで割れる。
+ * One more pair: the same `krm` read through a source that copies out blocks and through a source that, like the
+ * hub's scan path, returns views into the part's buffer (poisoned outside the buffer's blocks); output and
+ * resident byte counts must match. If any reader drops the byteOffset, it reads the head of the buffer or the
+ * poison and breaks.
  *
- * 外部の正解: 上の 2 組は合流層から Session 構築までを両辺で共有するので、そこの誤りは両辺に
- * 同じだけ乗って一致してしまう。そこで格納バイト列を CPU の codec 展開（`decodeI4` / `decodeF16` /
- * `decodeI8`）で f32 へ戻し、CPU 参照（`applyReferenceOp`）で linear → add → linear を辿った出力とも
- * 許容差で突き合わせる。展開を 1 つ取り違えた参照（i4 の scale を 1 チャネルずらす）が同じ出力で
- * 落ちることも同じケースで見る — 許容差が codec 展開の誤りを通すほど緩くないことの確認。
+ * External ground truth: the 2 pairs above share everything from the merge layer to Session construction on both
+ * sides, so an error there lands equally on both and they still match. So the stored bytes are also decoded back
+ * to f32 with the CPU codec decoding (`decodeI4` / `decodeF16` / `decodeI8`), and the output is compared within a
+ * tolerance against linear → add → linear traced by the CPU reference (`applyReferenceOp`). The same case also
+ * checks that a reference with one decoding mixed up (the i4 scale shifted by one channel) fails on the same
+ * output — confirming the tolerance is not loose enough to let a codec decoding error through.
  */
 
 import { assert, assertEquals, assertNotEquals, assertRejects } from "@std/assert";
@@ -56,7 +58,7 @@ const K = 32;
 const H = 24;
 const N = 8;
 
-/** 決定的な重み（乱数は使わない）。 */
+/** Deterministic weights (no random numbers). */
 const weights = () => ({
   w1: fill([H, K], (i) => Math.sin(i * 0.37) * 0.5),
   b1: fill([H], (i) => (i % 3) * 0.05),
@@ -112,7 +114,7 @@ const quantize = (): Quantized => {
   };
 };
 
-/** `krm` の入力。block 上限を 128 B に下げて書き手に piece 分割させる。 */
+/** Input of the `krm`. The block limit is lowered to 128 B so that the writer splits pieces. */
 const containerInput = (q: Quantized) => ({
   graphs: { main: declaration() },
   consts: [],
@@ -145,7 +147,7 @@ const containerInput = (q: Quantized) => ({
   provenance: { license: "test" },
 });
 
-/** i8 の重みを行範囲で 2 本に割った piece の読み口（`krm` 側の 5/3 分割とは別の 4/4 分割）。 */
+/** A piece reader that splits the i8 weights into 2 by row range (a 4/4 split, unlike the 5/3 split on the `krm` side). */
 const w2Pieces = (q: Quantized, counter: { reads: number }) => {
   const rowBytes = H;
   const ranges: readonly (readonly [number, number])[] = [
@@ -161,7 +163,7 @@ const w2Pieces = (q: Quantized, counter: { reads: number }) => {
   }));
 };
 
-/** メモリ内容器の入力（同じバイト列を、容器を書かずにそのまま渡す）。 */
+/** Input of the in-memory container (the same bytes, passed as they are without writing a container). */
 const memoryInput = (q: Quantized, counter: { reads: number }): MemoryContainerInput => ({
   graphs: { main: declaration() },
   tensors: {
@@ -182,11 +184,13 @@ const memoryInput = (q: Quantized, counter: { reads: number }): MemoryContainerI
 });
 
 /**
- * 縮図の CPU 参照: 容器へ渡したのと同じ格納バイト列を本番の CPU 展開で f32 に戻し、参照 op で
- * グラフの 3 ノードを辿る。合流層・Session 構築と実装を共有せず、常駐席の i4 / i8 は GPU 側の
- * 展開（カーネル内の unpack + scale）とも独立なので、2 経路が同じだけ誤る箇所もここで割れる
- * （f16 は展開席でホストの `decodeF16` を通るため、そこだけは参照と同じ実装）。
- * `i4Scale` は fault injection 用（既定は格納した scale そのもの）。
+ * CPU reference of the miniature: decodes the same stored bytes that were given to the container back to f32
+ * with the production CPU decoding, and traces the graph's 3 nodes with reference ops. It shares no
+ * implementation with the merge layer or Session construction, and the resident i4 / i8 slots are also
+ * independent of the GPU-side decoding (unpack + scale inside the kernel), so places where both paths are wrong
+ * by the same amount break here too (f16 goes through the host's `decodeF16` in the decode slot, so that part
+ * alone shares the reference's implementation).
+ * `i4Scale` is for fault injection (by default the stored scale itself).
  */
 const referenceOutput = (
   q: Quantized,
@@ -207,7 +211,7 @@ const referenceOutput = (
   return applyReferenceOp("linear", [u, w2, refTensor([N], w.b2.data)], {}, [M, N]);
 };
 
-/** i4 の group scale を出力チャネル 1 本ぶんずらす（行 r が行 r+1 の scale を読む）。 */
+/** Shifts the i4 group scale by one output channel (row r reads the scale of row r+1). */
 const shiftI4ScaleOneChannel = (q: Quantized): Float32Array<ArrayBuffer> => {
   const groups = q.w1.scaleShape[1];
   const scale = q.w1.scale;
@@ -219,10 +223,11 @@ const OPTIONS = { partBytes: 1024, blockBytes: 128 } as const;
 const POISON = 0xff;
 
 /**
- * hub の scan 経路（`packages/hub/src/container.ts`）と同じ形の取得元: part ごとに tight な器を
- * 1 本持ち、`read` は器の `subarray` を返す（写さない）。器のうち block の外（整列の隙間・末尾）は
- * 毒で埋める — byteOffset を落とした読みが「隣の有効なバイト列」を読んで偶然通るのを防ぐ。
- * `verified: true` は HF 取得元と同じ（block の digest を掛けない経路）。
+ * A source of the same shape as the hub's scan path (`packages/hub/src/container.ts`): it holds one tight buffer
+ * per part, and `read` returns a `subarray` of that buffer (no copy). The parts of the buffer outside blocks
+ * (alignment gaps, the tail) are filled with poison — so that a read that dropped the byteOffset does not pass by
+ * chance by reading "the neighbouring valid bytes".
+ * `verified: true` is the same as the HF source (the path that does not check block digests).
  */
 const scanShapedSource = (written: WrittenContainer) => {
   const blocksByPart = new Map<number, { readonly offset: number; readonly length: number }[]>();
@@ -236,7 +241,7 @@ const scanShapedSource = (written: WrittenContainer) => {
     blocksByPart.set(block.part, list);
   }
   let poisoned = 0;
-  // part 0（ヘッダ + 2 文書）は block を持たないのでそのまま写す。
+  // Part 0 (header + 2 documents) has no blocks, so it is copied as is.
   const vessels = written.parts.map((part, index) => {
     if (index === 0) return part.slice();
     const vessel = new Uint8Array(new ArrayBuffer(part.byteLength)).fill(POISON);
@@ -259,7 +264,7 @@ const scanShapedSource = (written: WrittenContainer) => {
   return { source, poisoned, offsets };
 };
 
-/** block を写して返す（tight）取得元 — 比較の基準。 */
+/** A source that returns copies of blocks (tight) — the baseline of the comparison. */
 const copyingSource = (written: WrittenContainer): BlockSource => ({
   partCount: written.parts.length,
   verified: true,
@@ -269,14 +274,14 @@ const copyingSource = (written: WrittenContainer): BlockSource => ({
 });
 
 describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
-  it("メモリ内容器から作った Session は krm 経路と出力バイト列・常駐バイト数が一致する", async () => {
+  it("a Session built from the in-memory container matches the krm path in output bytes and resident byte counts", async () => {
     const q = quantize();
     const written = await writeModelContainer(containerInput(q), OPTIONS);
     const gpu = await acquireGpu();
     try {
       const x = fill([M, K], (i) => ((i * 7) % 11) / 11 - 0.5);
       const opened = await openContainer({ kind: "parts", parts: written.parts });
-      // 書き手は block 上限 128 B で i8（192 B）も i4（384 B）も piece に割っている。
+      // With a 128 B block limit the writer splits both i8 (192 B) and i4 (384 B) into pieces.
       assertEquals(opened.graphs.main.supplies.get("enc.w2")?.blocks.length, 2);
       assertEquals(opened.graphs.main.supplies.get("enc.w1")?.blocks.length, 3);
       let expected: Float32Array<ArrayBuffer>;
@@ -291,18 +296,22 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
 
       const counter = { reads: 0 };
       const memory = openMemoryContainer(memoryInput(q, counter));
-      // 開いた時点では piece の読み口を 1 度も引いていない（lazy）。
+      // At open time no piece reader has been called even once (lazy).
       assertEquals(counter.reads, 0);
       assertEquals(memory.graphs.main.supplies.get("enc.w2")?.blocks.length, 2);
-      // 前提（モジュール doc の MUST）: 2 経路の piece の割り方が違う。書き手の刻みが変わって
-      // 同じ割り方になると、この A/B は分割の不変条件を見なくなる。
+      // Precondition (the MUST of the module doc): the two paths split pieces differently. If the writer's
+      // granularity changes and the splits become the same, this A/B stops checking the splitting invariant.
       const w2Rows = (bound: BoundContainer) =>
         bound.graphs.main.supplies.get("enc.w2")?.blocks.map((block) => block.rows);
       assertEquals(w2Rows(memory), [
         [0, N / 2],
         [N / 2, N],
       ]);
-      assertNotEquals(w2Rows(opened), w2Rows(memory), "krm とメモリ側の piece の割り方が同じ");
+      assertNotEquals(
+        w2Rows(opened),
+        w2Rows(memory),
+        "krm and the memory side split pieces the same way",
+      );
       const session = await createSessionFromContainer(gpu, memory, "main");
       try {
         const actual = (await session.run({ x }))["y"].data as Float32Array<ArrayBuffer>;
@@ -310,14 +319,14 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
         assertEquals(session.diagnostics().storage.residentCompressedBytes, expectedResident);
         assert(
           expectedResident > 0,
-          "圧縮のまま常駐した重みが無い（i4 / f16 / i8 の席が効いていない）",
+          "no weight is resident in compressed form (the i4 / f16 / i8 slots are not in effect)",
         );
-        // piece の読み口は Session 構築でちょうど 1 本 1 回だけ引かれる（保持しない）。
+        // Each piece reader is called exactly once during Session construction (not retained).
         assertEquals(counter.reads, 2);
       } finally {
         await session.dispose();
       }
-      // 見積りも同じ（席の分類が供給元で割れていない）。
+      // The estimate is the same too (the slot classification does not split by source).
       assertEquals(
         prepareContainer(memory, "main").estimate(),
         prepareContainer(opened, "main").estimate(),
@@ -327,7 +336,7 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
     }
   });
 
-  it("krm とメモリ内容器の出力は、格納バイト列を CPU で展開して参照 op で辿った出力と許容差内で一致する", async () => {
+  it("the outputs of krm and the in-memory container match, within tolerance, the output traced by reference ops over the stored bytes decoded on the CPU", async () => {
     const q = quantize();
     const written = await writeModelContainer(containerInput(q), OPTIONS);
     const x = fill([M, K], (i) => ((i * 7) % 11) / 11 - 0.5);
@@ -335,7 +344,7 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
     const miswired = referenceOutput(q, x, shiftI4ScaleOneChannel(q));
     const sources: readonly (readonly [string, BoundContainer])[] = [
       ["krm", await openContainer({ kind: "parts", parts: written.parts })],
-      ["メモリ内容器", openMemoryContainer(memoryInput(q, { reads: 0 }))],
+      ["in-memory container", openMemoryContainer(memoryInput(q, { reads: 0 }))],
     ];
     const gpu = await acquireGpu();
     try {
@@ -350,14 +359,14 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
         assertEquals(output.shape, expected.shape, label);
         const report = compareTensors(output, expected, GEMM_TOLERANCE);
         assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
-        // 同じ出力が、展開を 1 つ取り違えた参照では落ちる（許容差が codec の誤りを通さない）。
+        // The same output fails against a reference with one decoding mixed up (the tolerance does not let a codec error through).
         const miswiredReport = compareTensors(output, miswired, GEMM_TOLERANCE);
         assertEquals(
           miswiredReport.pass,
           false,
-          `${label}: i4 の scale を 1 チャネルずらした参照でも通った（${formatAllclose(
+          `${label}: passed even against the reference with the i4 scale shifted by one channel (${formatAllclose(
             miswiredReport,
-          )}）`,
+          )})`,
         );
       }
     } finally {
@@ -365,12 +374,15 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
     }
   });
 
-  it("part の器の view を返す取得元から組んだ Session は、写しを返す取得元と出力・常駐バイト数が一致する", async () => {
+  it("a Session built from a source that returns views into the part buffer matches a source that returns copies in output and resident byte counts", async () => {
     const q = quantize();
     const written = await writeModelContainer(containerInput(q), OPTIONS);
     const viewed = scanShapedSource(written);
-    // 毒が実際に器へ入り、block が器の中程（64 B 整列・0 以外）から読まれていること。
-    assert(viewed.poisoned > 0, "器に block の外の隙間が無く、毒を置けていない");
+    // The poison actually went into the buffer, and blocks are read from the middle of the buffer (64 B aligned, not 0).
+    assert(
+      viewed.poisoned > 0,
+      "the buffer has no gaps outside blocks, so no poison could be placed",
+    );
     const gpu = await acquireGpu();
     try {
       const x = fill([M, K], (i) => ((i * 7) % 11) / 11 - 0.5);
@@ -393,25 +405,25 @@ describe.skipIf(!GPU_AVAILABLE)("memory container session", () => {
         assertEquals(session.diagnostics().storage.residentCompressedBytes, expectedResident);
         assert(
           expectedResident > 0,
-          "圧縮のまま常駐した重みが無い（i4 / f16 / i8 の席が効いていない）",
+          "no weight is resident in compressed form (the i4 / f16 / i8 slots are not in effect)",
         );
       } finally {
         await session.dispose();
       }
       assert(
         viewed.offsets.some((offset) => offset !== 0),
-        "重みの block が全部 part の先頭から読まれている（byteOffset ≠ 0 の view を通っていない）",
+        "every weight block is read from the head of a part (the byteOffset ≠ 0 view is not exercised)",
       );
       assert(
         viewed.offsets.every((offset) => offset % 64 === 0),
-        "block 開始が 64 B 整列でない",
+        "a block start is not 64 B aligned",
       );
     } finally {
       gpu.destroy();
     }
   });
 
-  it("krg（重みの供給が無い）からは Session を組めない", async () => {
+  it("a Session cannot be built from a krg (no weight supply)", async () => {
     const q = quantize();
     const graphOnly = await writeGraphContainer(containerInput(q), OPTIONS);
     const opened = await openContainer({ kind: "bytes", bytes: graphOnly.bytes });

@@ -1,16 +1,16 @@
-// params バッファの内容アドレスキャッシュ（Session 常駐）。params の全バイトは
-// グラフ・node.attrs・解決済み shape の純関数なので、同じ内容の params は run 内・run 跨ぎの
-// どちらでも 1 本しか作られないのが不変条件。
+// The content-addressed cache of params buffers (resident in the Session). Every byte of a params buffer is a
+// pure function of the graph, node.attrs and the resolved shapes, so the invariant is that params with the same
+// content are created only once, both within a run and across runs.
 //
-// NOTE: 同一 bindings の 2 run 目は導出済み計画（see the prepared-plan section below）に当たり、導出相
-// ごと飛ぶので #writeParams に到達しない（lastRunParams は {0,0}）。したがってこの門は
-// ①同一 run 内の重複 params（同形ノード 2 本）と、②導出済み計画から**追い出された後**の
-// 再導出 run（prepared ミス・params は全ヒット）の 2 点で再利用を観測する — 2 つのキャッシュの
-// 寿命が独立であること（params は無上限・prepared は LRU 上限あり）もここで固定される。
+// NOTE: the second run with the same bindings hits the derived plan (see the prepared-plan section below) and
+// skips the whole derivation phase, so it never reaches #writeParams (lastRunParams is {0,0}). This check
+// therefore observes reuse at 2 points: ① duplicate params within one run (2 nodes of the same shape), and
+// ② a re-derivation run **after eviction** from the derived plans (prepared miss, every params a hit) — which also
+// pins that the lifetimes of the 2 caches are independent (params unbounded, prepared with an LRU limit).
 //
-// この門が見るのは「新規生成 0 で再利用 > 0」と「値が完全一致」の 2 つ。前者だけだと
-// キャッシュが誤ったバッファを配っても緑になり、後者だけだとキャッシュが黙って外れて
-// 毎 dispatch 確保に戻っても緑になる（どちらも例外は出ない）。
+// This check looks at 2 things: "0 new allocations with reuse > 0" and "exactly equal values". The first alone
+// stays green even if the cache hands out the wrong buffer; the second alone stays green even if the cache
+// silently misses and falls back to allocating per dispatch (neither throws).
 
 import { assertEquals, assertRejects } from "@std/assert";
 import { describe, it, test } from "vite-plus/test";
@@ -30,9 +30,9 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { injectOutOfMemory } from "./helpers/oom-injection.ts";
 
 /**
- * y[T] = Σ_c ((x[T,3] · w[3,2] + b[2]) + b[2])。params の形が異なる 3 ノード（matmul / add /
- * sum）に加えて、**同形の add をもう 1 本**置く — 2 本目の add は params の全バイトが
- * 1 本目と一致するので、1 run 目の中で再利用が 1 件観測できる。
+ * y[T] = Σ_c ((x[T,3] · w[3,2] + b[2]) + b[2]). Besides 3 nodes with different params shapes (matmul / add /
+ * sum), **one more add of the same shape** is placed — every params byte of the second add matches the first,
+ * so one reuse can be observed within the first run.
  */
 const GRAPH: DeclarationJson = {
   format: "karume-ir",
@@ -81,32 +81,40 @@ const input = (rows: number): Tensor => ({
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "同じ内容の params は run 内で 1 本に畳まれ、ヒット run は 1 本も触らない（実 GPU）",
+  "params with the same content fold into one within a run, and a hit run touches none (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
-      assertEquals(session.diagnostics().lastRunParams, undefined, "未実行なら診断は undefined");
+      assertEquals(
+        session.diagnostics().lastRunParams,
+        undefined,
+        "the diagnostics are undefined before any run",
+      );
 
       const first = await session.run({ x: input(4) });
       const firstParams = session.diagnostics().lastRunParams;
-      assertEquals(firstParams?.reuseCount, 1, "同形 add の 2 本目は 1 run 目の中で再利用");
-      assertEquals((firstParams?.allocCount ?? 0) > 0, true, "1 run 目は新規生成がある");
-      // 重みアリーナが params の実体も所有する（破棄は weights の dispose に相乗り）。
+      assertEquals(
+        firstParams?.reuseCount,
+        1,
+        "the second add of the same shape is reused within the first run",
+      );
+      assertEquals((firstParams?.allocCount ?? 0) > 0, true, "the first run makes new allocations");
+      // The weights arena also owns the params buffers (they are destroyed along with the weights' dispose).
       const weightsAfterFirst = session.diagnostics().weights.allocCount;
 
-      // 2 run 目は導出済み計画に当たり導出相ごと飛ぶ — params の GPU 操作もゼロ
-      // （キャッシュが外れたのではなく、レシピが params 実体を直参照している）。
+      // The second run hits the derived plan and skips the whole derivation phase — zero params GPU operations as well
+      // (not because the cache missed, but because the recipes reference the params buffers directly).
       const second = await session.run({ x: input(4) });
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
       assertEquals(session.diagnostics().lastRunParams, { allocCount: 0, reuseCount: 0 });
       assertEquals(
         session.diagnostics().weights.allocCount,
         weightsAfterFirst,
-        "ヒット run はアリーナに 1 本も足さない",
+        "a hit run adds nothing to the arena",
       );
 
-      // 使い回した params で値が変わらない（キャッシュが別の内容のバッファを配っていない）
+      // Reused params do not change the values (the cache did not hand out a buffer with different content)
       assertEquals(second["y"].shape, first["y"].shape);
       assertEquals(Array.from(second["y"].data), Array.from(first["y"].data));
     } finally {
@@ -117,7 +125,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "導出済み計画から追い出されても params キャッシュは生き残り全ヒットする（実 GPU）",
+  "the params cache survives eviction from the derived plans and hits on everything (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -126,26 +134,26 @@ test.skipIf(!GPU_AVAILABLE)(
       const narrow = session.diagnostics().lastRunParams;
       const narrowAlloc = narrow?.allocCount ?? 0;
 
-      // 記号次元が変われば解決済み shape が変わり、params の内容も変わる（= 別のキー）。
+      // When a symbolic dimension changes, the resolved shapes change and so does the params content (= a different key).
       await session.run({ x: input(9) }, { T: 9 });
       assertEquals(
         session.diagnostics().lastRunParams?.allocCount,
         narrowAlloc,
-        "別 shape は作り直す",
+        "a different shape is rebuilt",
       );
 
-      // T=4 を導出済み計画（LRU 上限）から確実に追い出す — 上限 +1 種類の別 shape を通せば、
-      // 最古の T=4 は必ず落ちる。params キャッシュは無上限なのでここで作られた params は残る。
-      // MUST: 本数は定数から出す（写しを置くと上限を動かしたときに追い出しが起きなくなり、
-      // 「prepared ミスなのに params 全ヒット」という観測点そのものが消える）。
+      // Evict T=4 from the derived plans (LRU limit) for sure — running limit + 1 different shapes always drops the
+      // oldest, T=4. The params cache is unbounded, so the params created here remain.
+      // MUST: derive the count from the constant (a copy would stop evicting when the limit moves, and the very
+      // observation point "prepared miss yet every params a hit" would disappear).
       for (let rows = 5; rows <= 5 + PREPARED_PLAN_CAPACITY; rows += 1) {
         await session.run({ x: input(rows) });
       }
 
-      // 再導出 run（prepared はミス）だが params は 1 本も作り直さない — 1 run 目の実体が
-      // Session 常駐のまま残っている（+1 は同形 add の run 内再利用）。
+      // A re-derivation run (prepared misses) yet not a single params is rebuilt — the first run's buffers are still
+      // resident in the Session (+1 is the in-run reuse of the same-shape add).
       await session.run({ x: input(4) });
-      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "計画は追い出し済み");
+      assertEquals(session.diagnostics().lastRunPrepared?.hit, false, "the plan has been evicted");
       assertEquals(session.diagnostics().lastRunParams, {
         allocCount: 0,
         reuseCount: narrowAlloc + 1,
@@ -158,44 +166,44 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * params キャッシュが **Session 寿命で無界**であること（by-design — docs/limitations.md）を
- * 固定する。追い出し機構が入れば赤くなるので、入れるときはこの門ごと裁定し直すこと。
+ * Pins that the params cache is **unbounded over the Session's lifetime** (by design — docs/limitations.md). It
+ * turns red if an eviction mechanism is added, so adding one means re-deciding together with this check.
  *
- * 同範囲の他キャッシュ（`SubmitScheduler.MEASURED_HISTORY` / `PREPARED_PLAN_CAPACITY`）は
- * 「MUST: 有界」を明示しており、ここだけが規律の外にある。数値で固定しておかないと、
- * 「可変 shape を長時間回すと GPU バッファが単調増加する」という制約が挙動からは見えない
- * （例外も警告も出ず、`diagnostics().weights.allocCount` が伸びるだけ）。
+ * The other caches of the same scope (`SubmitScheduler.MEASURED_HISTORY` / `PREPARED_PLAN_CAPACITY`) state
+ * "MUST: bounded", and only this one is outside that rule. Without pinning it in numbers, the constraint "running
+ * variable shapes for a long time grows GPU buffers monotonically" is invisible from the behaviour (no exception,
+ * no warning; only `diagnostics().weights.allocCount` grows).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "params キャッシュは Session 寿命で無界（可変 shape の run ごとに単調増加・実 GPU）",
+  "the params cache is unbounded over the Session's lifetime (grows monotonically per variable-shape run; real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openedModel(), "model");
     try {
-      // initializer 2 本ぶんだけが載った状態から始まる。
+      // Starts from a state holding only the 2 initializers.
       assertEquals(session.diagnostics().weights.allocCount, 2);
 
-      // 記号次元 T を毎回変える = params の内容が毎回変わる = 1 度も当たらない。
-      // 導出済み計画（LRU 上限）からは追い出されるが、params の実体は 1 本も返らない。
+      // Change the symbolic dimension T each time = the params content changes each time = never a hit.
+      // The plans are evicted from the derived plans (LRU limit), but not a single params buffer is returned.
       const RUNS = PREPARED_PLAN_CAPACITY + 1;
       for (let i = 0; i < RUNS; i += 1) {
         await session.run({ x: input(2 + i) });
         assertEquals(
           session.diagnostics().lastRunParams,
           { allocCount: 3, reuseCount: 1 },
-          `run ${i}: 3 種の params を新規生成（同形 add の 2 本目だけ run 内再利用）`,
+          `run ${i}: 3 kinds of params newly allocated (only the second same-shape add is reused within the run)`,
         );
       }
 
       assertEquals(
         session.diagnostics().weights.allocCount,
         2 + RUNS * 3,
-        "追い出しは 1 つも無い（initializer 2 本 + run 数 × ノード種 3）",
+        "nothing evicted at all (2 initializers + runs × 3 node kinds)",
       );
       assertEquals(
         session.diagnostics().lastRunPrepared?.cachedPlans,
         PREPARED_PLAN_CAPACITY,
-        "導出済み計画だけが上限で頭打ちになる（params キャッシュとは寿命が独立）",
+        "only the derived plans level off at the limit (their lifetime is independent of the params cache)",
       );
     } finally {
       await session.dispose();
@@ -204,7 +212,7 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 新しい Session で 1 run だけ回した出力（巻き戻し後の値の照合先）。 */
+/** The output of a single run on a new Session (what the values after rollback are compared against). */
 const freshOutput = async (
   gpu: Awaited<ReturnType<typeof acquireGpu>>,
   rows: number,
@@ -217,13 +225,14 @@ const freshOutput = async (
   }
 };
 
-// 非致命 OOM（`createBuffer` が無効なバッファを返すだけで例外にならない）は、params と計画を
-// キャッシュへ載せた**後**の errorScope で初めて判明する。巻き戻さないと、メモリが空いた後の
-// 再試行でも同じ無効バッファを直参照する計画に当たり、validation エラーが Session の寿命いっぱい
-// 続く。巻き戻すのは「その実行が新しく足したもの」だけで、既存の正常なエントリは残す。
-describe("params の確保が非致命 OOM で失敗した実行の後（注入・実 GPU）", () => {
+// A non-fatal OOM (`createBuffer` merely returns an invalid buffer without throwing) is discovered only in the
+// errorScope **after** params and the plan have been put into the caches. Without a rollback, a retry after
+// memory frees up hits a plan that references the same invalid buffer directly, and validation errors continue
+// for the rest of the Session's lifetime. The rollback discards only "what that execution newly added"; existing
+// healthy entries are kept.
+describe("after an execution whose params allocation failed with a non-fatal OOM (injected; real GPU)", () => {
   it.skipIf(!GPU_AVAILABLE)(
-    "失敗した run が足した params と計画だけを捨てて次の run で作り直し、既存の計画は残す",
+    "discards only the params and plan the failed run added, rebuilds them on the next run, and keeps the existing plans",
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -237,25 +246,29 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
           GpuOutOfMemoryError,
           "注入: 非致命 OOM",
         );
-        assertEquals(oom.fired(), 1, "注入が run の pop に当たっていない（門が空振る）");
+        assertEquals(
+          oom.fired(),
+          1,
+          "the injection did not hit the run's pop (the check would test nothing)",
+        );
 
         await session.run({ x: input(4) });
         assertEquals(
           session.diagnostics().lastRunPrepared?.hit,
           true,
-          "失敗と無関係な既存の計画まで捨てている",
+          "discards even existing plans unrelated to the failure",
         );
 
         const retried = await session.run({ x: input(9) }, { T: 9 });
         assertEquals(
           session.diagnostics().lastRunPrepared?.hit,
           false,
-          "失敗した run が登録した計画が残っている",
+          "the plan registered by the failed run remains",
         );
         assertEquals(
           session.diagnostics().lastRunParams,
           { allocCount: 3, reuseCount: 1 },
-          "失敗した run が確保した params をキャッシュから再利用している",
+          "reuses from the cache the params allocated by the failed run",
         );
         assertEquals(Array.from(retried["y"].data), await freshOutput(gpu, 9));
       } finally {
@@ -267,7 +280,7 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
   );
 
   it.skipIf(!GPU_AVAILABLE)(
-    "失敗で決着した batch の enqueue が足した params と計画を捨て、次の batch で作り直す",
+    "discards the params and plans added by the enqueue of a batch that settled with a failure, and rebuilds them in the next batch",
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
@@ -275,10 +288,18 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
       try {
         const failed = await gpu.beginBatch();
         await session.enqueue({ x: input(4) }, { batch: failed });
-        assertEquals(session.diagnostics().lastRunParams?.allocCount, 3, "導出が走っていない");
+        assertEquals(
+          session.diagnostics().lastRunParams?.allocCount,
+          3,
+          "the derivation did not run",
+        );
         oom.arm();
         await assertRejects(() => failed.finish(), GpuOutOfMemoryError, "注入: 非致命 OOM");
-        assertEquals(oom.fired(), 1, "注入が finish の pop に当たっていない（門が空振る）");
+        assertEquals(
+          oom.fired(),
+          1,
+          "the injection did not hit finish's pop (the check would test nothing)",
+        );
 
         const retry = await gpu.beginBatch();
         await session.enqueue({ x: input(4) }, { batch: retry });
@@ -286,12 +307,12 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
         assertEquals(
           session.diagnostics().lastRunPrepared?.hit,
           false,
-          "失敗した batch の enqueue が登録した計画が残っている",
+          "the plan registered by the failed batch's enqueue remains",
         );
         assertEquals(
           session.diagnostics().lastRunParams,
           { allocCount: 3, reuseCount: 1 },
-          "失敗した batch の enqueue が確保した params をキャッシュから再利用している",
+          "reuses from the cache the params allocated by the failed batch's enqueue",
         );
         assertEquals(
           Array.from((await session.run({ x: input(4) }))["y"].data),
@@ -306,17 +327,18 @@ describe("params の確保が非致命 OOM で失敗した実行の後（注入�
   );
 });
 
-// GPU 側の失敗でなければ、作れた params と計画は有効なので外さない。外すと、何度でも同じく落ちる
-// 失敗（入力の誤り）のたびに params を新しく確保し、キャッシュから外すだけで `dispose` まで
-// 積もる（params は破棄せず weights アリーナが持つ — `RecipeBuilder.forgetParams`）。
-// enqueue は導出が入力の検査より前にあるので、入力の誤りでも params を載せた後に落ちる。
-describe("ホスト側の失敗（入力の要素数の誤り）で落ちる enqueue を繰り返したとき（実 GPU）", () => {
+// Unless the failure is on the GPU side, the params and plans that were created are valid, so they are not
+// removed. Removing them would allocate new params on every failure that fails the same way every time (an input
+// error), and since they are only removed from the cache, they would pile up until `dispose` (params are not
+// destroyed; the weights arena owns them — `RecipeBuilder.forgetParams`).
+// enqueue derives before checking its inputs, so even an input error fails after the params were put in.
+describe("when an enqueue that fails on a host-side error (wrong input element count) is repeated (real GPU)", () => {
   it.skipIf(!GPU_AVAILABLE)(
-    "1 回目に作れた params と計画を残し、繰り返しても params を新しく確保しない",
+    "keeps the params and plan created the first time, and does not allocate new params on repetition",
     async () => {
       const gpu = await acquireGpu();
       const session = await createSessionFromContainer(gpu, await openedModel(), "model");
-      // 要素数の誤りは束縛の解決を通り、導出の後の入力検査で落ちる。
+      // A wrong element count passes binding resolution and fails at the input check after derivation.
       const wrongCount: Tensor = { dtype: "f32", shape: [4, 3], data: new Float32Array(11) };
       const failOnce = async (): Promise<void> => {
         const batch = await gpu.beginBatch();
@@ -327,14 +349,18 @@ describe("ホスト側の失敗（入力の要素数の誤り）で落ちる enq
         const initial = session.diagnostics().weights.allocCount;
         await failOnce();
         const derived = session.diagnostics().weights.allocCount;
-        assertEquals(derived - initial, 3, "1 回目の enqueue が導出していない（門が空振る）");
+        assertEquals(
+          derived - initial,
+          3,
+          "the first enqueue did not derive (the check would test nothing)",
+        );
 
         await failOnce();
         await failOnce();
         assertEquals(
           session.diagnostics().weights.allocCount,
           derived,
-          "同じホスト側の失敗のたびに params を新しく確保している",
+          "allocates new params on every identical host-side failure",
         );
 
         const batch = await gpu.beginBatch();
@@ -343,7 +369,7 @@ describe("ホスト側の失敗（入力の要素数の誤り）で落ちる enq
         assertEquals(
           session.diagnostics().lastRunPrepared?.hit,
           true,
-          "ホスト側の失敗で、作れた計画を捨てている",
+          "discards a plan that was created, on a host-side failure",
         );
         assertEquals(
           Array.from((await session.run({ x: input(4) }))["y"].data),
@@ -359,17 +385,17 @@ describe("ホスト側の失敗（入力の要素数の誤り）で落ちる enq
 
 // --- Prepared-plan cache ---
 //
-// 導出済み実行計画の Session 常駐キャッシュ（キー = 解決済み bindings）。計画・融合判定・
-// レシピ導出は graph と bindings だけの純関数なので、同一 bindings の 2 run 目以降は導出相を
-// 丸ごと飛ばせる（src/runtime/executor.ts の #preparedKey）。
+// The Session-resident cache of derived execution plans (key = the resolved bindings). Planning, fusion decisions
+// and recipe derivation are pure functions of the graph and the bindings only, so from the second run with the
+// same bindings on, the whole derivation phase can be skipped (#preparedKey in src/runtime/executor.ts).
 //
-// この門が見るのは「ヒット / ミスの判定」と「ヒット run の出力がミス run とビット単位で
-// 一致する」の 2 つ。前者だけだと誤った計画を配っても緑になり、後者だけだとキャッシュが
-// 黙って外れて毎 run 導出に戻っても緑になる（どちらも例外は出ない）。
+// This check looks at 2 things: "the hit / miss decision" and "the hit run's output is bit-identical to the miss
+// run's". The first alone stays green even if a wrong plan is handed out; the second alone stays green even if
+// the cache silently misses and falls back to deriving on every run (neither throws).
 
 /**
- * y = silu(x·w + b)（x: [T,3] → y: [T,2]）。末尾 2 ノードが silu 融合に掴まれるので、
- * 融合カウンタ（ADR 0040 §3 の常設診断）をヒット run 側でも見られる。
+ * y = silu(x·w + b) (x: [T,3] → y: [T,2]). The last 2 nodes are caught by silu fusion, so the fusion counters
+ * (the standing diagnostics of ADR 0040 §3) can be checked on the hit run as well.
  */
 const SILU_GRAPH: DeclarationJson = {
   format: "karume-ir",
@@ -411,36 +437,40 @@ const openProjection = (): Promise<OpenedContainer> =>
     },
   ]);
 
-/** 出力のビット列。値の一致は「バイト同値」で見る（丸めの取り違えを許容しない）。 */
+/** The output bit pattern. Values are compared by "byte equality" (a rounding mix-up is not tolerated). */
 const bits = (tensor: Tensor): readonly number[] =>
   Array.from(new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length));
 
 test.skipIf(!GPU_AVAILABLE)(
-  "同一 bindings の 2 run 目は導出済み計画に当たり、出力はビット単位で一致する（実 GPU）",
+  "the second run with the same bindings hits the derived plan, and the output is bit-identical (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
     try {
-      assertEquals(session.diagnostics().lastRunPrepared, undefined, "未実行なら診断は undefined");
+      assertEquals(
+        session.diagnostics().lastRunPrepared,
+        undefined,
+        "the diagnostics are undefined before any run",
+      );
 
       const first = await session.run({ x: input(4) });
       assertEquals(
         session.diagnostics().lastRunPrepared,
         { hit: false, cachedPlans: 1 },
-        "1 run 目は導出してから載せる",
+        "the first run derives and then stores",
       );
 
       const second = await session.run({ x: input(4) });
       assertEquals(
         session.diagnostics().lastRunPrepared,
         { hit: true, cachedPlans: 1 },
-        "2 run 目は導出相を飛ばす",
+        "the second run skips the derivation phase",
       );
-      // 飛ばしたのは導出だけで、GPU へ積むコマンド列は同一 — 出力が唯一の検出器。
+      // Only the derivation is skipped; the command sequence put on the GPU is identical — the output is the only detector.
       assertEquals(second["y"].shape, first["y"].shape);
       assertEquals(bits(second["y"]), bits(first["y"]));
 
-      // 導出相ごと飛ぶので params の GPU 操作もゼロになる（値の意味は従来どおり）。
+      // The whole derivation phase is skipped, so the params GPU operations are zero too (the meaning of the values is unchanged).
       assertEquals(session.diagnostics().lastRunParams, { allocCount: 0, reuseCount: 0 });
     } finally {
       await session.dispose();
@@ -450,7 +480,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "bindings が変わる run は導出し直し、元へ戻すと再びヒットする（実 GPU）",
+  "a run with changed bindings re-derives, and switching back hits again (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
@@ -458,19 +488,19 @@ test.skipIf(!GPU_AVAILABLE)(
       const narrow = await session.run({ x: input(4) });
       assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: 1 });
 
-      // 記号次元が変われば解決済み bindings が変わる（= 別のキー）。
+      // When a symbolic dimension changes, the resolved bindings change (= a different key).
       await session.run({ x: input(9) });
       assertEquals(
         session.diagnostics().lastRunPrepared,
         { hit: false, cachedPlans: 2 },
-        "別 bindings は導出し直して 2 本目として載る",
+        "different bindings are re-derived and stored as a second plan",
       );
 
       const again = await session.run({ x: input(4) });
       assertEquals(
         session.diagnostics().lastRunPrepared,
         { hit: true, cachedPlans: 2 },
-        "先の bindings のぶんは Session 常駐のまま残っている",
+        "the plan for the earlier bindings is still resident in the Session",
       );
       assertEquals(bits(again["y"]), bits(narrow["y"]));
     } finally {
@@ -481,7 +511,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "導出済み計画は上限本数で頭打ちになり、最古のものから追い出される（実 GPU）",
+  "the derived plans level off at the limit count and are evicted oldest first (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
@@ -492,22 +522,22 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           session.diagnostics().lastRunPrepared,
           { hit: false, cachedPlans: rows },
-          `T=${rows} は初出`,
+          `T=${rows} is new`,
         );
       }
 
-      // 上限 +1 種類目で頭打ちに当たる。載せてから最古（T=1）を落とすので本数は変わらない。
+      // The limit + 1-th kind hits the ceiling. It is stored and then the oldest (T=1) dropped, so the count does not change.
       await session.run({ x: input(capacity + 1) });
       assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: capacity });
 
-      // 追い出しの証明: 一度当たっていた T=1 が再びミスになる。
+      // Proof of eviction: T=1, which hit once, misses again.
       await session.run({ x: input(1) });
       assertEquals(
         session.diagnostics().lastRunPrepared,
         { hit: false, cachedPlans: capacity },
-        "最古の bindings は落ちている",
+        "the oldest bindings have been dropped",
       );
-      // 残りは健在（追い出しが 1 本ずつであることの裏）。
+      // The rest are intact (the other side of eviction being one at a time).
       await session.run({ x: input(capacity) });
       assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: capacity });
     } finally {
@@ -518,20 +548,24 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "ヒット run も融合回数を報告する（キャッシュで常設診断が消えない・実 GPU）",
+  "a hit run reports the fusion counts too (the cache does not erase the standing diagnostics; real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const session = await createSessionFromContainer(gpu, await openProjection(), "model");
     try {
       await session.run({ x: input(4) });
       const derived = session.diagnostics().lastRunFusions;
-      assertEquals(derived?.silu, 1, "1 run 目で silu 融合が掴めている（掴めないと門が空振る）");
+      assertEquals(
+        derived?.silu,
+        1,
+        "the first run catches the silu fusion (without it the check would test nothing)",
+      );
 
       await session.run({ x: input(4) });
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
       const cached = session.diagnostics().lastRunFusions;
-      assertEquals(cached === undefined, false, "ヒット run でも undefined にならない");
-      assertEquals(cached, derived, "計画時に決まった回数がそのまま報告される");
+      assertEquals(cached === undefined, false, "not undefined even on a hit run");
+      assertEquals(cached, derived, "the counts decided at planning are reported as they are");
     } finally {
       await session.dispose();
       gpu.destroy();
@@ -540,12 +574,12 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "導出相で落ちた run の部分レシピはキャッシュに載らない（実 GPU）",
+  "the partial recipes of a run that failed in the derivation phase are not cached (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // matmul の**出力タイル辺**で上限超過が決まる（`ceil(n / tileN) > 上限`）。辺は定数では
-    // なく既定幾何から導く — 直接書くと辺を変えた瞬間に throw が起きず、assertRejects だけが
-    // 静かに落ちる（runtime_executor_test.ts と同じ理由）。
+    // Exceeding the limit is decided by the matmul's **output tile edge** (`ceil(n / tileN) > limit`). The edge is
+    // derived from the default geometry, not a constant — written directly, changing the edge would stop the throw
+    // and only assertRejects would fail, quietly (the same reason as runtime_executor_test.ts).
     const tileN = gemmTileN(defaultGemmGeometry());
     const huge = gpu.limits.maxComputeWorkgroupsPerDimension * tileN + tileN;
     const graph: DeclarationJson = {
@@ -574,8 +608,8 @@ test.skipIf(!GPU_AVAILABLE)(
       await session.run(small());
       assertEquals(session.diagnostics().lastRunPrepared, { hit: false, cachedPlans: 1 });
 
-      // 2 ノード目（matmul）が導出相で上限超過に落ちる。レシピ列は 1 ノード目のぶんまで
-      // 出来ているが、登録は #buildRecipes が完走した後だけ。
+      // The second node (matmul) fails the limit in the derivation phase. The recipe list exists up to the first
+      // node, but registration happens only after #buildRecipes completes.
       await assertRejects(
         () => session.run({ x0: fill([1, 1], () => 1), x1: fill([1, huge], () => 1) }),
         DispatchLimitError,
@@ -583,10 +617,10 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         session.diagnostics().lastRunPrepared,
         undefined,
-        "導出相で決着しなかった run は実績を残さない",
+        "a run that did not settle in the derivation phase leaves no record",
       );
 
-      // 本数が増えていない = 失敗 run の部分レシピが載っていない。
+      // The count did not grow = the partial recipes of the failed run were not stored.
       await session.run(small());
       assertEquals(session.diagnostics().lastRunPrepared, { hit: true, cachedPlans: 1 });
     } finally {

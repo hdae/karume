@@ -42,16 +42,22 @@ const linearGraph = (): DeclarationJson => ({
   ],
 });
 
-/** 宣言 → 合流後のグラフ（格納は宣言 dtype どおり・中身は見ない — helpers/merged-graph.ts）。 */
+/**
+ * Declaration → merged graph (storage follows the declared dtype; contents are not inspected —
+ * helpers/merged-graph.ts).
+ */
 const parse = mergeGraph;
 
-test("シンボル束縛は入力 shape の次元位置から取る", () => {
+test("symbol bindings are taken from dimension positions in input shapes", () => {
   const graph = parse(linearGraph());
   assertEquals(bindSymbols(graph, { x: [7, 4] }), { T: 7 });
   assertEquals(bindSymbols(graph, { x: [0, 4] }), { T: 0 });
 });
 
-/** 入力の時間軸が派生形 `2T` だけのグラフ（母音検出 CRNN の形 — ADR 0057）。 */
+/**
+ * A graph whose input time axis has only the derived form `2T` (the shape of the vowel-detection
+ * CRNN — ADR 0057).
+ */
 const derivedGraph = (): DeclarationJson => {
   const graph = linearGraph();
   graph.inputs = [{ name: "x", dtype: "f32", shape: ["2T", 4] }];
@@ -60,17 +66,18 @@ const derivedGraph = (): DeclarationJson => {
   return graph;
 };
 
-test("派生次元だけの入力からもシンボルを解く（解は一意 — ADR 0057）", () => {
+test("symbols are solved even from inputs with only derived dimensions (the solution is unique — ADR 0057)", () => {
   const graph = parse(derivedGraph());
   assertEquals(bindSymbols(graph, { x: [284, 4] }), { T: 142 });
   assertEquals(bindSymbols(graph, { x: [0, 4] }), { T: 0 });
-  // 明示 seed は従来どおり優先され、解と食い違えば落ちる。
+  // An explicit seed still takes precedence as before, and fails if it disagrees with the solution.
   assertEquals(bindSymbols(graph, { x: [284, 4] }, { T: 142 }), { T: 142 });
   assertThrows(() => bindSymbols(graph, { x: [284, 4] }, { T: 284 }), ExecutionError);
 });
 
-test("宣言の形をしていない実寸は fail loudly（丸めない）", () => {
-  // 母音検出 CRNN の「10ms フレーム数は偶数」がここで落ちる（黙って 142 や 143 に丸めない）。
+test("an actual size that does not have the declared form fails loudly (no rounding)", () => {
+  // The vowel-detection CRNN's "the number of 10ms frames is even" fails here (it is not silently
+  // rounded to 142 or 143).
   const graph = parse(derivedGraph());
   const error = assertThrows(
     () => bindSymbols(graph, { x: [285, 4] }),
@@ -80,29 +87,29 @@ test("宣言の形をしていない実寸は fail loudly（丸めない）", ()
   assert(error.message.includes("actual 285"), error.message);
 });
 
-test("束縛と実 shape・宣言の食い違いは全て fail loudly", () => {
+test("every mismatch between bindings, actual shapes and declarations fails loudly", () => {
   const graph = parse(linearGraph());
-  // 数値次元の不一致
+  // Mismatched numeric dimension
   assertThrows(() => bindSymbols(graph, { x: [7, 5] }), ExecutionError);
-  // rank の不一致
+  // Mismatched rank
   assertThrows(() => bindSymbols(graph, { x: [7] }), ExecutionError);
-  // 入力の欠落・余剰
+  // Missing or extra input
   assertThrows(() => bindSymbols(graph, {}), ExecutionError);
   assertThrows(() => bindSymbols(graph, { x: [7, 4], z: [1] }), ExecutionError);
-  // 非負整数でない次元
+  // A dimension that is not a non-negative integer
   assertThrows(() => bindSymbols(graph, { x: [-1, 4] }), ExecutionError);
-  // 明示束縛が入力 shape 由来の束縛と衝突
+  // An explicit binding conflicts with a binding derived from an input shape
   assertThrows(() => bindSymbols(graph, { x: [7, 4] }, { T: 8 }), ExecutionError);
-  // 宣言に無いシンボルの明示束縛
+  // An explicit binding of a symbol not in the declaration
   assertThrows(() => bindSymbols(graph, { x: [7, 4] }, { S: 8 }), ExecutionError);
 });
 
-test("明示束縛が入力 shape と一致していれば受理する", () => {
+test("an explicit binding is accepted if it matches the input shape", () => {
   const graph = parse(linearGraph());
   assertEquals(bindSymbols(graph, { x: [7, 4] }, { T: 7 }), { T: 7 });
 });
 
-test("束縛の有無は Object.hasOwn で見る（prototype 由来の名前は束縛済みにしない）", () => {
+test("whether a binding exists is checked with Object.hasOwn (names from the prototype do not count as bound)", () => {
   const source = linearGraph();
   source.symbols = ["toString"];
   source.inputs = [{ name: "x", dtype: "f32", shape: ["toString", 4] }];
@@ -112,7 +119,7 @@ test("束縛の有無は Object.hasOwn で見る（prototype 由来の名前は�
   assertEquals(bindSymbols(graph, { x: [6, 4] }), { toString: 6 });
 });
 
-test("bindSymbols は '__proto__' というシンボル名の束縛を own property として保全する", () => {
+test("bindSymbols preserves a binding for a symbol named '__proto__' as an own property", () => {
   const source = linearGraph();
   source.symbols = ["__proto__"];
   source.inputs = [{ name: "x", dtype: "f32", shape: ["__proto__", 4] }];
@@ -121,39 +128,41 @@ test("bindSymbols は '__proto__' というシンボル名の束縛を own prope
   const graph = parse(source);
 
   const bindings = bindSymbols(graph, { x: [6, 4] });
-  // 実行系によっては `o["__proto__"] = v` でも own property が作られるため、hasOwn だけでは
-  // 素の `{}` への退行を検出できない。器が null プロトタイプであること（＝ 受理集合に
-  // エンジン差を持ち込まないこと）を併せて固定する。
+  // Some engines create an own property even with `o["__proto__"] = v`, so hasOwn alone cannot
+  // detect a regression to a plain `{}`. That the container has a null prototype (= no engine
+  // differences brought into the accepted set) is pinned as well.
   assertEquals(Object.getPrototypeOf(bindings), null);
   assertEquals(Object.hasOwn(bindings, "__proto__"), true);
   assertEquals(bindings["__proto__"], 6);
-  // 束縛が後段まで生きている（shape が数値に落ちる）
+  // The binding survives to later stages (the shape resolves to a number)
   assertEquals(resolveShape(graph.values["y"].shape, bindings), [6, 3]);
 
-  // 明示束縛（seed）側も同じ。MUST: 計算キーで作る — リテラルの `__proto__:` は own key では
-  // なく [[Prototype]] 指定になり、Object.entries に載らずに検査対象を外す。
+  // The same for the explicit binding (seed). MUST: build it with a computed key — a literal
+  // `__proto__:` is a [[Prototype]] specification, not an own key, and would not appear in
+  // Object.entries, escaping the check.
   const seeded = bindSymbols(graph, { x: [6, 4] }, { ["__proto__"]: 6 });
   assertEquals(Object.getPrototypeOf(seeded), null);
   assertEquals(seeded["__proto__"], 6);
   assertThrows(() => bindSymbols(graph, { x: [6, 4] }, { ["__proto__"]: 5 }), ExecutionError);
 });
 
-test("素の形と派生形が同居しても束縛は 1 つ（食い違いは fail loudly）", () => {
+test("a bare form and a derived form together still give one binding (a mismatch fails loudly)", () => {
   const source = linearGraph();
-  // 入力は inputs[] だけで宣言される（values{} に置くと二重宣言で IR が落ちる）
+  // Inputs are declared only in inputs[] (placing them in values{} is a double declaration and the
+  // IR fails)
   source.inputs = [
     { name: "x", dtype: "f32", shape: ["T", 4] },
     { name: "m", dtype: "f32", shape: ["2T+1"] },
   ];
   const graph = parse(source);
   assertEquals(bindSymbols(graph, { x: [3, 4], m: [7] }), { T: 3 });
-  // 派生側が別の T を指す（9 → T=4）: 衝突として落ちる。
+  // The derived side points to a different T (9 → T=4): fails as a conflict.
   assertThrows(() => bindSymbols(graph, { x: [3, 4], m: [9] }), ExecutionError);
-  // 派生側がそもそも `2T+1` の形をしていない（6 は奇数長にならない）。
+  // The derived side does not have the form `2T+1` at all (6 cannot be an odd length).
   assertThrows(() => bindSymbols(graph, { x: [3, 4], m: [6] }), ExecutionError);
 });
 
-test("planGraph が全値の shape を解決し、ノード出力を契約から照合する", () => {
+test("planGraph resolves every value's shape and checks node outputs against the contracts", () => {
   const graph = parse(linearGraph());
   const plan = planGraph(graph, { T: 5 });
   assertEquals(plan.shapes.get("x"), [5, 4]);
@@ -164,7 +173,7 @@ test("planGraph が全値の shape を解決し、ノード出力を契約から
   assertEquals(plan.nodes[1].contract.kind, "binary");
 });
 
-test("宣言 shape と計算 shape の不一致・未束縛シンボルは fail loudly", () => {
+test("a mismatch between declared and computed shapes, and unbound symbols, fail loudly", () => {
   const source = linearGraph();
   source.values.h = { dtype: "f32", shape: ["T", 4] };
   assertThrows(() => planGraph(parse(source), { T: 5 }), ExecutionError);
@@ -174,23 +183,25 @@ test("宣言 shape と計算 shape の不一致・未束縛シンボルは fail 
 });
 
 /**
- * 要素数が 2^53 を超える shape は計画の時点で落とす。通すと `numel` の素の積が丸まった値を
- * 返し、確保バイト数と dispatch 数がその丸め値で組まれる（例外は 1 つも出ないまま宣言範囲の
- * 外を読み書きする）。
+ * A shape with more than 2^53 elements is rejected at planning time. Letting it through would make
+ * the plain product in `numel` return a rounded value, and the allocation byte counts and dispatch
+ * counts would be built from that rounded value (reading and writing outside the declared range
+ * without a single exception).
  */
-test("要素数が安全整数を超える shape は planGraph が fail loudly（丸めない）", () => {
+test("planGraph fails loudly on a shape whose element count exceeds the safe integer range (no rounding)", () => {
   const graph = parse(linearGraph());
-  // T·4 = 2^54（束縛 1 つが大きいだけで、次元それぞれは安全整数のまま）。
+  // T·4 = 2^54 (only one binding is large; each dimension stays a safe integer).
   assertThrows(
     () => planGraph(graph, { T: 2 ** 52 }),
     ExecutionError,
     "Value 'x': the element count of shape [4503599627370496,4] exceeds the safe integer range",
   );
-  // 対照: 同じグラフで積が安全整数に収まる束縛は通る（2^50·4 = 2^52）。
+  // Control: on the same graph, a binding whose product fits in the safe integer range passes
+  // (2^50·4 = 2^52).
   assertEquals(planGraph(graph, { T: 2 ** 50 }).shapes.get("x"), [2 ** 50, 4]);
 });
 
-test("useCounts は node.ins の厳密な延べ計数（同じ値を 2 回取れば 2）", () => {
+test("useCounts is the exact total count over node.ins (taking the same value twice gives 2)", () => {
   const source = linearGraph();
   source.requires.ops = ["matmul", "add", "mul"];
   source.nodes.push({ op: "mul", ins: ["y", "y"], outs: ["z"], attrs: {} });
@@ -202,7 +213,7 @@ test("useCounts は node.ins の厳密な延べ計数（同じ値を 2 回取れ
   assertEquals(counts.get("z"), undefined);
 });
 
-test("契約検査は未対応 op・非空 attrs・非 f32 dtype を構築時に落とす", () => {
+test("the contract check rejects unsupported ops, non-empty attrs and non-f32 dtypes at build time", () => {
   assertEquals(validateGraphContracts(parse(linearGraph())), undefined);
 
   const foreignOp = linearGraph();
@@ -219,7 +230,7 @@ test("契約検査は未対応 op・非空 attrs・非 f32 dtype を構築時に
   assertThrows(() => validateGraphContracts(parse(intInput)), OpContractError);
 });
 
-/** table[6,5]（Tmax 形の i32 定数）→ sym_prefix_slice → y[T,T]。 */
+/** table[6,5] (an i32 constant of the Tmax shape) → sym_prefix_slice → y[T,T]. */
 const prefixSliceGraph = (overrides: Partial<DeclarationJson> = {}): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -249,11 +260,13 @@ const prefixSliceGraph = (overrides: Partial<DeclarationJson> = {}): Declaration
   ...overrides,
 });
 
-// ADR 0010: sym_prefix_slice の「グラフ全体を見ないと判定できない」契約は束縛前に落とす。
-test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に落ちる", () => {
+// ADR 0010: sym_prefix_slice's contracts that "cannot be decided without looking at the whole
+// graph" are rejected before binding.
+test("sym_prefix_slice's graph-context contracts fail at Session build", () => {
   validateGraphContracts(parse(prefixSliceGraph()));
 
-  // sym が graph.symbols に無い（実行時に束縛が取れず prefix 長が決まらない）
+  // sym is not in graph.symbols (no binding can be taken at run time, so the prefix length is
+  // undetermined)
   const foreignSym = prefixSliceGraph();
   foreignSym.nodes[0].attrs = {
     sym: "U",
@@ -261,13 +274,14 @@ test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に落ち
   };
   assertThrows(() => validateGraphContracts(parse(foreignSym)), ExecutionError);
 
-  // dim が入力 rank の外
+  // dim is outside the input rank
   const badDim = prefixSliceGraph();
   badDim.nodes[0].attrs = { sym: "T", slices: [{ dim: 2, coeff: 1, offset: 0 }] };
   assertThrows(() => validateGraphContracts(parse(badDim)), ExecutionError);
 
-  // MUST: 入力が記号 shape の形は束縛後の数値からは見分けが付かない（T = Tmax の run では
-  // 一致してしまう）。宣言の形を見られるここでしか検出できない。
+  // MUST: an input of symbolic shape cannot be told apart from the numbers after binding (it would
+  // match on a run with T = Tmax). It can only be detected here, where the declared form is
+  // visible.
   const symbolicSource = prefixSliceGraph();
   symbolicSource.initializers = {};
   symbolicSource.inputs = [
@@ -278,20 +292,22 @@ test("sym_prefix_slice のグラフ文脈の契約は Session 構築時に落ち
   assertThrows(() => validateGraphContracts(parse(symbolicSource)), ExecutionError);
 });
 
-// prefix 長は attrs（+ 束縛）から計算し、宣言と照合する（宣言が目標形の reshape とは違う）。
-test("sym_prefix_slice の出力 shape は束縛から計算されて宣言と突合される", () => {
+// The prefix length is computed from attrs (+ bindings) and checked against the declaration (unlike
+// reshape, where the declaration is the target shape).
+test("sym_prefix_slice's output shape is computed from the bindings and checked against the declaration", () => {
   const graph = parse(prefixSliceGraph());
   const plan = planGraph(graph, bindSymbols(graph, { bind: [3] }));
   assertEquals(plan.nodes[0].outputs[0].shape, [3, 3]);
 
-  // Tmax 超過（定数バッファの範囲外読み出しになる）は束縛時点で落ちる
+  // Exceeding Tmax (a read outside the constant buffer) fails at binding time
   assertThrows(() => planGraph(graph, bindSymbols(graph, { bind: [6] })), OpContractError);
 });
 
-// ADR 0014: slice / flip の対象軸は**宣言レベルで静的**（記号軸の切り出しは sym_prefix_slice
-// の担当）。cat の連結軸だけは ADR 0046 が「同一シンボルの一次和」まで緩めた。どちらも
-// 束縛後の数値 shape では見分けが付かない（別シンボルどうしも同じ値に解決されうる）ので、
-// 宣言の形を見られる validateGraphContracts でしか検出できない。
+// ADR 0014: the target axis of slice / flip is **static at the declaration level** (slicing a
+// symbolic axis is sym_prefix_slice's job). Only cat's concatenation axis was relaxed by ADR 0046
+// to "a linear sum of the same symbol". Neither can be told apart in the numeric shapes after
+// binding (different symbols can resolve to the same value), so they can only be detected by
+// validateGraphContracts, which sees the declared form.
 const layoutAxisGraph = (
   op: string,
   attrs: Record<string, unknown>,
@@ -301,7 +317,8 @@ const layoutAxisGraph = (
   format: "karume-ir",
   version: 2,
   requires: { ops: [op] },
-  // 素の形（'T' 等）で現れる入力次元だけが束縛源になる（派生形しか無いシンボルは宣言できない）
+  // Only input dimensions that appear in bare form ('T' and the like) are binding sources (a symbol
+  // with only derived forms cannot be declared)
   symbols: [...new Set(ins.flatMap((spec) => spec.shape.filter((dim) => typeof dim === "string")))],
   inputs: ins.map((spec) => ({ name: spec.name, dtype: "f32", shape: [...spec.shape] })),
   outputs: ["y"],
@@ -310,8 +327,8 @@ const layoutAxisGraph = (
   nodes: [{ op, ins: ins.map((spec) => spec.name), outs: ["y"], attrs }],
 });
 
-test("slice / flip の記号軸は Session 構築時に落ちる（静的軸のみ）", () => {
-  // 受理: 対象軸は静的で、他の軸が記号なのは構わない
+test("symbolic axes of slice / flip fail at Session build (static axes only)", () => {
+  // Accepted: the target axis is static; other axes being symbolic is fine
   validateGraphContracts(
     parse(
       layoutAxisGraph(
@@ -331,7 +348,7 @@ test("slice / flip の記号軸は Session 構築時に落ちる（静的軸の�
     parse(layoutAxisGraph("flip", { dim: 1 }, [{ name: "x", shape: ["T", 4] }], ["T", 4])),
   );
 
-  // 拒否: 対象軸そのものが記号
+  // Rejected: the target axis itself is symbolic
   assertThrows(
     () =>
       validateGraphContracts(
@@ -360,12 +377,13 @@ test("slice / flip の記号軸は Session 構築時に落ちる（静的軸の�
   );
 });
 
-// ADR 0046 が ADR 0014 の「連結軸は静的」を改訂した。DiT の joint attention は
-// `cat([self | context], dim=1)` で self 側の軸長が記号（`S+1519`）— 記号 1 本 + 定数は
-// 次元言語 `coeff·sym+offset` にそのまま載るので、旧規則の拒否理由（和が載らない）が
-// 成り立たない。残る拒否は**異なるシンボルの混在**だけ。
-test("cat の連結軸は同一シンボルの一次和まで受理し、異シンボルの混在で落ちる", () => {
-  // 受理: 連結軸が静的（他の軸が記号なのは構わない）
+// ADR 0046 revised ADR 0014's "the concatenation axis is static". DiT's joint attention is
+// `cat([self | context], dim=1)` with a symbolic axis length on the self side (`S+1519`) — one
+// symbol + a constant fits the dimension language `coeff·sym+offset` as is, so the old rule's
+// reason for rejection (the sum does not fit) no longer holds. The only remaining rejection is
+// **mixing different symbols**.
+test("cat's concatenation axis accepts up to a linear sum of the same symbol and fails on mixed symbols", () => {
+  // Accepted: the concatenation axis is static (other axes being symbolic is fine)
   validateGraphContracts(
     parse(
       layoutAxisGraph(
@@ -379,7 +397,7 @@ test("cat の連結軸は同一シンボルの一次和まで受理し、異シ�
       ),
     ),
   );
-  // 受理: 記号 + 定数（`S+1519` と同型）
+  // Accepted: symbol + constant (same type as `S+1519`)
   validateGraphContracts(
     parse(
       layoutAxisGraph(
@@ -393,7 +411,7 @@ test("cat の連結軸は同一シンボルの一次和まで受理し、異シ�
       ),
     ),
   );
-  // 受理: 同一シンボルどうし（係数が積み上がる）
+  // Accepted: the same symbol together (the coefficients add up)
   validateGraphContracts(
     parse(
       layoutAxisGraph(
@@ -408,7 +426,8 @@ test("cat の連結軸は同一シンボルの一次和まで受理し、異シ�
     ),
   );
 
-  // 拒否: 異なるシンボルの混在（和が 1 次元 1 シンボルの文法に載らない）
+  // Rejected: mixing different symbols (the sum does not fit the grammar of one symbol per
+  // dimension)
   assertThrows(
     () =>
       validateGraphContracts(
@@ -429,8 +448,9 @@ test("cat の連結軸は同一シンボルの一次和まで受理し、異シ�
   );
 });
 
-// cat のアリティは**下限** 2（可変アリティ — ADR 0014）。1 本は恒等コピーで語彙に無い。
-test("cat の入力は 2 本以上で、3 本以上も契約検査を通る", () => {
+// cat's arity has a **lower bound** of 2 (variadic — ADR 0014). A single input is an identity copy
+// and is not in the vocabulary.
+test("cat takes 2 or more inputs, and 3 or more also pass the contract check", () => {
   validateGraphContracts(
     parse(
       layoutAxisGraph(
@@ -454,11 +474,12 @@ test("cat の入力は 2 本以上で、3 本以上も契約検査を通る", ()
   );
 });
 
-// ---- state 参照ノード（ADR 0067 決定 4 / 5 / 5b） --------------------------
+// ---- State-referencing nodes (ADR 0067 decisions 4 / 5 / 5b) ----------------------------
 
 /**
- * `kv` スロットを読む attention 1 本と書く `state_append` 1 本（発行順は決定 5b の
- * 「全読者 → append」）。`extra` でノード列だけを差し替えて順序検査の変異を作る。
+ * One attention reading the `kv` slot and one `state_append` writing it (the issue order is
+ * decision 5b's "all readers → append"). `extra` replaces only the node list to build mutations for
+ * the order checks.
  */
 const stateGraph = (
   nodes?: DeclarationJson["nodes"],
@@ -493,14 +514,17 @@ const stateGraph = (
   ],
 });
 
-/** 容量記号 `C` は入力に現れない（束縛点は createGenerationContext — ADR 0066 追記 7）。 */
+/**
+ * The capacity symbol `C` does not appear in the inputs (its binding point is
+ * createGenerationContext — ADR 0066 addendum 7).
+ */
 const stateShapes = (capacity = 16): ReadonlyMap<string, readonly number[]> =>
   new Map([
     ["kv.k", [1, 2, capacity, 4]],
     ["kv.v", [1, 2, capacity, 4]],
   ]);
 
-test("state 参照グラフは契約検査を通り、スロット shape を渡せば計画できる", () => {
+test("a state-referencing graph passes the contract check and can be planned when slot shapes are passed", () => {
   const graph = parse(stateGraph());
   validateGraphContracts(graph);
 
@@ -510,12 +534,12 @@ test("state 参照グラフは契約検査を通り、スロット shape を渡�
     ["o"],
   );
   assertEquals(plan.nodes[0].outputs[0].shape, [1, 8, 3, 4]);
-  // effect op は出力列が空（`outs` が 0 本であることが計画にもそのまま出る）
+  // An effect op has an empty output list (`outs` having 0 entries shows up in the plan as is)
   assertEquals(plan.nodes[1].outputs, []);
   assertEquals(plan.nodes[2].outputs, []);
 });
 
-test("スロット shape を渡さない計画は state 参照ノードで fail loudly", () => {
+test("planning without slot shapes fails loudly on state-referencing nodes", () => {
   const graph = parse(stateGraph());
   const error = assertThrows(
     () => planGraph(graph, { M: 3, C: 16 }),
@@ -525,8 +549,9 @@ test("スロット shape を渡さない計画は state 参照ノードで fail 
   assert(error.message.includes("kv.k"), error.message);
 });
 
-// ADR 0067 決定 5b: state 参照はデータ辺を張らないので、順序の契約は nodes 配列順そのもの。
-test("同一スロットへの state_append は 1 step に 1 本まで", () => {
+// ADR 0067 decision 5b: state references draw no data edges, so the order contract is the nodes
+// array order itself.
+test("at most one state_append per step to the same slot", () => {
   const nodes = stateGraph().nodes;
   assertThrows(
     () =>
@@ -545,10 +570,11 @@ test("同一スロットへの state_append は 1 step に 1 本まで", () => {
   );
 });
 
-// append ゼロのスロットは「未初期化（ゼロ）行を過去として読み、pastLength だけ進む」形で、
-// 誤りが値にしか出ない（実行前のここでしか止められない）。KV 共有（ADR 0067 決定 5 — スロット
-// 単位で 1 本の append を複数読者が共有）はこの検査と両立しなければならない。
-test("state を読むスロットには終端 state_append がちょうど 1 本要る", () => {
+// A slot with zero appends is the form "reads uninitialized (zero) rows as the past and advances
+// only pastLength", where the error shows only in values (it can only be stopped here, before
+// execution). KV sharing (ADR 0067 decision 5 — several readers share one append per slot) must be
+// compatible with this check.
+test("a slot that state is read from needs exactly one terminating state_append", () => {
   const base = stateGraph();
   const reader = base.nodes[0];
   const error = assertThrows(
@@ -565,7 +591,8 @@ test("state を読むスロットには終端 state_append がちょうど 1 本
   );
   assert(error.message.includes("kv.k"), error.message);
 
-  // 同じスロットを 2 本の読者が共有する形（KV 共有層）は、終端 append が各スロット 1 本なら通る
+  // The form where two readers share the same slot (KV-sharing layers) passes if each slot has one
+  // terminating append
   validateGraphContracts(
     parse({
       ...base,
@@ -576,19 +603,19 @@ test("state を読むスロットには終端 state_append がちょうど 1 本
   );
 });
 
-test("state_append より後に同じスロットの読者を置けない", () => {
+test("a reader of a slot cannot come after that slot's state_append", () => {
   const nodes = stateGraph().nodes;
   const error = assertThrows(
     () => validateGraphContracts(parse(stateGraph([nodes[1], nodes[2], nodes[0]]))),
     ExecutionError,
     "comes the reader",
   );
-  // 「append より後に読者が居る」は**そのスロットに触れる並び**だけの話（他スロットの
-  // ノードが間に挟まっても順序は変わらない）
+  // "A reader after the append" concerns only **the order of nodes touching that slot** (nodes of
+  // other slots in between do not change the order)
   assert(error.message.includes("kv.k") || error.message.includes("kv.v"), error.message);
 });
 
-test("同一スロットに触れるノードの window は存在有無も値も一致する", () => {
+test("nodes touching the same slot agree on whether window exists and on its value", () => {
   const nodes = stateGraph().nodes;
   const windowed = (window: number | undefined): DeclarationJson["nodes"] => [
     {
@@ -598,23 +625,24 @@ test("同一スロットに触れるノードの window は存在有無も値も
     { op: "state_append", ins: ["k"], outs: [], attrs: { window: 8 }, states: { slot: "kv.k" } },
     { op: "state_append", ins: ["v"], outs: [], attrs: { window: 8 }, states: { slot: "kv.v" } },
   ];
-  // 読み側だけ window 宣言が無い（= 全 context を走査する）形は沈黙誤読になる
+  // A form where only the reader lacks a window declaration (= scans the full context) is a silent
+  // misread
   assertThrows(
     () => validateGraphContracts(parse(stateGraph(windowed(undefined)))),
     ExecutionError,
     "attrs.window disagrees",
   );
-  // 値が違う形も同じ
+  // Likewise for a different value
   assertThrows(
     () => validateGraphContracts(parse(stateGraph(windowed(4)))),
     ExecutionError,
     "attrs.window disagrees",
   );
-  // 一致していれば通る
+  // Passes when they agree
   validateGraphContracts(parse(stateGraph(windowed(8))));
 });
 
-test("sliding の window はスロット容量を超えられない（読み書きの両側）", () => {
+test("a sliding window cannot exceed the slot capacity (on both the read and write sides)", () => {
   const nodes = stateGraph().nodes;
   const windowed: DeclarationJson["nodes"] = [
     { ...nodes[0], attrs: { scale: 0.5, window: 32 } },
@@ -623,7 +651,8 @@ test("sliding の window はスロット容量を超えられない（読み書�
   ];
   const graph = parse(stateGraph(windowed));
   validateGraphContracts(graph);
-  // 容量 32 なら通り、16 では落ちる（宣言だけでは決まらない = 容量は context が決める）
+  // Passes with capacity 32 and fails with 16 (the declaration alone does not decide it = the
+  // context decides the capacity)
   planGraph(graph, { M: 3, C: 32 }, stateShapes(32));
   assertThrows(
     () => planGraph(graph, { M: 3, C: 16 }, stateShapes(16)),
@@ -632,33 +661,35 @@ test("sliding の window はスロット容量を超えられない（読み書�
   );
 });
 
-// ADR 0066 追記 7 の「効く範囲の分担」: states 専用記号（KV 容量 `C`）の束縛点は
-// createGenerationContext だけで、run / enqueue の bindSymbols は要求も受理もしない。
-test("states 専用記号は bindSymbols が要求せず、seed に来たら拒否する", () => {
+// ADR 0066 addendum 7's "division of where it applies": the binding point of states-only symbols
+// (the KV capacity `C`) is createGenerationContext alone, and run / enqueue's bindSymbols neither
+// requires nor accepts them.
+test("bindSymbols does not require states-only symbols and rejects them if they arrive in the seed", () => {
   const graph = parse(stateGraph());
   assertEquals([...statesOnlySymbols(graph)], ["C"]);
-  // 入力 shape だけで束縛が閉じる（C が無くても「束縛できなかった」にならない）
+  // Bindings close over input shapes alone (no C does not mean "could not bind")
   const inputs = { q: [1, 8, 3, 4], k: [1, 2, 3, 4], v: [1, 2, 3, 4] };
   const bindings = bindSymbols(graph, inputs);
   assertEquals(bindings, { M: 3 });
   assertEquals(Object.hasOwn(bindings, "C"), false);
-  // seed で渡す形は fail loudly（context 生成時の容量との二重簿記 — 食い違いは値に出ず
-  // 計画キャッシュの鍵だけが静かに割れる）
+  // Passing it in the seed fails loudly (double bookkeeping with the capacity at context creation —
+  // a mismatch would not show in values; only the plan cache key would quietly split)
   assertThrows(() => bindSymbols(graph, inputs, { C: 16 }), ExecutionError, "states-only symbol");
-  // 入力にも現れる記号は従来どおり（states に**も**現れる形は「専用」ではない）
+  // A symbol that also appears in the inputs works as before (a form that **also** appears in
+  // states is not "only")
   assertThrows(
     () => bindSymbols(graph, { q: [1, 8, 3, 4], k: [1, 2, 5, 4], v: [1, 2, 3, 4] }),
     ExecutionError,
     "conflicting bindings",
   );
-  // states の無いグラフでは空集合（挙動は 1 バイトも変わらない）
+  // For a graph without states it is the empty set (the behavior does not change by a single byte)
   assertEquals(statesOnlySymbols(parse(linearGraph())).size, 0);
 });
 
-// ADR 0097: i2 は linear / embedding の重みだけが packed のまま実行できる。同じ initializer を
-// それ以外の重みスロット（conv1d 等）も食うなら、そちらのカーネルが packed の 2bit バイトを
-// f32 として読むので、適格集合から外れて展開席へ落ちなければならない。
-test("i2 の適格集合は linear / embedding だけに食われる重みで、conv1d と共有すると外れる", () => {
+// ADR 0097: for i2, only linear / embedding weights can run while still packed. If another weight
+// slot (conv1d and the like) also consumes the same initializer, that kernel reads the packed 2-bit
+// bytes as f32, so it must leave the eligible set and fall back to the expanded seat.
+test("i2's eligible set is weights consumed only by linear / embedding, and sharing with conv1d excludes it", () => {
   const source: DeclarationJson = {
     format: "karume-ir",
     version: 2,
@@ -688,8 +719,8 @@ test("i2 の適格集合は linear / embedding だけに食われる重みで、
       { op: "linear", ins: ["x", "wl", "bl"], outs: ["hl"], attrs: {} },
       { op: "embedding", ins: ["we", "ids"], outs: ["he"], attrs: { padding_idx: -1 } },
       { op: "conv1d", ins: ["s", "wc", "bc"], outs: ["hc"], attrs: {} },
-      // 述語は重みスロットの消費 op だけを見る（shape の契約は見ない）ので、共有の形は
-      // linear の重みを conv1d の重みスロットへも渡すだけで作る。
+      // The predicate looks only at the op consuming the weight slot (not the shape contract), so
+      // the shared form is built simply by also passing the linear weight to conv1d's weight slot.
       { op: "linear", ins: ["x", "ws", "bl"], outs: ["hs"], attrs: {} },
       { op: "conv1d", ins: ["s", "ws", "bc"], outs: ["hsc"], attrs: {} },
     ],
@@ -697,7 +728,9 @@ test("i2 の適格集合は linear / embedding だけに食われる重みで、
   assertEquals([...i2EligibleInitializers(parse(source))].sort(), ["we", "wl"]);
 });
 
-/** unbatched conv3d 1 ノード（x[3,4,6,6] * w[6,3/groups,3,3,3] → y[6,2,6,6] — ADR 0118 決定 1）。 */
+/**
+ * One unbatched conv3d node (x[3,4,6,6] * w[6,3/groups,3,3,3] → y[6,2,6,6] — ADR 0118 decision 1).
+ */
 const conv3dGraph = (groups: number): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -721,25 +754,26 @@ const conv3dGraph = (groups: number): DeclarationJson => ({
   ],
 });
 
-// 意味論（契約・CPU 参照）は groups 一般を受けるが、GPU の実装済み subset は groups == 1 だけ
-// （ADR 0118 決定 1）。MUST: Session の構築時（= 計画時）に落とす — 契約検査を通したまま初回 run の
-// 導出相まで持ち越さない。
-test("conv3d の groups > 1 は計画時に fail loudly（意味論は通る・GPU の subset で落ちる）", () => {
+// The semantics (contract, CPU reference) accept groups in general, but the subset implemented on
+// the GPU is groups == 1 only (ADR 0118 decision 1). MUST: reject at Session build (= planning
+// time) — do not pass the contract check and carry it into the derivation phase of the first run.
+test("conv3d with groups > 1 fails loudly at planning time (the semantics pass; the GPU subset rejects it)", () => {
   const grouped = parse(conv3dGraph(3));
-  // 契約と shape（意味論）は groups 一般を受ける
+  // The contract and shapes (semantics) accept groups in general
   assertEquals(planGraph(grouped, {}).nodes[0].outputs[0].shape, [6, 2, 6, 6]);
   assertThrows(
     () => validateGraphContracts(grouped),
     ExecutionError,
     "conv3d groups 3 cannot run on the GPU",
   );
-  // groups == 1 は通る
+  // groups == 1 passes
   validateGraphContracts(parse(conv3dGraph(1)));
 });
 
-// conv3d の重みは f16 / i8 の適格（重みスロット 1・チャネル軸 0 — 出力チャネル）で、bias は適格外。
-// i4 の展開経路は無い（ADR 0069 決定 5 の追補は conv1d まで）。
-test("conv3d の重み [Cout,Cin,Kt,Kh,Kw] は圧縮格納の適格・軸 0 で、i4 / i2 の適格には入らない", () => {
+// conv3d's weights are eligible for f16 / i8 (weight slot 1, channel axis 0 — the output channels),
+// and bias is not eligible. There is no i4 expansion path (the supplement to ADR 0069 decision 5
+// goes only as far as conv1d).
+test("conv3d's weights [Cout,Cin,Kt,Kh,Kw] are eligible for compressed storage on axis 0 and not for i4 / i2", () => {
   const graph = parse(conv3dGraph(1));
   assertEquals([...eligibleCompressedInitializers(graph)], ["w"]);
   assertEquals(weightChannelAxes(graph).get("w"), 0);

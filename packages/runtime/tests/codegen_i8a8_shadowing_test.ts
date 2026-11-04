@@ -1,12 +1,14 @@
 /**
- * i8a8 カーネル生成器の**宣言名の重なり**（シャドーイング）の門。
+ * The check of **overlapping declaration names** (shadowing) in the i8a8 kernel generators.
  *
- * WGSL ではブロック内の `let` / `var` が外側スコープの同名を覆い隠すのが合法で、コンパイルも
- * validation も通る。生成器がスロット番号付きの名前（`<接頭辞><番号>`）を組むと、関数スコープの
- * `k4` / `n4`（パック数）と重なる形が幾何によって現れ、範囲判定が黙って偽になる誤値になる
- * （融合 attention ①QK の充填で実測 — 2026-09-27・K 側の充填スロット 5 以上の 16 幾何）。
- * 生成 WGSL の `fn main` 本体を走査し、外側スコープ（引数を含む）に既にある名前を内側で宣言して
- * いないことを、候補の全幾何 × 3 カーネル × 変種で見る。
+ * In WGSL a `let` / `var` in a block may legally hide a same-named declaration of an outer scope;
+ * it compiles and passes validation. When a generator builds slot-numbered names
+ * (`<prefix><number>`), some geometries produce a name that collides with the function-scope `k4`
+ * / `n4` (pack counts), and a range test silently becomes false, giving a wrong value (measured in
+ * the fill of fused attention ①QK — 2026-09-27, 16 geometries with K-side fill slot 5 or above).
+ * The test scans the body of `fn main` in the generated WGSL and checks, over every candidate
+ * geometry × 3 kernels × variants, that no inner scope declares a name already in an outer scope
+ * (parameters included).
  */
 
 import { test } from "vite-plus/test";
@@ -24,7 +26,10 @@ import {
   i8a8GeometryKeyPart,
 } from "../src/kernels/i8a8-geometry.ts";
 
-/** 掃引の候補と同じ格子（regM / regN ∈ {4,8}・wgX ∈ {8,16}・wgY ∈ {4,8,16}・tileK ∈ {16,32}）を門で濾す。 */
+/**
+ * Filters the same grid as the sweep's candidates (regM / regN ∈ {4,8}, wgX ∈ {8,16}, wgY ∈
+ * {4,8,16}, tileK ∈ {16,32}) through the check.
+ */
 const candidateGeometries = (): I8a8Geometry[] => {
   const found: I8a8Geometry[] = [];
   for (const regM of [4, 8]) {
@@ -37,7 +42,7 @@ const candidateGeometries = (): I8a8Geometry[] => {
               assertI8a8Geometry(geometry, "candidate");
               found.push(geometry);
             } catch {
-              // 門が落とす幾何は候補ではない
+              // A geometry the check rejects is not a candidate
             }
           }
         }
@@ -48,11 +53,12 @@ const candidateGeometries = (): I8a8Geometry[] => {
 };
 
 /**
- * `open` の位置の `(` に対応する `)` の位置。括弧の深さを数える —— 最初の `)` で打ち切ると、
- * 引数の属性 `@builtin(...)` の閉じ括弧で引数リストが終わったことになる。
+ * The position of the `)` matching the `(` at `open`. It counts parenthesis depth —— stopping at
+ * the first `)` would end the parameter list at the closing parenthesis of a parameter attribute
+ * `@builtin(...)`.
  */
 const matchingParen = (text: string, open: number): number => {
-  assertEquals(text[open], "(", "引数リストの開き括弧の位置");
+  assertEquals(text[open], "(", "position of the parameter list's opening parenthesis");
   let depth = 0;
   for (let at = open; at < text.length; at += 1) {
     if (text[at] === "(") depth += 1;
@@ -60,16 +66,17 @@ const matchingParen = (text: string, open: number): number => {
     depth -= 1;
     if (depth === 0) return at;
   }
-  throw new Error("fn main の引数リストが閉じていない");
+  throw new Error("the parameter list of fn main is not closed");
 };
 
 /**
- * `fn main` 本体で、外側スコープ（引数・囲むブロック）に既にある名前を `let` / `var` で宣言している
- * 箇所を返す（`名前@深さ`）。`for (var i …)` のヘッダ変数は続くブロックのスコープに入れる。
+ * Returns the places in the body of `fn main` where `let` / `var` declares a name already in an
+ * outer scope (parameters, enclosing blocks) (`name@depth`). The header variable of
+ * `for (var i …)` goes into the scope of the block that follows.
  */
 export const shadowedDeclarations = (wgsl: string): string[] => {
   const start = wgsl.indexOf("fn main(");
-  assert(start >= 0, "fn main が無い");
+  assert(start >= 0, "no fn main");
   const paramsEnd = matchingParen(wgsl, start + "fn main".length);
   const params = [...wgsl.slice(start, paramsEnd).matchAll(/(\w+)\s*:/g)].map((m) => m[1]);
   const body = wgsl.slice(paramsEnd);
@@ -100,7 +107,7 @@ export const shadowedDeclarations = (wgsl: string): string[] => {
   return shadowed;
 };
 
-test("shadowedDeclarations は覆い隠しを見つけ、兄弟ブロックの同名は許す", () => {
+test("shadowedDeclarations finds shadowing and allows the same name in sibling blocks", () => {
   const shadowing = `fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   let k4 = 4u;
   for (var t = 0u; t < 2u; t = t + 1u) {
@@ -118,9 +125,10 @@ test("shadowedDeclarations は覆い隠しを見つけ、兄弟ブロックの�
   assertEquals(shadowedDeclarations(`fn main(a: u32) { var a = 1u; }`), ["a@1"]);
 });
 
-test("shadowedDeclarations は属性付きの引数（実カーネルと同じ形）も外側スコープに入れる", () => {
-  // 実カーネルの `fn main` は `@builtin(workgroup_id) wid` で始まる。引数リストの終端を最初の `)` で
-  // 決めると属性の閉じ括弧で打ち切られ、引数名が 1 つも記録されない（引数の覆い隠しを丸ごと見逃す）。
+test("shadowedDeclarations also puts attributed parameters (the shape real kernels use) into the outer scope", () => {
+  // A real kernel's `fn main` starts with `@builtin(workgroup_id) wid`. Ending the parameter list
+  // at the first `)` stops at the attribute's closing parenthesis and records no parameter name
+  // at all (missing every shadowing of a parameter).
   const attributed = (body: string): string =>
     `fn main(
   @builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
@@ -130,17 +138,18 @@ test("shadowedDeclarations は属性付きの引数（実カーネルと同じ�
     "wid@1",
     "lid@2",
   ]);
-  // 対照: 引数と別名の宣言は何も報告しない。
+  // Control: a declaration with a name different from the parameters reports nothing.
   assertEquals(shadowedDeclarations(attributed("let tile = wid.x + lid.y;")), []);
 });
 
-test("i8a8 の 3 カーネルは候補の全幾何 × 変種で外側スコープの名前を宣言し直さない", () => {
+test("the 3 i8a8 kernels never redeclare an outer-scope name for any candidate geometry × variant", () => {
   const geometries = candidateGeometries();
-  assert(geometries.length >= 48, `候補が ${geometries.length} 本しか無い`);
-  // 欠陥を踏む形（K 側の充填スロット = regN · tileK / 4 / wgY が 5 以上）が格子に含まれていること
+  assert(geometries.length >= 48, `only ${geometries.length} candidates`);
+  // The grid must contain the shapes that hit the defect (K-side fill slots = regN · tileK / 4 /
+  // wgY of 5 or above)
   assert(
     geometries.some((g) => (g.regN * (g.tileK / 4)) / g.wgY >= 5),
-    "充填スロット 5 以上の幾何が候補に無い（門が欠陥を踏めない）",
+    "no candidate geometry with 5 or more fill slots (the check cannot hit the defect)",
   );
   const failures: string[] = [];
   for (const geometry of geometries) {

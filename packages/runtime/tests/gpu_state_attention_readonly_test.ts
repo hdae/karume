@@ -1,14 +1,20 @@
-// states 形 attention の **readonly 変種**（①' ro / ② ro / ③' ro — ADR 0096 決定 1・段 2）の実 GPU 門。
+// Real-GPU checks for the **readonly variants** of states-form attention (①' ro / ② ro / ③' ro —
+// ADR 0096 decision 1, step 2).
 //
-// drafter（MTP head）は自前の K/V を持たず、貸し手 context のスロットだけを読む。query は論理位置
-// P−1 の 1 行で、列 `[P − min(P, W), P)`（full は `[0, P)`）を見る。門は 3 本:
+// The drafter (MTP head) has no K/V of its own and only reads the slots of the lender context. The
+// query is one row at logical position P−1 and attends to the columns `[P − min(P, W), P)`
+// (`[0, P)` for full). Three checks:
 //
-// ① f64 参照（`referenceStateAttentionReadonly`）との帯（states 形と同じ atol）
-// ② **states 形との同値**: readonly(P) は「past = P−1・Q = 1・ins = 位置 P−1 の行」の ①'/③' と
-//    **ビット同一**（同じ列を同じ順で足すので、値が変わる理由が無い — 変わったら述語か写像が違う）
-// ③ 構造的保証: P = 0 は厳密 0（空行）・決定性・棄却行（col ≥ P）と窓外（col < P−W）を**読まない**
-//    （スロットの当該行に毒値を置いて値が動かないこと）・故障注入（live を 1 列広げる / 窓の先頭を
-//    1 列前へずらす / 写像の法を window へ戻す）が赤になること
+// ① within the band of the f64 reference (`referenceStateAttentionReadonly`) (the same atol as the
+//    states form)
+// ② **equivalence with the states form**: readonly(P) is **bit-identical** to ①'/③' with
+//    "past = P−1, Q = 1, ins = the row at position P−1" (it sums the same columns in the same
+//    order, so there is no reason for the values to change — if they do, the predicate or the
+//    mapping differs)
+// ③ structural guarantees: P = 0 is exactly 0 (empty row), determinism, rejected rows (col ≥ P) and
+//    out-of-window rows (col < P−W) are **not read** (poison values placed in those slot rows leave
+//    the values unchanged), and fault injection (widening live by one column / moving the window
+//    start one column earlier / turning the mapping's modulus back to window) turns red
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -32,16 +38,22 @@ import {
 } from "./helpers/state-dispatch.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** f64 参照との許容差（gpu_state_attention_test.ts の `STATE_TOLERANCE` と同値・同根拠）。 */
+/**
+ * The tolerance against the f64 reference (the same value and rationale as `STATE_TOLERANCE` in
+ * gpu_state_attention_test.ts).
+ */
 const STATE_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
 const QUERY = (i: number): number => Math.sin(i * 0.37 + 0.2) * 0.9;
 const KEY = (i: number): number => Math.cos(i * 0.53 + 1.1) * 0.8;
 const VALUE = (i: number): number => Math.sin(i * 0.71 + 2.3) * 1.2;
-/** live の外（棄却行・窓外・未初期化）に置く毒値（読んだら参照との帯を必ず超える）。 */
+/**
+ * The poison value placed outside live (rejected rows, out of window, uninitialized) (reading it
+ * always exceeds the band of the reference).
+ */
 const SLOT_POISON = 2 ** 60;
 
-/** M = Q = 1 固定の readonly ケース（`past` = 貸し手の P・容量 C・窓 W）。 */
+/** A readonly case with M = Q = 1 fixed (`past` = the lender's P, capacity C, window W). */
 const readonlyCase = (
   name: string,
   shape: { heads: number; kvHeads: number; depth: number; capacity: number; window: number },
@@ -59,28 +71,31 @@ const readonlyCase = (
   query: 1,
 });
 
-/** drafter の実形に近い GQA 4:1（sliding は W=8 / C=16 = 余裕 8 の縮小版）。 */
+/**
+ * GQA 4:1, close to the drafter's real shape (sliding is a scaled-down W=8 / C=16 = headroom 8).
+ */
 const SLIDING = { heads: 4, kvHeads: 1, depth: 16, capacity: 16, window: 8 };
 const FULL = { heads: 4, kvHeads: 1, depth: 16, capacity: 24, window: 0 };
 const PLAIN = { heads: 2, kvHeads: 2, depth: 8, capacity: 12, window: 0 };
 
 const CASES: readonly StateCase[] = [
-  readonlyCase("full P=0（空行）", FULL, 0),
+  readonlyCase("full P=0 (empty row)", FULL, 0),
   readonlyCase("full P=1", FULL, 1),
   readonlyCase("full P=7", FULL, 7),
-  readonlyCase("full P=C（容量いっぱい）", FULL, 24),
+  readonlyCase("full P=C (at capacity)", FULL, 24),
   readonlyCase("plain P=5", PLAIN, 5),
-  readonlyCase("sliding P=0（空行）", SLIDING, 0),
+  readonlyCase("sliding P=0 (empty row)", SLIDING, 0),
   readonlyCase("sliding P=3 < W", SLIDING, 3),
   readonlyCase("sliding P=8 = W", SLIDING, 8),
-  readonlyCase("sliding P=9（窓が動き始める）", SLIDING, 9),
-  readonlyCase("sliding P=17（ring 一周後）", SLIDING, 17),
-  readonlyCase("sliding P=40（ring 複数周）", SLIDING, 40),
+  readonlyCase("sliding P=9 (the window starts moving)", SLIDING, 9),
+  readonlyCase("sliding P=17 (after one ring wrap)", SLIDING, 17),
+  readonlyCase("sliding P=40 (several ring wraps)", SLIDING, 40),
 ];
 
 /**
- * 入力: q 1 行と貸し手スロット。live の外の物理行（棄却行 = 論理 col ≥ P が写る行・窓外・
- * 未初期化）は**毒値**で埋める — readonly が 1 語でも読めば参照との帯を超える。
+ * Inputs: one q row and the lender's slots. Physical rows outside live (rejected rows = rows that
+ * logical col ≥ P maps to, out of window, uninitialized) are filled with **poison values** — if
+ * readonly reads a single word of them, it exceeds the band of the reference.
  */
 const makeInputs = (spec: StateCase): StateReadonlyInputs => {
   const { batch, heads, kvHeads, depth, capacity, window, past } = spec;
@@ -122,8 +137,9 @@ const refInput = (
 });
 
 /**
- * 門 ②の相手: 同じスロットに対する states 形（①'/③'）を「past = P−1・Q = 1・ins = 位置 P−1 の
- * 行」で組む。ins に置くのは貸し手スロットの物理行 `slot_row(P−1)` の中身そのもの。
+ * The counterpart of check ②: builds the states form (①'/③') on the same slots with "past = P−1,
+ * Q = 1, ins = the row at position P−1". What goes into ins is exactly the contents of the lender
+ * slot's physical row `slot_row(P−1)`.
  */
 const equivalentStatesRun = (
   spec: StateCase,
@@ -158,18 +174,18 @@ const assertBitIdentical = (
   b: Float32Array<ArrayBuffer>,
   label: string,
 ): void => {
-  assertEquals(a.length, b.length, `${label}: 長さ`);
+  assertEquals(a.length, b.length, `${label}: length`);
   const ab = bitsOf(a);
   const bb = bitsOf(b);
   for (let i = 0; i < ab.length; i += 1) {
     if (ab[i] !== bb[i]) {
-      throw new Error(`${label}: 要素 ${i} がビット不一致（${a[i]} vs ${b[i]}）`);
+      throw new Error(`${label}: element ${i} differs in bits (${a[i]} vs ${b[i]})`);
     }
   }
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 readonly 変種: 参照の帯・states 形（P−1・Q=1）とビット同一・空行と決定性（実 GPU）",
+  "states-form readonly variants: within the reference band, bit-identical to the states form (P−1, Q=1), empty row and determinism (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
@@ -180,36 +196,38 @@ test.skipIf(!GPU_AVAILABLE)(
         const expected = referenceStateAttentionReadonly(refInput(spec, inputs));
         const got = await runStateAttentionReadonly(gpu.device, spec, inputs, { cache });
 
-        // ① f64 参照との帯（毒値を 1 語でも読めば必ず外れる）
+        // ① the band of the f64 reference (reading a single poison word always falls outside it)
         const ref = compareTensors({ dtype: "f32", data: got.out }, expected, STATE_TOLERANCE);
-        assert(ref.pass, `${spec.name} vs 参照: ${formatAllclose(ref)}`);
+        assert(ref.pass, `${spec.name} vs reference: ${formatAllclose(ref)}`);
         worst = Math.max(worst, ref.maxAbsError);
 
         if (spec.past === 0) {
-          // ③ 空行は厳密 0（Object.is — −0 も NaN も通さない・毒値の初期化が残っていない）
+          // ③ an empty row is exactly 0 (Object.is — lets neither −0 nor NaN through; no poison
+          // initialization is left)
           for (let i = 0; i < got.out.length; i += 1) {
             assert(
               Object.is(got.out[i], 0),
-              `${spec.name}: 空行の出力 ${i} が厳密 0 でない（${got.out[i]}）`,
+              `${spec.name}: empty-row output ${i} is not exactly 0 (${got.out[i]})`,
             );
           }
         } else {
-          // ② states 形（past = P−1・Q = 1・ins = 位置 P−1 の行）と**ビット同一**
+          // ② **bit-identical** to the states form (past = P−1, Q = 1, ins = the row at position
+          // P−1)
           const eq = equivalentStatesRun(spec, inputs);
           const states = await runStateAttention(gpu.device, eq.spec, eq.inputs, {
             cache,
             qkReduce: "parallel",
             pvReduce: "parallel",
           });
-          assertBitIdentical(got.out, states.out, `${spec.name}: readonly vs states 形（①'/③'）`);
+          assertBitIdentical(got.out, states.out, `${spec.name}: readonly vs states form (①'/③')`);
         }
 
-        // ③ 決定性
+        // ③ determinism
         const again = await runStateAttentionReadonly(gpu.device, spec, inputs, { cache });
-        assertBitIdentical(got.out, again.out, `${spec.name}: 決定性`);
+        assertBitIdentical(got.out, again.out, `${spec.name}: determinism`);
       }
       console.log(
-        `readonly 実測最悪: vs 参照 maxAbs ${worst.toExponential(2)}（帯 ${STATE_TOLERANCE.atol}）`,
+        `readonly measured worst: vs reference maxAbs ${worst.toExponential(2)} (band ${STATE_TOLERANCE.atol})`,
       );
     } finally {
       gpu.destroy();
@@ -217,16 +235,20 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 故障注入 — live の式と物理行の写像を崩した変異が参照の帯で落ちること（門が空振りでない証明）。 */
+/**
+ * Fault injection — mutations that break the live expression and the physical-row mapping fail the
+ * reference band (proof that the check fires).
+ */
 const MUTATIONS: readonly { readonly name: string; readonly mutate: StateMutation }[] = [
   {
-    // live を 1 列広げる（位置 P = 棄却行〈毒値〉を読む）
+    // Widen live by one column (reads position P = a rejected row (poison))
     name: "live = min(past, window) → min(past, window + 1u)",
     mutate: (_kernel, wgsl) =>
       wgsl.replaceAll("return min(past, params.window);", "return min(past, params.window + 1u);"),
   },
   {
-    // 窓の先頭を 1 列前へ（窓外 P−W−1〈毒値〉を読み、P−1 を落とす）
+    // Move the window start one column earlier (reads the out-of-window P−W−1 (poison) and drops
+    // P−1)
     name: "column_base = past − min(past, window) → past − min(past, window + 1u)",
     mutate: (_kernel, wgsl) =>
       wgsl.replaceAll(
@@ -235,7 +257,8 @@ const MUTATIONS: readonly { readonly name: string; readonly mutate: StateMutatio
       ),
   },
   {
-    // 読み側の写像を window の法へ戻す（読み書き同式を破る — ring 一周後は別の物理行を指す）
+    // Turn the read-side mapping back to modulo window (breaks "read and write use the same
+    // expression" — after one ring wrap it points at another physical row)
     name: "slot_row = col % capacity → col % window",
     mutate: (_kernel, wgsl) =>
       wgsl.replaceAll("return col % params.capacity;", "return col % params.window;"),
@@ -243,14 +266,15 @@ const MUTATIONS: readonly { readonly name: string; readonly mutate: StateMutatio
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  "states 形 readonly 変種: 故障注入（live のずれ・窓の先頭のずれ・写像の法）は参照の帯で落ちる（実 GPU）",
+  "states-form readonly variants: fault injection (shifted live, shifted window start, mapping modulus) fails the reference band (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const cache: StatePipelineCache = new Map();
     try {
-      // 変異が値に出る形: 位置 P の物理行と窓外の行に毒値が居て、ring が一周した sliding のケース
+      // Cases where a mutation shows in the values: sliding cases where the ring has wrapped, with
+      // poison in the physical row of position P and in the out-of-window rows
       const targets = CASES.filter((spec) => spec.past >= 9 && stateSliding(spec.window));
-      assert(targets.length >= 2, "故障注入の対象ケースが足りない");
+      assert(targets.length >= 2, "not enough target cases for fault injection");
       for (const mutation of MUTATIONS) {
         let caught = 0;
         for (const spec of targets) {
@@ -267,7 +291,7 @@ test.skipIf(!GPU_AVAILABLE)(
           });
           assert(
             changed > 0,
-            `故障注入「${mutation.name}」が 1 本のカーネルも書き換えていない（文言が変わった）`,
+            `fault injection "${mutation.name}" rewrote no kernel (the source text changed)`,
           );
           const cmp = compareTensors(
             { dtype: "f32", data: mutated.out },
@@ -276,7 +300,10 @@ test.skipIf(!GPU_AVAILABLE)(
           );
           if (!cmp.pass) caught += 1;
         }
-        assert(caught > 0, `故障注入「${mutation.name}」が 1 ケースも赤にならない（門が空振り）`);
+        assert(
+          caught > 0,
+          `fault injection "${mutation.name}" turned no case red (the check never fires)`,
+        );
       }
     } finally {
       gpu.destroy();

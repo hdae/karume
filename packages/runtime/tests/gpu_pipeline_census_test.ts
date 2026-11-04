@@ -1,12 +1,12 @@
-// `SessionDiagnostics.lastRunPipelines`（直近 run の計画上の dispatch 本数 — パイプラインキー別）を
-// 実 GPU で固定する門。純関数の振る舞いは runtime_pipeline_census_test.ts。
+// Real-GPU check that pins `SessionDiagnostics.lastRunPipelines` (the planned dispatch counts of the latest
+// run, per pipeline key). The behaviour of the pure function is in runtime_pipeline_census_test.ts.
 //
-// 見るのは 3 つ:
-// ① 計測ありの device で、実際に発行された dispatch の内訳（`lastRunTiming`）とキー集合・本数が
-//    一致する（ミス run とヒット run の両方 — ヒット run は導出相を飛ばすので、census の源が
-//    Session 累積のキー集合だと空振りする）。
-// ② 計測の無い常駐経路（enqueue — ADR 0054）でも埋まる（この欄の存在理由）。
-// ③ レシピ生成で落ちた run の直後は undefined（1 本前の成功 run の表を残さない）。
+// Three things are checked:
+// ① On a device with timing, the key set and counts match the breakdown of the dispatches actually issued
+//    (`lastRunTiming`) (on both a miss run and a hit run — a hit run skips the derivation phase, so a census
+//    sourced from the Session's cumulative key set would test nothing).
+// ② It is filled on the resident path without timing too (enqueue — ADR 0054) (the reason this field exists).
+// ③ Right after a run that failed in recipe generation it is undefined (the table of the previous successful run is not kept).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -21,11 +21,12 @@ import { type DeclarationJson, fill, GRAPH_NAME, openGraphModel } from "./helper
 type Census = readonly { readonly key: string; readonly dispatchCount: number }[];
 
 /**
- * y = relu(neg(relu(x))) + relu(x)。relu を 2 回使うので、同じキーに 2 本載る行ができる
- * （elementwise のキーは op / rank / dtype で決まる — 本数の集計が空振りしていないことの材料）。
- * MUST: states を持たない（= workgroup 数が全て静的な 3 つ組）グラフにする。論理長から算出する
- * states 形の dispatch は仕事量ゼロの step で実際には積まれず、計画上の本数（census）が実発行
- * （timing）より多く出る — ここでは完全一致を断言したいので、その差が生じ得ない形に限る。
+ * y = relu(neg(relu(x))) + relu(x). relu is used twice, so one row carries 2 dispatches on the same key
+ * (elementwise keys are determined by op / rank / dtype — evidence that the count aggregation is not vacuous).
+ * MUST: the graph has no states (= every workgroup count is a static triple). A states-form dispatch computed
+ * from a logical length is not actually encoded for a zero-work step, so the planned count (census) comes out
+ * higher than the actual issue (timing) — here we want to assert an exact match, so only shapes where that
+ * difference cannot arise are used.
  */
 const GRAPH: DeclarationJson = {
   format: "karume-ir",
@@ -57,36 +58,40 @@ const openSession = async (gpu: GpuContext): Promise<Session> =>
 const byKey = (a: { readonly key: string }, b: { readonly key: string }): number =>
   a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
 
-/** 実発行の内訳を census と同じ形（キーの辞書順）へ写す（`entries` は ns の降順）。 */
+/** Maps the actually issued breakdown into the same shape as the census (keys in lexicographic order; `entries` is in descending ns). */
 const issued = (timing: GpuTimingStats): Census =>
   timing.entries.map(({ key, dispatchCount }) => ({ key, dispatchCount })).sort(byKey);
 
-/** census が空振りしていないこと（空の表同士の一致で緑にしない）。 */
+/** Checks that the census is not vacuous (two empty tables matching must not pass). */
 const assertNonTrivial = (census: Census | undefined): Census => {
-  assert(census !== undefined, "lastRunPipelines が埋まっていない");
-  assert(census.length > 0, "census が空（数え損ねを一致で隠す）");
+  assert(census !== undefined, "lastRunPipelines is not filled");
+  assert(census.length > 0, "the census is empty (a miscount hidden behind a match)");
   assert(
     census.some((entry) => entry.dispatchCount >= 2),
-    "同じキーに 2 本以上載る行が無い（本数の集計が検査されていない）",
+    "no row carries 2 or more dispatches on the same key (the count aggregation is not exercised)",
   );
   return census;
 };
 
 test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
-  "lastRunPipelines は計測の実発行内訳とキー集合・本数が一致する（ミス / ヒット run・実 GPU）",
+  "lastRunPipelines matches the key set and counts of the timed actual issue (miss / hit run; real GPU)",
   async () => {
     const gpu = await acquireGpu({ gpuTiming: true });
     const session = await openSession(gpu);
     try {
-      assertEquals(session.diagnostics().lastRunPipelines, undefined, "未実行なら undefined");
+      assertEquals(session.diagnostics().lastRunPipelines, undefined, "undefined before any run");
       for (const hit of [false, true]) {
         await session.run(input());
         const diagnostics = session.diagnostics();
         assertEquals(diagnostics.lastRunPrepared?.hit, hit);
         const timing = diagnostics.lastRunTiming;
-        assert(timing !== undefined, "gpuTiming: true なのに内訳が無い");
+        assert(timing !== undefined, "no breakdown despite gpuTiming: true");
         const census = assertNonTrivial(diagnostics.lastRunPipelines);
-        assertEquals(census, issued(timing), `hit=${hit}: 計画上の本数と実発行が食い違う`);
+        assertEquals(
+          census,
+          issued(timing),
+          `hit=${hit}: planned counts and actual issue disagree`,
+        );
         assertEquals(
           census.reduce((total, entry) => total + entry.dispatchCount, 0),
           timing.dispatchCount,
@@ -100,28 +105,32 @@ test.skipIf(!GPU_AVAILABLE || !TIMESTAMP_QUERY_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "lastRunPipelines は計測の無い常駐経路（enqueue）でも埋まり、run と同じ表になる（実 GPU）",
+  "lastRunPipelines is filled on the resident path without timing (enqueue) too, with the same table as run (real GPU)",
   async () => {
-    // 計測を要求しない device（計測有効だと beginBatch が拒否される — ADR 0054）。
+    // A device that does not request timing (with timing enabled, beginBatch is rejected — ADR 0054).
     const gpu = await acquireGpu();
     const session = await openSession(gpu);
     try {
       const batch = await gpu.beginBatch();
-      // 1 本目は enqueue 側で導出（ミス）、2 本目はヒット。どちらの直後も埋まっていること。
-      // `#prepareInvocation` が毎回 undefined へ倒すので、2 本目の直後に埋まっているのは
-      // 2 本目自身が書いた値（1 本目の残りではない）。
+      // The first is derived on the enqueue side (miss), the second is a hit. It must be filled right after both.
+      // `#prepareInvocation` resets it to undefined every time, so what is filled right after the second is the
+      // value the second wrote itself (not a leftover from the first).
       const seen: Census[] = [];
       for (const hit of [false, true]) {
         await session.enqueue(input(), { batch });
         const diagnostics = session.diagnostics();
         assertEquals(diagnostics.lastRunPrepared?.hit, hit);
-        assertEquals(diagnostics.lastRunTiming, undefined, "常駐経路は計測窓を作らない");
+        assertEquals(
+          diagnostics.lastRunTiming,
+          undefined,
+          "the resident path does not open a timing window",
+        );
         seen.push(assertNonTrivial(diagnostics.lastRunPipelines));
       }
       await batch.finish();
-      assertEquals(seen[1], seen[0], "同じ計画のミス / ヒットで表が変わる");
+      assertEquals(seen[1], seen[0], "the table changes between miss and hit of the same plan");
 
-      // 対照: 同じ入力の run（同じ導出済み計画に当たる）と同じ表。
+      // Control: the same table as a run with the same inputs (which hits the same derived plan).
       await session.run(input());
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
       assertEquals(session.diagnostics().lastRunPipelines, seen[0]);
@@ -133,14 +142,15 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "レシピ生成で落ちた run の直後は lastRunPipelines が undefined（実 GPU）",
+  "right after a run that failed in recipe generation, lastRunPipelines is undefined (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // 故障注入の位置は**レシピ生成**（`RecipeBuilder.buildRecipes` の matmul が dispatch 上限超過で
-    // throw — gpu_params_cache_test.ts と同じ仕掛け）。出力タイル辺は既定幾何から導く（定数で
-    // 書くと辺を変えた瞬間に throw が起きず、assertRejects だけが静かに落ちる）。
-    // NOTE: `bindSymbols`（入力 shape の検証）と `planSteps`（計画・融合判定）の失敗は対象外 —
-    // どちらも `#prepareInvocation` で「直近 run」の席を倒すより前に throw する。
+    // The fault is injected in **recipe generation** (the matmul of `RecipeBuilder.buildRecipes` throws for
+    // exceeding the dispatch limit — the same setup as gpu_params_cache_test.ts). The output tile edge is derived
+    // from the default geometry (if it were written as a constant, changing the edge would stop the throw and only
+    // assertRejects would fail, quietly).
+    // NOTE: failures of `bindSymbols` (input shape validation) and `planSteps` (planning and fusion decisions) are
+    // out of scope — both throw before `#prepareInvocation` resets the "latest run" slot.
     const tileN = gemmTileN(defaultGemmGeometry());
     const huge = gpu.limits.maxComputeWorkgroupsPerDimension * tileN + tileN;
     const graph: DeclarationJson = {
@@ -166,7 +176,7 @@ test.skipIf(!GPU_AVAILABLE)(
     const session = await createSessionFromContainer(gpu, await openGraphModel(graph), GRAPH_NAME);
     const small = () => ({ x0: fill([1, 1], () => 1), x1: fill([1, 4], () => 1) });
     try {
-      // 対照: 成功 run の直後は埋まっている（失敗 run の undefined が「最初から空」ではない証明）。
+      // Control: it is filled right after a successful run (proof that the failed run's undefined is not "empty from the start").
       await session.run(small());
       const before = session.diagnostics().lastRunPipelines;
       assert(before !== undefined && before.length > 0);
@@ -176,11 +186,15 @@ test.skipIf(!GPU_AVAILABLE)(
         DispatchLimitError,
       );
       const failed = session.diagnostics();
-      assertEquals(failed.lastRunPipelines, undefined, "落ちた run が 1 本前の表を語る");
-      // 融合回数は落ちた run 自身の計画結果なので残る（倒れたのが「レシピ列が確定した後の席」だけ）。
+      assertEquals(
+        failed.lastRunPipelines,
+        undefined,
+        "the failed run reports the previous run's table",
+      );
+      // The fusion count stays because it is the failed run's own planning result (only the "slot after the recipe list is fixed" was reset).
       assertEquals(failed.lastRunFusions !== undefined, true);
 
-      // 復帰: 同じ bindings の run は元の計画に当たり、同じ表を返す。
+      // Recovery: a run with the same bindings hits the original plan and returns the same table.
       await session.run(small());
       assertEquals(session.diagnostics().lastRunPrepared?.hit, true);
       assertEquals(session.diagnostics().lastRunPipelines, before);

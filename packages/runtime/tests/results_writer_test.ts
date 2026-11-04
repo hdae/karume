@@ -1,8 +1,9 @@
-// 検証結果の書き出し（`outputs/verify/<環境キー>/<日付>_<系列>/`）。
+// Writing out verification results (`outputs/verify/<environment key>/<date>_<series>/`).
 //
-// ここで見るのは 3 つ: 席が環境キーで分かれること、`record` のたびに `results.json` が
-// **その時点までの全件**で書き直されること（途中で落ちても直前までが残る）、実物の置き場が
-// 同じディレクトリ配下に閉じること。実 GPU も `outputs/` も要らない — 根と環境は注入する。
+// Three things are checked here: results directories are separated by environment key; every
+// `record` rewrites `results.json` with **all entries up to that point** (a crash midway keeps
+// everything before it); and artifacts stay inside the same directory. Neither a real GPU nor
+// `outputs/` is needed — the root and the environment are injected.
 
 import {
   makeTempDirSync,
@@ -51,14 +52,17 @@ type ResultsDocument = {
   readonly cases: readonly ResultEntry[];
 };
 
-test("結果の書き出し: record のたびに全件で書き直され、実物は同じ席に置かれる", async () => {
+test("results writer: every record rewrites all entries, and artifacts go in the same directory", async () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("irodori", { root, environment: ENVIRONMENT });
 
     const artifact = results.artifact("voice-clone.wav");
-    assert(artifact.href.startsWith(results.dir.href), "実物が結果の席の外を指している");
+    assert(
+      artifact.href.startsWith(results.dir.href),
+      "the artifact points outside the results directory",
+    );
     await writeFile(artifact, new Uint8Array([1, 2, 3]));
 
     await results.record({
@@ -72,10 +76,11 @@ test("結果の書き出し: record のたびに全件で書き直され、実�
     const afterFirst = JSON.parse(
       await readTextFile(new URL("results.json", results.dir)),
     ) as ResultsDocument;
-    assertEquals(afterFirst.cases.length, 1, "1 件目が残っていない");
-    // 席の日付は、実装が走行の開始時に確定した startedAt の日付部（UTC）と同じ時刻の源で比べる。
-    // テスト側で時刻を取り直すと、開始とここの間に UTC 0 時をまたいだ回だけ偽 FAIL する。
-    assert(/^\d{4}-\d{2}-\d{2}T/.test(afterFirst.startedAt), "startedAt が ISO の日時でない");
+    assertEquals(afterFirst.cases.length, 1, "the first entry is missing");
+    // The directory's date is compared against the same time source as the implementation: the date
+    // part (UTC) of the startedAt fixed when the run started. Reading the clock again in the test
+    // would fail spuriously only on runs that cross UTC midnight between the start and here.
+    assert(/^\d{4}-\d{2}-\d{2}T/.test(afterFirst.startedAt), "startedAt is not an ISO date-time");
     const today = afterFirst.startedAt.slice(0, 10);
     assertEquals(results.dir.href, new URL(`${KEY}/${today}_irodori/`, root).href);
 
@@ -91,49 +96,60 @@ test("結果の書き出し: record のたびに全件で書き直され、実�
       ["voice-clone", "no-ref"],
     );
     assertEquals(document.cases[1].status, "written");
-    // 参照値を作った回は expected を持たない（JSON.stringify が undefined の欄を落とす）。
+    // A run that created the reference value has no expected (JSON.stringify drops undefined
+    // fields).
     assertEquals(Object.hasOwn(document.cases[1], "expected"), false);
-    assert(document.startedAt.endsWith("Z"), "startedAt が ISO 文字列でない");
-    // このリポは git 管理下なのでチェックアウトは採れる（git が無い機でだけ null）。
+    assert(document.startedAt.endsWith("Z"), "startedAt is not an ISO string");
+    // This repository is under git, so the checkout can be read (null only on a machine without
+    // git).
     assert(
       document.checkout === null || /^[0-9a-f]{40}$/.test(document.checkout.sha),
-      `checkout の sha が commit SHA でない: ${JSON.stringify(document.checkout)}`,
+      `the checkout's sha is not a commit SHA: ${JSON.stringify(document.checkout)}`,
     );
   } finally {
     removeSync(temporary, { recursive: true });
   }
 });
 
-test("結果の書き出し: 席を作った時点で走行中（cases 空）の results.json が置かれる", async () => {
+test("results writer: creating the directory places an in-progress results.json (cases empty)", async () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("golden", { root, environment: ENVIRONMENT });
-    // 前回の走行が同じ席（同じ日・同じ系列）に残した決着。
+    // The outcomes a previous run left in the same directory (same day, same series).
     mkdirSync(results.dir, { recursive: true });
     writeTextFileSync(
       new URL("results.json", results.dir),
       `${JSON.stringify({ schema: 1, cases: [{ id: "activations", status: "pass" }] })}\n`,
     );
-    // 実物だけ置いて record には到達しない = 記録の前に例外で抜けた回。
+    // Only an artifact is placed and record is never reached = a run that exited with an exception
+    // before recording.
     await writeFile(results.artifact("activations.png"), new Uint8Array([1, 2, 3]));
     const document = JSON.parse(
       await readTextFile(new URL("results.json", results.dir)),
     ) as ResultsDocument;
-    assertEquals(document.cases, [], "前回の走行の決着が今回の実物と同じ席に残っている");
+    assertEquals(
+      document.cases,
+      [],
+      "the previous run's outcomes remain in the same directory as this run's artifacts",
+    );
     assertEquals(document.family, "golden");
-    assert(document.startedAt.endsWith("Z"), "走行中マーカーが今回の startedAt を名乗っていない");
+    assert(
+      document.startedAt.endsWith("Z"),
+      "the in-progress marker does not carry this run's startedAt",
+    );
   } finally {
     removeSync(temporary, { recursive: true });
   }
 });
 
-test("結果の書き出し: 許容差の実測が record に載せたとおりの形で残る", async () => {
+test("results writer: tolerance measurements are kept in the shape given to record", async () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("golden", { root, environment: ENVIRONMENT });
-    // 合格した回の実測（これが残らないと「どれだけ差が出たか」は赤くなるまで分からない）。
+    // Measurements of a passing run (without them, "how large the difference was" is unknown until
+    // it goes red).
     const measurements: readonly Measurement[] = [
       {
         output: "sin",
@@ -160,13 +176,14 @@ test("結果の書き出し: 許容差の実測が record に載せたとおり�
   }
 });
 
-test("結果の書き出し: 非有限の実測は null として書かれる", async () => {
+test("results writer: non-finite measurements are written as null", async () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
     const results = openResults("golden", { root, environment: ENVIRONMENT });
-    // NaN / ±Inf（出力に非有限が混ざった回の実測）。JSON に綴りが無いので null になる —
-    // 読む側（tools/verify-diff）はこの null を「測れなかった」として受ける。
+    // NaN / ±Inf (measurements of a run whose output contained non-finite values). JSON has no
+    // spelling for them, so they become null — the reader (tools/verify-diff) takes this null as
+    // "could not be measured".
     await results.record({
       id: "activations",
       status: "fail",
@@ -189,17 +206,20 @@ test("結果の書き出し: 非有限の実測は null として書かれる", 
   }
 });
 
-// 失敗した回の決着は「残すのが務め」だが、その書き込みが落ちたときに throw すると、呼び手の
-// catch が抱えている元の検証例外（何が壊れたのかを言う唯一の診断）が I/O 例外に置き換わる。
-test("結果の書き出し: 記録できなくても recordFailure は throw せず、黙りもしない", async () => {
+// Keeping the outcome of a failed run is "the job", but throwing when that write fails would
+// replace the original verification exception held by the caller's catch (the only diagnostic
+// saying what broke) with an I/O exception.
+test("results writer: recordFailure neither throws nor stays silent when it cannot record", async () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
-    // 故障注入: 席の親（環境キーのディレクトリ）を通常ファイルにする = 席を作れない置き場。
+    // Fault injection: make the directory's parent (the environment key directory) a regular file =
+    // a place where the directory cannot be created.
     writeTextFileSync(new URL(KEY, root), "");
     const results = openResults("golden", { root, environment: ENVIRONMENT });
     const entry: ResultEntry = { id: "activations", status: "fail", elapsedMs: 3 };
-    // 故障注入が効いていることを先に固定する（素の record が通るなら下の検査は何も言わない）。
+    // Pin first that the fault injection works (if a plain record passes, the check below says
+    // nothing).
     await assertRejects(() => results.record(entry));
 
     const said: string[] = [];
@@ -208,19 +228,20 @@ test("結果の書き出し: 記録できなくても recordFailure は throw �
       said.push(args.map(String).join(" "));
     };
     try {
-      // 元の検証例外を置き換えないので、ここは投げずに戻る。
+      // It does not replace the original verification exception, so it returns here without
+      // throwing.
       await recordFailure(results, entry);
     } finally {
       console.error = original;
     }
-    assertEquals(said.length, 1, "記録できなかったことを黙って飲み込んだ");
+    assertEquals(said.length, 1, "the failure to record was silently swallowed");
     assertStringIncludes(said[0], "activations");
   } finally {
     removeSync(temporary, { recursive: true });
   }
 });
 
-test("結果の書き出し: ディレクトリ区切りを含む実物の名前は throw する", () => {
+test("results writer: an artifact name containing a directory separator throws", () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const results = openResults("anima", {
@@ -233,16 +254,18 @@ test("結果の書き出し: ディレクトリ区切りを含む実物の名前
   }
 });
 
-test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ / . / .. / % / ? / #）は throw する", () => {
-  // file: URL ではバックスラッシュも区切りとして解決され、`..` や `%2e%2e` は親ディレクトリを指す。
-  // `/` だけを拒む形だと、これらが結果の席の外（または席そのもの）へ書き込む。
+test("results writer: artifact names that can point outside the directory or to its parent (\\ / . / .. / % / ? / #) throw", () => {
+  // In a file: URL a backslash also resolves as a separator, and `..` or `%2e%2e` points to the
+  // parent directory. Rejecting only `/` would let these write outside the results directory (or to
+  // the directory itself).
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const results = openResults("anima", {
       root: new URL(`file://${temporary}/`),
       environment: ENVIRONMENT,
     });
-    // `?` / `#` の後ろはクエリ・フラグメントへ回り、記録する名前と書き込み先（`a`）がずれる。
+    // What follows `?` / `#` goes to the query / fragment, so the recorded name and the write
+    // target (`a`) diverge.
     for (const name of [
       "..\\outside.wav",
       "..",
@@ -255,7 +278,8 @@ test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ 
     ]) {
       assertThrows(() => results.artifact(name), Error, "実物の名前", JSON.stringify(name));
     }
-    // 対照: 普通の名前（点を含む拡張子や連番）は席の直下へ解決される。
+    // Control: ordinary names (extensions with dots, sequence numbers) resolve directly under the
+    // directory.
     for (const name of ["F1.i8.wav", "frame-0001.png"]) {
       assertEquals(results.artifact(name).href, new URL(name, results.dir).href);
     }
@@ -264,17 +288,18 @@ test("結果の書き出し: 席の外や親を指しうる実物の名前（\\ 
   }
 });
 
-// runRecordedCase（実重み golden の各ケースを包む枠）。書き出しの実体は上で見ているので、ここは
-// 記録の口を fake にして「どの経路でも決着が同じ形で 1 件積まれる」ことだけを見る。
+// runRecordedCase (the wrapper around each real-weight golden case). The writing itself is checked
+// above, so here recording is faked and only "every path appends one outcome of the same shape" is
+// checked.
 
-/** 積まれた決着を手元に残す fake（`record` を落とす故障注入つき）。 */
+/** A fake that keeps the appended outcomes (with fault injection that makes `record` fail). */
 const fakeResults = (failRecord = false): { results: Results; entries: ResultEntry[] } => {
   const entries: ResultEntry[] = [];
   const results: Results = {
     dir: new URL("file:///fake/"),
     artifact: (name: string): URL => new URL(name, "file:///fake/"),
     record: (entry: ResultEntry): Promise<void> => {
-      if (failRecord) return Promise.reject(new Error("results.json を書けない"));
+      if (failRecord) return Promise.reject(new Error("cannot write results.json"));
       entries.push(entry);
       return Promise.resolve();
     },
@@ -290,7 +315,7 @@ const MEASUREMENT: Measurement = {
   stage: "karume",
 };
 
-/** console.error を拾いながら `action` を待つ。 */
+/** Waits for `action` while capturing console.error. */
 const captureConsoleError = async (action: () => Promise<void>): Promise<string[]> => {
   const said: string[] = [];
   const original = console.error;
@@ -305,7 +330,7 @@ const captureConsoleError = async (action: () => Promise<void>): Promise<string[
   return said;
 };
 
-test("runRecordedCase: 本体が戻った回は pass と積んだ実測を 1 件残す", async () => {
+test("runRecordedCase: a run whose body returns keeps one entry with pass and the appended measurements", async () => {
   const { results, entries } = fakeResults();
   await runRecordedCase(results, { id: "case0" }, ({ measurements }) => {
     measurements.push(MEASUREMENT);
@@ -317,12 +342,15 @@ test("runRecordedCase: 本体が戻った回は pass と積んだ実測を 1 件
   assertEquals(entry.id, "case0");
   assertEquals(entry.status, "pass");
   assertEquals(entry.measurements, [MEASUREMENT]);
-  assert(Number.isInteger(entry.elapsedMs) && entry.elapsedMs >= 0, "elapsedMs が整数 ms でない");
+  assert(
+    Number.isInteger(entry.elapsedMs) && entry.elapsedMs >= 0,
+    "elapsedMs is not an integer number of ms",
+  );
 });
 
-test("runRecordedCase: 本体が投げた回は fail を残してから同じ例外を投げ直す", async () => {
+test("runRecordedCase: a run whose body throws keeps fail and then rethrows the same exception", async () => {
   const { results, entries } = fakeResults();
-  const cause = new Error("output.0: allclose 不一致");
+  const cause = new Error("output.0: allclose mismatch");
   const order: string[] = [];
   const thrown = await assertRejects(() =>
     runRecordedCase(
@@ -330,38 +358,43 @@ test("runRecordedCase: 本体が投げた回は fail を残してから同じ例
       {
         id: "case1",
         onFailure: () => {
-          order.push(`onFailure（積んだ件数 ${entries.length}）`);
+          order.push(`onFailure (entries appended: ${entries.length})`);
         },
       },
       ({ measurements }) => {
-        // 落ちる前に測れた分も決着に載る（どこまで測れたかが失敗の診断になる）。
+        // What was measured before the failure is part of the outcome (how far it got is the
+        // failure's diagnostic).
         measurements.push(MEASUREMENT);
         return Promise.reject(cause);
       },
     ),
   );
-  assertStrictEquals(thrown, cause, "元の検証例外が別の例外に置き換わった");
+  assertStrictEquals(
+    thrown,
+    cause,
+    "the original verification exception was replaced by another exception",
+  );
   assertEquals(entries.length, 1);
   assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "measurements"]);
   assertEquals(entries[0].status, "fail");
   assertEquals(entries[0].measurements, [MEASUREMENT]);
-  // 系列側の「ケースの席に残った」印は記録より先に立つ。
-  assertEquals(order, ["onFailure（積んだ件数 0）"]);
+  // The series' "left in the case's directory" mark is set before recording.
+  assertEquals(order, ["onFailure (entries appended: 0)"]);
 });
 
-test("runRecordedCase: 本体が fail を返した回は投げずに note つきで残す", async () => {
+test("runRecordedCase: a run whose body returns fail keeps it with its note without throwing", async () => {
   const { results, entries } = fakeResults();
   await runRecordedCase(results, { id: "gelu" }, () =>
-    Promise.resolve({ status: "fail", note: "仕様帯で受理: sin" }),
+    Promise.resolve({ status: "fail", note: "accepted within the specified band: sin" }),
   );
   assertEquals(entries.length, 1);
   assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "note", "measurements"]);
   assertEquals(entries[0].status, "fail");
-  assertEquals(entries[0].note, "仕様帯で受理: sin");
+  assertEquals(entries[0].note, "accepted within the specified band: sin");
   assertEquals(entries[0].measurements, []);
 });
 
-test("runRecordedCase: 投げた回の note は failureNote が例外から作る", async () => {
+test("runRecordedCase: the note of a run that threw is built from the exception by failureNote", async () => {
   const { results, entries } = fakeResults();
   await assertRejects(
     () =>
@@ -369,32 +402,37 @@ test("runRecordedCase: 投げた回の note は failureNote が例外から作�
         results,
         {
           id: "gelu",
-          failureNote: (cause) => `例外: ${cause instanceof Error ? cause.message : String(cause)}`,
+          failureNote: (cause) =>
+            `exception: ${cause instanceof Error ? cause.message : String(cause)}`,
         },
-        () => Promise.reject(new Error("createSession 失敗")),
+        () => Promise.reject(new Error("createSession failed")),
       ),
     Error,
-    "createSession 失敗",
+    "createSession failed",
   );
   assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "note", "measurements"]);
-  assertEquals(entries[0].note, "例外: createSession 失敗");
+  assertEquals(entries[0].note, "exception: createSession failed");
 });
 
-test("runRecordedCase: 投げた回に記録が落ちても元の例外を投げ、記録できなかったと言う", async () => {
+test("runRecordedCase: when recording fails on a run that threw, it throws the original exception and says it could not record", async () => {
   const { results } = fakeResults(true);
-  const cause = new Error("shape 不一致");
+  const cause = new Error("shape mismatch");
   let thrown: unknown;
   const said = await captureConsoleError(async () => {
     thrown = await assertRejects(() =>
       runRecordedCase(results, { id: "case2" }, () => Promise.reject(cause)),
     );
   });
-  assertStrictEquals(thrown, cause, "元の検証例外が I/O 例外に置き換わった");
-  assertEquals(said.length, 1, "記録できなかったことを黙って飲み込んだ");
+  assertStrictEquals(
+    thrown,
+    cause,
+    "the original verification exception was replaced by an I/O exception",
+  );
+  assertEquals(said.length, 1, "the failure to record was silently swallowed");
   assertStringIncludes(said[0], "case2");
 });
 
-test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailure は呼ばない", async () => {
+test("runRecordedCase: when recording fails on a run that returned, it throws and does not call onFailure", async () => {
   const { results } = fakeResults(true);
   let failed = false;
   await assertRejects(
@@ -410,15 +448,17 @@ test("runRecordedCase: 戻った回に記録が落ちたら投げ、onFailure �
         () => Promise.resolve(undefined),
       ),
     Error,
-    "results.json を書けない",
+    "cannot write results.json",
   );
-  // ケースの決着は残っていない — 系列側が「ケースの席に残った」と誤認すると、どこにも残らない。
+  // The case's outcome is not kept — if the series mistook it for "left in the case's directory",
+  // it would be kept nowhere.
   assertEquals(failed, false);
 });
 
-// 書き手（helpers/results.ts）と読み手（tools/verify-diff）は型を別々に持つ。ADR 0106 追記の
-// 「schema は 1 のまま」は両者の一致に依存するので、書き手が実際に書いた文書を読み手へ通す。
-test("往復: runRecordedCase が書いた results.json を verify-diff の読み手がそのまま受ける", async () => {
+// The writer (helpers/results.ts) and the reader (tools/verify-diff) have separate types. The ADR
+// 0106 addendum's "schema stays 1" depends on the two agreeing, so the document the writer actually
+// wrote is passed to the reader.
+test("round trip: the verify-diff reader accepts the results.json written by runRecordedCase as is", async () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
@@ -427,7 +467,7 @@ test("往復: runRecordedCase が書いた results.json を verify-diff の読�
       measurements.push({ ...MEASUREMENT, maxAbs: Number.NaN });
       return Promise.resolve(undefined);
     });
-    const cause = new Error("測る前に落ちた");
+    const cause = new Error("failed before measuring");
     await assertRejects(() =>
       runRecordedCase(results, { id: "thrown", failureNote: String }, () => Promise.reject(cause)),
     );
@@ -443,19 +483,23 @@ test("往復: runRecordedCase が書いた results.json を verify-diff の読�
         ["thrown", "fail"],
       ],
     );
-    // 非有限は書き手の JSON.stringify で null になり、読み手は「測れなかった」として受ける。
+    // Non-finite values become null through the writer's JSON.stringify, and the reader takes them
+    // as "could not be measured".
     assertEquals(document.cases[0].measurements, [{ ...MEASUREMENT, maxAbs: null }]);
-    // runRecordedCase 経由は測る前に投げた回も欄を持つ（空配列）。
+    // Through runRecordedCase, a run that threw before measuring also has the field (an empty
+    // array).
     assertEquals(document.cases[1].measurements, []);
-    assertEquals(document.cases[1].note, "Error: 測る前に落ちた");
+    assertEquals(document.cases[1].note, "Error: failed before measuring");
   } finally {
     removeSync(temporary, { recursive: true });
   }
 });
 
-// 自機 A/B 門（ADR 0110 決定 5）の実測は任意欄 `comparisons`。積んだケースだけが欄を持ち、
-// 非有限は null・未導出の帯は欄ごと落ちた形で、読み手（tools/verify-diff）がそのまま受ける。
-test("往復: runRecordedCase が積んだ A/B の実測は comparisons として読み手まで届く", async () => {
+// Measurements of the own-machine A/B check (ADR 0110 decision 5) go in the optional field
+// `comparisons`. Only cases that appended them have the field; non-finite values are null and a
+// band not yet derived drops out with its field, and the reader (tools/verify-diff) accepts this as
+// is.
+test("round trip: A/B measurements appended by runRecordedCase reach the reader as comparisons", async () => {
   const temporary = makeTempDirSync({ prefix: "karume-verify-" });
   try {
     const root = new URL(`file://${temporary}/`);
@@ -474,9 +518,10 @@ test("往復: runRecordedCase が積んだ A/B の実測は comparisons とし�
     });
     await runRecordedCase(results, { id: "unbanded" }, ({ comparisons }) => {
       comparisons.push({ ...comparison, relRms: Number.NaN, band: undefined });
-      return Promise.resolve({ status: "fail", note: "帯が未導出" });
+      return Promise.resolve({ status: "fail", note: "band not derived" });
     });
-    // 積まなかったケースは欄を持たない（A/B 門でないケースの決着の形は変わらない）。
+    // A case that appended none has no field (the outcome shape of a case that is not an A/B check
+    // is unchanged).
     await runRecordedCase(results, { id: "plain" }, () => Promise.resolve(undefined));
 
     const text = await readTextFile(new URL("results.json", results.dir));
@@ -497,10 +542,11 @@ test("往復: runRecordedCase が積んだ A/B の実測は comparisons とし�
   }
 });
 
-// sha 門を兼ねるケース（reference.ts の settleReference の決着を verdict に載せる）。欄は
-// ResultEntry の宣言順に並び、載せなかったケースの決着の形は従来のまま変わらない。
-describe("runRecordedCase の決着に載せた参照値の欄", () => {
-  it("written の決着は status / actual / artifact を写し、expected を持たない", async () => {
+// Cases that double as the sha check (the outcome of reference.ts's settleReference goes into the
+// verdict). The fields follow ResultEntry's declaration order, and the outcome shape of a case that
+// carries none stays as before.
+describe("the reference-value fields carried in runRecordedCase's outcome", () => {
+  it("a written outcome copies status / actual / artifact and has no expected", async () => {
     const { results, entries } = fakeResults();
     await runRecordedCase(results, { id: "golden-0" }, ({ measurements }) => {
       measurements.push(MEASUREMENT);
@@ -524,11 +570,11 @@ describe("runRecordedCase の決着に載せた参照値の欄", () => {
     assertEquals(entries[0].artifact, "golden-0.safetensors");
   });
 
-  it("expected / actual / artifact / note を ResultEntry の宣言順に写す", async () => {
+  it("copies expected / actual / artifact / note in ResultEntry's declaration order", async () => {
     const { results, entries } = fakeResults();
     await runRecordedCase(results, { id: "golden-1" }, () =>
       Promise.resolve({
-        note: "sha 不一致",
+        note: "sha mismatch",
         artifact: "golden-1.safetensors",
         actual: "b".repeat(64),
         expected: "a".repeat(64),
@@ -549,13 +595,13 @@ describe("runRecordedCase の決着に載せた参照値の欄", () => {
     assertEquals(entries[0].expected, "a".repeat(64));
   });
 
-  it("参照値の欄を持たない決着の entry は従来の形のまま", async () => {
+  it("the entry of an outcome without reference-value fields keeps its previous shape", async () => {
     const { results, entries } = fakeResults();
     await runRecordedCase(results, { id: "plain" }, () => Promise.resolve({ status: "pass" }));
     assertEquals(Object.keys(entries[0]), ["id", "status", "elapsedMs", "measurements"]);
   });
 
-  it("rewritten の決着は verify-diff の読み手まで届く", async () => {
+  it("a rewritten outcome reaches the verify-diff reader", async () => {
     const temporary = makeTempDirSync({ prefix: "karume-verify-" });
     try {
       const root = new URL(`file://${temporary}/`);

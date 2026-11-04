@@ -1,10 +1,11 @@
-// adaLN = `layer_norm → (1 + scale) → mul → add` の strict peephole（融合ルール adaln —
-// src/runtime/fusion.ts）。エクスポータが出す**非隣接の窓 6 / 7 ノード**だけを 1 dispatch へ
-// 畳み、掴めない形は素の列へ落ちる。
+// adaLN = the strict peephole for `layer_norm → (1 + scale) → mul → add` (fusion rule adaln —
+// src/runtime/fusion.ts). Only the **non-adjacent windows of 6 / 7 nodes** that the exporter emits
+// are folded into 1 dispatch; a shape it cannot match falls back to the plain sequence.
 //
-// この門が見るのは値のビット parity 一本。融合カーネルは中間 3 本（正規化結果 /`1 + scale` /
-// 積）の storage 往復を消すので、丸め位置が素の列とずれれば有限値のビット列が動く。
-// workgroup u32 staging による丸め障壁が実バックエンドで効いているかは、ここでしか分からない。
+// This check looks at one thing: bit parity of the values. The fused kernel removes the storage
+// round trips of the 3 intermediates (normalized result / `1 + scale` / product), so if its
+// rounding points drift from the plain sequence the bits of finite values move. Whether the
+// rounding barrier of the workgroup u32 staging works on real backends can only be seen here.
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
@@ -19,23 +20,30 @@ import { type DeclarationJson, fill, GRAPH_NAME, openModelBytes } from "./helper
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
-/** 行内は 256 スレッド workgroup の端数を通す長さ、行数は grid-stride を 1 周以上させる。 */
+/**
+ * The row length exercises a remainder of the 256-thread workgroup; the row count makes grid-stride
+ * loop at least once.
+ */
 const ROWS = 5;
 const DIM = 257;
 const ROW_SHAPE = [1, ROWS, DIM] as const;
 const MOD_SHAPE = [1, 1, DIM] as const;
 
 type AdalnGraphOptions = {
-  /** 実測どおり gate の reshape も置く（窓 7）。false なら窓 6。 */
+  /** Also place the gate's reshape, as measured (window 7). false gives window 6. */
   readonly gate?: boolean;
   /**
-   * 正規化結果に 0 dispatch の別名を 1 本挟む。値も物理 dispatch 数も変えずに strict matcher
-   * の結線条件だけを外す（= 同一バックエンド上の正本を作る）。
+   * Interpose one 0-dispatch alias on the normalized result. It removes only the wiring condition
+   * of the strict matcher without changing values or the physical dispatch count (= builds the
+   * reference on the same backend).
    */
   readonly interpose?: boolean;
-  /** 正規化結果を graph output にする（内部値の private 条件を外す反例）。 */
+  /**
+   * Make the normalized result a graph output (a counterexample removing the private-internal-value
+   * condition).
+   */
   readonly normOutput?: boolean;
-  /** `1 + scale` に別 consumer を足す反例。 */
+  /** A counterexample adding another consumer to `1 + scale`. */
   readonly modulationExtraConsumer?: boolean;
 };
 
@@ -97,7 +105,7 @@ const adalnGraph = (options: AdalnGraphOptions = {}): DeclarationJson => {
     outputs: [
       ...(options.normOutput ? ["t"] : []),
       "y",
-      // gate は鎖の外で消費される値（実 IR では次の block が食う）。
+      // gate is a value consumed outside the chain (in real IR the next block consumes it).
       ...(options.gate !== false ? ["gate"] : []),
       ...(options.modulationExtraConsumer ? ["s_copy"] : []),
     ],
@@ -112,7 +120,7 @@ const words = (tensor: Tensor): Uint32Array =>
 
 const isNanWord = (word: number): boolean => (word & 0x7fffffff) > 0x7f800000;
 
-/** 非 NaN はビット一致、NaN はバックエンド差を許して分類だけ一致させる。 */
+/** Non-NaN values match bit for bit; NaN only matches by class, allowing backend differences. */
 const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: string): void => {
   assertEquals(actual.length, expected.length, label + ": length");
   for (let i = 0; i < actual.length; i++) {
@@ -125,8 +133,9 @@ const assertFloatParity = (actual: Uint32Array, expected: Uint32Array, label: st
 };
 
 /**
- * 行ごとに性格を変える。0〜2 行目は有限（分散の大小と符号付きゼロ）、3 行目は大きさを
- * 振り切って正規化の桁落ちを踏み、4 行目に ±Inf / NaN を混ぜて行全体を NaN にする。
+ * Each row has a different character. Rows 0–2 are finite (small and large variance, signed zeros),
+ * row 3 pushes the magnitude to hit cancellation in the normalization, and row 4 mixes in ±Inf /
+ * NaN to make the whole row NaN.
  */
 const testInput = (): Tensor => {
   const x = fill(ROW_SHAPE, (i) => {
@@ -138,9 +147,10 @@ const testInput = (): Tensor => {
     if (row === 3) return Math.sin(at * 0.017) * 1e5 + 1e6;
     return Math.tan(at * 0.05);
   });
-  // 4 行目に非有限を差し込む（mean が NaN になり、行全体が NaN 分類へ落ちる）。
+  // Inject non-finite values into row 4 (mean becomes NaN and the whole row falls into the NaN
+  // class).
   words(x).set([0x7f800000, 0xff800000, 0x7fc01234], 4 * DIM);
-  // 2 行目の先頭は ±0 / subnormal / 最小正規化数。
+  // The head of row 2 is ±0 / subnormal / the smallest normal number.
   words(x).set([0x00000000, 0x80000000, 0x00000001, 0x807fffff, 0x00800000], 2 * DIM);
   return x;
 };
@@ -150,19 +160,20 @@ const testInputs = (options: AdalnGraphOptions = {}): Readonly<Record<string, Te
   ln_weight: fill([DIM], (i) => 1 + Math.sin(i * 0.21) * 0.4),
   ln_bias: fill([DIM], (i) => Math.cos(i * 0.13) * 0.2),
   one: fill([1], () => 1),
-  // scale は ±0 近傍から大きめまで振る（`t · (scale + 1)` の分配則が起きれば有限値で割れる）。
+  // scale ranges from near ±0 to fairly large (if `t · (scale + 1)` gets distributed, finite values
+  // break).
   shift_src: fill([1, DIM], (i) => Math.sin(i * 0.07) * 2.5),
   scale_src: fill([1, DIM], (i) => Math.cos(i * 0.29) * 3 - 1),
   ...(options.gate !== false ? { gate_src: fill([1, DIM], (i) => i / 31) } : {}),
 });
 
 test.skipIf(!GPU_AVAILABLE)(
-  "adaLN 融合は窓 6 / 7 とも primitive と有限ビット / NaN 分類が一致し、4→1 dispatch へ畳む（実 GPU）",
+  "adaLN fusion matches primitives in finite bits / NaN class for both windows 6 / 7 and folds 4→1 dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       for (const gate of [true, false] as const) {
-        const label = `窓 ${gate ? 7 : 6}`;
+        const label = `window ${gate ? 7 : 6}`;
         const inputs = testInputs({ gate });
         const fused = await createSessionFromContainer(
           gpu,
@@ -184,12 +195,13 @@ test.skipIf(!GPU_AVAILABLE)(
             4,
             `${label}: layer_norm + add + mul + add`,
           );
-          // 融合が黙って外れれば値は正しいまま dispatch だけ増える。カウンタで直接押さえる。
-          assertEquals(fused.diagnostics().lastRunFusions?.adaln, 1, `${label}: 融合カウンタ`);
+          // If the fusion silently drops off, the values stay correct and only dispatches grow. Pin
+          // it directly with the counter.
+          assertEquals(fused.diagnostics().lastRunFusions?.adaln, 1, `${label}: fusion counter`);
           assertEquals(
             primitive.diagnostics().lastRunFusions?.adaln,
             0,
-            `${label}: 反例のカウンタは 0`,
+            `${label}: the counterexample's counter is 0`,
           );
           assertEquals(
             requireCensus(fused.diagnostics().lastRunPipelines, label).map((row) => row.key),
@@ -208,7 +220,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "adaLN の内部 output / 別 consumer / 別名は strict matcher から fallback する（実 GPU）",
+  "adaLN with an internal output / another consumer / an alias falls back from the strict matcher (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const inputs = testInputs();
@@ -218,8 +230,8 @@ test.skipIf(!GPU_AVAILABLE)(
       { name: "interposed alias", options: { interpose: true } },
     ];
     try {
-      // 反例はどれも「値は正しいまま dispatch が 4 本に戻る」形。正本（融合）の y と
-      // ビット一致することまで見る。
+      // Every counterexample has the shape "values stay correct, dispatches go back to 4". Check
+      // down to bit equality with the reference (fused) y.
       const reference = await createSessionFromContainer(
         gpu,
         await openModelBytes(adalnGraph(), []),
@@ -235,7 +247,7 @@ test.skipIf(!GPU_AVAILABLE)(
           );
           try {
             const output = await session.run(inputs);
-            assertFloatParity(words(output.y), expected, `${testCase.name}: fallback の値`);
+            assertFloatParity(words(output.y), expected, `${testCase.name}: fallback values`);
             assertEquals(
               session.diagnostics().submit.dispatchCount,
               testCase.name === "extra consumer" ? 5 : 4,
@@ -244,7 +256,7 @@ test.skipIf(!GPU_AVAILABLE)(
             assertEquals(
               session.diagnostics().lastRunFusions?.adaln,
               0,
-              `${testCase.name}: 融合カウンタ 0`,
+              `${testCase.name}: fusion counter 0`,
             );
           } finally {
             await session.dispose();

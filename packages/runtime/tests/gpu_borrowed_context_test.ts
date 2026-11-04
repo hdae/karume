@@ -1,22 +1,28 @@
-// 借り手 context（drafter）と共有重みの**実行統合**門（ADR 0096 段 2 §2.1〜§2.3）。
+// **Execution integration** checks of the borrowing context (drafter) and shared weights (ADR 0096 stage 2 §2.1–§2.3).
 //
-// 宣言と契約の門は tests/runtime_external_states_test.ts（GPU 非依存）が持つ。こちらが見るのは
-// 「2 つの Session が 1 本の KV と 1 本の重みを共有して走る」結線そのもの:
+// The declaration and contract checks live in tests/runtime_external_states_test.ts (GPU-independent).
+// This file looks at the wiring itself: "two Sessions run sharing one KV and one set of weights":
 //
-//   ① 貸し手を数 step 走らせた後の借り手 run が、**貸し手スロットの実内容**から作った f64 参照
-//      （`referenceStateAttentionReadonly`）と帯内（P < W / P = W / ring 一周後の 3 相を通る）
-//   ② 直列化: 貸し手の進行中 run / commit 待ち / poison の 3 つが借り手 run の拒否理由になる
-//   ③ 寿命: 借り手が生きている間の貸し手 context dispose は ExecutionError・借り手 dispose 後は通る
-//   ④ 計画鍵: 容量の違う貸し手を束ねた 2 本の借り手 context は**別鍵**（external スロットの容量が
-//      鍵に載っていることの検出器）
-//   ⑤ 共有重み: 貸し手の i8 embedding 表を借り手が読み、値が貸し手と**ビット一致**する。
-//      shape / 意味論 dtype / 席 / 行の軸の不一致は fail loudly・借り手が生きている間の貸し手 dispose も拒否
-//   ⑥ 分岐（fork — ADR 0066 追記〈2026-10-11〉・裁定 36）: 生きている借り手を持つ貸し手は fork
-//      できる（拒否は借り手の run が走っている間だけ）。fork の後も元の借り手は元のスロットを読み、
-//      複製には借り手がいない。借り手 context そのものは fork できない
+//   (1) after the lender has run for a few steps, the borrower's run is within the band of an f64
+//       reference (`referenceStateAttentionReadonly`) built from **the actual contents of the lender's
+//       slots** (through 3 phases: P < W / P = W / after the ring has wrapped once)
+//   (2) serialization: the lender's run in progress / awaiting commit / poisoned are the three reasons
+//       to reject a borrower run
+//   (3) lifetime: disposing the lender context while a borrower is alive is an ExecutionError; it
+//       succeeds after the borrower is disposed
+//   (4) plan key: two borrowing contexts bound to lenders of different capacities get **different
+//       keys** (the detector that the external slot's capacity is part of the key)
+//   (5) shared weights: the borrower reads the lender's i8 embedding table and the values are
+//       **bit-identical** to the lender's. A mismatch of shape / semantic dtype / residency class /
+//       row axis fails loudly; disposing the lender while a borrower is alive is also rejected
+//   (6) fork (ADR 0066 addendum <2026-10-11>, ruling 36): a lender with a live borrower can be forked
+//       (rejected only while the borrower's run is running). After the fork the original borrower
+//       still reads the original slots, and the copy has no borrower. A borrowing context itself
+//       cannot be forked
 //
-// MUST: 参照に渡すスロットは**GPU から読み戻す**（ホスト側オラクルの再現ではない）。借り手が
-// 読むのは貸し手が実際に書いた行なので、読み戻しでしか「同じ実体を見ている」ことを示せない。
+// MUST: the slots handed to the reference are **read back from the GPU** (not a reproduction by a
+// host-side oracle). The borrower reads the rows the lender actually wrote, so only a readback can
+// show that "they see the same storage".
 
 import { test } from "vite-plus/test";
 import {
@@ -43,13 +49,13 @@ import { halfScale, seeded } from "./helpers/state-dispatch.ts";
 import { i8BytesFrom } from "./helpers/i8.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
-/** 帯は states 形の実行統合門と同値・同根拠（参照は f64 積算・GPU は f32 逐次累積）。 */
+/** The band is the same as, and for the same reasons as, the states-form execution integration check (the reference accumulates in f64, the GPU accumulates sequentially in f32). */
 const STATE_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 0 };
 
 const HEADS = 4;
 const KV_HEADS = 1;
 const DEPTH = 8;
-/** sliding の窓（貸し手・借り手で同値 MUST — 読み書き同式）。 */
+/** The sliding window (MUST be the same for lender and borrower — reads and writes use the same formula). */
 const WINDOW = 8;
 
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
@@ -58,7 +64,7 @@ const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
 
 const SCALE = halfScale(DEPTH);
 
-/** 貸し手（target 相当）: sliding な自前スロット 2 本 + states 形 attention + append 2 本。 */
+/** The lender (the target's role): 2 sliding slots of its own + a states-form attention + 2 appends. */
 const lenderGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -101,7 +107,7 @@ const lenderGraph = (): DeclarationJson => ({
   ],
 });
 
-/** 借り手（drafter 相当）: 貸し手と**同名**の external スロットを readonly attention 1 本が読む。 */
+/** The borrower (the drafter's role): one readonly attention reads external slots with **the same names** as the lender's. */
 const borrowerGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -132,7 +138,7 @@ const tensor = (shape: readonly number[], data: Float32Array<ArrayBuffer>): Tens
   data,
 });
 
-/** GPU バッファを f32 として読み戻す（helpers/state-dispatch.ts の readRaw と同型）。 */
+/** Reads a GPU buffer back as f32 (same shape as readRaw in helpers/state-dispatch.ts). */
 const readSlot = async (
   device: GPUDevice,
   buffer: GPUBuffer,
@@ -155,7 +161,7 @@ const readSlot = async (
 
 const internals = (context: GenerationContext) => context[RUNTIME_INTERNAL];
 
-/** 貸し手 context のスロット 2 本を読み戻す（借り手が実際に読む実体そのもの）。 */
+/** Reads back the 2 slots of the lender context (the very storage the borrower reads). */
 const readLenderSlots = async (
   gpu: GpuContext,
   context: GenerationContext,
@@ -165,14 +171,14 @@ const readLenderSlots = async (
   const slots = internals(context).slots;
   const k = slots.get("kslot");
   const v = slots.get("vslot");
-  assert(k !== undefined && v !== undefined, "貸し手のスロットが引けない");
+  assert(k !== undefined && v !== undefined, "the lender's slots cannot be looked up");
   return {
     slotK: await readSlot(gpu.device, k.buffer, count),
     slotV: await readSlot(gpu.device, v.buffer, count),
   };
 };
 
-/** 貸し手を 1 step 進める（`chunkRows` 行 × `query` 有効行）。 */
+/** Advances the lender by 1 step (`chunkRows` rows x `query` valid rows). */
 const lenderStep = async (
   session: Session,
   context: GenerationContext,
@@ -201,7 +207,7 @@ const lenderStep = async (
   );
 };
 
-/** 借り手を 1 回走らせて、貸し手スロットの実内容から作った参照と突き合わせる。 */
+/** Runs the borrower once and compares it with a reference built from the actual contents of the lender's slots. */
 const assertDraft = async (
   gpu: GpuContext,
   borrower: Session,
@@ -233,10 +239,10 @@ const assertDraft = async (
     slotV,
     scale: SCALE,
   });
-  // MUST: 期待値が自明でないことを毎回見る（P = 0 以外では非零 — 恒真な突合を避ける）。
+  // MUST: check every time that the expected value is not trivial (non-zero except at P = 0 — avoids a comparison that always holds).
   assert(
     (expected.data as Float32Array).some((value) => Math.abs(value) > 1e-3),
-    `${label}: 期待出力が自明（全 ~0）`,
+    `${label}: the expected output is trivial (all ~0)`,
   );
   const report = compareTensors(
     { dtype: "f32", data: actual },
@@ -244,13 +250,21 @@ const assertDraft = async (
     STATE_TOLERANCE,
   );
   assertEquals(report.pass, true, `${label}: ${formatAllclose(report)}`);
-  // 借り手は論理長を 1 つも動かさない（進めるのは貸し手の run だけ）。
-  assertEquals(lender.pastLength, past, `${label}: 借り手 run が貸し手の論理長を動かした`);
-  assertEquals(borrowed.pastLength, past, `${label}: 借り手の pastLength は最後に写した P`);
+  // The borrower moves the logical length by not a single step (only the lender's run advances it).
+  assertEquals(
+    lender.pastLength,
+    past,
+    `${label}: a borrower run moved the lender's logical length`,
+  );
+  assertEquals(
+    borrowed.pastLength,
+    past,
+    `${label}: the borrower's pastLength is the last P it copied`,
+  );
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "借り手 context の run が貸し手スロットの実内容と一致する（P < W / = W / ring 一周後・実 GPU）",
+  "a run of the borrowing context matches the actual contents of the lender's slots (P < W / = W / after the ring wraps, real GPU)",
   async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
@@ -273,17 +287,17 @@ test.skipIf(!GPU_AVAILABLE)(
       borrow: lenderContext,
     });
     try {
-      // P = 0（列 0 本 = 空行 → 厳密 0）。参照も 0 なので自明チェックは掛けない。
+      // P = 0 (0 columns = an empty row -> exactly 0). The reference is 0 too, so the triviality check is not applied.
       const empty = await borrower.run(
         { q: tensor([1, HEADS, 1, DEPTH], seeded(HEADS * DEPTH, QUERY)) },
         {},
         { context: borrowed, queryLength: 1 },
       );
       for (const value of empty["o"].data as Float32Array) {
-        assert(Object.is(value, 0), `P = 0 の出力が厳密 0 でない（${value}）`);
+        assert(Object.is(value, 0), `the output at P = 0 is not exactly 0 (${value})`);
       }
 
-      // prefill（M=4）→ decode を重ねて 3 相を通す: P < W（4）/ P = W（8）/ ring 一周後（18）。
+      // prefill (M=4) -> stacked decodes go through the 3 phases: P < W (4) / P = W (8) / after the ring wraps (18).
       await lenderStep(lender, lenderContext, 4, 4, 0);
       await assertDraft(gpu, borrower, borrowed, lenderContext, capacity, 101, "P=4 < W");
       for (let step = 0; step < 4; step += 1) {
@@ -294,17 +308,25 @@ test.skipIf(!GPU_AVAILABLE)(
       for (let step = 0; step < 10; step += 1) {
         await lenderStep(lender, lenderContext, 1, 1, 71 + step * 5);
       }
-      assertEquals(lenderContext.pastLength, 18, "ring を一周している（C=16）");
-      await assertDraft(gpu, borrower, borrowed, lenderContext, capacity, 303, "P=18（一周後）");
+      assertEquals(lenderContext.pastLength, 18, "the ring has wrapped once (C=16)");
+      await assertDraft(
+        gpu,
+        borrower,
+        borrowed,
+        lenderContext,
+        capacity,
+        303,
+        "P=18 (after wrapping)",
+      );
 
-      // 2 本目以降の draft は導出済み計画に当たる（借り手も通常の計画キャッシュに載る）。
+      // The second and later drafts hit the derived plan (the borrower is in the ordinary plan cache too).
       assertEquals(borrower.diagnostics().lastRunPrepared?.hit, true);
-      // 借り手は state を 1 行も書かないので、貸し手の論理長は draft で動かない。
+      // The borrower writes not a single row of state, so drafts do not move the lender's logical length.
       assertEquals(lenderContext.pastLength, 18);
 
-      // 診断は Session ごとに分かれる（借り手 run は貸し手の stateBacking を汚さない）。
-      // 借り手が抱えるのは論理長 uniform の 8 バイトだけ — スロットは貸し手の所有物なので、
-      // 両方が数えると同じ VRAM の二重計上になる。
+      // Diagnostics are split per Session (a borrower run does not touch the lender's stateBacking).
+      // The borrower holds only the 8 bytes of the logical-length uniform — the slots belong to the lender,
+      // so counting them on both sides would count the same VRAM twice.
       const lenderState = lender.diagnostics().stateBacking;
       const borrowerState = borrower.diagnostics().stateBacking;
       assertEquals(borrowerState.contextCount, 1);
@@ -313,7 +335,7 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         lenderState.residentBytes,
         2 * KV_HEADS * capacity * DEPTH * 4 + LENGTHS_BYTES,
-        "貸し手はスロット 2 本 + 論理長ぶんを数える",
+        "the lender counts its 2 slots + the logical length",
       );
     } finally {
       await borrowed.dispose();
@@ -326,18 +348,19 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 上の parity 門が**空振りでない**証明（故障注入）。参照側を 3 通り壊し、どれも帯の外へ出る
- * ことを見る:
+ * Proof that the parity check above is **not vacuous** (fault injection). It breaks the reference
+ * side in 3 ways and checks that each falls outside the band:
  *
- *   ① P を 1 つ古くする — 借り手が「貸し手の**現在の** P」を写していることの検出器
- *   ② k / v スロットを取り違える — 束縛の向きの検出器（2 本は同形なので shape では捕まらない）
- *   ③ live 窓の内側の 1 行を潰す — 借り手が実際にその行を読んでいることの検出器
+ *   (1) make P one step stale — the detector that the borrower copies "the lender's **current** P"
+ *   (2) swap the k / v slots — the detector of the binding direction (both have the same shape, so
+ *       shape does not catch it)
+ *   (3) wipe one row inside the live window — the detector that the borrower actually reads that row
  *
- * MUST: 3 通りとも「参照側だけ」を壊す（GPU 側は正しいまま）。両側を同じだけ壊すと誤りが
- * 相殺して恒真になる。
+ * MUST: all 3 break "only the reference side" (the GPU side stays correct). Breaking both sides by
+ * the same amount cancels the error and makes the check always hold.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "借り手 parity の故障注入（P のずれ・k/v 取り違え・live 行の欠落）は帯で落ちる（実 GPU）",
+  "fault injection into the borrower parity (stale P, swapped k/v, a missing live row) fails the band (real GPU)",
   async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
@@ -391,31 +414,31 @@ test.skipIf(!GPU_AVAILABLE)(
           STATE_TOLERANCE,
         ).pass;
 
-      // 正しい参照は帯の中（門が成立していることの前提）。
+      // The correct reference is inside the band (the premise that the check holds).
       assert(
         inBand(
           referenceStateAttentionReadonly({ ...base, past, slotK, slotV })
             .data as Float32Array<ArrayBuffer>,
         ),
-        "正しい参照が帯の外（門そのものが壊れている）",
+        "the correct reference is outside the band (the check itself is broken)",
       );
-      // ① P のずれ
+      // (1) stale P
       assert(
         !inBand(
           referenceStateAttentionReadonly({ ...base, past: past - 1, slotK, slotV })
             .data as Float32Array<ArrayBuffer>,
         ),
-        "P を 1 つ古くしても帯の中（借り手が貸し手の現在の P を見ていない可能性）",
+        "still inside the band with P one step stale (the borrower may not see the lender's current P)",
       );
-      // ② k / v の取り違え
+      // (2) swapped k / v
       assert(
         !inBand(
           referenceStateAttentionReadonly({ ...base, past, slotK: slotV, slotV: slotK })
             .data as Float32Array<ArrayBuffer>,
         ),
-        "k / v を入れ替えても帯の中（束縛の向きが検出できていない）",
+        "still inside the band with k / v swapped (the binding direction is not detected)",
       );
-      // ③ live 窓の内側の 1 行（論理位置 P−1 = 直近確定 token の行）を潰す
+      // (3) wipe one row inside the live window (logical position P−1 = the row of the latest committed token)
       const damagedK = new Float32Array(slotK);
       const row = (past - 1) % capacity;
       for (let d = 0; d < DEPTH; d += 1) damagedK[row * DEPTH + d] = 0;
@@ -424,7 +447,7 @@ test.skipIf(!GPU_AVAILABLE)(
           referenceStateAttentionReadonly({ ...base, past, slotK: damagedK, slotV })
             .data as Float32Array<ArrayBuffer>,
         ),
-        "live 行を潰しても帯の中（その行を読んでいない可能性）",
+        "still inside the band with the live row wiped (that row may not be read)",
       );
     } finally {
       await borrowed.dispose();
@@ -437,7 +460,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "借り手 run は貸し手の進行中 run / commit 待ち / poison で拒否される（実 GPU）",
+  "a borrower run is rejected when the lender has a run in progress / awaits commit / is poisoned (real GPU)",
   async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
@@ -469,20 +492,20 @@ test.skipIf(!GPU_AVAILABLE)(
       await lenderStep(lender, lenderContext, 4, 4, 0);
       await draft();
 
-      // ① 進行中の貸し手 run（リースは発行の同期区間で立つので、await しない並びで踏める）。
+      // (1) A lender run in progress (the lease is taken in the synchronous section of the issue, so an order without await hits it).
       const running = lenderStep(lender, lenderContext, 1, 1, 5);
       const concurrent = await assertRejects(draft, ExecutionError);
       assert(concurrent.message.includes("generation run in progress"), concurrent.message);
       await running;
 
-      // ② commit 待ち（deferred な貸し手 run — draft は commit の後）。
+      // (2) Awaiting commit (a deferred lender run — drafts come after the commit).
       await lenderStep(lender, lenderContext, 1, 1, 9, "deferred");
       const pending = await assertRejects(draft, ExecutionError);
       assert(pending.message.includes("awaiting commit"), pending.message);
       lenderContext.commit(1);
       await draft();
 
-      // ③ 借り手 run に deferred は指定できない（確定させる相手が居ない）。
+      // (3) A borrower run cannot specify deferred (there is nothing for it to commit).
       const deferred = await assertRejects(
         () =>
           borrower.run(
@@ -494,12 +517,12 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assert(deferred.message.includes("borrowing context"), deferred.message);
 
-      // ④ 借り手の commit / rewind は常に拒否（論理長を持たない）。
+      // (4) The borrower's commit / rewind is always rejected (it has no logical length).
       assertThrows(() => borrowed.commit(0), ExecutionError, "borrowing context");
       assertThrows(() => borrowed.rewind(0), ExecutionError, "borrowing context");
 
-      // ⑤ 貸し手の poison は借り手 run の拒否理由になる（故障注入）。
-      internals(lenderContext).poison("テストの故障注入");
+      // (5) A poisoned lender is a reason to reject a borrower run (fault injection).
+      internals(lenderContext).poison("fault injection by the test");
       const poisoned = await assertRejects(draft, ExecutionError);
       assert(poisoned.message.includes("poisoned"), poisoned.message);
     } finally {
@@ -513,7 +536,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "借り手が生きている間の貸し手 context dispose は拒否され、dispose 後は通る（実 GPU）",
+  "disposing the lender context is rejected while a borrower is alive and succeeds after the borrower is disposed (real GPU)",
   async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
@@ -539,12 +562,20 @@ test.skipIf(!GPU_AVAILABLE)(
       await lenderStep(lender, lenderContext, 4, 4, 0);
       const refused = await assertRejects(() => lenderContext.dispose(), ExecutionError);
       assert(refused.message.includes("contexts are borrowing"), refused.message);
-      // 拒否された dispose は貸し手を壊さない（受付終了フラグも立っていない）。
+      // A rejected dispose does not break the lender (the end-of-intake flag is not set either).
       assertEquals(lenderContext.pastLength, 4);
-      await assertDraft(gpu, borrower, borrowed, lenderContext, capacity, 404, "拒否の後");
+      await assertDraft(
+        gpu,
+        borrower,
+        borrowed,
+        lenderContext,
+        capacity,
+        404,
+        "after the rejection",
+      );
 
       await borrowed.dispose();
-      // 借り手が退いた後は通る。
+      // Once the borrower has gone, it succeeds.
       await lenderContext.dispose();
     } finally {
       await borrower.dispose();
@@ -555,9 +586,9 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 借り手の 1 回ぶんの出力（u32 — 値の近さではなく「どの実体を読んだか」を見る）。
+ * The output of one borrower run (u32 — it checks "which storage it read", not how close the values are).
  *
- * MUST: `borrower.run` は呼んだ同期区間で発行される（予約が同期に立つ — 拒否の門がこれに依る）。
+ * MUST: `borrower.run` is issued in the synchronous section of the call (the reservation is taken synchronously — the rejection check depends on this).
  */
 const draftWords = async (
   borrower: Session,
@@ -579,7 +610,7 @@ const draftWords = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "fork: 借り手を持つ貸し手は複製でき、元の借り手は元のスロットを読み続ける（実 GPU）",
+  "fork: a lender with a borrower can be copied, and the original borrower keeps reading the original slots (real GPU)",
   async () => {
     const capacity = 16;
     const gpu = await acquireGpu();
@@ -601,7 +632,7 @@ test.skipIf(!GPU_AVAILABLE)(
       chunkLength: 1,
       borrow: lenderContext,
     });
-    /** 後から作る context（後始末は作った順の逆）。 */
+    /** Contexts created later (cleaned up in the reverse order of creation). */
     const extra: GenerationContext[] = [];
     try {
       await lenderStep(lender, lenderContext, 4, 4, 0);
@@ -609,7 +640,7 @@ test.skipIf(!GPU_AVAILABLE)(
         await lenderStep(lender, lenderContext, 1, 1, 11 + step * 7);
       }
 
-      // 借り手の run が走っている間は拒否（借り手の run は貸し手の予約も取る — 拒否の (d)）。
+      // Rejected while the borrower's run is running (the borrower's run also takes the lender's reservation — rejection (d)).
       const drafting = draftWords(borrower, borrowed, 0);
       await assertRejects(
         () => lenderContext.fork(),
@@ -617,26 +648,27 @@ test.skipIf(!GPU_AVAILABLE)(
         "generation run is in progress",
       );
       await drafting;
-      // 借り手 context そのものは複製できない（拒否の (g) — スロットは貸し手の所有物）。
+      // A borrowing context itself cannot be copied (rejection (g) — the slots belong to the lender).
       await assertRejects(
         () => borrowed.fork(),
         ExecutionError,
         "a borrowing context cannot be forked",
       );
 
-      // 生きている借り手を持つ貸し手は fork できる（裁定 36 = a）。sliding を含む context も拒否しない。
+      // A lender with a live borrower can be forked (ruling 36 = a). A context that includes sliding is not rejected either.
       const forked = await lenderContext.fork();
       extra.push(forked);
       assertEquals(forked.pastLength, lenderContext.pastLength);
       assertEquals(forked.slidingSlack, lenderContext.slidingSlack);
 
-      // 元と複製を**別の入力**で 1 行ずつ進める（同じ論理位置に違う KV が入る）。
+      // Advance the original and the copy by one row each with **different inputs** (different KV lands at the same logical position).
       await lenderStep(lender, lenderContext, 1, 1, 101);
       await lenderStep(lender, forked, 1, 1, 202);
 
-      // 元の借り手は元のスロットを束ねたまま: 出力は「元に新しく作った借り手」と u32 で一致し、
-      // 「複製に作った借り手」とは違う。新しいバッファを元へ付け替える（swap 型の）実装は、元の
-      // 借り手が複製側の実体を読む形になるのでここで落ちる。
+      // The original borrower stays bound to the original slots: its output matches, as u32, "a borrower
+      // newly created on the original" and differs from "a borrower created on the copy". An implementation
+      // that re-points the original at new buffers (swap style) fails here, because the original borrower
+      // would then read the copy's storage.
       const onLender = await borrower.createGenerationContext({
         chunkLength: 1,
         borrow: lenderContext,
@@ -648,16 +680,16 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         live,
         await draftWords(borrower, onLender, 303),
-        "元の借り手が元のスロットを読んでいない",
+        "the original borrower does not read the original slots",
       );
       assertNotEquals(
         live,
         await draftWords(borrower, onFork, 303),
-        "元の借り手が複製のスロットを読んだ（付け替え型の取り違え）",
+        "the original borrower read the copy's slots (a mix-up of the re-pointing kind)",
       );
 
-      // 寿命: 複製には元の借り手が付いていない（元の借り手が生きていても複製は返せる）。元は
-      // 借り手が居る間は従来どおり拒否する。
+      // Lifetime: the copy has none of the original's borrowers (the copy can be returned even while the
+      // original borrower is alive). The original is still rejected while it has a borrower, as before.
       await onFork.dispose();
       await forked.dispose();
       const refused = await assertRejects(() => lenderContext.dispose(), ExecutionError);
@@ -674,7 +706,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "借り手 context の spec の門（borrow と external は対・chunkLength 1・継承する束縛・実 GPU）",
+  "spec checks of the borrowing context (borrow and external go together, chunkLength 1, inherited bindings, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const lender = await createSessionFromContainer(
@@ -692,28 +724,28 @@ test.skipIf(!GPU_AVAILABLE)(
       bindings: { C: 16 },
     });
     try {
-      // ① external があるのに borrow 無し（借り物を自分で確保すると空の過去を読む）
+      // (1) external without borrow (allocating the borrowed slots itself would read an empty past)
       const noBorrow = await assertRejects(
         () => borrower.createGenerationContext({ chunkLength: 1 }),
         ExecutionError,
       );
       assert(noBorrow.message.includes("external state slots"), noBorrow.message);
 
-      // ② 自前スロットのグラフに borrow（誰も読まないスロットを貸し手から掴む）
+      // (2) borrow on a graph with slots of its own (grabs slots from the lender that nobody reads)
       const ownSlots = await assertRejects(
         () => lender.createGenerationContext({ chunkLength: 4, borrow: lenderContext }),
         ExecutionError,
       );
       assert(ownSlots.message.includes("slots are all external"), ownSlots.message);
 
-      // ③ chunkLength は 1 ちょうど（借り手の実行形は decode 1 本）
+      // (3) chunkLength is exactly 1 (the borrower's execution shape is a single decode)
       const chunk = await assertRejects(
         () => borrower.createGenerationContext({ chunkLength: 2, borrow: lenderContext }),
         ExecutionError,
       );
       assert(chunk.message.includes("chunkLength"), chunk.message);
 
-      // ④ bindings は継承する（渡すと二重の束縛点になる）
+      // (4) bindings are inherited (passing them would make a second binding point)
       const bindings = await assertRejects(
         () =>
           borrower.createGenerationContext({
@@ -725,7 +757,7 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assert(bindings.message.includes("inherited"), bindings.message);
 
-      // ⑤ chunkBuckets は宣言できない（`chunkLength = 1` なので既存のバケット門が落とす）
+      // (5) chunkBuckets cannot be declared (`chunkLength = 1`, so the existing bucket check rejects it)
       const buckets = await assertRejects(
         () =>
           borrower.createGenerationContext({
@@ -737,7 +769,7 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assert(buckets.message.includes("chunkBuckets"), buckets.message);
 
-      // ⑥ 窓が貸し手と食い違う借り手（読み書き同式の破れ — 窓外の行を過去として読む）
+      // (6) a borrower whose window disagrees with the lender's (breaks the same-formula rule for reads and writes — rows outside the window are read as past)
       const wideWindow = borrowerGraph();
       wideWindow.nodes[0].attrs = { scale: SCALE, window: WINDOW + 2, readonly: true };
       const wide = await createSessionFromContainer(gpu, await openGraphModel(wideWindow), "model");
@@ -751,14 +783,18 @@ test.skipIf(!GPU_AVAILABLE)(
         await wide.dispose();
       }
 
-      // 正常系: 貸し手の bindings（C=16）を継承し、余裕も写す。
+      // Normal case: inherits the lender's bindings (C=16) and copies the slack too.
       const borrowed = await borrower.createGenerationContext({
         chunkLength: 1,
         borrow: lenderContext,
       });
       assertEquals(borrowed.chunkLength, 1);
       assertEquals(borrowed.chunkBuckets, []);
-      assertEquals(borrowed.slidingSlack, lenderContext.slidingSlack, "余裕は貸し手の写し");
+      assertEquals(
+        borrowed.slidingSlack,
+        lenderContext.slidingSlack,
+        "the slack is a copy of the lender's",
+      );
       assertEquals(borrowed.slidingSlack, 16 - WINDOW);
       await borrowed.dispose();
     } finally {
@@ -771,7 +807,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "確保の await を跨いだ chunkLength の書き換えは借り手 context に届かない（実 GPU）",
+  "rewriting chunkLength across the allocation await does not reach the borrowing context (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const lender = await createSessionFromContainer(
@@ -789,17 +825,22 @@ test.skipIf(!GPU_AVAILABLE)(
       bindings: { C: 16 },
     });
     try {
-      // 「chunkLength は 1 ちょうど」の検査と constructor 渡しの間には論理長確保の await がある。
-      // `spec` から読み直す形だと、検査は 1 で通ったのに実行形が M=4 の借り手ができてしまう
-      // （readonly attention は M 1 固定 — ADR 0096 段 2 §1.2 の形検査と対なので、この形は
-      // 例外なしに崩れる）。
+      // Between the "chunkLength is exactly 1" check and the hand-off to the constructor there is the
+      // await of the logical-length allocation. A form that re-reads `spec` would build a borrower whose
+      // check passed with 1 but whose execution shape is M=4 (readonly attention has M fixed at 1 — it is
+      // the counterpart of the shape check of ADR 0096 stage 2 §1.2, so this form breaks without any
+      // exception).
       const spec = { chunkLength: 1, borrow: lenderContext };
       const pending = borrower.createGenerationContext(spec);
       spec.chunkLength = 4;
       const borrowed = await pending;
       try {
-        assertEquals(borrowed.chunkLength, 1, "検査を通った 1 のまま");
-        assertEquals([...internals(borrowed).allowedRows], [1], "許可する物理形は decode 1 本だけ");
+        assertEquals(borrowed.chunkLength, 1, "stays at the 1 that passed the check");
+        assertEquals(
+          [...internals(borrowed).allowedRows],
+          [1],
+          "the only allowed physical shape is a single decode",
+        );
       } finally {
         await borrowed.dispose();
       }
@@ -813,7 +854,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "external スロットの容量は計画鍵に載る（容量の違う貸し手を束ねた 2 本は別鍵・実 GPU）",
+  "the external slot's capacity is part of the plan key (two bound to lenders of different capacities get different keys, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const lender = await createSessionFromContainer(
@@ -844,13 +885,25 @@ test.skipIf(!GPU_AVAILABLE)(
       );
     try {
       await draft(borrowedSmall);
-      assertEquals(borrower.diagnostics().lastRunPrepared?.hit, false, "1 本目は導出 run");
+      assertEquals(
+        borrower.diagnostics().lastRunPrepared?.hit,
+        false,
+        "the first is a deriving run",
+      );
       await draft(borrowedSmall);
-      assertEquals(borrower.diagnostics().lastRunPrepared?.hit, true, "同じ容量なら同じ鍵");
+      assertEquals(
+        borrower.diagnostics().lastRunPrepared?.hit,
+        true,
+        "the same capacity gives the same key",
+      );
       await draft(borrowedLarge);
       const stats = borrower.diagnostics().lastRunPrepared;
-      assertEquals(stats?.hit, false, "容量が違えば別鍵（external の容量が鍵に載っていない）");
-      assertEquals(stats?.cachedPlans, 2, "容量ごとに 1 本ずつ計画が載る");
+      assertEquals(
+        stats?.hit,
+        false,
+        "a different capacity gives a different key (the external capacity is not part of the key)",
+      );
+      assertEquals(stats?.cachedPlans, 2, "one plan is cached per capacity");
       await draft(borrowedLarge);
       assertEquals(borrower.diagnostics().lastRunPrepared?.hit, true);
     } finally {
@@ -866,13 +919,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 共有 initializer（§2.2）— 貸し手の i8 embedding 表を借り手が読む
+// Shared initializers (§2.2) — the borrower reads the lender's i8 embedding table
 // ---------------------------------------------------------------------------
 
 const VOCAB = 8;
 const HIDDEN = 4;
 
-/** i8 の embedding 表 1 本（行ごとに違う scale — 行の取り違えが値に出る形）。 */
+/** One i8 embedding table (a different scale per row — a row mix-up shows in the values). */
 const embedTable = (): {
   readonly bytes: Uint8Array<ArrayBuffer>;
   readonly scale: Float32Array<ArrayBuffer>;
@@ -887,7 +940,7 @@ const embedTable = (): {
   return { bytes, scale, values: decodeI8(bytes, [VOCAB, HIDDEN], scale, [VOCAB, 1]) };
 };
 
-/** 貸し手（重みの持ち主）: i8 の embedding 表を 1 本だけ持つ最小グラフ。 */
+/** The lender (owner of the weights): the smallest graph, holding a single i8 embedding table. */
 const weightLenderGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -903,7 +956,7 @@ const weightLenderGraph = (): DeclarationJson => ({
   nodes: [{ op: "embedding", ins: ["embed", "index"], outs: ["y"], attrs: { padding_idx: -1 } }],
 });
 
-/** 借り手（バイトを持たない側）: 同じ表を `shared` 宣言で借りて読む。 */
+/** The borrower (the side that holds no bytes): borrows the same table with a `shared` declaration and reads it. */
 const weightBorrowerGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -920,8 +973,9 @@ const weightBorrowerGraph = (): DeclarationJson => ({
 });
 
 /**
- * 行の軸の門の材料（貸し手）: conv1d の重みスロット = 行の軸 **0**（`[Cout,Cin,K]`）。
- * 値は見ない（門は席と軸だけを見る）ので scale は恒等・payload は定数で埋める。
+ * Material for the row-axis check (lender): the conv1d weight slot = row axis **0** (`[Cout,Cin,K]`).
+ * The values are not looked at (the check looks only at the residency class and the axis), so the
+ * scale is the identity and the payload is filled with a constant.
  */
 const convLenderGraph = (): DeclarationJson => ({
   format: "karume-ir",
@@ -946,7 +1000,7 @@ const convLenderGraph = (): DeclarationJson => ({
   ],
 });
 
-/** 同じバイト列を conv_transpose1d（`[Cin,Cout,K]` = 行の軸 **1**）で食う借り手。 */
+/** A borrower that consumes the same bytes with conv_transpose1d (`[Cin,Cout,K]` = row axis **1**). */
 const convBorrowerGraph = (): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -976,7 +1030,7 @@ const openConvLenderModel = () =>
       graph: "model",
       initializer: "w",
       bytes: i8BytesFrom(new Array(24).fill(1)),
-      // per-channel scale の行は消費側 op のチャネル軸（conv1d = 0）で、行長 6 = groupSize。
+      // The rows of the per-channel scale run along the consuming op's channel axis (conv1d = 0); row length 6 = groupSize.
       encoding: {
         codec: "int8-sym",
         rowAxis: 0,
@@ -1008,7 +1062,7 @@ const openWeightLenderModel = (table: ReturnType<typeof embedTable>) =>
       graph: "model",
       initializer: "embed",
       bytes: table.bytes,
-      // embedding のチャネル軸は 0・行長 HIDDEN = groupSize（per-channel）。
+      // The embedding's channel axis is 0; row length HIDDEN = groupSize (per-channel).
       encoding: {
         codec: "int8-sym",
         rowAxis: 0,
@@ -1019,7 +1073,7 @@ const openWeightLenderModel = (table: ReturnType<typeof embedTable>) =>
   ]);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "共有 initializer: 借り手が貸し手の i8 表を読み、値がビット一致する（実 GPU）",
+  "shared initializer: the borrower reads the lender's i8 table and the values are bit-identical (real GPU)",
   async () => {
     const table = embedTable();
     const gpu = await acquireGpu();
@@ -1043,27 +1097,27 @@ test.skipIf(!GPU_AVAILABLE)(
       const aBits = new Uint32Array(a.buffer, a.byteOffset, a.length);
       const bBits = new Uint32Array(b.buffer, b.byteOffset, b.length);
       for (let i = 0; i < aBits.length; i += 1) {
-        assertEquals(bBits[i], aBits[i], `要素 ${i}: 貸し手 ${a[i]} / 借り手 ${b[i]}`);
+        assertEquals(bBits[i], aBits[i], `element ${i}: lender ${a[i]} / borrower ${b[i]}`);
       }
-      // 期待値そのもの（decodeI8 の行 gather）とも一致する = 表を丸ごと読めている。
+      // It also matches the expected values themselves (the row gather of decodeI8) = the whole table is read.
       for (let row = 0; row < VOCAB; row += 1) {
         for (let col = 0; col < HIDDEN; col += 1) {
           const source = (VOCAB - 1 - row) * HIDDEN + col;
-          assertEquals(b[row * HIDDEN + col], table.values[source], `行 ${row} 列 ${col}`);
+          assertEquals(b[row * HIDDEN + col], table.values[source], `row ${row} column ${col}`);
         }
       }
-      // 借り手は 1 バイトも常駐させない（バイトを持つのは貸し手だけ）。
+      // The borrower keeps not a single byte resident (only the lender holds bytes).
       assertEquals(borrower.diagnostics().storage.residentCompressedBytes, 0);
       assertEquals(borrower.diagnostics().storage.hostExpandedBytes, 0);
 
-      // 借り手が生きている間の貸し手 dispose は拒否される。
+      // Disposing the lender while the borrower is alive is rejected.
       const refused = await assertRejects(() => lender.dispose(), ExecutionError);
       assert(refused.message.includes("lent out"), refused.message);
-      // 拒否された dispose は貸し手を壊さない。
+      // A rejected dispose does not break the lender.
       await lender.run({ index });
     } finally {
       await borrower.dispose();
-      // 借り手が退いた後は通る。
+      // Once the borrower has gone, it succeeds.
       await lender.dispose();
       gpu.destroy();
     }
@@ -1071,7 +1125,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "共有 initializer の門: 過不足・shape・席・行の軸の不一致は fail loudly（実 GPU）",
+  "shared initializer checks: a missing or surplus entry, or a mismatch of shape, residency class or row axis fails loudly (real GPU)",
   async () => {
     const table = embedTable();
     const gpu = await acquireGpu();
@@ -1093,18 +1147,18 @@ test.skipIf(!GPU_AVAILABLE)(
           weights === undefined ? {} : { sharedWeights: weights },
         );
 
-      // ① 渡し忘れ（宣言 1 本に対して 0 本）
+      // (1) forgotten (0 entries for 1 declaration)
       const missing = await assertRejects(() => build(weightBorrowerGraph()), ExecutionError);
       assert(missing.message.includes("missing [embed]"), missing.message);
 
-      // ② 余剰（宣言に無い名前）
+      // (2) surplus (a name not in the declarations)
       const surplus = await assertRejects(
         () => build(weightBorrowerGraph(), { embed: shared, unknown: shared }),
         ExecutionError,
       );
       assert(surplus.message.includes("extra [unknown]"), surplus.message);
 
-      // ③ 宣言 shape の不一致
+      // (3) mismatch of the declared shape
       const wrongShape = weightBorrowerGraph();
       wrongShape.values["embed"].shape = [HIDDEN, VOCAB];
       wrongShape.values["y"].shape = [VOCAB, VOCAB];
@@ -1114,10 +1168,11 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assert(shapeError.message.includes("declared shape"), shapeError.message);
 
-      // ④ 行の軸の不一致。借り手は格納を宣言しない（期待する席は貸し手の codec から導く）ので、
-      // 読み方の割れはこの軸が受け持つ: per-channel scale の軸は**消費側 op** から決まり、
-      // 貸し手 conv1d（軸 0）と借り手 conv_transpose1d（軸 1）では同じバイト列に別の行の
-      // scale が掛かる（例外は 1 つも出ない沈黙誤値）。
+      // (4) mismatch of the row axis. The borrower declares no storage (the expected residency class is
+      // derived from the lender's codec), so this axis carries any disagreement in how the bytes are read:
+      // the axis of the per-channel scale is set by the **consuming op**, and for the lender's conv1d
+      // (axis 0) and the borrower's conv_transpose1d (axis 1) the scales of different rows land on the
+      // same bytes (a silently wrong value with not a single exception).
       const axisLender = await createSessionFromContainer(
         gpu,
         await openConvLenderModel(),
@@ -1136,9 +1191,10 @@ test.skipIf(!GPU_AVAILABLE)(
         await axisLender.dispose();
       }
 
-      // ⑤ 消費席の不一致。借り手が同じ表を**重みスロット以外**（elementwise の被演算子）で
-      // 食う形は圧縮常駐の適格外 = 席 `expanded` で、貸し手の i8 席と組めない。通すと
-      // 「packed な i8 バイト列を f32 として読む」沈黙誤値そのものになる。
+      // (5) mismatch of the consuming residency class. A borrower that consumes the same table **outside a
+      // weight slot** (as an elementwise operand) is not eligible for compressed residency = residency class
+      // `expanded`, which cannot pair with the lender's i8 class. Letting it through would be exactly the
+      // silently wrong value of "reading packed i8 bytes as f32".
       const wrongSeat: DeclarationJson = {
         format: "karume-ir",
         version: 2,
@@ -1164,7 +1220,7 @@ test.skipIf(!GPU_AVAILABLE)(
         seatError.message,
       );
 
-      // ⑥ 借り物の再輸出は拒否する（借用の連鎖は持たない）。
+      // (6) Re-exporting a borrowed weight is rejected (there are no borrowing chains).
       const chained = await build(weightBorrowerGraph(), { embed: shared });
       try {
         assertThrows(
@@ -1183,13 +1239,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 共有 initializer の門: 意味論 dtype（§2.2）
+// Shared initializer checks: semantic dtype (§2.2)
 // ---------------------------------------------------------------------------
 
-/** dtype の門の材料の要素数（値は見ない — 門は宣言だけを見る）。 */
+/** The element count of the material for the dtype check (values are not looked at — the check looks only at declarations). */
 const DTYPE_LENGTH = 4;
 
-/** 貸し手: 意味論 dtype が `dtype` の initializer `w` を 1 本持ち、f32 へ cast して返す。 */
+/** The lender: holds one initializer `w` whose semantic dtype is `dtype`, casts it to f32 and returns it. */
 const dtypeLenderGraph = (dtype: "f32" | "i32"): DeclarationJson => ({
   format: "karume-ir",
   version: 2,
@@ -1219,12 +1275,14 @@ const openDtypeLenderModel = (dtype: "f32" | "i32") =>
   ]);
 
 /**
- * 借り手: `w` を `shared` で借り（意味論 dtype は `dtype` と宣言）、自前の f32 initializer
- * `bias` も 1 本持つ。`bias` は「門が重みのアップロードより後ろに在れば借り手側の GPU 確保が
- * 必ず起きる」ことを保証する材料（確保ゼロの観測を空振りにしない）。
+ * The borrower: borrows `w` with `shared` (declaring its semantic dtype as `dtype`) and also holds
+ * one f32 initializer `bias` of its own. `bias` is the material that guarantees "if the check sat
+ * after the weight upload, the borrower side would always make a GPU allocation" (so that the
+ * observation of zero allocations is not vacuous).
  *
- * bool は IR パーサが initializer の語彙外として落とすので、パース済みの宣言を書き換えて作る —
- * 公開面の `openMemoryContainer` は `IrDeclaration` を型付きの値で受け取り、パーサを通らない。
+ * The IR parser rejects bool as outside the initializer vocabulary, so it is built by rewriting a
+ * parsed declaration — the public `openMemoryContainer` takes an `IrDeclaration` as a typed value
+ * and does not go through the parser.
  */
 const dtypeBorrowerContainer = (dtype: "f32" | "i32" | "bool") => {
   const parsed = parseIrDeclarationValue({
@@ -1260,7 +1318,7 @@ const dtypeBorrowerContainer = (dtype: "f32" | "i32" | "bool") => {
   });
 };
 
-/** `fn` の間に device が受けた `createBuffer` の回数を数え、`fn` の結果と返す（終わったら元へ戻す）。 */
+/** Counts the `createBuffer` calls the device received during `fn` and returns them with `fn`'s result (restores the original afterwards). */
 const countCreateBuffer = async <T>(
   gpu: GpuContext,
   fn: () => Promise<T>,
@@ -1280,11 +1338,11 @@ const countCreateBuffer = async <T>(
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "共有 initializer の門: 貸し手と借り手の意味論 dtype の不一致は、借り手の GPU 確保より前に fail loudly（実 GPU）",
+  "shared initializer checks: a semantic dtype mismatch between lender and borrower fails loudly before the borrower's GPU allocation (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // 貸し手の構築も try の内側に置き、作れたものだけをここに積んで finally で返す — 2 本目の構築が
-    // 落ちても 1 本目と device の後始末を飛ばさない。
+    // The lenders are built inside the try too; only those that were built are pushed here and returned
+    // in finally — a failure to build the second does not skip cleaning up the first and the device.
     const lenders: Session[] = [];
     let disposed: PromiseSettledResult<void>[] = [];
     try {
@@ -1316,14 +1374,15 @@ test.skipIf(!GPU_AVAILABLE)(
           ),
         );
         if ("borrower" in outcome) {
-          // 借り手を先に返す — 掴んだままだと finally の貸し手 dispose が「貸し出し中」で拒否され、
-          // 本来の失敗（門が効いていない）がその拒否に隠れる。fail を finally に置くのは、借り手の
-          // dispose 自体が拒否されても、その拒否ではなく本来の失敗の文言を表に出すため。
+          // Return the borrower first — while it is held, the lender dispose in finally would be rejected as
+          // "on loan" and the real failure (the check not taking effect) would hide behind that rejection.
+          // fail sits in finally so that, even if the borrower's own dispose is rejected, the message of the
+          // real failure surfaces rather than that rejection.
           try {
             await outcome.borrower.dispose();
           } finally {
             fail(
-              `借り手（${dtype}）の構築が貸し手（${lenderDtype}）の重みで通った — 意味論 dtype の門が効いていない`,
+              `the borrower (${dtype}) was built with the lender's (${lenderDtype}) weights — the semantic dtype check does not take effect`,
             );
           }
         }
@@ -1331,31 +1390,36 @@ test.skipIf(!GPU_AVAILABLE)(
         const message = outcome.error.message;
         assert(message.includes("semantic dtype"), message);
         assert(message.includes(`'${dtype}'`) && message.includes(`'${lenderDtype}'`), message);
-        // 仕様（借り手の重みのアップロード前）より強い条件として構築全体の確保 0 回を見ている。将来ここが
-        // 赤になったら、門より前の確保の中身（重みか、重み以外か）を見て判断する。
-        assertEquals(allocated, 0, "門は借り手の重みを 1 バイトも上げる前に落とす");
+        // This checks a stronger condition than the spec (before the borrower's weight upload): 0 allocations
+        // over the whole build. If it turns red in the future, decide by looking at what the allocations
+        // before the check are (weights or something else).
+        assertEquals(
+          allocated,
+          0,
+          "the check rejects before uploading a single byte of the borrower's weights",
+        );
       };
 
-      // 対照: dtype が一致すれば構築は通り、借り手は自前の `bias` を確保する（= 確保ゼロの観測は
-      // 空振りではない）。
+      // Control: when the dtypes match, the build succeeds and the borrower allocates its own `bias` (= the
+      // observation of zero allocations is not vacuous).
       const { allocated: matchedAllocations, result: matched } = await countCreateBuffer(gpu, () =>
         build(f32Lender, "f32"),
       );
       await matched.dispose();
-      assert(matchedAllocations > 0, `一致した借り手の確保回数 ${matchedAllocations}`);
+      assert(matchedAllocations > 0, `allocations of the matching borrower ${matchedAllocations}`);
 
-      // ① 貸し手 f32・借り手 i32 — 通すと同じ 4 バイトが整数として読まれる（1.0 → 1065353216）。
+      // (1) lender f32, borrower i32 — letting it through would read the same 4 bytes as an integer (1.0 -> 1065353216).
       await rejectsBeforeAllocation(f32Lender, "i32", "f32");
-      // ② 貸し手 i32・借り手 f32 — 逆向きの同じ取り違え。
+      // (2) lender i32, borrower f32 — the same mix-up the other way round.
       await rejectsBeforeAllocation(i32Lender, "f32", "i32");
-      // ③ 借り手 bool — 常駐形式（raw）は同じなので席の門は区別しない。
+      // (3) borrower bool — the residency format (raw) is the same, so the residency-class check does not tell them apart.
       await rejectsBeforeAllocation(f32Lender, "bool", "f32");
     } finally {
-      // 片方の dispose の拒否で残りの後始末（もう 1 本の貸し手と device）を飛ばさない。
+      // A rejected dispose of one does not skip the rest of the cleanup (the other lender and the device).
       disposed = await Promise.allSettled(lenders.map((lender) => lender.dispose()));
       gpu.destroy();
     }
-    // dispose の拒否は本体が通ったときだけここで出す（finally で投げると本体の失敗を上書きする）。
+    // A dispose rejection is raised here only when the body passed (throwing in finally would overwrite the body's failure).
     for (const settled of disposed) {
       if (settled.status === "rejected") throw settled.reason;
     }

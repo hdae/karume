@@ -1,22 +1,22 @@
-// GQA（整除 broadcast — ADR 0067 決定 1〜3）の**ビット同一の門**。
+// **Bit-identity check** of GQA (exact-division broadcast — ADR 0067 decisions 1–3).
 //
-// 同じ乱数入力に対し、
+// For the same random inputs,
 //
-//   ① `k` / `v` を `[B,Hkv,N,D]` のまま渡す GQA 形の `attention`
-//   ② ホスト側で kv-head を H 本へ**実体化**（repeat_kv）した従来形の `attention`
+//   ① the GQA-form `attention` that takes `k` / `v` as `[B,Hkv,N,D]` as is
+//   ② the conventional-form `attention` with kv-heads **materialized** to H on the host (repeat_kv)
 //
-// を**同じ実 GPU**で流し、出力を **f32 のビット列**で突き合わせる。GQA 変種の差分は K / V の
-// バッチ base 1 行と uniform 1 語だけ（ADR 0067 決定 2）なので、共有タイル充填も K 縮約順も
-// 動かない = ビット単位で一致するのが**期待値そのもの**。allclose では head 対応の取り違えが
-// tolerance に隠れる。
+// are run on **the same real GPU** and the outputs are compared as **f32 bits**. The GQA variant
+// differs only in one line of the K / V batch base and one uniform word (ADR 0067 decision 2), so
+// neither the shared tile fill nor the K reduction order moves = bit-for-bit equality **is the
+// expected value itself**. With allclose, a mixed-up head mapping hides inside the tolerance.
 //
-// MUST: 恒真化しないこと。①② は**別々のグラフ**（入力 shape が違う）を別々の Session で
-// 走らせる。②の実体化はホスト側の素朴なコピーで、カーネルの写像式（`wid.z / r`）とは
-// 独立に書く。
-// MUST: 一致だけでなく**故障注入で不一致が出ること**を同じテストで見る（head 対応を取り違えた
-// 実体化と一致してしまうなら、この門は何も見ていない）。
-// MUST: B / H / Hkv / M / N / D は複数形状（端数・v4・行タイル 2 枚跨ぎ）を回す。カーネルは
-// B·H を 1 本のバッチ軸に畳むので、B=1 だけでは `b·Hkv + h/r` の恒等式が検証されない。
+// MUST: do not make it tautological. ① and ② run **separate graphs** (different input shapes) in
+// separate Sessions. The materialization of ② is a naive host-side copy, written independently of
+// the kernel's mapping formula (`wid.z / r`).
+// MUST: besides equality, the same test sees **fault injection produce a mismatch** (if it also
+// matches a materialization with a mixed-up head mapping, this check sees nothing).
+// MUST: B / H / Hkv / M / N / D run over several shapes (remainders, v4, spanning 2 row tiles). The
+// kernel folds B·H into one batch axis, so B=1 alone does not verify the identity `b·Hkv + h/r`.
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
@@ -35,10 +35,13 @@ import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
-/** 半スケール（torch math decomp の `√scale_factor`）。D から導く契約どおりの値。 */
+/**
+ * The half scale (`√scale_factor` of torch's math decomposition). The value derived from D per the
+ * contract.
+ */
 const halfScale = (depth: number): number => Math.fround(Math.sqrt(1 / Math.sqrt(depth)));
 
-/** 決定的なデータ列（乱数は使わない — 失敗が再現しないため）。 */
+/** Deterministic data sequences (no random numbers — failures would not reproduce). */
 const QUERY = (i: number): number => (((i * 7) % 23) - 11) * 0.17;
 const KEY = (i: number): number => (((i * 11) % 19) - 9) * 0.23;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.31;
@@ -56,16 +59,16 @@ const f32 = (shape: readonly number[], generator: (index: number) => number): F3
   return { dtype: "f32", shape, data };
 };
 
-/** f32 のビット列（末尾 1 ulp の差も `-0.0` も見える形）。 */
+/** The f32 bits (a form in which a 1-ulp difference and `-0.0` are visible). */
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
 type GqaShape = {
   readonly name: string;
   readonly b: number;
-  /** q の head 数 H。 */
+  /** Head count H of q. */
   readonly h: number;
-  /** k / v の head 数 Hkv（`h % kv == 0` — r = h / kv）。 */
+  /** Head count Hkv of k / v (`h % kv == 0` — r = h / kv). */
   readonly kv: number;
   readonly m: number;
   readonly n: number;
@@ -73,48 +76,59 @@ type GqaShape = {
 };
 
 const SHAPES: readonly GqaShape[] = [
-  // r=1（対照 — GQA ビットが立たない形。キーも生成物も従来のまま）
+  // r=1 (control — a shape where the GQA bit is not set; keys and generated code stay as before)
   { name: "r1 B2 H4 M5 N7 D4", b: 2, h: 4, kv: 4, m: 5, n: 7, d: 4 },
-  // r=2 かつ全軸タイル端数（D%4 ≠ 0 でスカラ変種へ落ちる）
+  // r=2 with remainders on every tile axis (D%4 ≠ 0 drops to the scalar variant)
   { name: "r2 B2 H4 M5 N7 D6", b: 2, h: 4, kv: 2, m: 5, n: 7, d: 6 },
-  // r=8 の MQA（Gemma 4 E2B の 8:1 — Hkv=1 も同じ整除式）。①③ とも v4 経路
+  // r=8 MQA (8:1 of Gemma 4 E2B — Hkv=1 follows the same exact-division formula). ① and ③ both on
+  // the v4 path
   { name: "r8 B2 H8 M3 N8 D8", b: 2, h: 8, kv: 1, m: 3, n: 8, d: 8 },
-  // r=4 × B=3 で行タイル 2 枚を跨ぐ（`b·Hkv + h/r` の b 項が効く形）
+  // r=4 × B=3 spans 2 row tiles (a shape where the b term of `b·Hkv + h/r` matters)
   { name: "r4 B3 H8 M68 N20 D12", b: 3, h: 8, kv: 2, m: 68, n: 20, d: 12 },
-  // 素の GQA 16:2（MiniCPM5-1B）を縮めた形。M / N とも 64 の倍数 = 実モデルの経路
+  // A shrunk version of plain GQA 16:2 (MiniCPM5-1B). M / N both multiples of 64 = the real model's
+  // path
   { name: "r8 B1 H16 M64 N64 D64", b: 1, h: 16, kv: 2, m: 64, n: 64, d: 64 },
 ];
 
-/** 故障注入で使う「r=4 を跨ぐ形」（head ごとにデータが違うので写像の誤りが値に出る）。 */
+/**
+ * The "shape spanning r=4" used for fault injection (data differs per head, so a mapping error
+ * shows in the values).
+ */
 const INJECT_SHAPE: GqaShape = SHAPES[3];
 
 /**
- * i8a8 の**段別適格判定**（①QK は `D % 4`・③PV は `N % 4` — src/runtime/recipe-builder.ts）を
- * 跨いだ GQA 形。GQA × i8a8 の拒否は**要求されたモード**で決まる（ADR 0067 決定 3）ので、
- * 段が片方だけ非適格でも両方非適格でも**同じ 1 本のエラー**で落ちる。
+ * GQA shapes spanning the **per-stage eligibility** of i8a8 (①QK needs `D % 4`, ③PV needs `N % 4` —
+ * src/runtime/recipe-builder.ts). The rejection of GQA × i8a8 is decided by **the requested mode**
+ * (ADR 0067 decision 3), so whether one stage or both are ineligible, it fails with **the same
+ * single error**.
  *
- * MUST: 適格形（SHAPES[2] は D=8 / N=8 で ①③ とも適格）だけを被験体にしない — 拒否条件を段別
- * 適格判定へ誤用する退行（`gqa && qkI8a8 && pvI8a8` 等）は、**非適格形だけが黙って f32 / 混成へ
- * 縮退する**形で出るので、適格形しか踏まない門は緑のまま通す。
+ * MUST: do not test only eligible shapes (SHAPES[2] has D=8 / N=8, eligible for both ① and ③) — a
+ * regression that misuses per-stage eligibility as the rejection condition
+ * (`gqa && qkI8a8 && pvI8a8` and the like) shows up as **only the ineligible shapes silently
+ * degrading to f32 / mixed**, so a check that only touches eligible shapes stays green.
  */
 const I8A8_INELIGIBLE: readonly GqaShape[] = [
-  { name: "r2 D%4≠0（①QK 非適格・③PV 適格）", b: 2, h: 4, kv: 2, m: 5, n: 8, d: 6 },
-  { name: "r2 N%4≠0（①QK 適格・③PV 非適格）", b: 2, h: 4, kv: 2, m: 5, n: 7, d: 4 },
-  { name: "r2 D%4≠0 かつ N%4≠0（①③ とも非適格）", b: 2, h: 4, kv: 2, m: 5, n: 7, d: 6 },
+  { name: "r2 D%4≠0 (①QK ineligible, ③PV eligible)", b: 2, h: 4, kv: 2, m: 5, n: 8, d: 6 },
+  { name: "r2 N%4≠0 (①QK eligible, ③PV ineligible)", b: 2, h: 4, kv: 2, m: 5, n: 7, d: 4 },
+  { name: "r2 D%4≠0 and N%4≠0 (both ①③ ineligible)", b: 2, h: 4, kv: 2, m: 5, n: 7, d: 6 },
 ];
 
-/** 拒否理由の**不変部分**（形ごとに変わるのは `${where}` と `H / Hkv / r` の表示だけ）。 */
+/**
+ * The **invariant part** of the rejection reason (only `${where}` and the display of `H / Hkv / r`
+ * change per shape).
+ */
 const rejectionReason = (message: string, where: string): string => {
   const at = message.indexOf("× i8a8");
-  assert(at >= 0, `${where}: GQA × i8a8 の拒否の文言が変わっている: ${message}`);
+  assert(at >= 0, `${where}: the wording of the GQA × i8a8 rejection changed: ${message}`);
   return message.slice(at);
 };
 
 /**
- * kv-head を H 本へ**実体化**する（repeat_kv）。
+ * **Materializes** the kv-heads to H (repeat_kv).
  *
- * `pick` が head → kv-head の写像で、既定（{@link BLOCK_REPEAT}）は `⌊h/r⌋` の block repeat。
- * 故障注入はここに別の写像を差す（カーネルの写像式とは独立にホスト側で組むのが要点）。
+ * `pick` is the head → kv-head mapping; the default ({@link BLOCK_REPEAT}) is the block repeat
+ * `⌊h/r⌋`. Fault injection plugs another mapping in here (the point is to build it on the host,
+ * independently of the kernel's mapping formula).
  */
 const materializeKv = (
   source: F32Tensor,
@@ -135,15 +149,19 @@ const materializeKv = (
   return { dtype: "f32", shape: [batches, heads, cols, depth], data };
 };
 
-/** 契約どおりの写像（`h/r` の整数除算 — ADR 0067 決定 2 の恒等式のホスト側の写し）。 */
+/**
+ * The mapping per the contract (integer division `h/r` — the host-side copy of the identity of ADR
+ * 0067 decision 2).
+ */
 const BLOCK_REPEAT = (head: number, _kvHeads: number, repeat: number): number =>
   Math.floor(head / repeat);
 
 /**
- * 実測形の band mask（`[1,1,M,N]` の加算項 — GQA とは独立の軸）。
+ * The measured band mask (an additive term of `[1,1,M,N]` — an axis independent of GQA).
  *
- * MUST: **全ての行に非マスク列が 1 本以上**あること（行が丸ごとマスクだと amax が −inf で
- * `exp(−inf − (−inf))` が NaN になり、両側が同じ NaN を出してビット比較が何も見なくなる）。
+ * MUST: **every row has at least one unmasked column** (if a whole row is masked, amax is −inf,
+ * `exp(−inf − (−inf))` becomes NaN, both sides produce the same NaN and the bit comparison sees
+ * nothing).
  */
 const bandMask = (m: number, n: number, width: number, blocked: number): F32Tensor => {
   const data = new Float32Array(m * n);
@@ -158,13 +176,13 @@ const bandMask = (m: number, n: number, width: number, blocked: number): F32Tens
 
 type RunResult = {
   readonly output: Tensor;
-  /** 直近 run のパイプラインキー（census — 計測に依らない）。 */
+  /** Pipeline keys of the last run (census — independent of timing). */
   readonly keys: readonly string[];
 };
 
 /**
- * 1 ノードの `attention` を走らせる。`kv` の shape が `q` と違えば GQA 形、同じなら従来形
- * （**同じ 1 本の経路**を通す — 形だけが違う）。
+ * Runs a 1-node `attention`. If the shape of `kv` differs from `q` it is the GQA form, if equal the
+ * conventional form (both go through **the same single path** — only the shapes differ).
  */
 const runAttention = async (
   gpu: GpuContext,
@@ -197,7 +215,10 @@ const runAttention = async (
   }
 };
 
-/** GQA 形と実体化形の入力 3 本（`pick` を差し替えると故障注入になる）。 */
+/**
+ * The 3 inputs of the GQA form and the materialized form (swapping `pick` makes it fault
+ * injection).
+ */
 const inputsFor = (
   shape: GqaShape,
   pick: (head: number, kvHeads: number, repeat: number) => number = BLOCK_REPEAT,
@@ -221,7 +242,7 @@ const inputsFor = (
   };
 };
 
-/** ビット列の食い違い（最初の 4 件だけ拾う）。 */
+/** Bit mismatches (only the first 4 are collected). */
 const mismatches = (left: Tensor, right: Tensor): readonly number[] => {
   const a = bits(left);
   const c = bits(right);
@@ -237,16 +258,22 @@ const assertBitEqual = (fused: Tensor, split: Tensor, where: string): void => {
   assertEquals(
     mismatches(fused, split),
     [],
-    `${where}: 実体化版とビット列が違う（最初の食い違い: ${mismatches(fused, split)
+    `${where}: bits differ from the materialized version (first mismatches: ${mismatches(
+      fused,
+      split,
+    )
       .map((i) => `[${i}] ${fused.data[i]} vs ${split.data[i]}`)
-      .join(" / ")}）`,
+      .join(" / ")})`,
   );
-  // 恒真化の門: 出力が定数なら「一致」は何も検証していない
-  assert(new Set(bits(fused)).size > 1, `${where}: 出力が定数（ビット一致が恒真になっている）`);
+  // Tautology guard: if the output is constant, "equal" verifies nothing
+  assert(
+    new Set(bits(fused)).size > 1,
+    `${where}: the output is constant (bit equality is a tautology)`,
+  );
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "GQA 形 attention の出力が repeat_kv 実体化版と**ビット単位で一致**する（r ∈ {1,2,4,8}・実 GPU）",
+  "GQA-form attention output is **bit-for-bit equal** to the repeat_kv materialized version (r ∈ {1,2,4,8}, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -255,7 +282,8 @@ test.skipIf(!GPU_AVAILABLE)(
         const gqa = await runAttention(gpu, q, k, v);
         const split = await runAttention(gpu, q, kFull, vFull);
         assertBitEqual(gqa.output, split.output, shape.name);
-        // 出力は q 側の H（実体化版と同形になっていることを shape の側でも固定する）
+        // The output has q's H (pin on the shape side too that it has the same shape as the
+        // materialized version)
         assertEquals(gqa.output.shape, [shape.b, shape.h, shape.m, shape.d], shape.name);
       }
     } finally {
@@ -265,15 +293,16 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * mask / s16 との**直交**（GQA は K / V の base だけの軸）。mask は `[1,1,M,N]` のまま Hkv に
- * 依らず、S の f16 格納も書き手と読み手が同時に切り替わるだけで写像には触れない。
+ * **Orthogonality** to mask / s16 (GQA is an axis of the K / V base only). The mask stays
+ * `[1,1,M,N]` regardless of Hkv, and the f16 storage of S only switches writer and reader together
+ * without touching the mapping.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GQA は加算 mask と S の f16 格納（s16）と直交してビット同一を保つ（実 GPU）",
+  "GQA stays bit-identical orthogonally to an additive mask and f16 storage of S (s16) (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // mask 付き（r=4・行タイル 2 枚跨ぎ）
+      // With a mask (r=4, spanning 2 row tiles)
       const masked = SHAPES[3];
       {
         const { q, k, v, kFull, vFull } = inputsFor(masked);
@@ -281,35 +310,36 @@ test.skipIf(!GPU_AVAILABLE)(
         const gqa = await runAttention(gpu, q, k, v, mask);
         const split = await runAttention(gpu, q, kFull, vFull, mask);
         assertBitEqual(gqa.output, split.output, `${masked.name} + mask`);
-        // 恒真化の門: mask が結果に効いている（mask 無しと違う値になる）
+        // Tautology guard: the mask affects the result (values differ from no mask)
         const plain = await runAttention(gpu, q, k, v);
         assert(
           bits(gqa.output).some((word, i) => word !== bits(plain.output)[i]),
-          `${masked.name}: mask 付きと mask 無しの出力が同一（mask が効いていない）`,
+          `${masked.name}: the outputs with and without the mask are identical (the mask has no effect)`,
         );
         assert(
           gqa.output.data.every((value) => Number.isFinite(value)),
-          `${masked.name}: 出力に非有限値（行が丸ごとマスクされている）`,
+          `${masked.name}: non-finite values in the output (a whole row is masked)`,
         );
       }
-      // s16（S の f16 格納 — 適格形であることを判定関数で確かめてから回す）
+      // s16 (f16 storage of S — run only after the predicate confirms the shape is eligible)
       const scored = SHAPES[2];
       {
         assertEquals(
           attentionScoreUsesF16(scored.d, scored.n),
           true,
-          `${scored.name}: s16 の適格形のはず`,
+          `${scored.name}: should be an s16-eligible shape`,
         );
         const { q, k, v, kFull, vFull } = inputsFor(scored);
         const options: SessionOptions = { attentionScoreStorage: "f16" };
         const gqa = await runAttention(gpu, q, k, v, undefined, options);
         const split = await runAttention(gpu, q, kFull, vFull, undefined, options);
         assertBitEqual(gqa.output, split.output, `${scored.name} + s16`);
-        // 恒真化の門: s16 が効いている（f32 格納と値が動く = 丸めが 1 段増えている）
+        // Tautology guard: s16 has an effect (values move from f32 storage = one more rounding
+        // step)
         const f32Score = await runAttention(gpu, q, k, v);
         assert(
           bits(gqa.output).some((word, i) => word !== bits(f32Score.output)[i]),
-          `${scored.name}: s16 と f32 格納の出力が同一（opt-in が効いていない）`,
+          `${scored.name}: the s16 and f32-storage outputs are identical (the opt-in has no effect)`,
         );
       }
     } finally {
@@ -319,46 +349,50 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **故障注入**（ADR 0067 決定 2 の受入条件）。head 対応を取り違えた実体化と突き合わせて
- * **不一致が出ること**を確かめる — 出なければ上のビット同一の門は何も見ていない。
+ * **Fault injection** (the acceptance condition of ADR 0067 decision 2). Compares against a
+ * materialization with a mixed-up head mapping and confirms **a mismatch shows** — if not, the
+ * bit-identity check above sees nothing.
  *
- * ① `r` 誤り: `⌊h/2⌋ mod Hkv`（r'=2 の写像）で実体化する。真の r=4 とは head 0..7 の
- *    対応が 0,0,1,1,0,0,1,1 と 0,0,0,0,1,1,1,1 で違う。
- * ② ③PV 側の写像漏れ: K だけ正しく実体化し、V は **kv-head 0 に張り付いた**形にする
- *    （①QK を写して ③PV を写し忘れたカーネルが出す値と同型 — S は正しいのに V だけ別 head）。
+ * ① Wrong `r`: materialize with `⌊h/2⌋ mod Hkv` (the r'=2 mapping). Against the true r=4 the
+ *    mapping of heads 0..7 differs: 0,0,1,1,0,0,1,1 vs 0,0,0,0,1,1,1,1.
+ * ② A missing mapping on the ③PV side: K is materialized correctly, V is **stuck to kv-head 0**
+ *    (the same shape as the values a kernel that maps ①QK but forgets ③PV would produce — S is
+ *    right, only V comes from another head).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GQA のビット同一の門は head 写像の誤り（r 誤り・③PV の写像漏れ）を検出する（実 GPU）",
+  "the GQA bit-identity check detects head mapping errors (wrong r, missing ③PV mapping) (real GPU)",
   async () => {
     const shape = INJECT_SHAPE;
     const gpu = await acquireGpu();
     try {
       const { q, k, v, kFull, vFull } = inputsFor(shape);
       const truth = await runAttention(gpu, q, k, v);
-      // 正しい実体化とは一致する（不一致側の対照 — 環境ではなく写像を見ていることの証拠）
+      // Equal to the correct materialization (control for the mismatch side — evidence that the
+      // mapping, not the environment, is what is checked)
       assertBitEqual(truth.output, (await runAttention(gpu, q, kFull, vFull)).output, shape.name);
 
-      // ① r 誤り（r'=2 の写像で K / V とも実体化）
+      // ① Wrong r (K / V both materialized with the r'=2 mapping)
       const wrongR = inputsFor(shape, (head, kvHeads) => Math.floor(head / 2) % kvHeads);
       const injectedR = await runAttention(gpu, q, wrongR.kFull, wrongR.vFull);
       assert(
         mismatches(truth.output, injectedR.output).length > 0,
-        `${shape.name}: r 誤り（r'=2）の実体化と一致してしまう（門が写像を見ていない）`,
+        `${shape.name}: matches the wrong-r (r'=2) materialization (the check does not see the mapping)`,
       );
 
-      // ② ③PV 側の写像漏れ（K は正しく・V は kv-head 0 に張り付き）
+      // ② Missing mapping on the ③PV side (K correct, V stuck to kv-head 0)
       const stuckV = materializeKv(v, shape.h, () => 0);
       const injectedPv = await runAttention(gpu, q, kFull, stuckV);
       assert(
         mismatches(truth.output, injectedPv.output).length > 0,
-        `${shape.name}: V の写像漏れと一致してしまう（③PV 側を見ていない）`,
+        `${shape.name}: matches the missing V mapping (the ③PV side is not checked)`,
       );
-      // 逆側（K だけ張り付き）も検出する — ①QK / ③PV のどちら片方の漏れも見える形
+      // The opposite side (only K stuck) is detected too — a missing mapping on either ①QK or ③PV
+      // is visible
       const stuckK = materializeKv(k, shape.h, () => 0);
       const injectedQk = await runAttention(gpu, q, stuckK, vFull);
       assert(
         mismatches(truth.output, injectedQk.output).length > 0,
-        `${shape.name}: K の写像漏れと一致してしまう（①QK 側を見ていない）`,
+        `${shape.name}: matches the missing K mapping (the ①QK side is not checked)`,
       );
     } finally {
       gpu.destroy();
@@ -367,15 +401,17 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **census**（ADR 0058 決定 4）。r > 1 では GQA 変種のキーが**実際に走った**こと、r = 1 では
- * `:gqa` が 1 本も出ないこと（決定 2 の「r=1 はバイト同一」の実行側の裏）。
+ * **census** (ADR 0058 decision 4). With r > 1 the GQA variant's keys **actually ran**; with r = 1
+ * no `:gqa` appears at all (the execution-side counterpart of decision 2's "r=1 is
+ * byte-identical").
  *
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
- * 無条件に FAIL にする（「entries が空なら次の形へ」で守ると全ケースが無検査のまま緑になる —
- * tests/helpers/pipeline-census.ts の `requireCensus`）。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing (runs on machines without
+ * timing too). An empty census FAILs unconditionally (guarding with "if entries is empty, go to the
+ * next shape" makes every case green without checking anything — `requireCensus` in
+ * tests/helpers/pipeline-census.ts).
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GQA のキーは r > 1 でだけ立つ（r=1 は従来キーのまま・実 GPU）",
+  "GQA keys are set only for r > 1 (r=1 keeps the conventional keys, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -383,12 +419,12 @@ test.skipIf(!GPU_AVAILABLE)(
       for (const shape of SHAPES) {
         const { q, k, v } = inputsFor(shape);
         const { keys } = await runAttention(gpu, q, k, v);
-        assert(keys.length > 0, `${shape.name}: 内訳が空（キー検査が空振りしている）`);
+        assert(keys.length > 0, `${shape.name}: the breakdown is empty (the key check is a no-op)`);
         const gqa = shape.h !== shape.kv;
         const attention = keys.filter(
           (key) => key.startsWith("attention_qk") || key.startsWith("attention_pv"),
         );
-        assertEquals(attention.length, 2, `${shape.name}: ①③ が 1 本ずつ走る`);
+        assertEquals(attention.length, 2, `${shape.name}: ① and ③ run once each`);
         assertEquals(
           keys.includes(
             attentionQkKey(
@@ -402,7 +438,7 @@ test.skipIf(!GPU_AVAILABLE)(
             ),
           ),
           true,
-          `${shape.name}: ①QK の期待キーが無い（走ったキー: ${attention.join(" / ")}）`,
+          `${shape.name}: the expected ①QK key is missing (keys that ran: ${attention.join(" / ")})`,
         );
         assertEquals(
           keys.includes(
@@ -416,13 +452,13 @@ test.skipIf(!GPU_AVAILABLE)(
             ),
           ),
           true,
-          `${shape.name}: ③PV の期待キーが無い（走ったキー: ${attention.join(" / ")}）`,
+          `${shape.name}: the expected ③PV key is missing (keys that ran: ${attention.join(" / ")})`,
         );
-        // r=1 は `:gqa` を 1 本も持たない / r>1 は ①③ とも持つ
+        // r=1 has no `:gqa` at all / r>1 has it on both ① and ③
         assertEquals(
           attention.filter((key) => key.endsWith(":gqa")).length,
           gqa ? 2 : 0,
-          `${shape.name}: :gqa の本数`,
+          `${shape.name}: number of :gqa keys`,
         );
       }
     } finally {
@@ -432,17 +468,20 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **GQA × i8a8 は fail loudly**（ADR 0067 決定 3 — 黙って f32 経路へ落とすと性能が静かに変わる。
- * i8a8 は head 基底が 5 本で K / V の量子化・確保も `B·H` 前提なので、GQA 形は取り違えになる）。
+ * **GQA × i8a8 fails loudly** (ADR 0067 decision 3 — silently dropping to the f32 path would
+ * quietly change performance. i8a8 has 5 head bases and its K / V quantization and allocation
+ * assume `B·H`, so a GQA shape would be mixed up).
  *
- * 恒真化の門: **同じ形の非 GQA（H = Hkv）は i8a8 で走る**こと（拒否の原因が GQA であって
- * 「その形が i8a8 で走らない」ではないことを固定する）。
+ * Tautology guard: **the non-GQA version of the same shape (H = Hkv) runs with i8a8** (pins that
+ * the cause of the rejection is GQA, not "that shape does not run with i8a8").
  *
- * MUST: 段別適格判定を跨いだ非適格形（{@link I8A8_INELIGIBLE}）も**同じ**エラーで落ちること
- * まで見る — 拒否が要求モードではなく段の適格性で決まる実装では、そこだけが沈黙で縮退する。
+ * MUST: check down to the ineligible shapes spanning per-stage eligibility
+ * ({@link I8A8_INELIGIBLE}) failing with **the same** error — in an implementation where the
+ * rejection is decided by stage eligibility instead of the requested mode, exactly those degrade
+ * silently.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "GQA × attentionCompute 'a8' は fail loudly（段別適格性に依らず・同形の非 GQA は走る・実 GPU）",
+  "GQA × attentionCompute 'a8' fails loudly (regardless of per-stage eligibility; non-GQA of the same shape runs; real GPU)",
   async () => {
     const shape = SHAPES[2];
     const gpu = await acquireGpu();
@@ -454,15 +493,17 @@ test.skipIf(!GPU_AVAILABLE)(
         ExecutionError,
         "GQA",
       );
-      assert(error.message.includes("ADR 0067"), `案内が足りない: ${error.message}`);
-      // ①③ とも i8a8 適格な形（D=8 / N=8）での拒否理由。以下の非適格形はこれと**同一**の理由で
-      // 落ちる（形ごとに変わるのは H / Hkv / r の表示だけ）。
+      assert(error.message.includes("ADR 0067"), `the guidance is insufficient: ${error.message}`);
+      // The rejection reason on a shape eligible for i8a8 in both ① and ③ (D=8 / N=8). The
+      // ineligible shapes below fail with **the identical** reason (only the display of H / Hkv / r
+      // changes per shape).
       const reason = rejectionReason(error.message, shape.name);
       for (const ineligible of I8A8_INELIGIBLE) {
-        // 被験体が本当に非適格であることを先に固定する（適格形が紛れ込むと被覆が消える）
+        // First pin that the subject really is ineligible (an eligible shape slipping in removes
+        // the coverage)
         assert(
           ineligible.d % 4 !== 0 || ineligible.n % 4 !== 0,
-          `${ineligible.name}: ①③ とも i8a8 適格 = 非適格形の被覆になっていない`,
+          `${ineligible.name}: eligible for i8a8 in both ①③ = not covering an ineligible shape`,
         );
         const inputs = inputsFor(ineligible);
         const rejected = await assertRejects(
@@ -473,15 +514,15 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           rejectionReason(rejected.message, ineligible.name),
           reason,
-          `${ineligible.name}: 適格形と拒否理由が違う（段別適格判定が拒否条件へ漏れている）`,
+          `${ineligible.name}: rejection reason differs from the eligible shape (per-stage eligibility leaks into the rejection condition)`,
         );
       }
-      // 非 GQA（実体化して H = Hkv にした同じ値）は i8a8 で走る
+      // Non-GQA (the same values materialized to H = Hkv) runs with i8a8
       const plain = await runAttention(gpu, q, kFull, vFull, undefined, options);
       assertEquals(plain.output.shape, [shape.b, shape.h, shape.m, shape.d], shape.name);
       assert(
         plain.output.data.every((value) => Number.isFinite(value)),
-        `${shape.name}: 非 GQA の i8a8 出力に非有限値`,
+        `${shape.name}: non-finite values in the non-GQA i8a8 output`,
       );
     } finally {
       gpu.destroy();

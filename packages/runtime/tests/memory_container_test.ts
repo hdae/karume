@@ -1,12 +1,15 @@
 /**
- * メモリ内容器（`openMemoryContainer`）— 手元のバイト列を容器を書かずに供給する面。
+ * The in-memory container (`openMemoryContainer`) — the surface that supplies local bytes without
+ * writing a container.
  *
- * ここで固定するのは 2 つ:
- * - **この層が自分で持つ検査**（宣言との対応・`pieces` が 2 本以上）と、**合流層へ委ねた検査**
- *   （codec × 意味論 dtype・piece の被覆・scale の要否）が実際に効いていること。後者は
- *   「メモリ内容器は descriptor を通らない」ぶん、委譲が崩れると無検査で素通りする。
- * - **合成した目次の規則**（block id・part 割り・`readBlock` の返し方）。part 割りは Session 構築の
- *   フェンス境界そのものなので、崩れると RAM ピークが静かに変わる。
+ * This file pins two things:
+ * - **The checks this layer owns** (matching the declaration, `pieces` having two or more entries)
+ *   and **the checks it delegates to the merge layer** (codec × semantic dtype, piece coverage,
+ *   whether a scale is needed) are actually in effect. Since "the in-memory container does not go
+ *   through a descriptor", the latter would slip through unchecked if the delegation broke.
+ * - **The rules of the synthesized index** (block ids, part assignment, how `readBlock` returns).
+ *   The part assignment is exactly the fence boundary of Session construction, so if it breaks the
+ *   RAM peak changes silently.
  */
 
 import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
@@ -28,7 +31,9 @@ import {
 
 const declarationOf = (graph: DeclarationJson): IrDeclaration => parseIrDeclarationValue(graph);
 
-/** 宣言 1 本 + 供給 1 組をそのまま開く（写像を挟まない素の入口）。 */
+/**
+ * Opens one declaration + one supply set as is (the bare entry point with no mapping in between).
+ */
 const openWith = (
   graph: DeclarationJson,
   tensors: Readonly<Record<string, MemoryTensor>>,
@@ -42,9 +47,9 @@ const openWith = (
 const baseSupply = (): Record<string, MemoryTensor> =>
   Object.fromEntries(baseTensors().map((tensor) => [tensor.initializer, memoryTensorOf(tensor)]));
 
-// --- 量子化 + piece 分割の fixture ------------------------------------------
-// q は per-channel int8 の [4,16]（payload 64 B・scale は rank 2 [4,1] = 16 B）。行を 2 本ずつ
-// 2 piece に割ると、中間 piece は詰め物不可の 32 B ちょうどになる。
+// --- Fixture for quantization + piece splitting ------------------------------
+// q is a per-channel int8 [4,16] (payload 64 B; the scale is rank 2 [4,1] = 16 B). Splitting it
+// into 2 pieces of 2 rows each makes the middle piece exactly 32 B, which cannot be padded.
 
 const ROWS = 4;
 const ROW_LENGTH = 16;
@@ -75,7 +80,10 @@ const biasTensor = (): MemoryTensor => ({
   encoding: { codec: "f32" },
 });
 
-/** q を行範囲で割った供給（`rows` の列をテストが差し替えて穴 / 末尾不一致を作る）。 */
+/**
+ * The supply of q split by row range (tests replace the `rows` column to make a gap / an end
+ * mismatch).
+ */
 const quantizedPieces = (
   rows: readonly (readonly [number, number])[],
   onRead: (index: number) => void = () => {},
@@ -93,8 +101,8 @@ const quantizedPieces = (
   };
 };
 
-describe("openMemoryContainer: 宣言との対応", () => {
-  it("shared でない initializer の不足を全件列挙して落とす", () => {
+describe("openMemoryContainer: matching the declaration", () => {
+  it("enumerates every missing non-shared initializer and fails", () => {
     const error = assertThrows(
       () => openWith(baseDeclaration(), {}),
       ContainerFormatError,
@@ -103,7 +111,7 @@ describe("openMemoryContainer: 宣言との対応", () => {
     assertEquals(error.message.includes("surplus []"), true, error.message);
   });
 
-  it("宣言に無い initializer の供給を余剰として落とす", () => {
+  it("rejects a supply for an initializer not in the declaration as surplus", () => {
     assertThrows(
       () => openWith(baseDeclaration(), { ...baseSupply(), z: biasTensor() }),
       ContainerFormatError,
@@ -111,7 +119,7 @@ describe("openMemoryContainer: 宣言との対応", () => {
     );
   });
 
-  it("未宣言のグラフ名への供給を落とす", () => {
+  it("rejects a supply for an undeclared graph name", () => {
     assertThrows(
       () => openWith(baseDeclaration(), baseSupply(), "other"),
       ContainerFormatError,
@@ -119,7 +127,7 @@ describe("openMemoryContainer: 宣言との対応", () => {
     );
   });
 
-  it("pieces が 1 本の供給を落とす（1 本なら bytes で渡す）", () => {
+  it("rejects a supply with a single piece (pass bytes for a single piece)", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -132,8 +140,8 @@ describe("openMemoryContainer: 宣言との対応", () => {
   });
 });
 
-describe("openMemoryContainer: 供給と合成した目次の突合", () => {
-  it("丸ごと供給の byteLength が宣言 payload と違えば落ちる（長すぎ）", () => {
+describe("openMemoryContainer: matching the supply against the synthesized index", () => {
+  it("fails when a whole supply's byteLength differs from the declared payload (too long)", () => {
     assertThrows(
       () =>
         openWith(baseDeclaration(), {
@@ -145,7 +153,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
     );
   });
 
-  it("丸ごと供給の byteLength が宣言 payload と違えば落ちる（短すぎ）", () => {
+  it("fails when a whole supply's byteLength differs from the declared payload (too short)", () => {
     assertThrows(
       () =>
         openWith(baseDeclaration(), {
@@ -157,7 +165,7 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
     );
   });
 
-  it("scale の byteLength が group 形の宣言と違えば落ちる", () => {
+  it("fails when the scale's byteLength differs from the declaration's group shape", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -177,9 +185,10 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
     );
   });
 
-  it("scale の byteOffset が 4 バイト整列でなければ落ちる", () => {
-    // 整列していない view は `session-build` が Float32Array を張る瞬間に素の RangeError に
-    // なり、転送層の文言へ化ける（供給元が保証する側の規則）。
+  it("fails when the scale's byteOffset is not 4-byte aligned", () => {
+    // An unaligned view turns into a bare RangeError at the moment `session-build` creates a
+    // Float32Array over it, disguised as a message of the transfer layer (a rule the supplier
+    // guarantees).
     const backing = new Uint8Array(new ArrayBuffer(ROWS * 4 + 1));
     assertThrows(
       () =>
@@ -200,8 +209,9 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
     );
   });
 
-  it("合成した block id が衝突すれば落ちる（後勝ちの沈黙上書きにしない）", () => {
-    // initializer 名に `#scale` を含む形は、別 initializer の companion scale と同じ id を取る。
+  it("fails when synthesized block ids collide (no silent last-wins overwrite)", () => {
+    // An initializer name containing `#scale` takes the same id as another initializer's companion
+    // scale.
     const graph = quantizedDeclaration();
     graph.initializers["q#scale"] = {};
     graph.values["q#scale"] = { dtype: "f32", shape: [ROWS] };
@@ -225,14 +235,15 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
     );
   });
 
-  it("piece の read() が宣言長と違うバイト列を返せば readBlock が落ちる", async () => {
+  it("readBlock fails when a piece's read() returns bytes of a length other than the declared one", async () => {
     const payload = qPayload();
     const container = openWith(quantizedDeclaration(), {
       q: {
         encoding: { codec: "int8-sym", rowAxis: 0, groupSize: ROW_LENGTH, scale: qScale() },
         pieces: [
-          // piece 1 は行範囲 [0,2)（= 32 B）を名乗りながら全量 64 B を返す。合流層の突合は
-          // 導出値どうしなので恒真で、`containerBatches` の切り詰めも門に届かない。
+          // Piece 1 claims the row range [0,2) (= 32 B) but returns the full 64 B. The merge layer
+          // compares derived values with each other, so its check is a tautology, and the
+          // truncation in `containerBatches` never reaches the check either.
           { rows: [0, 2], read: () => Promise.resolve(payload) },
           {
             rows: [2, ROWS],
@@ -250,8 +261,8 @@ describe("openMemoryContainer: 供給と合成した目次の突合", () => {
   });
 });
 
-describe("openMemoryContainer: 合流層へ委ねた検査", () => {
-  it("piece 列の行範囲に穴があれば落ちる", () => {
+describe("openMemoryContainer: checks delegated to the merge layer", () => {
+  it("fails when the row ranges of the piece list have a gap", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -266,7 +277,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("piece 列の末尾が宣言 shape の先頭次元に届かなければ落ちる", () => {
+  it("fails when the end of the piece list falls short of the leading dimension of the declared shape", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -281,8 +292,9 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("piece 列の末尾が宣言 shape の先頭次元を超えれば落ちる", () => {
-    // 末尾の一致を `<` へ緩めると、宣言より長い供給が黙って通る。
+  it("fails when the end of the piece list exceeds the leading dimension of the declared shape", () => {
+    // Relaxing the end match to `<` would silently let a supply longer than the declaration
+    // through.
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -297,8 +309,9 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("piece の行範囲が空区間なら落ちる", () => {
-    // [2,2) は連続性（開始 = 直前の終端）と末尾の一致をどちらも満たすので、空区間の門だけが掴む。
+  it("fails when a piece's row range is empty", () => {
+    // [2,2) satisfies both continuity (start = previous end) and the end match, so only the
+    // empty-range check catches it.
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -314,7 +327,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("piece の行範囲の開始が負なら非負の門で落ちる", () => {
+  it("fails the non-negativity check when a piece's row range starts below zero", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -329,9 +342,9 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("piece の行範囲が整数でなければ落ちる", () => {
-    // 小数の行境界は被覆検査（空区間・連続性・末尾）をどれも素通りしたうえで、GPU 構築の
-    // byteOffset を 4 の倍数でない位置にする。
+  it("fails when a piece's row range is not an integer", () => {
+    // A fractional row boundary slips through every coverage check (empty range, continuity, end)
+    // and then puts the byteOffset of GPU construction at a position that is not a multiple of 4.
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -346,9 +359,10 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("中間 piece のバイト長が 4 の倍数でなければ落ちる", () => {
-    // f16 の [4,3]（行 6 バイト）を 1 行目で割ると、中間 piece は詰め物を掛けられないまま
-    // 6 バイトになる。ここで落とさないと GPU の writeBuffer validation まで失敗が遅れる。
+  it("fails when a middle piece's byte length is not a multiple of 4", () => {
+    // Splitting an f16 [4,3] (6 bytes per row) after the first row leaves a middle piece of 6 bytes
+    // that cannot be padded. Without failing here, the failure is delayed until GPU writeBuffer
+    // validation.
     const bytes = new Uint8Array(new ArrayBuffer(24));
     assertThrows(
       () =>
@@ -367,7 +381,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("意味論 dtype と codec の組が交差していれば落ちる", () => {
+  it("fails when the pair of semantic dtype and codec is mismatched", () => {
     const graph = baseDeclaration();
     graph.values["w"] = { dtype: "i32", shape: [4, 3] };
     assertThrows(
@@ -377,7 +391,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("量子化 codec に scale / groupSize が無ければ落ちる", () => {
+  it("fails when a quantized codec has no scale / groupSize", () => {
     assertThrows(
       () =>
         openWith(quantizedDeclaration(), {
@@ -389,7 +403,7 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
     );
   });
 
-  it("非量子化 codec に scale / groupSize / rowAxis が付いていれば落ちる", () => {
+  it("fails when a non-quantized codec carries scale / groupSize / rowAxis", () => {
     assertThrows(
       () =>
         openWith(baseDeclaration(), {
@@ -402,11 +416,15 @@ describe("openMemoryContainer: 合流層へ委ねた検査", () => {
   });
 });
 
-// --- codec 別の rowAxis ------------------------------------------------------
-// 展開（`decodeI4` / `decodeI2` と WGSL）は宣言の軸を受け取らず軸 0 固定なので、両軸の長さが
-// 等しい `[N,N]` では scale 形の突合が通ってしまう。宣言の軸を見るのは合流層だけ。
+// --- rowAxis per codec ---------------------------------------------------------
+// Expansion (`decodeI4` / `decodeI2` and the WGSL) does not take the declared axis and is fixed to
+// axis 0, so for an `[N,N]` with both axes the same length the scale-shape match passes. Only the
+// merge layer looks at the declared axis.
 
-/** `q`（f32 意味論）を 1 本の op で消費するグラフ。rank 2 は linear・rank 3 は conv_transpose1d。 */
+/**
+ * A graph that consumes `q` (f32 semantics) in one op. Rank 2 is linear, rank 3 is
+ * conv_transpose1d.
+ */
 const weightDeclaration = (shape: readonly number[]): DeclarationJson => {
   const common = {
     format: "karume-ir",
@@ -451,7 +469,10 @@ const weightDeclaration = (shape: readonly number[]): DeclarationJson => {
   };
 };
 
-/** `rowAxis: 1` の量子化 `q` と f32 の bias（中身は見ないので 0 埋め）。 */
+/**
+ * A quantized `q` with `rowAxis: 1` and an f32 bias (zero-filled, since its contents are not looked
+ * at).
+ */
 const rowAxisOneSupply = (input: {
   readonly codec: "int8-sym" | "int4-sym-g" | "int2-off";
   readonly payloadBytes: number;
@@ -471,9 +492,10 @@ const rowAxisOneSupply = (input: {
   b: { bytes: new Uint8Array(input.biasElements * 4), encoding: { codec: "f32" } },
 });
 
-describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
-  it("int4-sym-g の rowAxis 1 は、両軸の長さが等しい形でも落ちる", () => {
-    // [32,32]・group 16: 軸 0 と読んでも軸 1 と読んでも scale は [32,2] で、形の突合は区別しない。
+describe("openMemoryContainer: rowAxis per codec (merge layer)", () => {
+  it("int4-sym-g with rowAxis 1 fails even for a shape whose two axes have the same length", () => {
+    // [32,32], group 16: the scale is [32,2] whether read as axis 0 or axis 1, so the shape match
+    // cannot tell them apart.
     assertThrows(
       () =>
         openWith(
@@ -491,7 +513,7 @@ describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
     );
   });
 
-  it("int2-off の rowAxis 1 は、展開の時点でなく合流層で落ちる", () => {
+  it("int2-off with rowAxis 1 fails at the merge layer, not at expansion time", () => {
     assertThrows(
       () =>
         openWith(
@@ -509,8 +531,8 @@ describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
     );
   });
 
-  it("int8-sym の rowAxis 1（conv_transpose1d 形）は受理する", () => {
-    // [Cin=4, Cout=8, K=3] の行は軸 1（8 行・行長 12）。
+  it("accepts int8-sym with rowAxis 1 (the conv_transpose1d shape)", () => {
+    // The rows of [Cin=4, Cout=8, K=3] are axis 1 (8 rows, row length 12).
     const opened = openWith(
       weightDeclaration([4, 8, 3]),
       rowAxisOneSupply({
@@ -525,13 +547,14 @@ describe("openMemoryContainer: codec 別の rowAxis（合流層）", () => {
   });
 });
 
-// --- 行数 0 の量子化重み -----------------------------------------------------
-// 量子化行が 1 本も無い重みは実モデルに用途が無く、合流層で拒否する。合流層が受理すると、
-// 行長の式を自前で持つ下流（CPU 展開 `decodeI4` の `numel / shape[0]` = 0 / 0）が
-// 別の層・別の文言（「行長 NaN」）で落ちる。
+// --- Quantized weights with zero rows -----------------------------------------
+// A weight with no quantized row has no use in a real model and is rejected at the merge layer. If
+// the merge layer accepted it, a downstream that owns its own row-length formula (the CPU expansion
+// `decodeI4`'s `numel / shape[0]` = 0 / 0) would fail at another layer with another message
+// ("row length NaN").
 
-describe("openMemoryContainer: 行数 0 の量子化重み（合流層）", () => {
-  it("int4-sym-g の [0,16] は、CPU 展開の時点でなく合流層で落ちる", () => {
+describe("openMemoryContainer: quantized weights with zero rows (merge layer)", () => {
+  it("int4-sym-g [0,16] fails at the merge layer, not at CPU expansion time", () => {
     assertThrows(
       () =>
         openWith(weightDeclaration([0, 16]), {
@@ -546,7 +569,7 @@ describe("openMemoryContainer: 行数 0 の量子化重み（合流層）", () =
     );
   });
 
-  it("int8-sym の rowAxis 1 で行の軸が 0 の [4,0,3] も落ちる", () => {
+  it("int8-sym with rowAxis 1 also fails for [4,0,3], whose row axis is 0", () => {
     assertThrows(
       () =>
         openWith(
@@ -565,15 +588,15 @@ describe("openMemoryContainer: 行数 0 の量子化重み（合流層）", () =
   });
 });
 
-describe("openMemoryContainer: 合成した目次", () => {
-  it("丸ごとの実体は渡された器をそのまま返す（複製しない）", async () => {
+describe("openMemoryContainer: the synthesized index", () => {
+  it("returns a whole tensor's backing as passed (no copy)", async () => {
     const tensors = baseTensors();
     const container = memoryModel(baseDeclaration(), tensors);
     assertStrictEquals(await container.readBlock(`${GRAPH_NAME}/w`), tensors[0].bytes);
     assertStrictEquals(await container.readBlock(`${GRAPH_NAME}/b`), tensors[1].bytes);
   });
 
-  it("piece は readBlock のたびに read() を引き直す（保持しない）", async () => {
+  it("re-runs a piece's read() on every readBlock (does not keep it)", async () => {
     const reads: number[] = [];
     const container = openWith(quantizedDeclaration(), {
       q: quantizedPieces(
@@ -592,7 +615,7 @@ describe("openMemoryContainer: 合成した目次", () => {
     assertEquals(reads, [0, 0, 1]);
   });
 
-  it("未知の block id は fail loudly", async () => {
+  it("fails loudly on an unknown block id", async () => {
     const container = memoryModel();
     await assertRejects(
       () => container.readBlock(`${GRAPH_NAME}/missing`),
@@ -601,7 +624,7 @@ describe("openMemoryContainer: 合成した目次", () => {
     );
   });
 
-  it("丸ごとの実体と scale は part 2・piece は 2 の次から 1 本 1 part", () => {
+  it("whole tensors and scales go in part 2; pieces get one part each from the one after 2", () => {
     const container = openWith(quantizedDeclaration(), {
       q: quantizedPieces([
         [0, 2],
@@ -618,7 +641,7 @@ describe("openMemoryContainer: 合成した目次", () => {
         [`${GRAPH_NAME}/q#piece2`, 4, 2 * ROW_LENGTH],
       ],
     );
-    // 規則③: companion scale は piece 1 と同じ part。
+    // Rule ③: the companion scale is in the same part as piece 1.
     assertEquals(
       [q?.scale?.id, q?.scale?.part, q?.scale?.length],
       [`${GRAPH_NAME}/q#scale`, 3, ROWS * 4],
@@ -630,7 +653,7 @@ describe("openMemoryContainer: 合成した目次", () => {
     );
   });
 
-  it("丸ごとだけの供給は全部 part 2 に載る", () => {
+  it("a supply of whole tensors only goes entirely into part 2", () => {
     const supplies = memoryModel().graphs[GRAPH_NAME].supplies;
     assertEquals(
       [...supplies].map(([name, supply]) => [name, supply.blocks[0].part]),
@@ -641,9 +664,10 @@ describe("openMemoryContainer: 合成した目次", () => {
     );
   });
 
-  it("丸ごと供給は累積が part 長を超えたところで次の part へ移る", () => {
-    // part 割り = 構築時の staging VRAM の上限（`session-build` は part ごとに submit + 完了
-    // 待ちを出す）。全部を 1 part に載せると、丸ごと供給のモデルだけその対策が無効になる。
+  it("whole supplies move to the next part where the running total exceeds the part length", () => {
+    // The part assignment = the cap on staging VRAM during construction (`session-build` submits
+    // and waits for completion per part). Putting everything in one part would disable that measure
+    // only for models with whole supplies.
     const CHUNK = 96 * 1024 * 1024;
     const names = ["a", "b", "c"] as const;
     const graph: DeclarationJson = {
@@ -666,7 +690,7 @@ describe("openMemoryContainer: 合成した目次", () => {
     });
     const supplies = openWith(graph, Object.fromEntries(names.map((name) => [name, bigTensor()])))
       .graphs[GRAPH_NAME].supplies;
-    // 96 MiB × 2 は 256 MiB に収まるので同じ part・3 本目で溢れて次の part へ。
+    // 96 MiB × 2 fits in 256 MiB, so they share a part; the third overflows into the next part.
     assertEquals(
       [...supplies].map(([name, supply]) => [name, supply.blocks[0].part]),
       [
@@ -678,14 +702,14 @@ describe("openMemoryContainer: 合成した目次", () => {
   });
 });
 
-describe("BoundContainer: krm 経路とメモリ経路の A/B", () => {
-  it("OpenedContainer は BoundContainer として prepareContainer に渡せる", async () => {
+describe("BoundContainer: A/B of the krm path and the memory path", () => {
+  it("an OpenedContainer can be passed to prepareContainer as a BoundContainer", async () => {
     const opened = await openModelBytes();
     const prepared = prepareContainer(opened, GRAPH_NAME);
     assertEquals(prepared.graph.initializers["w"], { storage: { codec: "f32" } });
   });
 
-  it("同じ入力なら合流後のグラフと見積りが一致する", async () => {
+  it("the same input gives the same merged graph and estimate", async () => {
     const fromContainer = prepareContainer(await openModelBytes(), GRAPH_NAME);
     const fromMemory = prepareContainer(memoryModel(), GRAPH_NAME);
     assertEquals(fromMemory.graph, fromContainer.graph);
@@ -699,10 +723,10 @@ describe("BoundContainer: krm 経路とメモリ経路の A/B", () => {
 });
 
 /**
- * `Object.prototype.__proto__` を仕様どおりの accessor（代入で prototype を差し替える — ブラウザの
- * 既定）に一時的に定義し直して `body` を走らせ、元の記述子へ必ず戻す。Deno の既定の setter は
- * own property を作るので、素の Deno では「名前 `__proto__` の代入が prototype の差し替えになる」
- * 形の不具合が見えない。
+ * Temporarily redefines `Object.prototype.__proto__` as the spec's accessor (assignment replaces
+ * the prototype — the browser default), runs `body`, and always restores the original descriptor.
+ * Deno's default setter creates an own property, so on bare Deno a defect of the form "assigning
+ * to the name `__proto__` replaces the prototype" is not visible.
  */
 const withBrowserProtoAccessor = <T>(body: () => T): T => {
   const original = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__");
@@ -727,10 +751,10 @@ const withBrowserProtoAccessor = <T>(body: () => T): T => {
   }
 };
 
-describe("openMemoryContainer: 名前 '__proto__'", () => {
-  it("ブラウザの __proto__ accessor の下でも、グラフ名と initializer 名を own property で保全する", () => {
-    // 宣言の own key は JSON.parse で作る MUST（オブジェクトリテラルの `"__proto__":` は
-    // [[Prototype]] 指定になる）。
+describe("openMemoryContainer: the name '__proto__'", () => {
+  it("keeps graph and initializer names as own properties even under the browser's __proto__ accessor", () => {
+    // The declaration's own keys MUST be created with JSON.parse (`"__proto__":` in an object
+    // literal sets [[Prototype]]).
     const declaration = declarationOf(
       JSON.parse(`{
       "format": "karume-ir",

@@ -8,7 +8,7 @@ import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 
 const WORKGROUP_SIZE = 64;
 
-/** 自明な elementwise（y = 2x + 1）。grid-stride で 1D 上限を跨いでも成立する形。 */
+/** A trivial elementwise (y = 2x + 1). A form that holds with grid-stride even across the 1D limit. */
 const DOUBLE_PLUS_ONE_WGSL = `
 @group(0) @binding(0) var<storage, read> src: array<f32>;
 @group(0) @binding(1) var<storage, read_write> dst: array<f32>;
@@ -27,7 +27,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 `;
 
 test.skipIf(!GPU_AVAILABLE)(
-  "device / cache / scheduler / arena を通した compute dispatch が正しい値を返す（実 GPU）",
+  "a compute dispatch through device / cache / scheduler / arena returns the correct values (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const scheduler = new SubmitScheduler(gpu);
@@ -72,7 +72,7 @@ test.skipIf(!GPU_AVAILABLE)(
 
       assertEquals(actual.length, count);
       for (let i = 0; i < count; i += 1) {
-        // 2x+1 は整数で、f32 で厳密表現できる範囲に収めてある
+        // 2x+1 is an integer, kept within the range exactly representable in f32
         assertEquals(actual[i], i * 2 + 1, `index ${i}`);
       }
       assertEquals(scheduler.stats.dispatchCount, 1);
@@ -85,7 +85,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "領域の offset 束縛で中間と出力を 1 本のバッファに同居させ、配り直しても結果が壊れない（実 GPU）",
+  "offset bindings into a region let an intermediate and an output share one buffer, and handing the space out again does not break the results (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     const scheduler = new SubmitScheduler(gpu);
@@ -108,7 +108,11 @@ test.skipIf(!GPU_AVAILABLE)(
         "test:double_plus_one:f32",
         DOUBLE_PLUS_ONE_WGSL,
       );
-      assertEquals(roles, { reads: new Set([0]), writes: new Set([1]) }, "WGSL 宣言から採った役割");
+      assertEquals(
+        roles,
+        { reads: new Set([0]), writes: new Set([1]) },
+        "roles taken from the WGSL declarations",
+      );
       const dispatchInto = (src: GPUBufferBinding, dst: GPUBufferBinding): void => {
         const bindGroup = gpu.device.createBindGroup({
           layout,
@@ -125,9 +129,10 @@ test.skipIf(!GPU_AVAILABLE)(
         );
       };
 
-      // 計画（ADR 0093）と同じ形: 1 本の領域に中間（offset 0）と出力（256 整列の次の区間）を
-      // 同居させる。同じ dispatch で読む中間と書く出力が同じバッファに載るのは usage scope の
-      // 制約に触れるので、そこだけは別バッファ（source）から読む形で組む。
+      // The same shape as the plan (ADR 0093): one region holds an intermediate (offset 0) and an output
+      // (the next span, 256-aligned). An intermediate read and an output written by the same dispatch on
+      // the same buffer would touch the usage-scope constraint, so only that part is built to read from a
+      // separate buffer (source).
       const align = gpu.device.limits.minStorageBufferOffsetAlignment;
       const outputOffset = Math.ceil(bytes / align) * align;
       const region = arena.allocRegion(outputOffset + bytes);
@@ -136,11 +141,11 @@ test.skipIf(!GPU_AVAILABLE)(
       const second = arena.allocRegion(bytes);
       const relay: GPUBufferBinding = { buffer: second, offset: 0, size: bytes };
 
-      dispatchInto({ buffer: source }, intermediate); // 1 → 3（領域の先頭区間へ）
-      dispatchInto(intermediate, relay); // 3 → 7（別バッファへ）
-      // 中間の生存が終わった区間へ別の値を配り直す（同じ offset 0 を出力側として再利用）。
+      dispatchInto({ buffer: source }, intermediate); // 1 → 3 (into the first span of the region)
+      dispatchInto(intermediate, relay); // 3 → 7 (into a separate buffer)
+      // Hand a span whose intermediate is no longer live out again for another value (reusing the same offset 0 on the output side).
       dispatchInto(relay, intermediate); // 7 → 15
-      dispatchInto({ buffer: source }, output); // 1 → 3（同じ領域の別区間 — 配り直しに巻き込まれない）
+      dispatchInto({ buffer: source }, output); // 1 → 3 (another span of the same region — not caught up in the hand-out)
 
       await scheduler.flush();
 
@@ -158,8 +163,8 @@ test.skipIf(!GPU_AVAILABLE)(
       staging.destroy();
 
       for (let i = 0; i < count; i += 1) {
-        assertEquals(actual[i], 15, `配り直した区間 index ${i}`);
-        assertEquals(actual[count + i], 3, `同居する出力区間 index ${i}`);
+        assertEquals(actual[i], 15, `span handed out again, index ${i}`);
+        assertEquals(actual[count + i], 3, `output span sharing the buffer, index ${i}`);
       }
       assertEquals(arena.stats.allocCount, 3);
     } finally {

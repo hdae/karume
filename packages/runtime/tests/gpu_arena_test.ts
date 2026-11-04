@@ -2,7 +2,10 @@ import { test } from "vite-plus/test";
 import { assertEquals, assertRejects, assertStrictEquals, assertThrows } from "@std/assert";
 import { ArenaError, RunArena, STORAGE_USAGE, toSizeClass } from "../src/gpu/arena.ts";
 
-/** RunArena が触る面だけを持つフェイク。DOM 型全体は再現しないため cast で渡す。 */
+/**
+ * A fake holding only the surface RunArena touches. The full DOM types are not reproduced, so it is
+ * passed with a cast.
+ */
 type FakeGpu = {
   readonly device: GPUDevice;
   readonly created: { readonly size: number; readonly usage: number }[];
@@ -34,40 +37,42 @@ const createFakeGpu = (): FakeGpu => {
 const noopFlush = (): Promise<void> => Promise.resolve();
 
 /**
- * 非安全整数のバイト数は切り上げが端数を落とすため、サイズクラスにできない。
- * `Number.isInteger` は 2^53 以上でも真になるので、そこを通すと「要求より小さいバッファを
- * 切り上げた顔で配る」形になる（`toSizeClass` の MUST が例外なしに破れる）。
+ * A byte count that is not a safe integer cannot become a size class, because the round-up drops
+ * the fraction. `Number.isInteger` is true at 2^53 and above too, so letting it through would hand
+ * out "a buffer smaller than requested, posing as rounded up" (breaking the MUST of `toSizeClass`
+ * without an exception).
  */
-test("toSizeClass は安全整数を超えるバイト数を拒否する（切り上げで丸めない）", () => {
+test("toSizeClass rejects byte counts beyond the safe integers (no rounding by the round-up)", () => {
   assertThrows(() => toSizeClass(2 ** 53), ArenaError, "safe integer >= 0");
   assertThrows(() => toSizeClass(2 ** 53 + 4), ArenaError, "safe integer >= 0");
   assertThrows(() => toSizeClass(-4), ArenaError, "safe integer >= 0");
   assertThrows(() => toSizeClass(1.5), ArenaError, "safe integer >= 0");
-  // 対照: 安全整数の上限直下は 4 バイト整列へ切り上げて通る。
+  // Control: just below the safe-integer maximum rounds up to 4-byte alignment and passes.
   assertEquals(toSizeClass(Number.MAX_SAFE_INTEGER - 6), 2 ** 53 - 4);
   assertEquals(toSizeClass(0), 4);
 });
 
-test("RunArena.allocRegion は計画の領域を STORAGE_USAGE で確保し、破棄まで所有する", async () => {
+test("RunArena.allocRegion allocates a planned region with STORAGE_USAGE and owns it until destroy", async () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
 
   const region = arena.allocRegion(1000);
-  assertEquals(region.size, 1000, "4 バイト整列済みの実サイズちょうどで確保する");
-  assertEquals(region.usage, STORAGE_USAGE, "中間バッファの usage は 1 定数");
+  assertEquals(region.size, 1000, "allocates exactly the 4-byte-aligned actual size");
+  assertEquals(region.usage, STORAGE_USAGE, "the usage of intermediate buffers is one constant");
   const odd = arena.allocRegion(9);
   assertEquals(odd.size, 12);
   assertEquals(arena.stats.allocCount, 2);
   assertEquals(arena.stats.allocatedBytes, 1012);
-  // 計画から写す 3 欄は recordTransients が載せるまで 0（領域の確保では動かない）。
+  // The 3 fields copied from the plan stay 0 until recordTransients sets them (allocating regions
+  // does not move them).
   assertEquals(arena.stats.reuseCount, 0);
   assertEquals(arena.stats.peakTransientBytes, 0);
 
   await arena.destroy();
-  assertEquals(gpu.destroyedCount(), 2, "領域の破棄はアリーナが持つ");
+  assertEquals(gpu.destroyedCount(), 2, "destroying the regions is the arena's job");
 });
 
-test("RunArena.recordTransients は計画の診断 3 欄を stats へ写す（確保の実数は動かない）", () => {
+test("RunArena.recordTransients copies the plan's 3 diagnostic fields into stats (the actual allocation counts do not move)", () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
   arena.allocRegion(64);
@@ -81,24 +86,24 @@ test("RunArena.recordTransients は計画の診断 3 欄を stats へ写す（�
   });
 });
 
-test("RunArena.allocHostRead は staging を領域外で確保し、破棄まで所有する", async () => {
+test("RunArena.allocHostRead allocates staging outside the regions and owns it until destroy", async () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
 
   const staging = arena.allocHostRead(9);
-  assertEquals(staging.size, 12, "4 バイト整列した実サイズちょうどで確保する");
+  assertEquals(staging.size, 12, "allocates exactly the 4-byte-aligned actual size");
   assertEquals(
     staging.usage,
     GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    "MAP_READ は STORAGE と併用できない",
+    "MAP_READ cannot be combined with STORAGE",
   );
   assertEquals(arena.stats.allocatedBytes, 12);
 
   await arena.destroy();
-  assertEquals(gpu.destroyedCount(), 1, "staging の破棄もアリーナが持つ");
+  assertEquals(gpu.destroyedCount(), 1, "destroying staging is the arena's job too");
 });
 
-test("RunArena.allocHostWritten は COPY_DST の無い usage を拒否する", () => {
+test("RunArena.allocHostWritten rejects a usage without COPY_DST", () => {
   const gpu = createFakeGpu();
   const arena = new RunArena(gpu.device, noopFlush);
 
@@ -109,7 +114,7 @@ test("RunArena.allocHostWritten は COPY_DST の無い usage を拒否する", (
   assertThrows(() => arena.allocHostWritten(64, GPUBufferUsage.UNIFORM), ArenaError, "COPY_DST");
 });
 
-test("RunArena.destroy は flush 完了後にのみバッファを破棄する", async () => {
+test("RunArena.destroy destroys buffers only after the flush completes", async () => {
   const gpu = createFakeGpu();
   let releaseFlush: () => void = () => {};
   const flushed = new Promise<void>((resolve) => {
@@ -120,15 +125,15 @@ test("RunArena.destroy は flush 完了後にのみバッファを破棄する",
   arena.allocHostWritten(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
 
   const destroying = arena.destroy();
-  assertEquals(gpu.destroyedCount(), 0, "flush 未完了の間は 1 つも破棄しない");
+  assertEquals(gpu.destroyedCount(), 0, "destroys nothing while the flush is incomplete");
   assertThrows(
     () => arena.allocRegion(32),
     ArenaError,
     "destroyed",
-    "flush 待ちの間に確保されたバッファは誰にも破棄されない",
+    "a buffer allocated while waiting for the flush would be destroyed by no one",
   );
 
-  // 2 度目の destroy も同じ完了を待つ（早すぎる「破棄済み」応答を返さない）
+  // A second destroy waits for the same completion (no premature "already destroyed" answer)
   const second = arena.destroy();
   releaseFlush();
   await Promise.all([destroying, second]);
@@ -137,21 +142,25 @@ test("RunArena.destroy は flush 完了後にのみバッファを破棄する",
   assertThrows(() => arena.allocRegion(32), ArenaError, "destroyed");
 });
 
-test("RunArena.destroy は flush が失敗してもバッファを破棄し、その失敗を伝える", async () => {
+test("RunArena.destroy destroys buffers even when the flush fails, and reports that failure", async () => {
   const gpu = createFakeGpu();
-  // 実運用の主因は device 消失（flush が GpuDeviceLostError で落ちる）
-  const lost = new Error("flush 中に device が失われた");
+  // The main cause in practice is device loss (the flush fails with GpuDeviceLostError)
+  const lost = new Error("device was lost during flush");
   const arena = new RunArena(gpu.device, () => Promise.reject(lost));
   arena.allocRegion(32);
   arena.allocHostWritten(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
 
   const caught = await assertRejects(() => arena.destroy());
-  assertStrictEquals(caught, lost, "flush の失敗は握り潰さない");
-  assertEquals(gpu.destroyedCount(), 2, "flush が失敗しても所有バッファは 1 本残らず破棄する");
+  assertStrictEquals(caught, lost, "the flush failure is not swallowed");
+  assertEquals(
+    gpu.destroyedCount(),
+    2,
+    "every owned buffer is destroyed even when the flush fails",
+  );
 
-  // 破棄済みの状態は確定している（後始末が済んでいるので再確保は受け付けない）
+  // The destroyed state is final (cleanup is done, so allocating again is refused)
   assertThrows(() => arena.allocRegion(32), ArenaError, "destroyed");
   const again = await assertRejects(() => arena.destroy());
   assertStrictEquals(again, lost);
-  assertEquals(gpu.destroyedCount(), 2, "2 度目の destroy が二重破棄を起こさない");
+  assertEquals(gpu.destroyedCount(), 2, "a second destroy does not destroy twice");
 });

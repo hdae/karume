@@ -1,17 +1,22 @@
-// run の途中の送り込みの待ち（ADR 0123 — `executeBakedPlanPaced` が返す Promise を run が `await` する）が
-// 失敗する経路の門。フェイク device の Session で撃つ（GPU は要らない）。
+// The checks of the failure paths of the mid-run submission wait (ADR 0123 — the run `await`s the
+// Promise `executeBakedPlanPaced` returns). Exercised on a Session over a fake device (no GPU
+// needed).
 //
-// 縛るのは 2 点（待ちを足したことで run に入った非同期の分岐の失敗経路 — 成功経路は
-// `gpu_submit_backpressure_test.ts` の実 GPU の門と `runtime_recipe_test.ts` が見る）:
+// Two points are pinned (the failure paths of the asynchronous branch the wait added to run — the
+// success paths are covered by the real-GPU check in `gpu_submit_backpressure_test.ts` and by
+// `runtime_recipe_test.ts`):
 //
-// ① 印の待ちの間に device が失われたら、run はハングせず `GpuDeviceLostError` で決着し、消失の購読を基線へ
-//    戻す（ADR 0054 / `raceDeviceLost` — 消失後の `onSubmittedWorkDone` が解決しない実装がありうる）。
-// ② state を書く generation run が待ちの後で落ちたら、context を poison する（ADR 0066 追記 3 の失敗の
-//    原子性 — 待つ前に未 submit を出し切るので、待ちを挟んだ失敗は「submit した後の失敗」になる。過少 poison は
-//    壊れた KV で生成が続く沈黙破壊）。
+// ① if the device is lost while waiting on a marker, run settles with `GpuDeviceLostError`
+//    instead of hanging, and returns the loss subscriptions to the baseline (ADR 0054 /
+//    `raceDeviceLost` — an implementation may never resolve `onSubmittedWorkDone` after a loss).
+// ② if a generation run that writes state fails after the wait, it poisons the context (the
+//    failure atomicity of ADR 0066 addendum 3 — everything unsubmitted is flushed before waiting,
+//    so a failure across the wait is "a failure after submit". Under-poisoning is silent
+//    corruption where generation continues on broken KV).
 //
-// NOTE: フェイク device は run が触る GPU の面（パイプライン・bind group・コマンド列・バッファ・queue）だけを
-// 持つ。値は計算しない — 見るのは失敗の決着と後始末で、出力の値ではない。
+// NOTE: the fake device has only the GPU surfaces run touches (pipelines, bind groups, command
+// sequences, buffers, queue). It computes no values — what is checked is the failure's settlement
+// and cleanup, not the output values.
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { test } from "vite-plus/test";
@@ -37,7 +42,10 @@ import { createSessionFromContainer, type Session, type Tensor } from "../src/ru
 import { ExecutionError } from "../src/runtime/plan.ts";
 import { type DeclarationJson, GRAPH_NAME, openGraphModel } from "./helpers/model-fixture.ts";
 
-/** 上限は門に掛からない値でよい（見たいのは失敗経路で、確保の寸法ではない）。 */
+/**
+ * Any limits that do not trip a check will do (what matters is the failure path, not allocation
+ * sizes).
+ */
 const LIMITS: RequiredLimits = {
   maxBufferSize: 1 << 28,
   maxStorageBufferBindingSize: 1 << 27,
@@ -52,7 +60,10 @@ const LIMITS: RequiredLimits = {
   maxComputeWorkgroupsPerDimension: 65535,
 };
 
-/** 1 dispatch = 1 submit（印の位置を dispatch の数から決められる形 — 実 GPU の門と同じ政策）。 */
+/**
+ * 1 dispatch = 1 submit (so the marker positions follow from the dispatch count — the same policy
+ * as the real-GPU check).
+ */
 const ONE_PER_SUBMIT: SubmitPolicy = {
   timeBudgetMs: 100,
   initialChunkSize: 1,
@@ -60,10 +71,13 @@ const ONE_PER_SUBMIT: SubmitPolicy = {
   maxChunkSize: 1,
 };
 
-/** 未完了の印が上限 + 1 本に届く（run がステップの間で最も古い印を待つ）だけの add の段数。 */
+/**
+ * The number of add steps that just reaches limit + 1 outstanding markers (so run waits on the
+ * oldest marker between steps).
+ */
 const CHAIN = IN_FLIGHT_MARKER_INTERVAL * (IN_FLIGHT_MAX_MARKERS + 1) + 8;
 
-/** y = x + x + … + x（add を {@link CHAIN} 段つなぐ）。 */
+/** y = x + x + … + x ({@link CHAIN} adds chained). */
 const chainNodes = () =>
   Array.from({ length: CHAIN }, (_, i) => ({
     op: "add",
@@ -80,7 +94,7 @@ const chainValues = () =>
     ]),
   );
 
-/** state を書かないグラフ（{@link CHAIN} 段の add）。 */
+/** A graph that writes no state ({@link CHAIN} adds). */
 const CHAIN_GRAPH: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -93,7 +107,7 @@ const CHAIN_GRAPH: DeclarationJson = {
   nodes: chainNodes(),
 };
 
-/** 先頭で state を書き（`state_append`）、その後に {@link CHAIN} 段の add を積むグラフ。 */
+/** A graph that writes state first (`state_append`) and then stacks {@link CHAIN} adds. */
 const STATE_THEN_CHAIN_GRAPH: DeclarationJson = {
   format: "karume-ir",
   version: 2,
@@ -113,21 +127,23 @@ const STATE_THEN_CHAIN_GRAPH: DeclarationJson = {
   ],
 };
 
-/** 引き金が渡す消失情報（`reason` は GpuContext の分岐に使われない）。 */
+/** The loss info the trigger passes (`reason` is not used by GpuContext's branching). */
 const LOSS: GPUDeviceLostInfo = platformObject<GPUDeviceLostInfo>({
   reason: "destroyed",
-  message: "テストによる消失",
+  message: "lost by the test",
 });
 
 const x = (): Tensor => ({ dtype: "f32", shape: [4, 3], data: new Float32Array(12) });
 
-/** 2 行ぶんの `k`（`M = 2`）。 */
+/** `k` for 2 rows (`M = 2`). */
 const k = (): Tensor => ({ dtype: "f32", shape: [1, 1, 2, 4], data: new Float32Array(8) });
 
 /**
- * run が触る GPU の面だけを持つフェイク device と、`onSubmittedWorkDone`（印とフェンス）の差し替え口・消失の引き金。
+ * A fake device with only the GPU surfaces run touches, plus a hook to replace
+ * `onSubmittedWorkDone` (markers and fences) and a loss trigger.
  *
- * NOTE: GpuContext は実物（区間ロック・消失購読・`raceDeviceLost` は本番の実装 — `helpers/fake-gpu.ts` と同じ方針）。
+ * NOTE: GpuContext is the real one (the scope lock, loss subscription and `raceDeviceLost` are the
+ * production implementation — the same approach as `helpers/fake-gpu.ts`).
  */
 const pacedGpu = () => {
   let workDone: () => Promise<void> = () => Promise.resolve();
@@ -172,9 +188,9 @@ const pacedGpu = () => {
     },
   };
   return {
-    // DOM 型全体は再現しないため cast で渡す（テスト専用の境界）。
+    // The full DOM types are not reproduced, so it is passed with a cast (a test-only boundary).
     gpu: new GpuContext(device as unknown as GPUDevice, readAdapterInfo({}), LIMITS, new Set()),
-    /** 以後の `onSubmittedWorkDone` の戻りを差し替える。 */
+    /** Replaces the return of subsequent `onSubmittedWorkDone` calls. */
     setWorkDone: (next: () => Promise<void>): void => {
       workDone = next;
     },
@@ -187,13 +203,14 @@ const session = async (gpu: GpuContext, graph: DeclarationJson): Promise<Session
     submitPolicy: ONE_PER_SUBMIT,
   });
 
-test("印の待ちの間に device が失われたら、run はハングせず GpuDeviceLostError で決着し、消失の購読を基線へ戻す", async () => {
+test("if the device is lost while waiting on a marker, run settles with GpuDeviceLostError instead of hanging and returns the loss subscriptions to the baseline", async () => {
   const { gpu, setWorkDone, lose } = pacedGpu();
   const chain = await session(gpu, CHAIN_GRAPH);
   const baseline = gpu.pendingLostListeners;
   let markers = 0;
-  // 印は解決しない（消失後の onSubmittedWorkDone が解決しない実装の形）。上限 + 1 本目の印を置いた後
-  // （= run が最も古い印を待つ位置）で device を失う。
+  // Markers never resolve (the shape of an implementation whose onSubmittedWorkDone never resolves
+  // after a loss). The device is lost after the limit + 1th marker is placed (= the position where
+  // run waits on the oldest marker).
   setWorkDone(() => {
     markers += 1;
     if (markers === IN_FLIGHT_MAX_MARKERS + 1) setTimeout(lose, 0);
@@ -202,16 +219,21 @@ test("印の待ちの間に device が失われたら、run はハングせず G
 
   const error = await assertRejects(() => chain.run({ x: x() }));
   assertInstanceOf(error, GpuDeviceLostError);
-  assertEquals(markers, IN_FLIGHT_MAX_MARKERS + 1, "前提: run が印の待ちまで進んだ");
-  assertEquals(gpu.pendingLostListeners, baseline, "消失の購読が積み残っている");
+  assertEquals(
+    markers,
+    IN_FLIGHT_MAX_MARKERS + 1,
+    "precondition: run got as far as waiting on a marker",
+  );
+  assertEquals(gpu.pendingLostListeners, baseline, "loss subscriptions were left behind");
 });
 
-test("state を書く generation run が印の待ちの後で落ちたら、context を poison し、失敗をそのまま投げる", async () => {
+test("if a generation run that writes state fails after waiting on a marker, it poisons the context and throws the failure as is", async () => {
   const { gpu, setWorkDone } = pacedGpu();
   const model = await session(gpu, STATE_THEN_CHAIN_GRAPH);
   const context = await model.createGenerationContext({ chunkLength: 2 });
-  const failure = new Error("模擬: 印の待ちの失敗");
-  // run の中で置く印だけを落とす（Session と context の構築は上の既定の解決のまま通す）。
+  const failure = new Error("simulated: marker wait failure");
+  // Only the markers placed inside run fail (building the Session and context goes through with the
+  // default resolution above).
   setWorkDone(() => Promise.reject(failure));
 
   const error = await assertRejects(() =>
@@ -220,13 +242,14 @@ test("state を書く generation run が印の待ちの後で落ちたら、cont
   assertStrictEquals(error, failure);
 
   setWorkDone(() => Promise.resolve());
-  // 待つ前に state を書く dispatch を submit しているので、同じ context では続けられない。
+  // The dispatch that writes state was submitted before the wait, so the same context cannot
+  // continue.
   await assertRejects(
     () => model.run({ k: k(), x: x() }, {}, { context, queryLength: 1 }),
     ExecutionError,
     "a poisoned GenerationContext cannot be used",
   );
-  // 対照: poison は context に閉じる — 新しい context では同じ Session がそのまま回る。
+  // Control: the poison stays within the context — the same Session runs fine on a new context.
   const fresh = await model.createGenerationContext({ chunkLength: 2 });
   const outputs = await model.run({ k: k(), x: x() }, {}, { context: fresh, queryLength: 2 });
   assert(Object.hasOwn(outputs, "y"));

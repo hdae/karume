@@ -1,62 +1,66 @@
-// linear の **GEMV 族**（1 ≤ M ≤ {@link LINEAR_GEMV_MAX_ROWS} × 重み i4 / i8 — ADR 0082 /
-// perf-ledger K-16（M=1）/ K-21（M ≥ 2 の行ブロック））の実 GPU 門。
+// Real-GPU checks of the **GEMV family** of linear (1 ≤ M ≤ {@link LINEAR_GEMV_MAX_ROWS} × weights i4 / i8 —
+// ADR 0082 / perf-ledger K-16 (M=1) / K-21 (row blocks for M ≥ 2)).
 //
-// この族の存在理由は速度だけで、**値は既定経路（src/kernels/gemm.ts の linear）と 1 ビットも
-// 違ってはならない**（ADR 0022 決定 3 が自由と認めるのは担当割りだけ）。よって見るのは 3 つ:
+// This family exists only for speed, and **its values must not differ by a single bit from the default path
+// (linear in src/kernels/gemm.ts)** (the only freedom ADR 0022 decision 3 grants is the work assignment). So three
+// things are checked:
 //
-// 1. **既定経路との u32 完全一致** — 同じ重み・同じ入力行なら、GEMV 経路の出力と既定 GEMM の
-//    **先頭 m 行**が 1 ビットも違わない。1 出力要素あたりの K 縮約順が経路によらず
-//    「k 昇順の逐次」で同じことの直接証明で、tests/gpu_gemm_skinny_test.ts の
-//    「バケット跨ぎビット同一」を族跨ぎへ延長した形にあたる。
-//    MUST: 割れたら変種の選択ではなく**ビット同一という命題そのもの**を疑う（設計判断へ戻す）。
-//    MUST: 比較相手は **M = {@link GEMM_ROWS}（= 上限 + 1）**で走らせる。上限までは行ブロック
-//    GEMV が受けるようになった（K-21）ので、以前の M=2 は既定経路ではなく**同じ族の別変種**に
-//    なり、突き合わせが族内の自己比較へ退化する。活性 `XS` は平坦添字の関数（行優先 r·k + c）
-//    なので、行 0..m−1 の値は m によらず同じ = 先頭 m 行がそのまま参照になる。
-// 2. **CPU 参照との一致** — 1 だけだと「両経路が同じだけ壊れている」を排除できない（構造上
-//    起こりにくいが、比較対象が何かの拍子に GEMV へ流れていれば恒真化する）。
-// 3. **門（分岐の適用条件）そのもの** — パイプラインキーの側から、1 ≤ M ≤ 上限でだけ GEMV 族が
-//    立ち（M=1 は M=1 変種・M ≥ 2 は行ブロック変種）、上限 + 1・group 16・n%4≠0 では従来の
-//    `linear:` キーのままであることを見る。
+// 1. **Exact u32 equality with the default path** — for the same weights and the same input rows, the GEMV path's
+//    output and **the first m rows** of the default GEMM do not differ by a single bit. It directly proves that the
+//    K reduction order per output element is the same "sequential in ascending k" regardless of the path, and
+//    extends the "bit-identical across buckets" of tests/gpu_gemm_skinny_test.ts across families.
+//    MUST: if it breaks, suspect **the bit-identity claim itself**, not the variant selection (take it back to the
+//    design decision).
+//    MUST: run the comparison at **M = {@link GEMM_ROWS} (= limit + 1)**. Up to the limit the row-block GEMV now
+//    takes over (K-21), so the former M=2 would be **another variant of the same family**, not the default path,
+//    and the comparison would degrade into a self-comparison within the family. The activation `XS` is a function
+//    of the flat index (row-major r·k + c), so the values of rows 0..m−1 are the same regardless of m = the first m
+//    rows serve directly as the reference.
+// 2. **Agreement with the CPU reference** — 1 alone cannot rule out "both paths broken by the same amount"
+//    (structurally unlikely, but if the comparison somehow flowed into GEMV it would become vacuous).
+// 3. **The check itself (the conditions of the branch)** — from the pipeline keys, the GEMV family comes up only
+//    for 1 ≤ M ≤ limit (M=1 with the M=1 variant, M ≥ 2 with the row-block variant), while limit + 1, group 16 and
+//    n%4≠0 keep the former `linear:` key.
 //
-// **行ブロック（M ≥ 2）が足す形の軸**（M=1 では 1 度も走らない断片）:
-//   - `rows > 1` — 1 スレッドが重み語を 1 回読んで `rows` 行と積和する（行間で共有するのは
-//     整数の重み語と scale だけ）
-//   - **y タイル複数**（`ceil(m / rows) > 1`）— 重みをタイルごとに読み直す
-//   - **部分的な最終 y タイル**（`m % rows != 0`）— 範囲外の行は x の最終行を読み直し、
-//     書き戻しだけを `row < dims.m` で落とす（読みの範囲外と書きの範囲外が別処理）
-//   - `rows == 1` の y タイル形 — M=1 変種とは別テキスト（行頭 `xr0` 経由の x 読み + 書き戻し
-//     ガード）で、n が小さい形では上限の M でもこれが選ばれる
+// **Shape axes the row block (M ≥ 2) adds** (fragments that never run at M=1):
+//   - `rows > 1` — one thread reads a weight word once and multiply-accumulates it with `rows` rows (only the
+//     integer weight words and the scales are shared between rows)
+//   - **multiple y tiles** (`ceil(m / rows) > 1`) — the weights are re-read per tile
+//   - **a partial last y tile** (`m % rows != 0`) — out-of-range rows re-read the last row of x, and only the
+//     write-back is dropped with `row < dims.m` (out-of-range reads and writes are handled separately)
+//   - the y-tile shape with `rows == 1` — a different text from the M=1 variant (x read through the row start
+//     `xr0` + the write-back guard); for small n it is chosen even at the limit M
 //
-// MUST: 形は **本番 12 形が一度も踏まない端**を専用に持つ（実モデルの decode は
-// `n % 32 == 0` かつ `units % 4 == 0` しか出さないので、端の workgroup の早期 return も
-// 先読みループの端数も本番形では 1 度も走らない）:
-//   - `n % 32 != 0` — 最終 workgroup が部分的（`col >= dims.n` の早期 return が効く）
-//   - `units % 4 != 0`（`units = k / 32`）— 先読み 4 本のループが端数を残す
-//   - `units < 4` — 先読みループが**一度も回らず**端数ループだけで縮約が終わる
-// MUST: 重みは **scale の単位ごとに大きさを変える**（i4 = group ごと・i8 = 出力チャネルごと）。
-// 全単位で同じ scale だと、添字〈i4 は `(unit · 32) >> shift`・i8 は `wscale[col]`〉の
-// 取り違えが一切値に出ない（gpu_i4_weights_test.ts / gpu_f16_i8_weights_test.ts と同じ罠）。
-// MUST: 隣接要素の符号を交互にする（i4 は pack の上下 nibble・i8 は語内レーンの取り違えが、
-// 対称パターンでは値の上で打ち消し合う）。
+// MUST: the shapes include **edges that the 12 production shapes never hit** (real-model decode only produces
+// `n % 32 == 0` and `units % 4 == 0`, so neither the early return of the edge workgroup nor the remainder of the
+// prefetch loop ever runs on a production shape):
+//   - `n % 32 != 0` — the last workgroup is partial (the early return on `col >= dims.n` takes effect)
+//   - `units % 4 != 0` (`units = k / 32`) — the 4-word prefetch loop leaves a remainder
+//   - `units < 4` — the prefetch loop **never runs** and the reduction finishes in the remainder loop alone
+// MUST: the weights **change magnitude per scale unit** (i4 = per group, i8 = per output channel).
+// With the same scale for every unit, mixing up the index (i4 `(unit · 32) >> shift`, i8 `wscale[col]`) never
+// shows in the values (the same trap as gpu_i4_weights_test.ts / gpu_f16_i8_weights_test.ts).
+// MUST: alternate the signs of adjacent elements (mixing up the low / high nibble of the pack for i4, or the lanes
+// within a word for i8, cancels out in the values with a symmetric pattern).
 //
-// 格納 2 種は**同じ 3 観点を別々に**踏む（i4 = 1 語 32 要素 × 語ごとの group scale /
-// i8 = 1 語 16 要素 × 縮約の外で 1 度だけ引くチャネル scale — 生成の別枝なので片方の緑は
-// もう片方の根拠にならない）。i8 の `units` は `k / 16` で、端の 3 条件は同じ意味を持つ。
+// The 2 storages hit **the same 3 viewpoints separately** (i4 = 32 elements per word × a group scale per word /
+// i8 = 16 elements per word × a channel scale looked up once outside the reduction — separate branches of the
+// generator, so green on one is no evidence for the other). For i8, `units` is `k / 16`, and the 3 edge
+// conditions mean the same.
 //
-// 検出できる変異（設計時に確認した故障注入 — 2026-08-31 / 行ブロックは 2026-09-07）:
-// - group scale の shift を 1 段ずらす（`>> shift` → `>> shift+1`）→ 1 が落ちる
-//   （差は 3 倍規模で、2 の allclose でも落ちる）
-// - 語内の積和を「上位 nibble 先」へ並べ替える（積の集合は同じで**加算順だけ**が変わる）→
-//   1 だけが落ちる（実測差は 1 ULP = `0xc083c922` vs `0xc083c921` で、2 の allclose は素通り）。
-//   **u32 完全一致でなければ意味を持たない門**であることの実証。
-// - **行ブロック側だけ**同じ並べ替えを入れる（`unitMacsI4` の行ごとの MAC で下位 / 上位 nibble の
-//   2 行を入れ替え、M=1 変種〈`row === undefined`〉の生成物は 1 バイトも動かさない）→
-//   **行ブロックの 1 だけ**が落ちる（i4 の rows4 ケース・行 0 列 2 で `0xc083c922` vs
-//   `0xc083c921` = 1 ULP。差 4.8e-7 / rel 1.2e-7 なので 2 の allclose は素通りし、3 も緑）。
-//   同時に M=1 の 3 観点・i8 側・M=1 の WGSL スナップショット 3 本は全て緑のままで、動くのは
-//   行ブロックのスナップショット（linear_gemv_r*.wgsl）だけ — **M=1 の緑は行ブロックの
-//   根拠にならない**ことの実証（2026-09-07 実測）。
+// Mutations it detects (fault injection checked at design time — 2026-08-31 / row block 2026-09-07):
+// - shifting the group-scale shift by one step (`>> shift` → `>> shift+1`) → 1 fails
+//   (the difference is about 3×, so the allclose of 2 fails too)
+// - reordering the in-word multiply-accumulate to "high nibble first" (the set of products is the same; **only the
+//   addition order** changes) → only 1 fails (the measured difference is 1 ULP = `0xc083c922` vs `0xc083c921`,
+//   and the allclose of 2 lets it through). Proof that **this check means nothing unless it is exact u32 equality**.
+// - putting the same reordering **only on the row-block side** (swapping the 2 low / high nibble lines of the
+//   per-row MAC in `unitMacsI4`, without moving a single byte of what the M=1 variant (`row === undefined`)
+//   generates) → **only 1 of the row block** fails (the i4 rows4 case, row 0 column 2: `0xc083c922` vs
+//   `0xc083c921` = 1 ULP. The difference is 4.8e-7 / rel 1.2e-7, so the allclose of 2 lets it through and 3 is
+//   green too). Meanwhile the 3 M=1 viewpoints, the i8 side and the 3 M=1 WGSL snapshots all stay green, and only
+//   the row-block snapshots (linear_gemv_r*.wgsl) move — proof that **green at M=1 is no evidence for the row
+//   block** (measured 2026-09-07).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
@@ -99,38 +103,40 @@ import { GPU_AVAILABLE, SHADER_F16_AVAILABLE } from "./helpers/gpu.ts";
 import { requireCensus } from "./helpers/pipeline-census.ts";
 
 /**
- * 活性。平坦添字の関数なので、**行 r の値は m によらず同じ**（行優先で `r·k + c`）—
- * GEMV の m 行と既定 GEMM の先頭 m 行を突き合わせられる条件そのもの。桁落ちが起きる程度に
- * 符号と大きさを散らす。
+ * Activations. A function of the flat index, so **the values of row r are the same regardless of m** (row-major
+ * `r·k + c`) — the very condition that lets the m rows of GEMV be compared with the first m rows of the default
+ * GEMM. Signs and magnitudes are spread enough to cause cancellation.
  */
 const XS = (index: number): number => ((index % 11) - 5) * 0.375 + 0.125;
 
 /**
- * ビット同一の比較相手を走らせる行数 = **門の外の最小値**（上限 + 1）。
- * MUST: 上限以下を比較相手にしない — GEMV 族が受ける区間なので、突き合わせが族内の
- * 自己比較へ退化して恒真になる。
- * NOTE: 上限 + 1 = 65 は幾何 M64N32（gemm-geometry.ts の `gemmGeometryForRows`）で、GEMV 族が
- * 実際に置き換える M ≤ 64 の幾何は M16N16。この門が直接見るのは「GEMV == M64N32 の GEMM」で、
- * 「== M16N16」は幾何跨ぎのビット同一（gpu_gemm_skinny_test.ts のバケット跨ぎ門）を経由した推移。
+ * The row count the bit-identity comparison runs at = **the smallest value outside the check** (limit + 1).
+ * MUST: do not compare against a count at or below the limit — that is the range the GEMV family takes, so the
+ * comparison would degrade into a vacuous self-comparison within the family.
+ * NOTE: limit + 1 = 65 uses the geometry M64N32 (`gemmGeometryForRows` in gemm-geometry.ts), while the geometry the
+ * GEMV family actually replaces for M ≤ 64 is M16N16. What this check sees directly is "GEMV == the M64N32 GEMM";
+ * "== M16N16" follows transitively through bit identity across geometries (the cross-bucket check of
+ * gpu_gemm_skinny_test.ts).
  */
 const GEMM_ROWS = LINEAR_GEMV_MAX_ROWS + 1;
 
 /**
- * 比較相手が**本当に既定経路で走った**ことの検査。
- * MUST: 門の上限（recipe-builder）と `LINEAR_GEMV_MAX_ROWS` がずれて比較相手が GEMV 族へ流れると、
- * u32 一致は族内の自己比較になって恒真化する — その退化をここで機械的に止める。
+ * Checks that the comparison **really ran on the default path**.
+ * MUST: if the check's limit (recipe-builder) and `LINEAR_GEMV_MAX_ROWS` drift apart and the comparison flows into
+ * the GEMV family, u32 equality becomes a vacuous self-comparison within the family — this stops that degradation
+ * mechanically.
  */
 const assertRanGemm = (name: string, keys: readonly string[]): void => {
   assert(
     !ranGemv(keys),
-    `${name}: 比較相手（M=${GEMM_ROWS}）が GEMV 族で走った（内訳: ${keys.join(" / ")}）`,
+    `${name}: the comparison (M=${GEMM_ROWS}) ran on the GEMV family (breakdown: ${keys.join(" / ")})`,
   );
 };
 
-/** bias（GEMV では縮約の**外**で最後に 1 度だけ足される — 順序が動けば値に出る）。 */
+/** bias (in GEMV it is added once at the end, **outside** the reduction — if the order moves, it shows in the values). */
 const BS = (index: number): number => ((index % 5) - 2) * 0.25;
 
-/** group ごとに振幅が違い、隣接要素の符号が交互になる重み（上の 2 つの MUST）。 */
+/** Weights whose amplitude differs per group and whose adjacent elements alternate in sign (the 2 MUSTs above). */
 const weightAt =
   (cols: number, groupSize: number) =>
   (index: number): number => {
@@ -148,26 +154,26 @@ type GemvCase = {
 };
 
 /**
- * 形の選定。`units = k / 32`（重み語の本数）と `n % 32`（最終 workgroup の埋まり方）が
- * 独立の軸で、group 長は scale 添字の shift を動かす軸。
- * MUST: `n % 4 == 0`（門が v4 を要求する — recipe-builders/linear.ts の `buildLinear`）。
+ * Shape selection. `units = k / 32` (the number of weight words) and `n % 32` (how full the last workgroup is) are
+ * independent axes, and the group length is the axis that moves the shift of the scale index.
+ * MUST: `n % 4 == 0` (the check requires v4 — `buildLinear` in recipe-builders/linear.ts).
  */
 const CASES: readonly GemvCase[] = [
-  // 端がどこにも無い基準形（units = 4 ちょうど・n は workgroup 2 枚ちょうど）
-  { name: "整除形 k128 n64 g32", k: 128, n: 64, groupSize: 32 },
-  // units = 5 → 先読み 4 本の後に端数 1 本 / n = 100 は最終 workgroup が 4 列だけ
-  { name: "端数 units5 n100 g32", k: 160, n: 100, groupSize: 32 },
-  // units = 6（端数 2 本）・group 64 = 1 語おきに scale が変わる形
-  { name: "端数 units6 n36 g64", k: 192, n: 36, groupSize: 64 },
-  // units = 8・group 128 = 4 語で 1 scale（shift の焼き込みが最も効く形）
-  { name: "整除形 units8 n68 g128", k: 256, n: 68, groupSize: 128 },
-  // units = 3 < 先読み 4 → 先読みループが一度も回らない（端数ループだけで縮約が終わる）
-  { name: "先読み不成立 units3 n4 g32", k: 96, n: 4, groupSize: 32 },
-  // units = 7（端数 3 本）・n = 32 は workgroup ちょうど 1 枚
-  { name: "端数 units7 n32 g32", k: 224, n: 32, groupSize: 32 },
+  // A base shape without any edge (units = exactly 4; n = exactly 2 workgroups)
+  { name: "divisible k128 n64 g32", k: 128, n: 64, groupSize: 32 },
+  // units = 5 → 1 remainder word after the 4-word prefetch / n = 100 leaves only 4 columns in the last workgroup
+  { name: "remainder units5 n100 g32", k: 160, n: 100, groupSize: 32 },
+  // units = 6 (2 remainder words); group 64 = the scale changes every other word
+  { name: "remainder units6 n36 g64", k: 192, n: 36, groupSize: 64 },
+  // units = 8; group 128 = 1 scale per 4 words (the shape where baking the shift matters most)
+  { name: "divisible units8 n68 g128", k: 256, n: 68, groupSize: 128 },
+  // units = 3 < prefetch 4 → the prefetch loop never runs (the reduction finishes in the remainder loop alone)
+  { name: "no prefetch units3 n4 g32", k: 96, n: 4, groupSize: 32 },
+  // units = 7 (3 remainder words); n = 32 is exactly 1 workgroup
+  { name: "remainder units7 n32 g32", k: 224, n: 32, groupSize: 32 },
 ];
 
-/** `linear(x, w, b)` 1 本のグラフ（w は i4 + group scale）。`m` だけが経路を分ける。 */
+/** A graph with one `linear(x, w, b)` (w is i4 + group scale). Only `m` decides the path. */
 const linearI4Model = (
   testCase: GemvCase,
   m: number,
@@ -212,7 +218,7 @@ const linearI4Model = (
 
 type RunResult = {
   readonly output: Tensor;
-  /** その run で実際に走ったパイプラインキー（census — 計測に依らない）。 */
+  /** The pipeline keys that actually ran in that run (census — independent of timing). */
   readonly keys: readonly string[];
 };
 
@@ -233,7 +239,7 @@ const runLinearOn = async (
   }
 };
 
-/** 組み上げたモデル 1 本を走らせて出力と走ったキーを返す（格納 2 種で共有）。 */
+/** Runs one built model and returns the output and the keys that ran (shared by the 2 storages). */
 const runLinear = (
   gpu: GpuContext,
   model: Promise<OpenedContainer>,
@@ -241,12 +247,12 @@ const runLinear = (
   k: number,
 ): Promise<RunResult> => runLinearOn(gpu, model, fill([m, k], XS));
 
-/** f32 の生ビット列（-0 / NaN も含めて 1 ビットの差を見る）。 */
+/** The raw f32 bit pattern (looks at a 1-bit difference, -0 / NaN included). */
 const bits = (tensor: Tensor): Uint32Array =>
   new Uint32Array(tensor.data.buffer, tensor.data.byteOffset, tensor.data.length);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "M=1 の i4 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
+  "an M=1 i4 linear does not differ by a single bit from the default path even on the GEMV family (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -257,9 +263,9 @@ test.skipIf(!GPU_AVAILABLE)(
         const quantized = quantizeI4(weight.data, weight.shape, groupSize);
 
         const gemv = await runLinear(gpu, linearI4Model(testCase, 1, quantized, bias), 1, k);
-        // 比較相手は M = 上限 + 1（門の外 = 既定の GEMM 骨格）。1 出力要素あたりの K 縮約順は
-        // M に依らないので（ADR 0022 決定 3 — gpu_gemm_skinny_test.ts のバケット跨ぎ門が同じ
-        // 命題を見ている）、先頭行が GEMV の全出力に対する参照になる。
+        // The comparison is M = limit + 1 (outside the check = the default GEMM skeleton). The K reduction order per
+        // output element does not depend on M (ADR 0022 decision 3 — the cross-bucket check of
+        // gpu_gemm_skinny_test.ts looks at the same claim), so the first row is the reference for all GEMV outputs.
         const gemm = await runLinear(
           gpu,
           linearI4Model(testCase, GEMM_ROWS, quantized, bias),
@@ -268,19 +274,19 @@ test.skipIf(!GPU_AVAILABLE)(
         );
         assertRanGemm(name, gemm.keys);
 
-        assertEquals(gemv.output.shape, [1, n], `${name}: 出力の形`);
+        assertEquals(gemv.output.shape, [1, n], `${name}: output shape`);
         const actual = bits(gemv.output);
         const expected = bits(gemm.output);
         for (let col = 0; col < n; col += 1) {
           assert(
             actual[col] === expected[col],
-            `${name}: 列 ${col} が既定経路と別ビット（0x${actual[col].toString(16)} vs ` +
+            `${name}: column ${col} differs in bits from the default path (0x${actual[col].toString(16)} vs ` +
               `0x${expected[col].toString(16)} = ${gemv.output.data[col]} vs ` +
               `${gemm.output.data[col]}）`,
           );
         }
 
-        // 「両経路が同じだけ壊れている」を排除する（比較相手が GEMV へ流れていれば 1 は恒真）。
+        // Rules out "both paths broken by the same amount" (if the comparison flowed into GEMV, 1 would be vacuous).
         const reference = applyReferenceOp(
           "linear",
           [
@@ -300,29 +306,30 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 門（`buildLinear` の分岐）1 件ぶんの期待キー。 */
+/** The expected key of one check case (a branch of `buildLinear`). */
 type DoorCase = {
   readonly name: string;
   readonly shape: GemvCase;
   readonly m: number;
-  /** 真ならこの形は GEMV 族へ、偽なら既定の `linear:` へ落ちる。 */
+  /** If true this shape goes to the GEMV family; if false it falls to the default `linear:`. */
   readonly gemv: boolean;
-  /** 既定へ落ちる形で期待する `linear:` キー（GEMV へ入る形では未使用）。 */
+  /** The `linear:` key expected for a shape that falls to the default (unused for shapes that enter GEMV). */
   readonly fallback?: (profile: GeometryProfile) => string;
 };
 
 /**
- * 診断キーの列から「GEMV 族が走ったか」を族名だけで判定する。
+ * Decides from the diagnostic keys "whether the GEMV family ran" by the family name alone.
  *
- * MUST: **特定の変種キーの有無ではなく族名の接頭辞**で見る。変種キーで見ると、門が閉じている
- * はずの形が**別の変種で**走ったときに「期待したキーが無い」= 門が閉じたと読めてしまう。
+ * MUST: look at **the family-name prefix, not the presence of a specific variant key**. Looking at a variant key, a
+ * shape for which the check should be closed but that ran **on another variant** would read as "the expected key
+ * is missing" = the check is closed.
  */
 const ranGemv = (keys: readonly string[]): boolean =>
   keys.some((key) => key.startsWith("linear_gemv:"));
 
 /**
- * 門が開いた形で期待する族のキー。M=1 は M=1 変種（decode の生成物を動かさない）、
- * M ≥ 2 は行ブロック変種で、`rows` は (格納, m, n) の純関数から来る。
+ * The family key expected for a shape where the check opens. M=1 is the M=1 variant (it does not move what decode
+ * generates), M ≥ 2 the row-block variant, and `rows` comes from a pure function of (storage, m, n).
  */
 const expectedGemvKey = (
   storage: WeightStorage,
@@ -335,10 +342,11 @@ const expectedGemvKey = (
     : linearGemvRowsKey(storage, groupSize, defaultLinearGemvRowsVariant(storage, m, n));
 
 /**
- * MUST: 門の**各条件を 1 つずつだけ外した形**を並べる。まとめて外すと、どの条件が門を
- * 閉じているのか（あるいは条件が 1 つも効いていないのか）が区別できない。
- * MUST: 行数以外の条件（group 長 / v4）は **M=1 と M ≥ 2 の両方で 1 つずつ外す**。行ブロックは
- * 別の生成枝なので、M=1 で門が閉じることは M ≥ 2 で閉じることの根拠にならない。
+ * MUST: list **shapes that drop exactly one condition of the check at a time**. Dropping several at once makes it
+ * impossible to tell which condition closes the check (or whether no condition is in effect at all).
+ * MUST: the conditions other than the row count (group length / v4) are dropped one at a time **for both M=1 and
+ * M ≥ 2**. The row block is a separate generator branch, so the check closing at M=1 is no evidence that it closes
+ * at M ≥ 2.
  */
 const DOOR_CASES: readonly DoorCase[] = [
   {
@@ -348,22 +356,22 @@ const DOOR_CASES: readonly DoorCase[] = [
     gemv: true,
   },
   {
-    // 行数の条件を満たす下端（M ≥ 2 = 行ブロック変種 — perf-ledger K-21）
-    name: "M=2 × i4 × g32 × v4（行ブロックの下端）",
+    // The lower end satisfying the row-count condition (M ≥ 2 = the row-block variant — perf-ledger K-21)
+    name: "M=2 × i4 × g32 × v4 (lower end of the row block)",
     shape: { name: "", k: 128, n: 64, groupSize: 32 },
     m: 2,
     gemv: true,
   },
   {
-    // 上限ちょうど（門の内側の上端）
-    name: `M=${LINEAR_GEMV_MAX_ROWS} × i4 × g32 × v4（行ブロックの上端）`,
+    // Exactly the limit (the upper end inside the check)
+    name: `M=${LINEAR_GEMV_MAX_ROWS} × i4 × g32 × v4 (upper end of the row block)`,
     shape: { name: "", k: 128, n: 64, groupSize: 32 },
     m: LINEAR_GEMV_MAX_ROWS,
     gemv: true,
   },
   {
-    // 行数だけを外す（上限 + 1 — その外は既定の GEMM 骨格のまま）
-    name: `M=${GEMM_ROWS}（行数の条件だけ外す）`,
+    // Drops only the row count (limit + 1 — beyond it, the default GEMM skeleton as before)
+    name: `M=${GEMM_ROWS} (drops only the row-count condition)`,
     shape: { name: "", k: 128, n: 64, groupSize: 32 },
     m: GEMM_ROWS,
     gemv: false,
@@ -371,32 +379,32 @@ const DOOR_CASES: readonly DoorCase[] = [
       linearKey("i4", true, "f32", GEMM_ROWS, 32, gemmRowsGeometry(profile, GEMM_ROWS)),
   },
   {
-    // group 長だけを外す（16 = 1 語 32 要素が group を跨ぐ形）
-    name: "group 16 × M=1（group 長の条件だけ外す）",
+    // Drops only the group length (16 = a 32-element word crosses groups)
+    name: "group 16 × M=1 (drops only the group-length condition)",
     shape: { name: "", k: 128, n: 64, groupSize: 16 },
     m: 1,
     gemv: false,
     fallback: (profile) => linearKey("i4", true, "f32", 1, 16, gemmRowsGeometry(profile, 1)),
   },
   {
-    // 同じ条件を行ブロック側でも外す
-    name: "group 16 × M=2（group 長の条件だけ外す）",
+    // Drops the same condition on the row-block side too
+    name: "group 16 × M=2 (drops only the group-length condition)",
     shape: { name: "", k: 128, n: 64, groupSize: 16 },
     m: 2,
     gemv: false,
     fallback: (profile) => linearKey("i4", true, "f32", 2, 16, gemmRowsGeometry(profile, 2)),
   },
   {
-    // v4 だけを外す（n % 4 != 0 — 既定のスカラ変種へ）
-    name: "n=33 × M=1（v4 の条件だけ外す）",
+    // Drops only v4 (n % 4 != 0 — to the default scalar variant)
+    name: "n=33 × M=1 (drops only the v4 condition)",
     shape: { name: "", k: 128, n: 33, groupSize: 32 },
     m: 1,
     gemv: false,
     fallback: (profile) => linearKey("i4", false, "f32", 1, 32, gemmRowsGeometry(profile, 1)),
   },
   {
-    // 同じ条件を行ブロック側でも外す
-    name: "n=33 × M=2（v4 の条件だけ外す）",
+    // Drops the same condition on the row-block side too
+    name: "n=33 × M=2 (drops only the v4 condition)",
     shape: { name: "", k: 128, n: 33, groupSize: 32 },
     m: 2,
     gemv: false,
@@ -405,8 +413,8 @@ const DOOR_CASES: readonly DoorCase[] = [
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i4 × group32 以上 × v4 でだけ開く` +
-    "（実 GPU / 診断キー）",
+  `the GEMV family check opens only for 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i4 × group32 or more × v4` +
+    " (real GPU / diagnostic keys)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -426,21 +434,21 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           ranGemv(keys),
           door.gemv,
-          `${door.name}: GEMV 族が走ったかどうかが期待と違う（走った内訳: ${shown}）`,
+          `${door.name}: whether the GEMV family ran differs from the expectation (breakdown of what ran: ${shown})`,
         );
         if (door.gemv) {
-          // 開いた形は**どの変種で**開いたかまで見る（M=1 変種と行ブロック変種の取り違えは
-          // 族名だけでは見えない）。
+          // For an open shape, also check **on which variant** it opened (mixing up the M=1 variant and the
+          // row-block variant is invisible from the family name alone).
           const key = expectedGemvKey("i4", door.m, n, groupSize);
           assert(
             keys.includes(key),
-            `${door.name}: 期待した変種のキー ${key} で走っていない（内訳: ${shown}）`,
+            `${door.name}: did not run on the expected variant key ${key} (breakdown: ${shown})`,
           );
         } else {
           const fallback = door.fallback?.(profile);
           assert(
             fallback !== undefined && keys.includes(fallback),
-            `${door.name}: 既定経路のキー ${fallback} で走っていない（内訳: ${shown}）`,
+            `${door.name}: did not run on the default-path key ${fallback} (breakdown: ${shown})`,
           );
         }
       }
@@ -451,8 +459,8 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// i8 格納（lm_head — perf-ledger K-16）。i4 と同じ 3 観点を、別枝の生成（1 語 16 要素・
-// scale は出力チャネルごと 1 本）に対して独立に踏む。
+// i8 storage (lm_head — perf-ledger K-16). The same 3 viewpoints as i4, hit independently against the separate
+// generator branch (16 elements per word, one scale per output channel).
 // ---------------------------------------------------------------------------
 
 type GemvI8Case = {
@@ -462,9 +470,9 @@ type GemvI8Case = {
 };
 
 /**
- * 出力チャネルごとに振幅（= scale）が違い、隣接要素の符号が交互になる重み。
- * MUST: チャネルで振幅を変える — 全チャネル同じ scale だと `wscale[col]` の添字取り違えが
- * 一切値に出ない（i4 の group ごと MUST と同型の罠）。
+ * Weights whose amplitude (= scale) differs per output channel and whose adjacent elements alternate in sign.
+ * MUST: vary the amplitude per channel — with the same scale for every channel, mixing up the `wscale[col]` index
+ * never shows in the values (the same trap as the per-group MUST of i4).
  */
 const weightAtI8 =
   (k: number) =>
@@ -475,26 +483,26 @@ const weightAtI8 =
   };
 
 /**
- * 形の選定。`units = k / 16`（重み語の本数）と `n % 32`（最終 workgroup の埋まり方）が
- * 独立の軸で、本番形（n 262,144 × k 1,536 = units 96・n % 32 == 0）はどの端も踏まない。
- * MUST: `n % 4 == 0`（門が v4 を要求する — recipe-builders/linear.ts の `buildLinear`）。
+ * Shape selection. `units = k / 16` (the number of weight words) and `n % 32` (how full the last workgroup is) are
+ * independent axes; the production shape (n 262,144 × k 1,536 = units 96, n % 32 == 0) hits no edge at all.
+ * MUST: `n % 4 == 0` (the check requires v4 — `buildLinear` in recipe-builders/linear.ts).
  */
 const I8_CASES: readonly GemvI8Case[] = [
-  // 端がどこにも無い基準形（units = 4 ちょうど・n は workgroup 2 枚ちょうど）
-  { name: "整除形 k64 n64", k: 64, n: 64 },
-  // units = 5 → 先読み 4 本の後に端数 1 本 / n = 100 は最終 workgroup が 4 列だけ
-  { name: "端数 units5 n100", k: 80, n: 100 },
-  // units = 6（端数 2 本）・n = 36 も最終 workgroup が部分的
-  { name: "端数 units6 n36", k: 96, n: 36 },
-  // units = 8（整除）・n = 68 は workgroup 2 枚 + 4 列
-  { name: "整除形 units8 n68", k: 128, n: 68 },
-  // units = 3 < 先読み 4 → 先読みループが一度も回らない（端数ループだけで縮約が終わる）
-  { name: "先読み不成立 units3 n4", k: 48, n: 4 },
-  // units = 7（端数 3 本）・n = 32 は workgroup ちょうど 1 枚
-  { name: "端数 units7 n32", k: 112, n: 32 },
+  // A base shape without any edge (units = exactly 4; n = exactly 2 workgroups)
+  { name: "divisible k64 n64", k: 64, n: 64 },
+  // units = 5 → 1 remainder word after the 4-word prefetch / n = 100 leaves only 4 columns in the last workgroup
+  { name: "remainder units5 n100", k: 80, n: 100 },
+  // units = 6 (2 remainder words); n = 36 also leaves the last workgroup partial
+  { name: "remainder units6 n36", k: 96, n: 36 },
+  // units = 8 (divisible); n = 68 is 2 workgroups + 4 columns
+  { name: "divisible units8 n68", k: 128, n: 68 },
+  // units = 3 < prefetch 4 → the prefetch loop never runs (the reduction finishes in the remainder loop alone)
+  { name: "no prefetch units3 n4", k: 48, n: 4 },
+  // units = 7 (3 remainder words); n = 32 is exactly 1 workgroup
+  { name: "remainder units7 n32", k: 112, n: 32 },
 ];
 
-/** `linear(x, w, b)` 1 本のグラフ（w は i8 + 出力チャネルごとの scale）。`m` だけが経路を分ける。 */
+/** A graph with one `linear(x, w, b)` (w is i8 + a scale per output channel). Only `m` decides the path. */
 const linearI8Model = (
   testCase: GemvI8Case,
   m: number,
@@ -522,7 +530,7 @@ const linearI8Model = (
       graph: GRAPH_NAME,
       initializer: "w",
       bytes: quantized.bytes,
-      // per-channel（int8-sym）は groupSize = 行長 k・groups = 1。
+      // per-channel (int8-sym) has groupSize = the row length k and groups = 1.
       encoding: {
         codec: "int8-sym",
         groupSize: k,
@@ -539,7 +547,7 @@ const linearI8Model = (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "M=1 の i8 linear は GEMV 族で走っても既定経路と 1 ビットも違わない（実 GPU）",
+  "an M=1 i8 linear does not differ by a single bit from the default path even on the GEMV family (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -547,11 +555,11 @@ test.skipIf(!GPU_AVAILABLE)(
         const { name, k, n } = testCase;
         const weight = fill([n, k], weightAtI8(k));
         const bias = fill([n], BS);
-        // チャネル軸は 0（linear の重みは [n,k] — ADR 0019 / 0024 の MUST ④）。
+        // The channel axis is 0 (linear weights are [n,k] — MUST ④ of ADR 0019 / 0024).
         const quantized = quantizeI8(weight.data, weight.shape, 0);
 
         const gemv = await runLinear(gpu, linearI8Model(testCase, 1, quantized, bias), 1, k);
-        // 比較相手は M = 上限 + 1（門の外 = 既定の GEMM 骨格 — i4 側と同文）。
+        // The comparison is M = limit + 1 (outside the check = the default GEMM skeleton — same as the i4 side).
         const gemm = await runLinear(
           gpu,
           linearI8Model(testCase, GEMM_ROWS, quantized, bias),
@@ -560,19 +568,19 @@ test.skipIf(!GPU_AVAILABLE)(
         );
         assertRanGemm(name, gemm.keys);
 
-        assertEquals(gemv.output.shape, [1, n], `${name}: 出力の形`);
+        assertEquals(gemv.output.shape, [1, n], `${name}: output shape`);
         const actual = bits(gemv.output);
         const expected = bits(gemm.output);
         for (let col = 0; col < n; col += 1) {
           assert(
             actual[col] === expected[col],
-            `${name}: 列 ${col} が既定経路と別ビット（0x${actual[col].toString(16)} vs ` +
+            `${name}: column ${col} differs in bits from the default path (0x${actual[col].toString(16)} vs ` +
               `0x${expected[col].toString(16)} = ${gemv.output.data[col]} vs ` +
               `${gemm.output.data[col]}）`,
           );
         }
 
-        // 「両経路が同じだけ壊れている」を排除する（比較相手が GEMV へ流れていれば 1 は恒真）。
+        // Rules out "both paths broken by the same amount" (if the comparison flowed into GEMV, 1 would be vacuous).
         const reference = applyReferenceOp(
           "linear",
           [
@@ -592,7 +600,7 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-/** 門（i8 側）1 件ぶんの期待キー。i8 は group を持たないので軸は M / k / n の 3 本。 */
+/** The expected key of one check case (i8 side). i8 has no groups, so the axes are the 3 of M / k / n. */
 type DoorI8Case = {
   readonly name: string;
   readonly shape: GemvI8Case;
@@ -602,9 +610,11 @@ type DoorI8Case = {
 };
 
 /**
- * MUST: 門の**各条件を 1 つずつだけ外した形**を並べる（i4 側と同じ規律）。
- * `k % 16 != 0` は i8 固有の軸で、外すと 1 語 16 要素の縮約が行の末尾を黙って落とす。
- * MUST: 行数以外の条件は M=1 と M ≥ 2 の両方で外す（i4 側と同文 — 生成枝が別）。
+ * MUST: list **shapes that drop exactly one condition of the check at a time** (the same discipline as the i4 side).
+ * `k % 16 != 0` is an axis specific to i8; dropping it makes the 16-element-per-word reduction silently drop the
+ * end of the row.
+ * MUST: the conditions other than the row count are dropped for both M=1 and M ≥ 2 (same as the i4 side — separate
+ * generator branches).
  */
 const DOOR_I8_CASES: readonly DoorI8Case[] = [
   {
@@ -614,22 +624,22 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
     gemv: true,
   },
   {
-    // 行数の条件を満たす下端（M ≥ 2 = 行ブロック変種）
-    name: "M=2 × i8 × k%16 × v4（行ブロックの下端）",
+    // The lower end satisfying the row-count condition (M ≥ 2 = the row-block variant)
+    name: "M=2 × i8 × k%16 × v4 (lower end of the row block)",
     shape: { name: "", k: 64, n: 64 },
     m: 2,
     gemv: true,
   },
   {
-    // 上限ちょうど（門の内側の上端）
-    name: `M=${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4（行ブロックの上端）`,
+    // Exactly the limit (the upper end inside the check)
+    name: `M=${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4 (upper end of the row block)`,
     shape: { name: "", k: 64, n: 64 },
     m: LINEAR_GEMV_MAX_ROWS,
     gemv: true,
   },
   {
-    // 行数だけを外す（上限 + 1）
-    name: `M=${GEMM_ROWS}（行数の条件だけ外す）`,
+    // Drops only the row count (limit + 1)
+    name: `M=${GEMM_ROWS} (drops only the row-count condition)`,
     shape: { name: "", k: 64, n: 64 },
     m: GEMM_ROWS,
     gemv: false,
@@ -637,24 +647,24 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
       linearKey("i8", true, "f32", GEMM_ROWS, undefined, gemmRowsGeometry(profile, GEMM_ROWS)),
   },
   {
-    // 縮約の刻みだけを外す（k=68 は 4 の倍数なので v4 は立ったまま）
-    name: "k=68 × M=1（k % 16 の条件だけ外す）",
+    // Drops only the reduction step (k=68 is a multiple of 4, so v4 stays up)
+    name: "k=68 × M=1 (drops only the k % 16 condition)",
     shape: { name: "", k: 68, n: 64 },
     m: 1,
     gemv: false,
     fallback: (profile) => linearKey("i8", true, "f32", 1, undefined, gemmRowsGeometry(profile, 1)),
   },
   {
-    // 同じ条件を行ブロック側でも外す
-    name: "k=68 × M=2（k % 16 の条件だけ外す）",
+    // Drops the same condition on the row-block side too
+    name: "k=68 × M=2 (drops only the k % 16 condition)",
     shape: { name: "", k: 68, n: 64 },
     m: 2,
     gemv: false,
     fallback: (profile) => linearKey("i8", true, "f32", 2, undefined, gemmRowsGeometry(profile, 2)),
   },
   {
-    // v4 だけを外す（n % 4 != 0 — 既定のスカラ変種へ）
-    name: "n=33 × M=1（v4 の条件だけ外す）",
+    // Drops only v4 (n % 4 != 0 — to the default scalar variant)
+    name: "n=33 × M=1 (drops only the v4 condition)",
     shape: { name: "", k: 64, n: 33 },
     m: 1,
     gemv: false,
@@ -662,8 +672,8 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
       linearKey("i8", false, "f32", 1, undefined, gemmRowsGeometry(profile, 1)),
   },
   {
-    // 同じ条件を行ブロック側でも外す
-    name: "n=33 × M=2（v4 の条件だけ外す）",
+    // Drops the same condition on the row-block side too
+    name: "n=33 × M=2 (drops only the v4 condition)",
     shape: { name: "", k: 64, n: 33 },
     m: 2,
     gemv: false,
@@ -673,8 +683,8 @@ const DOOR_I8_CASES: readonly DoorI8Case[] = [
 ];
 
 test.skipIf(!GPU_AVAILABLE)(
-  `GEMV 族の門は 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4 でだけ開く` +
-    "（実 GPU / 診断キー）",
+  `the GEMV family check opens only for 1 ≤ M ≤ ${LINEAR_GEMV_MAX_ROWS} × i8 × k%16 × v4` +
+    " (real GPU / diagnostic keys)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -694,19 +704,19 @@ test.skipIf(!GPU_AVAILABLE)(
         assertEquals(
           ranGemv(keys),
           door.gemv,
-          `${door.name}: GEMV 族が走ったかどうかが期待と違う（走った内訳: ${shown}）`,
+          `${door.name}: whether the GEMV family ran differs from the expectation (breakdown of what ran: ${shown})`,
         );
         if (door.gemv) {
           const key = expectedGemvKey("i8", door.m, n);
           assert(
             keys.includes(key),
-            `${door.name}: 期待した変種のキー ${key} で走っていない（内訳: ${shown}）`,
+            `${door.name}: did not run on the expected variant key ${key} (breakdown: ${shown})`,
           );
         } else {
           const fallback = door.fallback?.(profile);
           assert(
             fallback !== undefined && keys.includes(fallback),
-            `${door.name}: 既定経路のキー ${fallback} で走っていない（内訳: ${shown}）`,
+            `${door.name}: did not run on the default-path key ${fallback} (breakdown: ${shown})`,
           );
         }
       }
@@ -717,44 +727,44 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// 行ブロック変種（M ≥ 2 — ADR 0082 追記 5 / perf-ledger K-21）。M=1 変種と同じ 3 観点を、
-// **行ブロックが足す 4 つの断片**（rows > 1 の行共有 / 複数 y タイル / 部分的な最終 y タイル /
-// rows == 1 の y タイル形）へ差し向ける。格納 2 種は別枝なので独立に踏む。
+// The row-block variant (M ≥ 2 — ADR 0082 addendum 5 / perf-ledger K-21). The same 3 viewpoints as the M=1 variant,
+// aimed at **the 4 fragments the row block adds** (row sharing with rows > 1 / multiple y tiles / a partial last y
+// tile / the y-tile shape with rows == 1). The 2 storages are separate branches, so they are hit independently.
 // ---------------------------------------------------------------------------
 
 /**
- * 行ブロック 1 件の形。`rows` / `tiles` / `lastTileRows` は **`linearGemvRowsForShape` の実装表から
- * 導いた値**で、ケースがどの断片を踏むつもりなのかを書き留めたもの。
+ * The shape of one row-block case. `rows` / `tiles` / `lastTileRows` are **values derived from the implementation
+ * table of `linearGemvRowsForShape`**, recording which fragment the case intends to hit.
  *
- * MUST: 3 つとも表明する。形だけ書いて意図を書かないと、選択が変わったときにケースが黙って
- * 「rows 1 の y タイルばかり」へ滑り、行共有も部分タイルも 1 度も走らないまま緑になる。
+ * MUST: state all 3. Writing only the shape without the intent lets the case silently slide to "only rows-1 y
+ * tiles" when the selection changes, staying green while neither row sharing nor partial tiles ever run.
  */
 type RowsCase = {
   readonly name: string;
   readonly k: number;
   readonly n: number;
-  /** i4 のみ（i8 は group を持たない）。 */
+  /** i4 only (i8 has no groups). */
   readonly groupSize?: number;
   readonly m: number;
-  /** 期待する行ブロックの高さ（1 スレッドが持つ行数）。 */
+  /** The expected row-block height (the rows one thread holds). */
   readonly rows: number;
-  /** 期待する y タイル枚数 = `ceil(m / rows)`（重みを読み直す回数）。 */
+  /** The expected number of y tiles = `ceil(m / rows)` (how many times the weights are re-read). */
   readonly tiles: number;
-  /** 最終 y タイルで実際に書き戻す行数（`< rows` なら部分タイル）。 */
+  /** The rows actually written back in the last y tile (a partial tile if `< rows`). */
   readonly lastTileRows: number;
-  /** 長いKは短縮約用の許容差でなく、独立CPU参照からの前進誤差上界を検査する。 */
+  /** A long K checks the forward error bound from an independent CPU reference, not the short-reduction tolerance. */
   readonly longReference?: boolean;
 };
 
 /**
- * i4 の形。`units = k / 32`（先読み 4 本の端数）と `n % 32`（最終 workgroup の埋まり方）は
- * M=1 側と同じ軸で、ここに rows / y タイルの軸が乗る。
- * MUST: `n % 4 == 0`（門が v4 を要求する）。
+ * i4 shapes. `units = k / 32` (the remainder of the 4-word prefetch) and `n % 32` (how full the last workgroup is)
+ * are the same axes as on the M=1 side, with the rows / y-tile axes added on top.
+ * MUST: `n % 4 == 0` (the check requires v4).
  */
 const ROWS_CASES: readonly RowsCase[] = [
-  // 関数の呼び出しをまたぐ長いKと部分タイルでも、通常GEMMとの丸めを維持する。
+  // Keeps the rounding of the normal GEMM even with a long K spanning function calls and a partial tile.
   {
-    name: "長いK・rows2 × 部分タイル（k4096 n4096 m9）",
+    name: "long K, rows2 × partial tile (k4096 n4096 m9)",
     longReference: true,
     k: 4096,
     n: 4096,
@@ -764,9 +774,9 @@ const ROWS_CASES: readonly RowsCase[] = [
     tiles: 5,
     lastTileRows: 1,
   },
-  // rows > 1 × y タイル複数（行共有と読み直しが両方走る基準形・units 4 ちょうど）
+  // rows > 1 × multiple y tiles (the base shape where row sharing and re-reads both run; units exactly 4)
   {
-    name: "rows4 × タイル8（k128 n2048 g32 m32）",
+    name: "rows4 × 8 tiles (k128 n2048 g32 m32)",
     k: 128,
     n: 2048,
     groupSize: 32,
@@ -775,9 +785,9 @@ const ROWS_CASES: readonly RowsCase[] = [
     tiles: 8,
     lastTileRows: 4,
   },
-  // 天井の rows（i4 は 1 語 32 要素 × 8 行 = 256 で頭打ち — コンパイル費の天井）・units 3 < 先読み 4
+  // The ceiling rows (i4 caps at 32 elements per word × 8 rows = 256 — the compile-cost ceiling); units 3 < prefetch 4
   {
-    name: "天井rows8 × タイル4 × 先読み不成立（k96 n16384 g32 m32）",
+    name: "ceiling rows8 × 4 tiles × no prefetch (k96 n16384 g32 m32)",
     k: 96,
     n: 16384,
     groupSize: 32,
@@ -786,10 +796,10 @@ const ROWS_CASES: readonly RowsCase[] = [
     tiles: 4,
     lastTileRows: 8,
   },
-  // 最終 y タイルが部分的（9 = 2×4 + 1 → 最後の 1 行だけ書き戻す）・n % 32 = 4 で端の
-  // workgroup も部分的・units 5（端数 1 本）
+  // The last y tile is partial (9 = 2×4 + 1 → only the last 1 row is written back); n % 32 = 4 makes the edge
+  // workgroup partial too; units 5 (1 remainder word)
   {
-    name: "部分タイル rows2 × 最終1行 × n%32≠0（k160 n4100 g32 m9）",
+    name: "partial tile rows2 × last 1 row × n%32≠0 (k160 n4100 g32 m9)",
     k: 160,
     n: 4100,
     groupSize: 32,
@@ -798,9 +808,9 @@ const ROWS_CASES: readonly RowsCase[] = [
     tiles: 5,
     lastTileRows: 1,
   },
-  // 部分タイル（7 = 4 + 3）× group 64（scale の shift が恒等式に縮まない）・units 6（端数 2 本）
+  // Partial tile (7 = 4 + 3) × group 64 (the scale shift does not reduce to the identity); units 6 (2 remainder words)
   {
-    name: "部分タイル rows4 × 最終3行 × g64（k192 n16384 g64 m7）",
+    name: "partial tile rows4 × last 3 rows × g64 (k192 n16384 g64 m7)",
     k: 192,
     n: 16384,
     groupSize: 64,
@@ -809,9 +819,9 @@ const ROWS_CASES: readonly RowsCase[] = [
     tiles: 2,
     lastTileRows: 3,
   },
-  // rows 1 の y タイル形（n が小さいと上限近い M でもこれが選ばれる）— M=1 変種と別テキスト
+  // The y-tile shape with rows 1 (for small n it is chosen even at M near the limit) — a different text from the M=1 variant
   {
-    name: "rows1 × タイル33（k128 n64 g32 m33）",
+    name: "rows1 × 33 tiles (k128 n64 g32 m33)",
     k: 128,
     n: 64,
     groupSize: 32,
@@ -820,9 +830,9 @@ const ROWS_CASES: readonly RowsCase[] = [
     tiles: 33,
     lastTileRows: 1,
   },
-  // 門の上端ちょうど（M = LINEAR_GEMV_MAX_ROWS）・units 7（端数 3 本）
+  // Exactly the upper end of the check (M = LINEAR_GEMV_MAX_ROWS); units 7 (3 remainder words)
   {
-    name: "上限 m64 × 天井rows8 × タイル8（k224 n8192 g32）",
+    name: "limit m64 × ceiling rows8 × 8 tiles (k224 n8192 g32)",
     k: 224,
     n: 8192,
     groupSize: 32,
@@ -834,13 +844,13 @@ const ROWS_CASES: readonly RowsCase[] = [
 ];
 
 /**
- * i8 の形。`units = k / 16` で、天井は 1 語 16 要素 × 16 行 = 256（i4 の倍の行数まで伸びる）。
- * MUST: `n % 4 == 0`（門が v4 を要求する）。
+ * i8 shapes. `units = k / 16`, and the ceiling is 16 elements per word × 16 rows = 256 (up to twice the rows of i4).
+ * MUST: `n % 4 == 0` (the check requires v4).
  */
 const ROWS_I8_CASES: readonly RowsCase[] = [
-  // 関数の呼び出しをまたぐ長いKと部分タイルでも、通常GEMMとの丸めを維持する。
+  // Keeps the rounding of the normal GEMM even with a long K spanning function calls and a partial tile.
   {
-    name: "長いK・rows2 × 部分タイル（k4096 n4096 m9）",
+    name: "long K, rows2 × partial tile (k4096 n4096 m9)",
     longReference: true,
     k: 4096,
     n: 4096,
@@ -849,9 +859,9 @@ const ROWS_I8_CASES: readonly RowsCase[] = [
     tiles: 5,
     lastTileRows: 1,
   },
-  // rows > 1 × y タイル複数・units 5（端数 1 本）
+  // rows > 1 × multiple y tiles; units 5 (1 remainder word)
   {
-    name: "rows8 × タイル4（k80 n4096 m32）",
+    name: "rows8 × 4 tiles (k80 n4096 m32)",
     k: 80,
     n: 4096,
     m: 32,
@@ -859,9 +869,9 @@ const ROWS_I8_CASES: readonly RowsCase[] = [
     tiles: 4,
     lastTileRows: 8,
   },
-  // 天井の rows 16（i4 の 8 と別値であることがこのケースの主眼）・y タイル 2 枚・units 3
+  // The ceiling rows 16 (the point of this case is that it differs from the 8 of i4); 2 y tiles; units 3
   {
-    name: "天井rows16 × タイル2 × 先読み不成立（k48 n16384 m32）",
+    name: "ceiling rows16 × 2 tiles × no prefetch (k48 n16384 m32)",
     k: 48,
     n: 16384,
     m: 32,
@@ -869,9 +879,9 @@ const ROWS_I8_CASES: readonly RowsCase[] = [
     tiles: 2,
     lastTileRows: 16,
   },
-  // 最終 y タイルが部分的（9 = 2×4 + 1）・n % 32 = 4・units 7（端数 3 本）
+  // The last y tile is partial (9 = 2×4 + 1); n % 32 = 4; units 7 (3 remainder words)
   {
-    name: "部分タイル rows2 × 最終1行 × n%32≠0（k112 n4100 m9）",
+    name: "partial tile rows2 × last 1 row × n%32≠0 (k112 n4100 m9)",
     k: 112,
     n: 4100,
     m: 9,
@@ -879,9 +889,9 @@ const ROWS_I8_CASES: readonly RowsCase[] = [
     tiles: 5,
     lastTileRows: 1,
   },
-  // rows 1 の y タイル形
+  // The y-tile shape with rows 1
   {
-    name: "rows1 × タイル33（k64 n64 m33）",
+    name: "rows1 × 33 tiles (k64 n64 m33)",
     k: 64,
     n: 64,
     m: 33,
@@ -889,9 +899,9 @@ const ROWS_I8_CASES: readonly RowsCase[] = [
     tiles: 33,
     lastTileRows: 1,
   },
-  // 門の上端ちょうど × 天井 rows 16（y タイル 4 枚）
+  // Exactly the upper end of the check × ceiling rows 16 (4 y tiles)
   {
-    name: "上限 m64 × 天井rows16 × タイル4（k112 n8192）",
+    name: "limit m64 × ceiling rows16 × 4 tiles (k112 n8192)",
     k: 112,
     n: 8192,
     m: LINEAR_GEMV_MAX_ROWS,
@@ -902,13 +912,13 @@ const ROWS_I8_CASES: readonly RowsCase[] = [
 ];
 
 /**
- * 行ブロック 1 ケースの検査（格納 2 種で共有）。
+ * Checks of one row-block case (shared by the 2 storages).
  *
- * ① 形の意図（rows / y タイル枚数 / 部分タイルの行数）が実装表と一致する
- * ② 既定 GEMM（M = {@link GEMM_ROWS}）の**先頭 m 行**と u32 完全一致（全要素）
- * ③ CPU 参照と allclose（両経路が同じだけ壊れている場合の排除）
- * ④ 期待した行ブロック変種のキーで実際に走った（診断が取れる device のみ — ②③が
- *    既定経路のままでも緑になる形＝恒真化の排除）
+ * ① The intent of the shape (rows / number of y tiles / rows of the partial tile) matches the implementation table
+ * ② Exact u32 equality with **the first m rows** of the default GEMM (M = {@link GEMM_ROWS}) (every element)
+ * ③ allclose with the CPU reference (rules out both paths broken by the same amount)
+ * ④ It actually ran on the expected row-block variant key (only on devices with diagnostics — rules out the
+ *    vacuous form where ② and ③ stay green on the default path)
  */
 const checkRowsCase = async (
   gpu: GpuContext,
@@ -920,35 +930,35 @@ const checkRowsCase = async (
   bias: FilledTensor,
 ): Promise<void> => {
   const { name, k, n, m, groupSize } = rowsCase;
-  // ① 形の意図（実装表が動いたらケースの狙いごと赤くする）
-  assertEquals(linearGemvRowsForShape(storage, m, n), rowsCase.rows, `${name}: 行ブロックの高さ`);
+  // ① The intent of the shape (if the implementation table moves, the case turns red together with its aim)
+  assertEquals(linearGemvRowsForShape(storage, m, n), rowsCase.rows, `${name}: row-block height`);
   const tiles = Math.ceil(m / rowsCase.rows);
-  assertEquals(tiles, rowsCase.tiles, `${name}: y タイル枚数`);
+  assertEquals(tiles, rowsCase.tiles, `${name}: number of y tiles`);
   assertEquals(
     m - (tiles - 1) * rowsCase.rows,
     rowsCase.lastTileRows,
-    `${name}: 最終 y タイルの有効行数`,
+    `${name}: valid rows of the last y tile`,
   );
 
   const gemv = await runLinear(gpu, build(m), m, k);
   const gemm = await runLinear(gpu, build(GEMM_ROWS), GEMM_ROWS, k);
   assertRanGemm(name, gemm.keys);
 
-  // ② 全要素の u32 完全一致（GEMM 側は先頭 m 行 = 同じ平坦添字の区間）
-  assertEquals(gemv.output.shape, [m, n], `${name}: 出力の形`);
+  // ② Exact u32 equality of every element (on the GEMM side the first m rows = the same flat-index range)
+  assertEquals(gemv.output.shape, [m, n], `${name}: output shape`);
   const actual = bits(gemv.output);
   const expected = bits(gemm.output);
   for (let index = 0; index < m * n; index += 1) {
     if (actual[index] === expected[index]) continue;
     assert(
       false,
-      `${name}: 行 ${Math.floor(index / n)} 列 ${index % n} が既定経路と別ビット` +
+      `${name}: row ${Math.floor(index / n)} column ${index % n} differs in bits from the default path` +
         `（0x${actual[index].toString(16)} vs 0x${expected[index].toString(16)} = ` +
         `${gemv.output.data[index]} vs ${gemm.output.data[index]}）`,
     );
   }
 
-  // ③ CPU参照。短いKの既存許容差はそのまま使う。
+  // ③ CPU reference. The existing tolerance for short K is used as is.
   const reference = applyReferenceOp(
     "linear",
     [fill([m, k], XS) as RefTensor, refTensor(weightShape, values), bias as RefTensor],
@@ -956,9 +966,10 @@ const checkRowsCase = async (
     [m, n],
   );
   if (rowsCase.longReference) {
-    // K=4096へK=72の経験的な帯を外挿しない。f32の隣接値への丸めを含むu=2^-23、
-    // 乗算K回・加算K回・bias・参照の最終丸めからγ(2K+2)·Σ|項|を上界とする。
-    // この入力は有限かつnormal。FMAの有無を固定しない。最適化の退行は②の全ビット比較で検出する。
+    // Do not extrapolate the empirical band of K=72 to K=4096. With u=2^-23, which includes rounding to an adjacent
+    // f32 value, the bound is γ(2K+2)·Σ|terms| from K multiplications, K additions, the bias and the reference's
+    // final rounding. This input is finite and normal. Whether FMA is used is not pinned. Optimization regressions
+    // are caught by the all-bit comparison of ②.
     const input = fill([m, k], XS).data;
     const errorFactor = (2 * k + 2) * 2 ** -23;
     const gamma = errorFactor / (1 - errorFactor);
@@ -972,7 +983,7 @@ const checkRowsCase = async (
         const error = Math.abs(gemv.output.data[index] - reference.data[index]);
         assert(
           error <= gamma * magnitude,
-          `${name}: CPU参照 ${index}: ${error} > ${gamma * magnitude}`,
+          `${name}: CPU reference ${index}: ${error} > ${gamma * magnitude}`,
         );
       }
     }
@@ -981,16 +992,16 @@ const checkRowsCase = async (
     assertEquals(report.pass, true, `${name}: ${formatAllclose(report)}`);
   }
 
-  // ④ 行ブロック変種のキーで走ったこと（②③だけだと既定経路のままでも緑になる）
+  // ④ It ran on the row-block variant key (with only ② and ③ it would stay green on the default path)
   const key = linearGemvRowsKey(storage, groupSize, defaultLinearGemvRowsVariant(storage, m, n));
   assert(
     gemv.keys.includes(key),
-    `${name}: 行ブロックのキー ${key} で走っていない（内訳: ${gemv.keys.join(" / ")}）`,
+    `${name}: did not run on the row-block key ${key} (breakdown: ${gemv.keys.join(" / ")})`,
   );
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロック（M ≥ 2）の i4 linear は既定経路と 1 ビットも違わない（実 GPU）",
+  "a row-block (M ≥ 2) i4 linear does not differ by a single bit from the default path (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -1018,7 +1029,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "行ブロック（M ≥ 2）の i8 linear は既定経路と 1 ビットも違わない（実 GPU）",
+  "a row-block (M ≥ 2) i8 linear does not differ by a single bit from the default path (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -1026,7 +1037,7 @@ test.skipIf(!GPU_AVAILABLE)(
         const { k, n } = rowsCase;
         const weight = fill([n, k], weightAtI8(k));
         const bias = fill([n], BS);
-        // チャネル軸は 0（linear の重みは [n,k] — ADR 0019 / 0024 の MUST ④）。
+        // The channel axis is 0 (linear weights are [n,k] — MUST ④ of ADR 0019 / 0024).
         const quantized = quantizeI8(weight.data, weight.shape, 0);
         const shape: GemvI8Case = { name: rowsCase.name, k, n };
         await checkRowsCase(
@@ -1159,7 +1170,7 @@ const checkFloatGemvBits = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "f16 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  "an f16 M=1 GEMV is bit-identical to the normal GEMM even on edge shapes and satisfies the CPU reference (real GPU)",
   () =>
     checkFloatGemvBits("f16", [
       [64, 128],
@@ -1175,7 +1186,7 @@ test.skipIf(!GPU_AVAILABLE)(
 
 // bf16 shares f16's packing (8 elements per 16-byte word), so the same edge shapes apply.
 test.skipIf(!GPU_AVAILABLE)(
-  "bf16 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  "a bf16 M=1 GEMV is bit-identical to the normal GEMM even on edge shapes and satisfies the CPU reference (real GPU)",
   () =>
     checkFloatGemvBits("bf16", [
       [64, 128],
@@ -1190,7 +1201,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "f32 M=1 GEMV は端の形でも通常 GEMM とビット一致し CPU 参照を満たす（実 GPU）",
+  "an f32 M=1 GEMV is bit-identical to the normal GEMM even on edge shapes and satisfies the CPU reference (real GPU)",
   () =>
     checkFloatGemvBits("f32", [
       [64, 128],
@@ -1243,7 +1254,7 @@ const checkFloatDoor = async (cases: readonly FloatDoorCase[]): Promise<void> =>
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "f16 GEMV の行数・K 整列・N 整列の門と f32 格納の別変種を検証する（実 GPU）",
+  "checks the row-count, K-alignment and N-alignment conditions of the f16 GEMV and the separate variant for f32 storage (real GPU)",
   () =>
     checkFloatDoor([
       { m: 2, n: 36, k: 40, storage: "f16" },
@@ -1254,7 +1265,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "bf16 GEMV の行数・K 整列・N 整列の門は f16 と同じ条件で開く（実 GPU）",
+  "the row-count, K-alignment and N-alignment conditions of the bf16 GEMV open under the same conditions as f16 (real GPU)",
   () =>
     checkFloatDoor([
       { m: 2, n: 36, k: 40, storage: "bf16" },
@@ -1265,7 +1276,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "f32 GEMV の行数・K 整列・N 整列の門は条件を外すと通常 GEMM を選ぶ（実 GPU）",
+  "the f32 GEMV selects the normal GEMM when a row-count, K-alignment or N-alignment condition is dropped (real GPU)",
   () =>
     checkFloatDoor([
       { m: 2, n: 36, k: 20, storage: "f32" },
@@ -1291,11 +1302,11 @@ const checkF16ComputeKeepsGemm = async (storage: FloatStorage): Promise<void> =>
 };
 
 test.skipIf(!SHADER_F16_AVAILABLE)(
-  "f16 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
+  "even with f16 storage, an f16 compute request is not replaced by GEMV (real GPU)",
   () => checkF16ComputeKeepsGemm("f16"),
 );
 
 test.skipIf(!SHADER_F16_AVAILABLE)(
-  "f32 格納でも f16 計算の指定は GEMV に置き換えない（実 GPU）",
+  "even with f32 storage, an f16 compute request is not replaced by GEMV (real GPU)",
   () => checkF16ComputeKeepsGemm("f32"),
 );

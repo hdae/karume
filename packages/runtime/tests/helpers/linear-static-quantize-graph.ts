@@ -15,7 +15,10 @@ export type LinearStaticQuantizeOptions = {
   sharedWeight?: boolean;
 };
 
-/** 隣接条件を変えても非融合の実行が成立する検査用グラフ（IR v2 の宣言 — 格納は持たない）。 */
+/**
+ * A test graph whose unfused execution holds whatever the adjacency (IR v2 declaration — no
+ * storage).
+ */
 export const linearStaticQuantizeGraph = (o: LinearStaticQuantizeOptions = {}): DeclarationJson => {
   const m = o.m ?? 4,
     n = o.n ?? 256,
@@ -28,7 +31,8 @@ export const linearStaticQuantizeGraph = (o: LinearStaticQuantizeOptions = {}): 
     inputs: [{ name: "x", dtype: "f32", shape: [m, k] }],
     outputs: ["y", "copy", ...(o.publicLinear ? ["linear"] : [])],
     initializers: {
-      // 借り物の宣言は名前だけ（貸し手の initializer 名と同じ MUST — 格納も実体も持たない）。
+      // A borrowed declaration is a name only (MUST equal the lender's initializer name — no
+      // storage, no data).
       w: o.sharedWeight ? { shared: true } : {},
       b: {},
     },
@@ -58,7 +62,10 @@ export const linearStaticQuantizeGraph = (o: LinearStaticQuantizeOptions = {}): 
   return graph;
 };
 
-/** 格納（codec / group / companion scale）は供給側が決める — v1 の `storage` 宣言の行き先。 */
+/**
+ * The supply side decides storage (codec / group / companion scale) — where v1's `storage`
+ * declaration went.
+ */
 const weightEncoding = (o: LinearStaticQuantizeOptions): EncodingInput => {
   const n = o.n ?? 256,
     k = o.k ?? 1536,
@@ -75,7 +82,7 @@ const weightEncoding = (o: LinearStaticQuantizeOptions): EncodingInput => {
   };
 };
 
-/** {@link linearStaticQuantizeGraph} に対応する供給（借り物の `w` は渡さない）。 */
+/** The supply for {@link linearStaticQuantizeGraph} (the borrowed `w` is not supplied). */
 export const linearStaticQuantizeTensors = (
   o: LinearStaticQuantizeOptions = {},
 ): readonly TensorInput[] => {
@@ -106,6 +113,9 @@ export const linearStaticQuantizeTensors = (
   ];
 };
 
-/** 宣言 + 供給を合流したメモリ内容器（`createSessionFromContainer` / `mergedGraph` の入口）。 */
+/**
+ * In-memory container joining declaration + supply (input to `createSessionFromContainer` /
+ * `mergedGraph`).
+ */
 export const linearStaticQuantizeModel = (o: LinearStaticQuantizeOptions = {}): BoundContainer =>
   memoryModel(linearStaticQuantizeGraph(o), linearStaticQuantizeTensors(o));

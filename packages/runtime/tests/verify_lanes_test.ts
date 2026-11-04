@@ -1,28 +1,31 @@
-// テストレーンの被覆の門（ADR 0005 追記 2026-09-20）。
+// The coverage check of the test lanes (ADR 0005 addendum 2026-09-20).
 //
-// レーン（`packages/test-support/src/lanes.ts` の `LANES` — Vitest の projects として
-// `vp test --project <lane>` で回す）は、フル verify（`vp test`）を分割した実行単位である。
-// 分割の唯一の危険は**被覆漏れ** —— 新しいテストを足したのにどのレーンにも入らず、レーン実行では
-// 一度も走らないまま「緑」に見える形。ここはそれを無音で通さない門で、次の 4 つと、Vitest の設定が
-// `--expose-gc` を worker に渡していること（テストの GPU の取得口の緩和が要る — 下の
-// EXPOSE_GC_FLAG）を見る:
+// A lane (`LANES` of `packages/test-support/src/lanes.ts` — run as a Vitest project with
+// `vp test --project <lane>`) is an execution unit of the split full verify (`vp test`). The only
+// danger of the split is a **coverage gap** — a new test that lands in no lane, never runs in a
+// lane run, and still looks "green". This is the check that does not let that pass silently; it
+// looks at the following 4 things and at the Vitest config passing `--expose-gc` to the workers
+// (needed by the relaxation of the tests' GPU acquisition — EXPOSE_GC_FLAG below):
 //
-// - **被覆**: core ∪ 全レーン = リポの全 `*_test.ts`（`packages/*/tests` と `tools/*/tests` 配下）。
-// - **重複なし**: core と系列レーンは互いに素（同じ重い e2e を 2 度払わない）。系列レーン
-//   どうしの重複は許す —— 通常配布形と QAT 配布形の両方を要るファイルが実在する。
-// - **空でない**: 各レーンは 1 本以上。綴りを間違えたレーンは Vitest が "No test files found" で
-//   落ちるが、それはそのレーンを回したときにしか分からない。
-// - **綴り**: テストの名前は `*_test.ts` だけ。Vitest の `include` は `*_test.ts` なので、
-//   `*.test.ts` / `test.ts` の綴りは**収集されないまま**緑に見える。母集団を広げるのではなく
-//   拒否側で止める。
+// - **Coverage**: core ∪ all lanes = every `*_test.ts` of the repository (under `packages/*/tests`
+//   and `tools/*/tests`).
+// - **No overlap**: core and the family lanes are disjoint (the same heavy e2e is not paid twice).
+//   Overlap between family lanes is allowed — files that need both the regular and the QAT
+//   distribution exist.
+// - **Not empty**: each lane collects at least one file. Vitest fails a misspelled lane with "No
+//   test files found", but only when that lane is run.
+// - **Spelling**: test names are `*_test.ts` only. Vitest's `include` is `*_test.ts`, so the
+//   spellings `*.test.ts` / `test.ts` look green **without ever being collected**. This is stopped
+//   on the rejecting side rather than by widening the population.
 //
 // Two more checks guard the lane table itself. Coverage and disjointness still hold when a family
 // row is dropped from `FAMILY_LANES` (its files fall back into core), so core may hold no
 // end-to-end test but the GPU-free gates of `CORE_E2E_TESTS`, and a family lane that claims no
 // end-to-end test is named in `HOST_ONLY_FAMILY_LANES` and must exist.
 //
-// 真実源は `LANES` そのもの（`vite.config.ts` の projects は `laneProjects()` で同じ表から作る）。
-// glob の展開はこの門が自前で行う（`*` は `/` を跨がず、区切りを伴う `**` は 0 個以上のディレクトリ）。
+// The source of truth is `LANES` itself (the projects of `vite.config.ts` are built from the same
+// table with `laneProjects()`). This check expands the globs itself (`*` does not cross `/`, `**`
+// with a separator is zero or more directories).
 
 import { readDirSync } from "@karume/test-support/fs";
 import {
@@ -37,19 +40,20 @@ import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import viteConfig from "../../../vite.config.ts";
 
-/** リポジトリ根（レーンの glob はリポ相対）。 */
+/** The repository root (lane globs are relative to the repository). */
 const REPO_ROOT = new URL("../../../", import.meta.url);
 
 /**
- * glob を正規表現へ。受けるのは `*`（`/` を跨がない）・ディレクトリ区切りを伴う `**`
- * （0 個以上のディレクトリ）・`{a,b}`（選択）だけ。
+ * Turns a glob into a regular expression. Only `*` (does not cross `/`), `**` with a directory
+ * separator (zero or more directories) and `{a,b}` (alternation) are accepted.
  *
- * MUST: それ以外（`?` / `[…]` / 区切りを伴わない `**`）は受けない。Vitest 側の展開と食い違ったまま緑になる
- * より、「この門が読めない綴りを使った」と落ちる方が安い。
+ * MUST: anything else (`?` / `[…]` / `**` without a separator) is not accepted. Failing with "a
+ * spelling this check cannot read was used" is cheaper than staying green while disagreeing with
+ * Vitest's expansion.
  */
 const globToRegExp = (pattern: string): RegExp => {
   if (/\?|\[|\]/.test(pattern) || /\*\*(?!\/)/.test(pattern)) {
-    throw new Error(`レーン解析: 未対応の glob 構文である: ${pattern}`);
+    throw new Error(`lane parsing: unsupported glob syntax: ${pattern}`);
   }
   let source = "";
   let rest = pattern;
@@ -62,7 +66,7 @@ const globToRegExp = (pattern: string): RegExp => {
       rest = rest.slice(1);
     } else if (rest.startsWith("{")) {
       const close = rest.indexOf("}");
-      if (close < 0) throw new Error(`レーン解析: 閉じていない { である: ${pattern}`);
+      if (close < 0) throw new Error(`lane parsing: unclosed {: ${pattern}`);
       source += `(?:${rest
         .slice(1, close)
         .split(",")
@@ -77,7 +81,10 @@ const globToRegExp = (pattern: string): RegExp => {
   return new RegExp(`^${source}$`);
 };
 
-/** リポ相対 `dir` 以下のファイルを再帰列挙する（`node_modules` と VCS は降りない）。 */
+/**
+ * Lists the files under the repository-relative `dir` recursively (does not descend into
+ * `node_modules` or VCS directories).
+ */
 const walkFiles = (dir: string): string[] => {
   const found: string[] = [];
   const visit = (relative: string): void => {
@@ -95,7 +102,7 @@ const walkFiles = (dir: string): string[] => {
   return found;
 };
 
-/** テストの置き場の全ファイル（`packages/<pkg>/tests` と `tools/<tool>/tests` 配下）。 */
+/** Every file in the test directories (under `packages/<pkg>/tests` and `tools/<tool>/tests`). */
 const TEST_DIRS = ["packages", "tools"]
   .flatMap((parent) =>
     readDirSync(new URL(`${parent}/`, REPO_ROOT))
@@ -112,10 +119,12 @@ const TEST_DIRS = ["packages", "tools"]
   });
 const ALL_FILES = TEST_DIRS.flatMap(walkFiles);
 
-/** レーンの母集団 = `*_test.ts` だけ（Vitest の `include` と同じ綴り）。 */
+/** The lanes' population = `*_test.ts` only (the same spelling as Vitest's `include`). */
 const ALL_TEST_FILES = ALL_FILES.filter((file) => globToRegExp(ALL_TESTS).test(file));
 
-/** Vitest / Deno がテストとして扱いうる綴り（`test.<ext>` / `*.test.<ext>` / `*_test.<ext>`）。 */
+/**
+ * Spellings that Vitest / Deno may treat as tests (`test.<ext>` / `*.test.<ext>` / `*_test.<ext>`).
+ */
 const TEST_EXTENSIONS = ["ts", "tsx", "mts", "js", "mjs", "jsx"] as const;
 const looksLikeTestFile = (name: string): boolean =>
   TEST_EXTENSIONS.some(
@@ -126,7 +135,7 @@ const looksLikeTestFile = (name: string): boolean =>
   );
 const basename = (file: string): string => file.slice(file.lastIndexOf("/") + 1);
 
-/** レーンが実際に収集するファイル集合。 */
+/** The set of files a lane actually collects. */
 const filesOf = (lane: Lane): Set<string> => {
   const includes = lane.include.map(globToRegExp);
   const excludes = lane.exclude.map(globToRegExp);
@@ -141,48 +150,48 @@ const filesOf = (lane: Lane): Set<string> => {
 
 const [coreLane, ...familyLanes] = LANES;
 if (coreLane === undefined || coreLane.name !== "core") {
-  throw new Error("レーン解析: LANES の先頭が core でない");
+  throw new Error("lane parsing: the first entry of LANES is not core");
 }
 const core = filesOf(coreLane);
 const lanes = familyLanes.map((lane) => ({ name: lane.name, files: filesOf(lane) }));
 
 const sorted = (files: Iterable<string>): string[] => [...files].sort();
 
-test("レーンの門: core ∪ 全レーンがリポの全テストを覆う", () => {
+test("lane check: core ∪ all lanes covers every test of the repository", () => {
   const covered = new Set(core);
   for (const lane of lanes) for (const file of lane.files) covered.add(file);
   const uncovered = ALL_TEST_FILES.filter((file) => !covered.has(file));
   assert(
     uncovered.length === 0,
-    "どのレーンにも入らないテストがある（レーン実行では一度も走らない）: " +
-      `${uncovered.sort().join(", ")}。` +
-      "lanes.ts の core の exclude か、該当する models:<系列> を直すこと。",
+    "some tests are in no lane (they never run in a lane run): " +
+      `${uncovered.sort().join(", ")}. ` +
+      "Fix core's exclude in lanes.ts or the matching models:<family>.",
   );
 });
 
-test("レーンの門: core と系列レーンは互いに素", () => {
+test("lane check: core and the family lanes are disjoint", () => {
   for (const lane of lanes) {
     const overlap = sorted(lane.files).filter((file) => core.has(file));
-    assertEquals(overlap, [], `${lane.name} が core と重複している（重い e2e を 2 度払う）`);
+    assertEquals(overlap, [], `${lane.name} overlaps core (the heavy e2e is paid twice)`);
   }
 });
 
-test("レーンの門: 各レーンは 1 本以上を収集する", () => {
-  assert(lanes.length > 0, "lanes.ts に models:<系列> が 1 本も無い");
+test("lane check: each lane collects at least one file", () => {
+  assert(lanes.length > 0, "lanes.ts has no models:<family> at all");
   const empty = lanes.filter((lane) => lane.files.size === 0).map((lane) => lane.name);
-  assertEquals(empty, [], "何も収集しないレーンがある（Vitest が No test files found で落ちる）");
-  assert(core.size > 0, "core が何も収集しない");
+  assertEquals(empty, [], "some lanes collect nothing (Vitest fails with No test files found)");
+  assert(core.size > 0, "core collects nothing");
 });
 
-test("レーンの門: テストの綴りは *_test.ts だけ", () => {
+test("lane check: tests are spelled *_test.ts only", () => {
   const strays = ALL_FILES.filter(
     (file) => looksLikeTestFile(basename(file)) && !file.endsWith("_test.ts"),
   ).sort();
   assertEquals(
     strays,
     [],
-    "テストに見えるのに Vitest の include（*_test.ts）に入らない綴りのファイルがある" +
-      "（収集されないまま緑に見える）。ファイル名を <name>_test.ts へ揃えること。",
+    "some files look like tests but are spelled outside Vitest's include (*_test.ts)" +
+      " (they look green without being collected). Rename them to <name>_test.ts.",
   );
 });
 
@@ -234,37 +243,38 @@ test("lane gate: every family lane claims an end-to-end test or is a named host-
 
 const EXPOSE_GC_FLAG = "--expose-gc";
 
-test("レーンの門: Vitest の設定は projects を LANES から作り、worker に --expose-gc を渡す", () => {
-  // フラグの無い走行では `gc` が生えず、取得口の緩和が黙って効かなくなる（赤にはならない）。
+test("lane check: the Vitest config builds projects from LANES and passes --expose-gc to the workers", () => {
+  // A run without the flag has no `gc`, and the acquisition relaxation silently stops working (it
+  // does not turn red).
   const config: unknown = viteConfig;
   assert(
     typeof config === "object" && config !== null && "test" in config,
-    "vite.config.ts が test 設定を持たない",
+    "vite.config.ts has no test config",
   );
   const testConfig: unknown = config.test;
   assert(
     typeof testConfig === "object" && testConfig !== null,
-    "vite.config.ts の test が object でない",
+    "the test of vite.config.ts is not an object",
   );
   const execArgv: unknown = "execArgv" in testConfig ? testConfig.execArgv : undefined;
   assert(
     Array.isArray(execArgv) && execArgv.includes(EXPOSE_GC_FLAG),
-    `${EXPOSE_GC_FLAG} を worker に渡していない`,
+    `${EXPOSE_GC_FLAG} is not passed to the workers`,
   );
   const projects: unknown = "projects" in testConfig ? testConfig.projects : undefined;
-  assertEquals(projects, laneProjects(), "vite.config.ts の projects が LANES と食い違う");
+  assertEquals(projects, laneProjects(), "the projects of vite.config.ts disagree with LANES");
   assertEquals(
     laneProjects().map((project) => project.test.name),
     defaultLanes().map((lane) => lane.name),
   );
 });
 
-test("レーンの門: 既定で走らせないファミリーはレーン表にあり、KARUME_ALL_FAMILIES=1 のときだけ projects に入る", () => {
+test("lane check: the families not run by default are in the lane table and enter projects only with KARUME_ALL_FAMILIES=1", () => {
   const lowPriority = LOW_PRIORITY_FAMILIES.map((family) => `models:${family}`);
   for (const name of lowPriority) {
     assert(
       LANES.some((lane) => lane.name === name),
-      `${name} が LANES に無い（core が拾ってしまう）`,
+      `${name} is not in LANES (core would pick it up)`,
     );
   }
   const without = laneProjects({}).map((project) => project.test.name);
@@ -280,7 +290,7 @@ test("レーンの門: 既定で走らせないファミリーはレーン表に
   assertEquals(without.length + lowPriority.length, withAll.length);
 });
 
-test("レーン解析: glob は * と **/ と {a,b} だけを展開する", () => {
+test("lane parsing: globs expand only *, **/ and {a,b}", () => {
   const matches = globToRegExp("packages/*/tests/**/*_test.ts");
   assert(matches.test("packages/hub/tests/fetch_test.ts"));
   assert(matches.test("packages/runtime/tests/helpers/nested_test.ts"));
@@ -307,6 +317,6 @@ test("レーン解析: glob は * と **/ と {a,b} だけを展開する", () =
     } catch {
       threw = true;
     }
-    assert(threw, `未対応の glob を受けてしまった: ${bad}`);
+    assert(threw, `an unsupported glob was accepted: ${bad}`);
   }
 });

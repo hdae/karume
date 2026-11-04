@@ -1,16 +1,22 @@
-// `sessionOptionsViolation`（SessionOptions の GPU 非依存の受理条件）の門 — GPU に触れない純関数
-// なので、アダプタ無し環境でも回帰を撃てる位置に置く。
+// The check of `sessionOptionsViolation` (the GPU-independent acceptance conditions of
+// SessionOptions) — a pure function that touches no GPU, so it sits where a regression is caught
+// even in an environment without an adapter.
 //
-// Session 構築はこの関数の違反を `ExecutionError` として送出し、models 側の合成（明示 > 宣言 >
-// runtime 既定）は同じ関数で重みの取得前に落とす。ここが縛るのは「構築と同じ判定・同じ文言を
-// 返す」ことと「GPU の能力に依る条件を混ぜない」ことの 2 点（混ぜると、device を見ずに判定する
-// 呼び手が shader-f16 を持つ device でも f16 を拒否する）。
+// Session construction throws this function's violation as an `ExecutionError`, and the models-side
+// merge (explicit > declared > runtime default) fails with the same function before fetching the
+// weights. What this pins is two things: "it returns the same verdict and the same wording as
+// construction" and "it does not mix in conditions that depend on the GPU's capabilities" (mixed
+// in, a caller that decides without looking at the device would reject f16 even on a device that
+// has shader-f16).
 
 import { assert, assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
 import { type SessionOptions, sessionOptionsViolation } from "../mod.ts";
 
-/** 型の外から来る呼び手（JS の消費者）の欄を再現する — TS の型はこの経路を守らない。 */
+/**
+ * Reproduces a field from a caller outside the types (a JS consumer) — TS types do not guard this
+ * path.
+ */
 const withValue = (key: string, value: unknown): SessionOptions => {
   const options: SessionOptions = {};
   Object.defineProperty(options, key, { value, enumerable: true });
@@ -18,7 +24,7 @@ const withValue = (key: string, value: unknown): SessionOptions => {
 };
 
 describe("sessionOptionsViolation", () => {
-  it("既定・受理される組合せでは undefined を返す", () => {
+  it("returns undefined for the defaults and accepted combinations", () => {
     assertEquals(sessionOptionsViolation({}), undefined);
     assertEquals(
       sessionOptionsViolation({
@@ -39,15 +45,16 @@ describe("sessionOptionsViolation", () => {
     );
   });
 
-  it("GPU の能力に依る条件（shader-f16 / subgroups）では落とさない", () => {
-    // f16 計算・subgroup 変種は device を見ないと決まらない — 構築側の門の担当。
+  it("does not fail on conditions that depend on the GPU's capabilities (shader-f16 / subgroups)", () => {
+    // f16 compute and the subgroup variants cannot be decided without the device — that is the job
+    // of construction's check.
     assertEquals(sessionOptionsViolation({ linearCompute: "f16" }), undefined);
     assertEquals(sessionOptionsViolation({ attentionCompute: "f16" }), undefined);
     assertEquals(sessionOptionsViolation({ linearGemvReduce: "parallel-subgroup32" }), undefined);
     assertEquals(sessionOptionsViolation({ rmsNormReduce: "subgroup32" }), undefined);
   });
 
-  it("組合せ違反は構築と同じ文言で返す", () => {
+  it("returns a combination violation with the same wording as construction", () => {
     const cases: readonly (readonly [SessionOptions, string])[] = [
       [
         { fuseLinearStaticQuantize: true },
@@ -80,7 +87,7 @@ describe("sessionOptionsViolation", () => {
     );
   });
 
-  it("型・綴り・値域の違反を返し、診断で利用者の変換を呼ばない", () => {
+  it("returns type, spelling and range violations, and the diagnostic calls no user conversion", () => {
     let conversions = 0;
     const object = {
       [Symbol.toPrimitive](): string {
@@ -115,9 +122,10 @@ describe("sessionOptionsViolation", () => {
     assertEquals(conversions, 0);
   });
 
-  it("attentionRowBlockMaxBytes は正の安全な整数だけを受ける（構築時に分かる不正値だけを落とす）", () => {
-    // 1 行ぶんに満たない予算は形を見ないと決まらない（run の計画導出で落ちる — ADR 0124 決定 5）ので、
-    // ここが受けるのは値域だけ。1 B も値域の内。
+  it("attentionRowBlockMaxBytes accepts only positive safe integers (it rejects only the invalid values known at construction)", () => {
+    // Whether a budget is smaller than one row cannot be decided without the shapes (it fails when
+    // the run derives its plan — ADR 0124 decision 5), so this checks only the range. 1 B is inside
+    // the range.
     for (const accepted of [1, 512 * 1024 * 1024, Number.MAX_SAFE_INTEGER]) {
       assertEquals(sessionOptionsViolation({ attentionRowBlockMaxBytes: accepted }), undefined);
     }
@@ -134,7 +142,8 @@ describe("sessionOptionsViolation", () => {
         `options.attentionRowBlockMaxBytes ${shown} must be a positive safe integer`,
       );
     }
-    // 数値でない値（JS の消費者）も拒否する。文字列は綴りのまま、他は型名だけを出す。
+    // Non-numeric values (from a JS consumer) are rejected too. A string is shown as spelled, any
+    // other value only by its type name.
     assertEquals(
       sessionOptionsViolation(withValue("attentionRowBlockMaxBytes", "512")),
       'options.attentionRowBlockMaxBytes "512" must be a positive safe integer',
@@ -173,10 +182,11 @@ describe("sessionOptionsViolation", () => {
     }
   });
 
-  it("省略と同じく null も runtime 既定として読む（構築と同じ読み方）", () => {
-    // 「欄はあるが値が不正」を既定へ戻さず拒否するのは、明示指定を受ける上位層の責務
-    // （@karume/models の resolveSessionOptions）。ここで null を拒否に変えると構築の受理集合が
-    // 動く — その変更はこのテストで見える。
+  it("reads null as the runtime default, like an omitted field (the same reading as construction)", () => {
+    // Rejecting "the field is present but its value is invalid" instead of falling back to the
+    // default is the job of the upper layer that takes explicit settings (resolveSessionOptions of
+    // @karume/models). Turning null into a rejection here would move construction's accepted set —
+    // that change shows up in this test.
     assertEquals(sessionOptionsViolation(withValue("linearCompute", null)), undefined);
   });
 });

@@ -1,12 +1,14 @@
 /**
- * packed int8 活性（ADR 0105）の**ビット同一門**（実 GPU）。
+ * **Bit-identity checks** of packed int8 activations (ADR 0105) (real GPU).
  *
- * 1. 復元の門: 全 256 コード × 代表 scale（QAT 配布形の実 scale を含む）で、消費側の
- *    `vec4<f32>(unpack4xI8(w)) * scale` が現行 SRQ の f32 出力と**要素ごとに u32 一致**する。
- *    唯一の例外は int8 に席の無い `-0.0`（コード 0 = `+0.0` へ落ちる）で、本数まで固定する。
- * 2. 経路の門: 並列 GEMV（i2 / i4 / i8 × lane 2〜32 × SRQ 融合エピローグあり / なし）の
- *    packed 変種と現行経路の出力が **u32 完全一致**する。`-0.0` の落ちが出力を動かさないこと
- *    （積和の `acc` は `+0.0` 始まりなので `±0.0` の加算で値が動かない）は、ここが検出器。
+ * 1. Restore check: over all 256 codes × representative scales (including real scales of the QAT
+ *    distribution), the consumer-side `vec4<f32>(unpack4xI8(w)) * scale` **matches the current SRQ f32 output
+ *    as u32 per element**. The only exception is `-0.0`, which has no slot in int8 (it falls to code 0 =
+ *    `+0.0`); its count is pinned as well.
+ * 2. Path check: the packed variant of the parallel GEMV (i2 / i4 / i8 × lane 2–32 × with / without the fused
+ *    SRQ epilogue) matches the current path's output **exactly as u32**. This is the detector for the claim that
+ *    the `-0.0` fall does not move the output (the accumulator `acc` starts at `+0.0`, so adding `±0.0` does not
+ *    change its value).
  */
 
 import { assertEquals } from "@std/assert";
@@ -33,8 +35,8 @@ import {
 } from "../src/kernels/static-quantize.ts";
 
 /**
- * 代表 scale。末尾 4 本は **QAT E2B 配布形が実際に宣言している値**（最小 / 中位 2 本 / 最大）。
- * 先頭 2 本は 2 冪（積が厳密）と非 2 冪の対照。
+ * Representative scales. The last 4 are **values the QAT E2B distribution actually declares** (minimum / two
+ * middle ones / maximum). The first 2 are a power of 2 (exact product) and a non-power-of-2 control.
  */
 const SCALES = [
   0.00390625,
@@ -45,7 +47,7 @@ const SCALES = [
   27.842519760131836,
 ] as const;
 
-/** 消費側の復元 1 語ぶんだけを取り出した検査用シェーダ（字面はカーネルと同じ）。 */
+/** A test shader that extracts just the consumer-side restore of one word (the text is the same as the kernel's). */
 const RESTORE_WGSL = `
 @group(0) @binding(0) var<uniform> params: vec4<u32>;
 @group(0) @binding(1) var<storage, read> src: array<u32>;
@@ -59,8 +61,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 const f32Bits = (value: number): number => new Uint32Array(Float32Array.of(value).buffer)[0];
 
-describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 GPU）", () => {
-  it("全 256 コード × 代表 scale で復元が現行 SRQ 出力と u32 一致する（-0.0 だけ +0.0 へ落ちる）", async () => {
+describe.skipIf(!GPU_AVAILABLE)("bit-identity checks of packed int8 activations (real GPU)", () => {
+  it("over all 256 codes × representative scales the restore matches the current SRQ output as u32 (only -0.0 falls to +0.0)", async () => {
     const gpu = await acquireGpu(),
       d = gpu.device;
     try {
@@ -77,7 +79,7 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
       };
       let checks = 0;
       for (const scale of SCALES) {
-        // コード -128..127 の中央と両隣、加えて ±0 / 極小負（= -0.0 を作る側）。
+        // The middle of codes -128..127 and its neighbours, plus ±0 / a tiny negative (= the side that produces -0.0).
         const values: number[] = [];
         for (let code = -128; code <= 127; code += 1) values.push(code * scale);
         values.push(0, -0, -scale * 1e-6, scale * 1e-6, -Infinity, Infinity);
@@ -126,7 +128,7 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
             pass.dispatchWorkgroups(gx);
           };
           dispatch(STATIC_QUANTIZE_WGSL, [sp, input, reference], Math.ceil(count / 128));
-          // packed も f32 経路と同じ「1 スレッド 1 要素」（ADR 0105 追記 1）= dispatch 数も同じ
+          // packed also uses "1 thread per element" like the f32 path (ADR 0105 addendum 1) = the same dispatch count
           dispatch(STATIC_QUANTIZE_PACKED_WGSL, [pp, input, codes], Math.ceil(count / 128));
           dispatch(RESTORE_WGSL, [rp, codes, restored], Math.ceil(count / 4 / 64));
           pass.end();
@@ -145,9 +147,9 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
             if (a === 0x80000000 && b === 0) negativeZero += 1;
             else different += 1;
           }
-          assertEquals(different, 0, `scale=${scale}: 復元が一致しない要素`);
-          // -0.0 になるのは「符号つきで level 0 へ落ちる入力」だけ: -0 と極小負の 2 本。
-          assertEquals(negativeZero, 2, `scale=${scale}: -0.0 の落ちる本数`);
+          assertEquals(different, 0, `scale=${scale}: elements whose restore does not match`);
+          // -0.0 comes only from "inputs that fall to level 0 with a sign": -0 and the tiny negative, 2 in all.
+          assertEquals(negativeZero, 2, `scale=${scale}: number of values falling to -0.0`);
           checks += 1;
         } finally {
           d.queue.submit([]);
@@ -164,15 +166,15 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
   });
 
   /**
-   * grid-stride の端の長さ。`128` の倍数でない `132` と `12288`（= 132 × 93 + …）を含めて、
-   * 共有メモリ経由の詰め（ADR 0105 追記 1）が端のタイルで壊れないことを見る。
-   * 要素数が 4 の倍数なのは params の門（1 語 4 要素）。
+   * Edge lengths of the grid stride. Including `132` and `12288` (= 132 × 93 + …), which are not multiples of
+   * `128`, checks that the packing through shared memory (ADR 0105 addendum 1) does not break on the edge tile.
+   * The element counts are multiples of 4 because of the params check (4 elements per word).
    */
   const TAIL_COUNTS = [4, 16, 128, 132, 1536, 12288] as const;
-  /** 範囲外の語を 1 語でも書いたら落ちる番兵。 */
+  /** A sentinel that fails if even one out-of-range word is written. */
   const SENTINEL = 0xdeadbeef;
 
-  it("新カーネルは端の長さでも f32 経路と同じコード列を出す（コード巡回 × count 6 種）", async () => {
+  it("the new kernel emits the same code sequence as the f32 path at edge lengths too (code cycle × 6 counts)", async () => {
     const gpu = await acquireGpu(),
       d = gpu.device;
     try {
@@ -190,7 +192,7 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
       let checks = 0;
       for (const count of TAIL_COUNTS) {
         for (const scale of [SCALES[0], SCALES[2]]) {
-          // 全 256 コードを巡回させ、4 要素ごとに 1 語の境界を跨がせる。
+          // Cycle through all 256 codes, crossing a word boundary every 4 elements.
           const x = Float32Array.from(
             { length: count },
             (_, i) => ((i % 256) - 128 + (i % 3) * 0.37) * scale,
@@ -214,7 +216,7 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
             };
             const input = make(x);
             const reference = make(count * 4);
-            // 末尾 8 語を番兵で埋めておき、端のタイルの書きすぎを検出する。
+            // Fill the last 8 words with the sentinel to detect over-writes on the edge tile.
             const codes = make(new Uint32Array(words + 8).fill(SENTINEL));
             const restored = make(count * 4);
             const stage = make((count * 2 + words + 8) * 4, U.MAP_READ | U.COPY_DST);
@@ -250,7 +252,7 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
             await stage.mapAsync(MAP_MODE.READ);
             const read = new Uint32Array(stage.getMappedRange().slice(0));
             stage.unmap();
-            // 契約は「f32 経路の語と一致・ただし `-0.0` だけ `+0.0` へ落ちる」（ADR 0105）。
+            // The contract is "matches the f32 path's words, except that only `-0.0` falls to `+0.0`" (ADR 0105).
             let different = 0,
               negativeZero = 0;
             for (let i = 0; i < count; i += 1) {
@@ -261,19 +263,19 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
                 if (restoredWord !== 0) different += 1;
               } else if (reference !== restoredWord) different += 1;
             }
-            assertEquals(different, 0, `count=${count} scale=${scale}: 一致しない要素`);
-            // `-0.0` になるのは「負で level 0 へ落ちる」= 商が (-0.5, 0) の要素だけ。上の入力で
-            // それを満たすのは `i%256 == 127 かつ i%3 == 2`（商 -0.26）の 1 点 = `i ≡ 383 (mod 768)`。
+            assertEquals(different, 0, `count=${count} scale=${scale}: mismatching elements`);
+            // `-0.0` comes only from "a negative value falling to level 0" = elements whose quotient is in (-0.5, 0).
+            // With the input above, that is the single point `i%256 == 127 and i%3 == 2` (quotient -0.26) = `i ≡ 383 (mod 768)`.
             assertEquals(
               negativeZero,
               Math.floor((count + 384) / 768),
-              `count=${count} scale=${scale}: -0.0 の落ちる本数`,
+              `count=${count} scale=${scale}: number of values falling to -0.0`,
             );
             const tail = [...read.subarray(count * 2 + words, count * 2 + words + 8)];
             assertEquals(
               tail,
               Array.from({ length: 8 }, () => SENTINEL),
-              `count=${count} scale=${scale}: 範囲外の語を書いた`,
+              `count=${count} scale=${scale}: wrote an out-of-range word`,
             );
             checks += 1;
           } finally {
@@ -291,11 +293,11 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
     }
   });
 
-  it("NaN は符号ビットに従って +127 / -128 へ飽和する（quiet / signaling とも・f32 経路と違う唯一の 2 値の片方）", async () => {
+  it("NaN saturates to +127 / -128 by its sign bit (quiet and signaling alike; one of the only 2 values that differ from the f32 path)", async () => {
     const gpu = await acquireGpu(),
       d = gpu.device;
     try {
-      // 入力はビット列で渡す（カーネルは u32 として読むので NaN のペイロードも届く）。
+      // Inputs are passed as bit patterns (the kernel reads them as u32, so NaN payloads arrive as well).
       // +qNaN / -qNaN / +sNaN / -sNaN / 1.0 / -1.0 / +0 / -0
       const bits = Uint32Array.of(
         0x7fc00000,
@@ -361,15 +363,15 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
         for (const b of owned) b.destroy();
       }
       assertEquals(validationError, null);
-      // NaN の magnitude は全境界を超えるので level は符号で決まる上限（+127 / 128 = -128）。
-      // 1.0 / 0.5 = 2 → 0x02、-2 → 0xFE、-0 は int8 に席が無く 0x00。
+      // The magnitude of NaN exceeds every boundary, so the level is the limit given by the sign (+127 / 128 = -128).
+      // 1.0 / 0.5 = 2 → 0x02, -2 → 0xFE, and -0 has no slot in int8, so 0x00.
       assertEquals(bytes, [0x7f, 0x80, 0x7f, 0x80, 0x02, 0xfe, 0x00, 0x00]);
     } finally {
       gpu.destroy();
     }
   });
 
-  it("並列 GEMV の packed 変種は現行経路と u32 完全一致する（i2/i4/i8 × lane × 融合あり/なし）", async () => {
+  it("the packed variant of the parallel GEMV matches the current path exactly as u32 (i2/i4/i8 × lane × with/without fusion)", async () => {
     const gpu = await acquireGpu(),
       d = gpu.device;
     try {
@@ -412,7 +414,7 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
                     return b;
                   };
                   try {
-                    // 活性は int8 の全域を跨ぐ形・特殊値を含む形・素直な形の 3 通り。
+                    // Three activation shapes: one spanning the whole int8 range, one with special values, and a plain one.
                     const x = Float32Array.from({ length: m * k }, (_, i) =>
                       scenario === "codes"
                         ? ((i % 256) - 128 + (i % 3) * 0.4) * xScale
@@ -546,8 +548,8 @@ describe.skipIf(!GPU_AVAILABLE)("packed int8 活性のビット同一門（実 G
  * storage x lane x M, including the SRQ boundary, special values, identity
  * (scale 0) and the sign-mask rounding scenario.
  */
-describe.skipIf(!GPU_AVAILABLE)("linear→SRQの融合カーネル（実GPU）", () => {
-  it("元のparallel＋元のSRQと全境界・特殊値・M1/4/8で一致する", async () => {
+describe.skipIf(!GPU_AVAILABLE)("fused linear→SRQ kernel (real GPU)", () => {
+  it("matches the original parallel + original SRQ at every boundary, on special values and at M1/4/8", async () => {
     const gpu = await acquireGpu(),
       d = gpu.device;
     let checks = 0;

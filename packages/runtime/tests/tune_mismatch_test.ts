@@ -1,10 +1,13 @@
-// 保存した表の照合 geometryProfileMismatch（src/tune/mismatch.ts — ADR 0117 決定 5）の門。公開の関数は
-// 公開面（../tune.ts）から、公開しない指紋（geometryProfileKernelsId）は src から引く。GPU を使わない
-// （指紋は codegen だけで導く）。
+// The check of geometryProfileMismatch, the matching of a saved table (src/tune/mismatch.ts — ADR
+// 0117 decision 5). The public functions come from the public surface (../tune.ts), the unexported
+// fingerprint (geometryProfileKernelsId) from src. No GPU is used (the fingerprint is derived from
+// codegen alone).
 //
-// 固定するのは ① 全て一致なら undefined ② provenance 無し・adapter の 4 欄（空文字も値）・指紋・ケース集合の
-// 版のそれぞれの不一致を、その欄を名指す文言で返す ③ 照合の順（最初の不一致だけを返す）④ 投げない
-// （表の幾何から掃引の shape のカーネルを組めない表も文言で返す）。
+// What this pins: ① undefined when everything matches ② a missing provenance and a mismatch of each
+// of the adapter's 4 fields (the empty string is a value too), the fingerprint and the case-set
+// version are each returned with wording that names that field ③ the matching order (only the first
+// mismatch is returned) ④ it does not throw (a table whose geometry cannot build the kernels of the
+// sweep shapes is also returned as a message).
 
 import { platformObject } from "@karume/test-support/webgpu";
 import { assertEquals, assertStringIncludes } from "@std/assert";
@@ -23,7 +26,10 @@ const ADAPTER: Adapter = {
   description: "Apple M2",
 };
 
-/** 今の runtime の値で照合の材料を揃えた表（`overrides` で provenance の欄を差し替える）。 */
+/**
+ * A table whose matching inputs are the current runtime's values (`overrides` replaces provenance
+ * fields).
+ */
 const stored = (
   table: GeometryProfile = DEFAULT_GEOMETRY_PROFILE,
   overrides: Partial<Provenance> = {},
@@ -42,17 +48,18 @@ const stored = (
   },
 });
 
-/** 照合が不一致を返すこと（undefined なら落とす）。 */
+/** Asserts that matching returns a mismatch (fails on undefined). */
 const mismatchOf = (profile: GeometryProfile, adapter: Adapter): string => {
   const message = geometryProfileMismatch(profile, adapter);
-  if (message === undefined) throw new Error("一致と判定された");
+  if (message === undefined) throw new Error("judged as a match");
   return message;
 };
 
 describe("geometryProfileMismatch", () => {
-  it("adapter の 4 欄・カーネルの指紋・ケース集合の版が全て一致すれば undefined", () => {
+  it("is undefined when the adapter's 4 fields, the kernel fingerprint and the case-set version all match", () => {
     assertEquals(geometryProfileMismatch(stored(), ADAPTER), undefined);
-    // GPUAdapterInfo の他の欄（subgroup の幅など）は見ない — GpuContext.adapterInfo をそのまま渡せる
+    // Other GPUAdapterInfo fields (the subgroup sizes and so on) are ignored —
+    // GpuContext.adapterInfo can be passed as it is
     const info: GPUAdapterInfo = platformObject<GPUAdapterInfo>({
       ...ADAPTER,
       subgroupMinSize: 4,
@@ -62,24 +69,25 @@ describe("geometryProfileMismatch", () => {
     assertEquals(geometryProfileMismatch(stored(), info), undefined);
   });
 
-  it("provenance の無い表（手書きの表）は照合の材料が無いと返す", () => {
+  it("reports that a table without provenance (a hand-written table) has nothing to match against", () => {
     const message = mismatchOf(DEFAULT_GEOMETRY_PROFILE, ADAPTER);
     assertStringIncludes(message, "'default' has no provenance");
     assertStringIncludes(message, "nothing to match against");
   });
 
   for (const field of ["vendor", "architecture", "device", "description"] as const) {
-    it(`adapter の ${field} が違えば、その欄と両方の値を名指す（空文字も値として比べる）`, () => {
+    it(`names the field and both values when the adapter's ${field} differs (the empty string compares as a value)`, () => {
       const blank = mismatchOf(stored(), { ...ADAPTER, [field]: "" });
       assertStringIncludes(blank, `adapter ${field} differs`);
       assertStringIncludes(blank, `table ${JSON.stringify(ADAPTER[field])} / this adapter ""`);
-      // 表の側が空（フラグ無しの Chrome で作った表）で、adapter が値を返す（フラグを入れた）場合も不一致
+      // Also a mismatch when the table's side is empty (a table made in Chrome without the flag)
+      // and the adapter returns a value (the flag is on)
       const filled = mismatchOf(
         stored(DEFAULT_GEOMETRY_PROFILE, { adapter: { ...ADAPTER, [field]: "" } }),
         ADAPTER,
       );
       assertStringIncludes(filled, `adapter ${field} differs`);
-      // 大小文字も揃えない（文字列の完全一致）
+      // Case is not normalised either (exact string match)
       assertStringIncludes(
         mismatchOf(stored(), { ...ADAPTER, [field]: ADAPTER[field].toUpperCase() + "!" }),
         `adapter ${field} differs`,
@@ -87,7 +95,7 @@ describe("geometryProfileMismatch", () => {
     });
   }
 
-  it("空文字どうしの欄は一致する（フラグ無しの Chrome で作り、同じ Chrome で照合する）", () => {
+  it("fields that are both empty match (made in Chrome without the flag, matched in the same Chrome)", () => {
     const blank = { ...ADAPTER, device: "", description: "" };
     assertEquals(
       geometryProfileMismatch(stored(DEFAULT_GEOMETRY_PROFILE, { adapter: blank }), blank),
@@ -95,7 +103,7 @@ describe("geometryProfileMismatch", () => {
     );
   });
 
-  it("カーネルの指紋が今の runtime の値と違えば返す（表の幾何が保存後に書き換わった場合も同じ）", () => {
+  it("reports a kernel fingerprint that differs from the current runtime's (also when the table's geometry was edited after saving)", () => {
     const message = mismatchOf(
       stored(DEFAULT_GEOMETRY_PROFILE, { kernels: "0123456789abcdef" }),
       ADAPTER,
@@ -116,7 +124,7 @@ describe("geometryProfileMismatch", () => {
     assertStringIncludes(mismatchOf(edited, ADAPTER), "kernel fingerprint differs");
   });
 
-  it("ケース集合の版が今の runtime の値と違えば返す", () => {
+  it("reports a case-set version that differs from the current runtime's", () => {
     const message = mismatchOf(
       stored(DEFAULT_GEOMETRY_PROFILE, { caseSet: "fedcba9876543210" }),
       ADAPTER,
@@ -125,7 +133,7 @@ describe("geometryProfileMismatch", () => {
     assertStringIncludes(message, `table fedcba9876543210 / current runtime ${sweepCaseSetId()}`);
   });
 
-  it("最初の不一致だけを返す（adapter の 4 欄 → 指紋 → ケース集合の版の順）", () => {
+  it("returns only the first mismatch (in the order adapter's 4 fields → fingerprint → case-set version)", () => {
     const all = stored(DEFAULT_GEOMETRY_PROFILE, {
       kernels: "0123456789abcdef",
       caseSet: "fedcba9876543210",
@@ -141,7 +149,7 @@ describe("geometryProfileMismatch", () => {
     );
   });
 
-  it("候補集合と match は照合しない", () => {
+  it("does not match the candidate set or match", () => {
     assertEquals(
       geometryProfileMismatch(
         {
@@ -154,7 +162,7 @@ describe("geometryProfileMismatch", () => {
     );
   });
 
-  it("provenance.userAgent（掃引したブラウザの参考の欄）は照合しない — 違っても欄が無くても一致", () => {
+  it("does not match provenance.userAgent (an informational field naming the sweeping browser) — a match whether it differs or is absent", () => {
     for (const overrides of [
       { userAgent: ["Mozilla/5.0 (Macintosh) Chrome/153.0.0.0"] },
       { userAgent: ["Deno/2.9.6"] },
@@ -168,8 +176,9 @@ describe("geometryProfileMismatch", () => {
     }
   });
 
-  it("投げない: 表の幾何から掃引の shape のカーネルを組めない表（dispatch 数が 65535 を超える）は理由を返す", () => {
-    // 門（assertGeometryProfile）は通るが、tileN 4 で conv2d 512² の N = 262144 が 65536 workgroup になる
+  it("does not throw: returns the reason for a table whose geometry cannot build the sweep shapes' kernels (dispatch count over 65535)", () => {
+    // It passes the check (assertGeometryProfile), but with tileN 4 the N = 262144 of conv2d 512²
+    // becomes 65536 workgroups
     const narrow: GeometryProfile = {
       ...DEFAULT_GEOMETRY_PROFILE,
       conv2d: { ...DEFAULT_GEOMETRY_PROFILE.conv2d, rows32: { regM: 1, regN: 4, wgX: 1, wgY: 16 } },

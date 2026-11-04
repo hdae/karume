@@ -1,6 +1,8 @@
-// 公開面（mod.ts）だけで書く E2E。ADR 0008 の「面と実装の乖離を機械検出する」常設テスト。
-// MUST: src/ を直接 import しない — 内部直参照で書くと、公開面から落ちた機能を検出できない。
-// テスト補助の helper も引かない（helper が src/ を引いていると、この門の検出力がそのぶん減る）。
+// E2E written against the public surface (mod.ts) only. The standing test for ADR 0008's
+// "mechanically detect drift between the surface and the implementation".
+// MUST: do not import src/ directly — written against internals, it cannot detect a feature that
+// fell off the public surface. Do not pull in test helpers either (if a helper imports src/, this
+// check loses that much of its detection power).
 
 import { readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -33,8 +35,8 @@ const f32Bytes = (values: readonly number[]): Uint8Array<ArrayBuffer> => {
 };
 
 /**
- * y[T] = Σ_c (x[T,3] · w[3,2] + b[2])。記号次元 T を含む 3 ノードのグラフを、公開面の
- * **メモリ内容器**（手元のバイト列をそのまま供給する面）で組む。
+ * y[T] = Σ_c (x[T,3] · w[3,2] + b[2]). A 3-node graph with the symbolic dimension T, built with
+ * the public surface's **in-memory container** (the surface that supplies bytes in hand as is).
  */
 const model = (): BoundContainer =>
   openMemoryContainer({
@@ -70,7 +72,9 @@ const model = (): BoundContainer =>
     },
   });
 
-/** ノードごとに f32 へ丸めながら手計算する（実装とは独立した参照）。 */
+/**
+ * Computed by hand, rounding to f32 at every node (a reference independent of the implementation).
+ */
 const expectedRows = (x: readonly number[], rows: number): Float32Array<ArrayBuffer> => {
   const out = new Float32Array(rows);
   for (let row = 0; row < rows; row += 1) {
@@ -86,11 +90,12 @@ const expectedRows = (x: readonly number[], rows: number): Float32Array<ArrayBuf
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "公開面だけでモデルを開き、記号次元込みのグラフを実行できる（実 GPU）",
+  "opens a model through the public surface only and runs a graph with symbolic dimensions (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
-    // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
+    // MUST: device destruction also covers a failing `createSession`. If it is missed, the rest of
+    // the run carries an undestroyed device and later tests go red with OOM (deferred release in
+    // known-issues).
     try {
       const session = await createSessionFromContainer(gpu, model(), "model");
       try {
@@ -106,7 +111,7 @@ test.skipIf(!GPU_AVAILABLE)(
           assertAlmostEquals(outputs["y"].data[row], expected[row], 1e-5, `row ${row}`);
         }
 
-        // 記号次元は run ごとに束縛し直される
+        // Symbolic dimensions are rebound on every run
         const wide = Array.from({ length: 9 * 3 }, (_, i) => (i % 5) - 2);
         const outputs2 = await session.run(
           {
@@ -120,12 +125,13 @@ test.skipIf(!GPU_AVAILABLE)(
           assertAlmostEquals(outputs2["y"].data[row], expected2[row], 1e-5, `wide row ${row}`);
         }
 
-        // MUST: 診断は**型付きで**受ける。`SessionDiagnostics` が参照する型のどれかが mod.ts の
-        // 列挙から落ちていても構造的には代入できてしまうので、名前で書く下の 1 行が輸出漏れの
-        // 機械検出になる（`FusionCounts` が非公開だった間はここが書けなかった）。
+        // MUST: the diagnostics are received **typed**. Even if one of the types
+        // `SessionDiagnostics` refers to fell off the mod.ts export list, it would still be
+        // structurally assignable, so the line below that writes the name is the mechanical
+        // detector of a missing export (it could not be written while `FusionCounts` was private).
         const diagnostics: SessionDiagnostics = session.diagnostics();
         const fusions: FusionCounts | undefined = diagnostics.lastRunFusions;
-        // このグラフ（matmul / add / sum）はどのルールにも掛からない = 全カウンタ 0。
+        // This graph (matmul / add / sum) matches no rule = every counter is 0.
         assertEquals(fusions, {
           silu: 0,
           upsample2x: 0,
@@ -143,8 +149,9 @@ test.skipIf(!GPU_AVAILABLE)(
           attentionPermute: 0,
         });
         assertEquals(diagnostics.pipelineCount, 3);
-        // 重みアリーナは initializer 2 本に加えて params キャッシュ（Session 常駐）の実体も
-        // 所有する。この 2 run は T が違うので params は 3 ノードぶんずつ別内容で載る。
+        // The weight arena owns the params cache (resident in the Session) in addition to the two
+        // initializers. These two runs have different T, so params are loaded with different
+        // contents, 3 nodes' worth each.
         assertEquals(diagnostics.weights.allocCount, 2 + 3 + 3);
         assertEquals(diagnostics.lastRunParams, { allocCount: 3, reuseCount: 0 });
         assertEquals((diagnostics.lastRun?.allocCount ?? 0) > 0, true);
@@ -158,28 +165,34 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 0 要素テンソル（shape に 0 を含む）の経路。要素数 0 は dispatch 数 0・確保サイズ 0 を
- * 生み、各所の下限クランプ（最小 4 バイト）に乗って通っている。shape を保ったまま長さ 0 の
- * data が返ること、そして同じ Session の後続 run が壊れないことをここで固定する。
+ * The path of zero-element tensors (shapes containing 0). An element count of 0 produces 0
+ * dispatches and an allocation size of 0, and gets through by riding the lower clamps in various
+ * places (minimum 4 bytes). This pins that zero-length data comes back with the shape kept, and
+ * that later runs on the same Session do not break.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "0 要素テンソル（記号次元 T=0）が shape を保ったまま長さ 0 で返る（実 GPU）",
+  "a zero-element tensor (symbolic dimension T=0) comes back with length 0 and its shape kept (real GPU)",
   async () => {
     const gpu = await acquireGpu();
-    // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
-    // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
+    // MUST: device destruction also covers a failing `createSession`. If it is missed, the rest of
+    // the run carries an undestroyed device and later tests go red with OOM (deferred release in
+    // known-issues).
     try {
       const session = await createSessionFromContainer(gpu, model(), "model");
       try {
         const empty: Tensor = { dtype: "f32", shape: [0, 3], data: new Float32Array(0) };
         const outputs = await session.run({ x: empty });
         assertEquals(Object.keys(outputs), ["y"]);
-        assertEquals(outputs["y"].shape, [0], "0 要素でも shape はスカラに縮退しない");
+        assertEquals(
+          outputs["y"].shape,
+          [0],
+          "even with 0 elements the shape does not degenerate to a scalar",
+        );
         assertEquals(outputs["y"].data.length, 0);
-        // 3 ノードとも「要素ゼロの dispatch」としてエンコードされる（黙って飛ばさない）
+        // All 3 nodes are encoded as "zero-element dispatches" (not silently skipped)
         assertEquals(session.diagnostics().submit.dispatchCount, 3);
 
-        // 0 要素の run が Session の状態（プール・パイプライン）を壊していない
+        // The zero-element run did not break the Session's state (pools, pipelines)
         const values = [1, -2, 0.5, 3, 0.25, -1];
         const next = await session.run({
           x: { dtype: "f32", shape: [2, 3], data: Float32Array.from(values) },
@@ -198,34 +211,38 @@ test.skipIf(!GPU_AVAILABLE)(
   },
 );
 
-test("ランタイム内部の直列化プリミティブは公開型面に現れない（ADR 0008）", () => {
-  // 型レベルの門。`withScopeLock` / `raceDeviceLost` が素の名前で GpuContext に載っていると
-  // 下の代入が型エラーになる（実行時の assert は恒真で、検出するのは deno check）。
-  // 素で見えると `gpu.withScopeLock(() => session.run(...))` が書けてしまい、run が同じロックを
-  // 取りに行って**例外も診断も出ないまま自己デッドロック**する（再入検出器は置けない）。
-  // MUST: 1 名ずつ別々に否定する。union を左辺に置いた条件型は**裸の型引数ではない**ので
-  // 分配されず、片方だけが載っても union 全体は `keyof GpuContext` に代入不能 = 偽枝のまま
-  // 通ってしまう（片側漏出が素通りする）。
+test("the runtime's internal serialization primitives do not appear on the public type surface (ADR 0008)", () => {
+  // A type-level check. If `withScopeLock` / `raceDeviceLost` were on GpuContext under their plain
+  // names, the assignment below would be a type error (the runtime assert is a tautology; the type
+  // checker is what detects it). Visible under plain names, `gpu.withScopeLock(() =>
+  // session.run(...))` could be written, and run would take the same lock and **self-deadlock with
+  // no exception and no diagnostic** (no reentrancy detector can be placed).
+  // MUST: negate each name separately. A conditional type with a union on the left is **not a naked
+  // type parameter**, so it does not distribute; if only one name leaked, the union as a whole is
+  // not assignable to `keyof GpuContext` = it stays in the false branch and passes (a one-sided
+  // leak slips through).
   const scopeLockHidden: "withScopeLock" extends keyof GpuContext ? false : true = true;
   const raceDeviceLostHidden: "raceDeviceLost" extends keyof GpuContext ? false : true = true;
   assertEquals([scopeLockHidden, raceDeviceLostHidden], [true, true]);
 });
 
-test("生成 run の第 3 引数が公開型で名指しできる（ADR 0066 決定 6 の呼び出し形）", () => {
-  // 型レベルの門。`GenerationRun` が mod.ts の輸出列から落ちると deno check で落ちる
-  // （構造的部分型でオブジェクトリテラルは渡せてしまうので、公開メソッドのシグネチャに
-  // 現れる型を**名前で**書く下の 1 行が輸出漏れの機械検出になる）。
+test("the third argument of a generation run can be named with a public type (the call form of ADR 0066 decision 6)", () => {
+  // A type-level check. If `GenerationRun` falls off the mod.ts export list, the type check fails
+  // (an object literal can still be passed through structural subtyping, so the line below that
+  // writes the type appearing in the public method's signature **by name** is the mechanical
+  // detector of a missing export).
   const asThirdArgument = (run: GenerationRun): Parameters<Session["run"]>[2] => run;
   assertEquals(typeof asThirdArgument, "function");
 });
 
-test("公開面が capability 照会とモデル解析の失敗型を提供する", async () => {
+test("the public surface provides the capability query and the model-parsing error types", async () => {
   const ops = capabilities().ops;
   for (const op of ["matmul", "add", "sum", "gelu", "amax"]) {
     assertEquals(ops.includes(op), true, op);
   }
   assertEquals(capabilities().storage, ["bf16", "f16", "f32", "i2", "i32", "i4", "i8"]);
-  // 容器（`krm` / `krg`）の解析失敗と、付帯資産（safetensors）の解析失敗の 2 型。
+  // The two types for a container (`krm` / `krg`) parse failure and an attached-asset (safetensors)
+  // parse failure.
   await assertRejects(
     () => openContainer({ kind: "bytes", bytes: new Uint8Array(new ArrayBuffer(4)) }),
     ContainerFormatError,
@@ -233,7 +250,7 @@ test("公開面が capability 照会とモデル解析の失敗型を提供す�
   assertThrows(() => parseSafetensors(new ArrayBuffer(4)), SafetensorsError);
 });
 
-test("この E2E は公開面（mod.ts）以外の実装を import しない", async () => {
+test("this E2E imports no implementation other than the public surface (mod.ts)", async () => {
   const source = await readTextFile(new URL(import.meta.url));
   const specifiers = [...source.matchAll(/from "([^"]+)"/g)].map((match) => match[1]);
   assertEquals(

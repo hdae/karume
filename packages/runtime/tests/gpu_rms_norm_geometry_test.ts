@@ -1,4 +1,4 @@
-// RMS の 128 スレッド版は、256 版の下半分の加算順序を維持する。
+// The 128-thread RMS variant keeps the addition order of the lower half of the 256-thread variant.
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { acquireGpu, type GpuContext } from "../src/gpu/device.ts";
@@ -69,7 +69,8 @@ const direct = async (
       pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, group);
-    // 行を再訪させる。行ごとに値が異なるので、scratch の寿命と grid-stride の誤りも値に出る。
+    // Make workgroups revisit rows. Each row holds different values, so a scratch-lifetime or
+    // grid-stride error also shows up in the values.
     pass.dispatchWorkgroups(Math.min(rows, 2));
     pass.end();
     encoder.copyBufferToBuffer(output, 0, staging, 0, x.byteLength);
@@ -116,7 +117,7 @@ const bits = (data: Float32Array<ArrayBuffer>): Uint32Array<ArrayBuffer> =>
   new Uint32Array(data.buffer, data.byteOffset, data.length);
 
 test.skipIf(!GPU_AVAILABLE)(
-  "rms_norm の 128 スレッド版は端の幅でも従来版とビット一致し、128 を超える幅は従来版を選ぶ（実 GPU）",
+  "rms_norm's 128-thread variant is bit-identical to the original at edge widths, and widths above 128 select the original (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -163,7 +164,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "rms_norm の空レーン削減は ±0・大きい有限値・非有限値の伝播を維持する（実 GPU）",
+  "rms_norm's idle-lane reduction preserves propagation of ±0, large finite values and non-finite values (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -185,7 +186,8 @@ test.skipIf(!GPU_AVAILABLE)(
         const expected = await direct(gpu, RMS_NORM_WGSL, x, weight);
         const actual = await direct(gpu, RMS_NORM_128_WGSL, x, weight);
         for (let i = 0; i < x.length; i++) {
-          // NaN の payload は op の契約外。伝播する位置を検査し、それ以外は ±0 も含む u32 一致。
+          // A NaN payload is outside the op's contract: check where NaN propagates, and require
+          // u32 equality everywhere else, ±0 included.
           if (Number.isNaN(expected[i])) assert(Number.isNaN(actual[i]), `dim=${dim} i=${i}`);
           else assertEquals(bits(actual)[i], bits(expected)[i], `dim=${dim} i=${i}`);
         }

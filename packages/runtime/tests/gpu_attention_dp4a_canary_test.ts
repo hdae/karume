@@ -1,31 +1,38 @@
-// 融合 attention の i8a8 内積変種を**実走で決める**カナリア（src/gpu/attention-dp4a-canary.ts）。
+// The canary that **decides by an actual run** the i8a8 dot-product variant of fused attention
+// (src/gpu/attention-dp4a-canary.ts).
 //
-// 背景 = docs/known-issues.md の Metal（Apple GPU）節。当初は「dot4I8Packed 版とエミュ版は同じ
-// 整数を返す」という主張（src/kernels/linear-i8a8.ts）が **融合 attention だけ** Apple M2 で崩れると
-// 推論していたが、2026-08-29 に撤回した（M2 でも両変種はビット同一で、外れていたのは共有 f32
-// エピローグの 1 ULP）。アダプタ能力から数値を変える経路を自動選択しない（ADR 0058 決定 2）を
-// 保つには、列挙ではなく**既知解との突合**で変種を決めるほかない。
+// Background = the Metal (Apple GPU) section of docs/known-issues.md. At first we reasoned that the
+// claim "the dot4I8Packed version and the emulated version return the same integers"
+// (src/kernels/linear-i8a8.ts) breaks on Apple M2 **only for fused attention**, but that was
+// retracted on 2026-08-29 (both variants are bit-identical on M2 too; what was off was 1 ULP of the
+// shared f32 epilogue). To keep "no automatic selection of a path that changes the numbers from
+// adapter capabilities" (ADR 0058 decision 2), the variant can only be decided by **comparison
+// against a known answer**, not by enumeration.
 //
-// ## このファイルが固定する契約（判定則 v2）
+// ## The contract this file pins (decision rule v2)
 //
-// 1. 健全な device では **dp4a / emu の両腕とも既知解と atol=0 で一致**し、カナリアは dp4a を
-//    選ぶ（= 従来と 1 ビットも変わらない挙動）。
-// 2. dp4a だけが既知解を外す device では attention だけ emu へ落ちる。
-// 3. **どちらの腕も厳密一致しない**ときは sanity 帯で裁く — 片腕だけ帯内ならその腕、両腕とも
-//    帯内で腕同士がビット同一なら dp4a（Apple M2 の正常経路。共有 f32 エピローグの丸めが
-//    既知解と数 ULP ずれるだけで、変種選択は数値に無関係）。判定は「厳密一致ではなかった」
-//    事実を戻り値に載せる。
-// 4. **両腕とも帯を外したら fail loudly**（変種の選び方の問題ではないので縮退先が無い）。
-// 5. 判定は **device 単位に 1 度**（Promise メモ化）。a8 でない Session は 1 dispatch も払わない。
-//    一過性の確保失敗（OOM）で落ちた判定だけはメモに残さず、次の要求で走り直す。
-// 6. 判定結果は診断（パイプラインキーの `:dp4aEmu`）に現れる（ADR 0058 決定 3）。
+// 1. On a healthy device **both the dp4a and emu arms match the known answer with atol=0**, and the
+//    canary picks dp4a (= behaviour unchanged by a single bit from before).
+// 2. On a device where only dp4a misses the known answer, only attention drops to emu.
+// 3. When **neither arm matches exactly**, the sanity band decides — if only one arm is inside the
+//    band, that arm; if both arms are inside the band and bit-identical to each other, dp4a (the
+//    normal path on Apple M2: the rounding of the shared f32 epilogue only differs from the known
+//    answer by a few ULP, and the variant choice is irrelevant to the numbers). The decision
+//    carries the fact "it was not an exact match" in its return value.
+// 4. **If both arms fall outside the band, fail loudly** (it is not a problem of how the variant is
+//    chosen, so there is nothing to degrade to).
+// 5. The decision runs **once per device** (Promise memoization). A Session that is not a8 pays not
+//    a single dispatch. Only a decision that failed with a transient allocation failure (OOM) is
+//    not kept in the memo, and runs again on the next request.
+// 6. The decision shows in the diagnostics (`:dp4aEmu` in the pipeline key) (ADR 0058 decision 3).
 //
-// ## 故障注入について
+// ## About fault injection
 //
-// 不一致経路・帯内経路・両不一致経路は健全な実機では作れない（src/gpu/device.ts の shader-f16
-// カナリアと同じ事情）。そこで**生成 WGSL を意図的に壊す差し替え口**（`CanaryWgslPatch`）を
-// 通して、判定の分岐そのものを実 GPU 上で踏む。MUST: 注入が効いていること自体を先に門にする
-// （置換が空振りすると「壊したのに一致した」= 恒真テストになる）。
+// The mismatch path, the in-band path and the both-mismatch path cannot be produced on a healthy
+// real machine (the same situation as the shader-f16 canary of src/gpu/device.ts). So **a hook that
+// deliberately breaks the generated WGSL** (`CanaryWgslPatch`) is used to hit the decision branches
+// themselves on a real GPU. MUST: first make the injection taking effect a check of its own (if the
+// replacement misses, it becomes "broken yet matched" = a tautological test).
 
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertStrictEquals } from "@std/assert";
@@ -74,22 +81,30 @@ import { deviceGeometryProfile } from "./helpers/geometry.ts";
 import { GPU_AVAILABLE } from "./helpers/gpu.ts";
 import { assertPipelineCensus } from "./helpers/pipeline-census.ts";
 
-/** 既定プロファイルの i8a8 attention 幾何（既定の Session がカナリアへ渡すものと同じ）。 */
+/**
+ * The i8a8 attention geometry of the default profile (the same one the default Session passes to
+ * the canary).
+ */
 const DEFAULT_CANARY_GEOMETRY = {
   qk: defaultI8a8Geometry("attention_qk"),
   pv: defaultI8a8Geometry("attention_pv"),
 };
 
-/** `127·exp(S−m)` が半整数から離れているべき最小の余裕（WGSL の `exp` 誤差 ~1e-5 の桁上）。 */
+/**
+ * The minimum margin by which `127·exp(S−m)` should stay away from a half-integer (an order of
+ * magnitude above the ~1e-5 error of WGSL's `exp`).
+ */
 const QUANT_MARGIN = 0.3;
 
 /**
- * `value` から f16 の丸め境界（隣接する f16 値との中点）までの距離が、その要素の
- * **sanity 帯の許容の何倍**か。1 を超えていれば「帯の内側の差では f16 の段が動かない」—
- * s16 変種でも帯が閉じることの十分条件そのもの（RC1-1）。
+ * How many times **the sanity band's tolerance** of the element the distance from `value` to the
+ * f16 rounding boundary (the midpoint to the neighbouring f16 value) is. Above 1 means "a
+ * difference inside the band does not move the f16 step" — exactly the sufficient condition for the
+ * band to close for the s16 variant too (RC1-1).
  *
- * f16 の刻みは二進指数ごとに一定で、境界は `h ± 刻み/2`（`h` がちょうど 2 の冪のときだけ
- * 下側の刻みが半分）。subnormal 域は刻みが `2⁻²⁴` で一定なので下限で押さえる。
+ * The f16 spacing is constant per binary exponent, and the boundaries are `h ± spacing/2` (only
+ * when `h` is exactly a power of 2 is the spacing below halved). The subnormal range has the
+ * constant spacing `2⁻²⁴`, so it is clamped from below.
  */
 const f16BoundaryBandRatio = (value: number): number => {
   const magnitude = Math.abs(value);
@@ -104,21 +119,24 @@ const f16BoundaryBandRatio = (value: number): number => {
   return distance / Math.max(magnitude * SANITY_RELATIVE_TOLERANCE, SANITY_ABSOLUTE_FLOOR);
 };
 
-/** dp4a 変種**だけ**を壊す（エミュ側の生成物にこの綴りは現れない）。 */
+/**
+ * Breaks **only** the dp4a variant (this spelling does not appear in the emulated generated code).
+ */
 const BREAK_DP4A: CanaryWgslPatch = (wgsl) =>
   wgsl.replace("return dot4I8Packed(a, b);", "return dot4I8Packed(a, b) + 1;");
 
-/** 両変種を壊す（`idot` の本体はどちらも `  return dot` で始まる）。 */
+/** Breaks both variants (the body of `idot` starts with `  return dot` in both). */
 const BREAK_BOTH: CanaryWgslPatch = (wgsl) => wgsl.replace("  return dot", "  return 1 + dot");
 
 /**
- * **③PV のエピローグだけ**に相対 `factor − 1` の摂動を入れる（両腕に等しく効く — この綴りは
- * dp4a / emu のどちらの生成物にも同じ形で現れる）。
+ * Puts a relative `factor − 1` perturbation into **the ③PV epilogue only** (it affects both arms
+ * equally — this spelling appears in the same form in both the dp4a and emu generated code).
  *
- * なぜ ③PV だけか: ①QK の s16 変種は出力を f16 に丸めて格納するので、**帯の内側の摂動は
- * 格納の丸めに吸収されて 1 ビットも動かない**（固定入力の ①QK 既知解は f16 の格子ちょうどに
- * 載せてあり、丸め境界まで帯の 24 倍離れている — RC1-1・下の余裕門）。摂動が「入れた倍率
- * そのままで観測できる」のは O を 3 変種とも f32 で書く ③PV だけ。
+ * Why only ③PV: the s16 variant of ①QK rounds its output to f16 for storage, so **a perturbation
+ * inside the band is absorbed by the storage rounding and does not move a single bit** (the ①QK
+ * known answer of the fixed input sits exactly on the f16 grid, 24 times the band away from the
+ * rounding boundary — RC1-1, the margin check below). Only ③PV, which writes O in f32 for all 3
+ * variants, lets the perturbation "be observed at exactly the factor put in".
  */
 const nudgePv =
   (factor: string): CanaryWgslPatch =>
@@ -126,56 +144,60 @@ const nudgePv =
     wgsl.replaceAll("let prow = stats[", `let prow = ${factor} * stats[`);
 
 /**
- * 帯**内**の摂動（両腕・同一）。`1.0000001` は f32 で 1 + 1 ULP に丸まるので、掛けると出力は
- * 必ず 1〜2 ULP 動く（= 厳密一致は必ず外れる）が、相対 ~1.2e-7 は帯（1e-5）の 2 桁下。
+ * A perturbation **inside** the band (both arms, identical). `1.0000001` rounds to 1 + 1 ULP in
+ * f32, so multiplying by it always moves the output by 1–2 ULP (= exact match always fails), but
+ * the relative ~1.2e-7 is 2 orders of magnitude below the band (1e-5).
  */
 const NUDGE_BOTH = nudgePv("1.0000001");
 
-/** 帯**外**の摂動（両腕・同一）。相対 1e-4 は帯の 1 桁上 — M2 の故障注入実測 9.5e-5 と同水準。 */
+/**
+ * A perturbation **outside** the band (both arms, identical). Relative 1e-4 is an order of
+ * magnitude above the band — the same level as the 9.5e-5 measured by fault injection on M2.
+ */
 const SKEW_BOTH = nudgePv("1.0001");
 
-/** 片腕（emu）だけが帯内に残る形 = dp4a が本当に壊れている device の姿。 */
+/** Only one arm (emu) stays inside the band = what a device with a truly broken dp4a looks like. */
 const NUDGE_BOTH_BREAK_DP4A: CanaryWgslPatch = (wgsl) => BREAK_DP4A(NUDGE_BOTH(wgsl));
 
 // ---------------------------------------------------------------------------
-// (0) 固定入力の性質（既知解が atol=0 で立つ前提 — GPU 不要）
+// (0) Properties of the fixed inputs (premise for the known answer to hold at atol=0 — no GPU)
 // ---------------------------------------------------------------------------
 
-test("カナリアの形は production 幾何の 1 タイル全域 × K タイル 2 枚以上を埋める", () => {
+test("the canary's shape fills one whole tile of the production geometry × at least 2 K tiles", () => {
   const qkGeometry = defaultI8a8Geometry("attention_qk");
   const qk = buildQkCase(qkGeometry);
-  assertEquals(qk.rows, i8a8TileM(qkGeometry), "①QK の M がタイル辺と違う");
-  assertEquals(qk.cols, i8a8TileN(qkGeometry), "①QK の N がタイル辺と違う");
+  assertEquals(qk.rows, i8a8TileM(qkGeometry), "M of ①QK differs from the tile edge");
+  assertEquals(qk.cols, i8a8TileN(qkGeometry), "N of ①QK differs from the tile edge");
   assert(
     qk.depth / 4 / i8a8KPacks(qkGeometry) >= 2,
-    `①QK の K タイルが ${qk.depth / 4 / i8a8KPacks(qkGeometry)} 枚しかない`,
+    `①QK has only ${qk.depth / 4 / i8a8KPacks(qkGeometry)} K tiles`,
   );
   const pvGeometry = defaultI8a8Geometry("attention_pv");
   const pv = buildPvCase(pvGeometry);
-  assertEquals(pv.rows, i8a8TileM(pvGeometry), "③PV の M がタイル辺と違う");
-  assertEquals(pv.depth, i8a8TileN(pvGeometry), "③PV の D がタイル辺と違う");
+  assertEquals(pv.rows, i8a8TileM(pvGeometry), "M of ③PV differs from the tile edge");
+  assertEquals(pv.depth, i8a8TileN(pvGeometry), "D of ③PV differs from the tile edge");
   assert(
     pv.cols / 4 / i8a8KPacks(pvGeometry) >= 2,
-    `③PV の K タイルが ${pv.cols / 4 / i8a8KPacks(pvGeometry)} 枚しかない`,
+    `③PV has only ${pv.cols / 4 / i8a8KPacks(pvGeometry)} K tiles`,
   );
 });
 
-test("③PV の固定 S は f16 ちょうどで表せ、往復で 1 ビットも動かない（s16 変種の前提）", () => {
+test("the fixed S of ③PV is exactly representable in f16 and does not move a bit through a round trip (premise of the s16 variant)", () => {
   const pv = buildPvCase(DEFAULT_CANARY_GEOMETRY.pv);
   const words = packScoresF16(pv.scores);
-  assertEquals(words.length, pv.scores.length / 2, "詰め直しの語数");
+  assertEquals(words.length, pv.scores.length / 2, "word count of the repacking");
   for (let i = 0; i < pv.scores.length; i += 1) {
     const value = pv.scores[i];
-    // ① Math.f16round（丸めの正本）から見て f16 ちょうど
-    assertEquals(roundToF16(value), value, `S[${i}] が f16 ちょうどでない`);
-    // ② カナリアの詰め直し器（exactF16Bits）と展開の正本が往復する
+    // ① exactly f16 as seen by Math.f16round (the reference for rounding)
+    assertEquals(roundToF16(value), value, `S[${i}] is not exactly f16`);
+    // ② the canary's repacker (exactF16Bits) and the reference decode round-trip
     const word = words[i >> 1];
     const half = (i & 1) === 0 ? word & 0xffff : word >>> 16;
-    assertEquals(f16BitsToF32(half), value, `S[${i}] の f16 往復`);
+    assertEquals(f16BitsToF32(half), value, `f16 round trip of S[${i}]`);
   }
 });
 
-test("③PV の qP は丸め境界から十分離れている（GPU の exp 誤差では段が動かない）", () => {
+test("qP of ③PV stays well away from the rounding boundaries (the GPU's exp error does not move a step)", () => {
   const pv = buildPvCase(DEFAULT_CANARY_GEOMETRY.pv);
   let worst = Number.POSITIVE_INFINITY;
   const seen = new Set<number>();
@@ -188,30 +210,36 @@ test("③PV の qP は丸め境界から十分離れている（GPU の exp 誤�
       worst = Math.min(worst, Math.abs(p - Math.floor(p) - 0.5));
     }
   }
-  assert(worst > QUANT_MARGIN, `qP の最悪余裕が ${worst} しかない（固定 S を選び直すこと）`);
-  // 段が 1 つに潰れていない（潰れると添字の取り違えが値に出ない = 突合が恒真化する）
-  assert(seen.size >= 8, `qP の段が ${seen.size} 種類しかない`);
+  assert(worst > QUANT_MARGIN, `the worst qP margin is only ${worst} (pick the fixed S again)`);
+  // The steps have not collapsed into one (if they did, a mixed-up index would not show in the
+  // values = the comparison becomes a tautology)
+  assert(seen.size >= 8, `qP has only ${seen.size} distinct steps`);
 });
 
-test("①QK の既知解は f16 格納の可視域に収まり、定数に潰れていない", () => {
+test("the ①QK known answer fits the visible range of f16 storage and has not collapsed to a constant", () => {
   const qk = buildQkCase(DEFAULT_CANARY_GEOMETRY.qk);
   let distinct = 0;
   const values = new Set<number>();
   for (const value of qk.expected) {
-    assert(Number.isFinite(value), "既知解 S に非有限値がある");
-    assert(Math.abs(value) < 65504, `既知解 S=${value} が f16 の可視域を超える`);
+    assert(Number.isFinite(value), "the known answer S has non-finite values");
+    assert(Math.abs(value) < 65504, `the known answer S=${value} exceeds the visible range of f16`);
     if (!values.has(value)) {
       values.add(value);
       distinct += 1;
     }
   }
-  assert(distinct > 100, `既知解 S が ${distinct} 種類しかない（比較が恒真になりうる）`);
+  assert(
+    distinct > 100,
+    `the known answer S has only ${distinct} distinct values (the comparison could become a tautology)`,
+  );
 });
 
-test("①QK の既知解は f16 の丸め境界から sanity 帯より遠い（s16 変種で帯が閉じる前提）", () => {
-  // s16 変種は「既知解をホストで f16 に丸めた列」と突き合わせるので、既知解が丸め境界の
-  // 近くにあると **帯の内側の差が f16 の 1 段（帯の 55 倍）へ増幅されて両腕とも帯外**になる。
-  // 全要素でこの門が立つと「帯内の f32 差 ⇒ f16 の段は同じ」が固定入力に対する定理になる。
+test("the ①QK known answer is farther than the sanity band from the f16 rounding boundaries (premise for the band to close with the s16 variant)", () => {
+  // The s16 variant compares against "the known answer rounded to f16 on the host", so if the known
+  // answer is near a rounding boundary, **a difference inside the band is amplified to one f16 step
+  // (55 times the band) and both arms fall outside the band**. With this check holding for every
+  // element, "an f32 difference inside the band ⇒ the same f16 step" becomes a theorem for the
+  // fixed input.
   const qk = buildQkCase(DEFAULT_CANARY_GEOMETRY.qk);
   let worst = Number.POSITIVE_INFINITY;
   let at = -1;
@@ -224,39 +252,50 @@ test("①QK の既知解は f16 の丸め境界から sanity 帯より遠い（s
   }
   assert(
     worst > 1,
-    `既知解 S[${at}] = ${qk.expected[at]} の f16 境界余裕が帯の ${worst} 倍しかない` +
-      "（固定入力を選び直すこと — src/gpu/attention-dp4a-canary.ts の §固定入力）",
+    `the f16 boundary margin of the known answer S[${at}] = ${qk.expected[at]} is only ${worst} times the band` +
+      " (pick the fixed input again — §fixed inputs of src/gpu/attention-dp4a-canary.ts)",
   );
 });
 
-test("故障注入の置換は狙った変種にだけ効く（注入の空振りを先に塞ぐ）", () => {
+test("the fault-injection replacements affect only the targeted variant (closing off an injection that misses first)", () => {
   const geometry = defaultI8a8Geometry("attention_qk");
   const dp4aWgsl = attentionQkI8a8Wgsl(true, true, "f32", geometry);
   const emuWgsl = attentionQkI8a8Wgsl(true, false, "f32", geometry);
-  assert(BREAK_DP4A(dp4aWgsl) !== dp4aWgsl, "dp4a 生成物に注入が効いていない");
-  assertEquals(BREAK_DP4A(emuWgsl), emuWgsl, "dp4a 専用の注入がエミュ生成物にも効いている");
-  assert(BREAK_BOTH(dp4aWgsl) !== dp4aWgsl, "両変種注入が dp4a に効いていない");
-  assert(BREAK_BOTH(emuWgsl) !== emuWgsl, "両変種注入がエミュに効いていない");
+  assert(
+    BREAK_DP4A(dp4aWgsl) !== dp4aWgsl,
+    "the injection has no effect on the dp4a generated code",
+  );
+  assertEquals(
+    BREAK_DP4A(emuWgsl),
+    emuWgsl,
+    "the dp4a-only injection also affects the emulated generated code",
+  );
+  assert(BREAK_BOTH(dp4aWgsl) !== dp4aWgsl, "the both-variant injection has no effect on dp4a");
+  assert(
+    BREAK_BOTH(emuWgsl) !== emuWgsl,
+    "the both-variant injection has no effect on the emulation",
+  );
 });
 
-test("エピローグ摂動は ③PV の 3 変種すべてに、両腕へ等しく効く（①QK は素通し）", () => {
+test("the epilogue perturbation affects all 3 ③PV variants, equally for both arms (①QK passes through)", () => {
   const pvGeometry = defaultI8a8Geometry("attention_pv");
   for (const patch of [NUDGE_BOTH, SKEW_BOTH]) {
     for (const score of ["f32", "f16"] as const) {
       for (const v4 of score === "f16" ? [true] : [true, false]) {
         for (const dp4a of [true, false]) {
           const wgsl = attentionPvI8a8Wgsl(v4, dp4a, score, pvGeometry);
-          assert(patch(wgsl) !== wgsl, `③PV v4=${v4} score=${score} dp4a=${dp4a} に効いていない`);
+          assert(patch(wgsl) !== wgsl, `no effect on ③PV v4=${v4} score=${score} dp4a=${dp4a}`);
         }
       }
     }
-    // ①QK は f16 格納が丸め境界を跨ぐ危険があるので、摂動の対象外であることを門にする
+    // ①QK's f16 storage risks crossing a rounding boundary, so being outside the perturbation's
+    // target is made a check
     const qkWgsl = attentionQkI8a8Wgsl(true, true, "f16", defaultI8a8Geometry("attention_qk"));
-    assertEquals(patch(qkWgsl), qkWgsl, "エピローグ摂動が ①QK にも効いている");
+    assertEquals(patch(qkWgsl), qkWgsl, "the epilogue perturbation also affects ①QK");
   }
 });
 
-test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言がそのまま使う本文）", () => {
+test("the one-line rationale of the decision carries the branch and the maximum error (the body the warning uses as is)", () => {
   const decision: AttentionI8a8Decision = {
     dot: "dp4a",
     exact: false,
@@ -272,10 +311,10 @@ test("判定の根拠 1 行は分岐と最大誤差を持つ（警告文言が�
 });
 
 // ---------------------------------------------------------------------------
-// (0') device 単位のメモ（GpuContext の席 — フェイク device で GPU 不要）
+// (0') The per-device memo (the slot of GpuContext — fake device, no GPU needed)
 // ---------------------------------------------------------------------------
 
-/** メモの席が配る判定（中身は席の振る舞いに関係しない）。 */
+/** The decision the memo slot hands out (its content is irrelevant to the slot's behaviour). */
 const memoDecision: AttentionI8a8Decision = {
   dot: "dp4a",
   exact: true,
@@ -284,35 +323,36 @@ const memoDecision: AttentionI8a8Decision = {
   maxBandRatio: 0,
 };
 
-test("メモ: 一過性の OOM で落ちた判定は保持せず、次の要求でカナリアを走らせ直す", async () => {
-  // カナリアの一時バッファは KB 級だが、他の Session で VRAM が天井付近まで埋まっていると非致命
-  // OOM になりうる。空きが戻っても同じ失敗を配り続けると、同じ GpuContext では a8 の Session を
-  // 作れなくなる（device の性質ではないので、走らせ直せば結論が変わりうる）。
+test("memo: a decision that failed with a transient OOM is not kept, and the next request runs the canary again", async () => {
+  // The canary's temporary buffers are KB-sized, but when other Sessions fill VRAM close to the
+  // ceiling they can hit a non-fatal OOM. Handing out the same failure after memory frees up would
+  // make a8 Sessions impossible on the same GpuContext (it is not a property of the device, so
+  // running again can change the conclusion).
   const gpu = fakeGpuContext(fakeDevice());
-  const oom = new GpuOutOfMemoryError("カナリアの一時バッファ: out of memory");
+  const oom = new GpuOutOfMemoryError("canary temporary buffer: out of memory");
   await assertRejects(() => gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => Promise.reject(oom)));
   let reruns = 0;
   const decided = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
     reruns += 1;
     return Promise.resolve(memoDecision);
   });
-  assertEquals(reruns, 1, "OOM の後の要求でカナリアが走り直していない");
+  assertEquals(reruns, 1, "the canary did not run again on the request after the OOM");
   assertStrictEquals(decided, memoDecision);
-  // 成功した判定は従来どおり device の寿命いっぱい保持する。
+  // A successful decision is kept for the device's whole lifetime, as before.
   let extra = 0;
   await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
     extra += 1;
     return Promise.resolve(memoDecision);
   });
-  assertEquals(extra, 0, "成功した判定をメモから外している");
+  assertEquals(extra, 0, "a successful decision was dropped from the memo");
 });
 
-test("メモ: 数値の不一致と device 消失で落ちた判定は保持し、走らせ直さない", async () => {
-  // どちらも device の性質（または device 自体が使えない）なので、走らせ直しても同じ結論を得る
-  // ためだけに 1 submit を払うことになる。
+test("memo: a decision that failed with a numeric mismatch or device loss is kept and not run again", async () => {
+  // Both are properties of the device (or the device itself is unusable), so running again would
+  // only pay one submit to reach the same conclusion.
   for (const failure of [
-    new GpuFeatureError("両腕とも sanity 帯を外した"),
-    new GpuDeviceLostError("カナリアの検証中に device が失われた"),
+    new GpuFeatureError("both arms fell outside the sanity band"),
+    new GpuDeviceLostError("device was lost while verifying the canary"),
   ]) {
     const gpu = fakeGpuContext(fakeDevice());
     await assertRejects(() =>
@@ -328,12 +368,12 @@ test("メモ: 数値の不一致と device 消失で落ちた判定は保持し�
         () => undefined,
         (cause: unknown) => cause,
       );
-    assertEquals(reruns, 0, `${failure.name} の後にカナリアが走り直している`);
-    assertStrictEquals(again, failure, "保持した失敗と別の結果を配っている");
+    assertEquals(reruns, 0, `the canary ran again after ${failure.name}`);
+    assertStrictEquals(again, failure, "hands out a result other than the kept failure");
   }
 });
 
-test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちたときも同じ失敗を配る", async () => {
+test("memo: concurrent requests share one run and hand out the same failure when it fails with OOM", async () => {
   const gpu = fakeGpuContext(fakeDevice());
   const pending = Promise.withResolvers<AttentionI8a8Decision>();
   let runs = 0;
@@ -343,9 +383,9 @@ test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちた�
   };
   const first = gpu[RUNTIME_INTERNAL].attentionI8a8Dot(run);
   const second = gpu[RUNTIME_INTERNAL].attentionI8a8Dot(run);
-  assertStrictEquals(first, second, "同時の要求が別の Promise を受け取っている");
-  assertEquals(runs, 1, "同時の要求でカナリアが 2 本走っている");
-  const oom = new GpuOutOfMemoryError("カナリアの一時バッファ: out of memory");
+  assertStrictEquals(first, second, "concurrent requests received different Promises");
+  assertEquals(runs, 1, "concurrent requests ran the canary twice");
+  const oom = new GpuOutOfMemoryError("canary temporary buffer: out of memory");
   pending.reject(oom);
   for (const waiter of [first, second]) {
     assertStrictEquals(
@@ -356,7 +396,7 @@ test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちた�
       oom,
     );
   }
-  // 落ちた後の要求は新しい 1 本を走らせる。
+  // A request after the failure runs a new one.
   const retried = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
     runs += 1;
     return Promise.resolve(memoDecision);
@@ -366,40 +406,43 @@ test("メモ: 同時の要求は 1 回の実行を共有し、OOM で落ちた�
 });
 
 // ---------------------------------------------------------------------------
-// (1) 健全な device（この Linux / NVIDIA）
+// (1) A healthy device (this Linux / NVIDIA)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "素の判定は dp4a を選び、分岐と厳密一致フラグが整合する（実 GPU）",
+  "the plain decision picks dp4a, and the branch and the exact-match flag agree (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY);
-      // 期待はプラットフォームで分かれる: 参照機（Linux / NVIDIA）は dp4a-exact、Apple M2 は
-      // 共有エピローグの 1 ULP 差により band-both-identical（known-issues の Metal 節）。
-      // どちらでも**選ばれる腕は dp4a** — それがこのテストの主題。参照機のビット厳密性
-      // そのものは attention parity 門（atol=0）が別途固定している。
-      assertEquals(decision.dot, "dp4a", "素の判定で dp4a が選ばれない");
+      // The expectation splits by platform: the reference machine (Linux / NVIDIA) gives
+      // dp4a-exact, Apple M2 gives band-both-identical through the 1 ULP difference of the shared
+      // epilogue (the Metal section of known-issues). Either way **the chosen arm is dp4a** — that
+      // is the subject of this test. The bit exactness of the reference machine itself is pinned
+      // separately by the attention parity check (atol=0).
+      assertEquals(decision.dot, "dp4a", "the plain decision does not pick dp4a");
       assert(
         decision.branch === "dp4a-exact" || decision.branch === "band-both-identical",
-        `素の判定が想定外の分岐: ${decision.branch}`,
+        `the plain decision took an unexpected branch: ${decision.branch}`,
       );
       assertEquals(
         decision.exact,
         decision.branch === "dp4a-exact",
-        "厳密一致フラグと分岐が食い違っている",
+        "the exact-match flag and the branch disagree",
       );
       if (decision.exact) {
-        assertEquals(decision.maxAbsError, 0, "厳密一致なのに誤差が乗っている");
-        // 参照機ではエミュ側も既知解に乗る（= カナリアの沈黙が「両方同じだけずれている」形で
-        // はない）。band 機では非対象 — 両腕の同一性は band-both-identical 分岐自体が検証済み。
-        // MUST: 直接呼ぶときも device 単位の errorScope 区間ロックの中で（probe の doc）。
+        assertEquals(decision.maxAbsError, 0, "an exact match yet an error is present");
+        // On the reference machine the emulated side also lands on the known answer (= the canary's
+        // silence is not "both are off by the same amount"). Not applicable on band machines — the
+        // identity of the two arms is already verified by the band-both-identical branch itself.
+        // MUST: even when called directly, inside the per-device errorScope section lock (the
+        // probe's doc).
         const emu = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
           probeAttentionI8a8Dot(gpu, "emu", DEFAULT_CANARY_GEOMETRY),
         );
-        assertEquals(emu.mismatch, undefined, "エミュ変種が既知解を外した");
-        assert(emu.exact, "エミュ変種が atol=0 で一致していない");
-        assertEquals(emu.variants.length, 6, "撃った変種が 6 本でない");
+        assertEquals(emu.mismatch, undefined, "the emulated variant missed the known answer");
+        assert(emu.exact, "the emulated variant does not match at atol=0");
+        assertEquals(emu.variants.length, 6, "the number of variants hit is not 6");
       }
     } finally {
       gpu.destroy();
@@ -408,30 +451,35 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * 既定でない i8a8 attention 幾何（64×64 タイル — 既定は ①QK 128×64 / ③PV 64×128、apple-metal-3
- * プロファイルが当てるのは ①QK tile32x64 / ③PV tile16x128 で、どちらとも別の形）。カナリアが
- * 「Session が渡した幾何の生成物」を撃っていることの検出器に使う。
+ * A non-default i8a8 attention geometry (64×64 tiles — the default is ①QK 128×64 / ③PV 64×128, and
+ * the apple-metal-3 profile applies ①QK tile32x64 / ③PV tile16x128; this differs from both). Used
+ * as a detector that the canary hits "the generated code of the geometry the Session passed".
  */
 const PROFILE_GEOMETRY: I8a8Geometry = { regM: 8, regN: 4, wgX: 16, wgY: 8, tileK: 16 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "プロファイルの幾何を渡すとカナリアはその幾何の生成物を撃ち、判定が得られる（実 GPU）",
+  "given the profile's geometry, the canary hits the generated code of that geometry and reaches a decision (real GPU)",
   async () => {
     const geometry = { qk: PROFILE_GEOMETRY, pv: PROFILE_GEOMETRY };
     const gpu = await acquireGpu();
     try {
-      // 判定そのもの: 既定でない幾何でも固定入力は 1 タイル全域を埋め、帯内の判定に着地する
-      // （両腕とも帯外なら decide が GpuFeatureError で落ちる）。
+      // The decision itself: even with a non-default geometry the fixed input fills one whole tile
+      // and lands on an in-band decision (if both arms were outside the band, decide would fail
+      // with GpuFeatureError).
       const decision = await decideAttentionI8a8Dot(gpu, geometry);
-      assert(decision.maxBandRatio <= 1, `帯余裕 ${decision.maxBandRatio} が帯外`);
+      assert(
+        decision.maxBandRatio <= 1,
+        `band margin ${decision.maxBandRatio} is outside the band`,
+      );
       assertEquals(
         decision.exact,
         decision.branch === "dp4a-exact" || decision.branch === "emu-exact",
-        "厳密一致フラグと分岐が食い違っている",
+        "the exact-match flag and the branch disagree",
       );
 
-      // 検出器: probe が組んだパイプラインキーが**渡した幾何**のキーそのもので、既定幾何の
-      // キーとは違う（既定幾何を直に引く実装へ戻ると、ここが既定のキーを返して落ちる）。
+      // Detector: the pipeline keys the probe built are exactly the keys of **the geometry
+      // passed**, different from the default geometry's keys (reverting to an implementation that
+      // reads the default geometry directly returns the default keys here and fails).
       const probe = await gpu[RUNTIME_INTERNAL].withScopeLock(() =>
         probeAttentionI8a8Dot(gpu, "dp4a", geometry),
       );
@@ -455,15 +503,15 @@ test.skipIf(!GPU_AVAILABLE)(
       assertEquals(
         probe.variants.map((variant) => variant.key),
         expected,
-        "カナリアが渡した幾何のキーで撃っていない",
+        "the canary did not hit with the keys of the geometry passed",
       );
       for (const [index, key] of expected.entries()) {
         const v4 = shapes[index % shapes.length][0];
         assert(
           key.includes(i8a8GeometryKeyPart(PROFILE_GEOMETRY, v4)),
-          `幾何の判別子が無い: ${key}`,
+          `the geometry discriminator is missing: ${key}`,
         );
-        assert(key !== defaults[index], `既定幾何のキーと同じ: ${key}`);
+        assert(key !== defaults[index], `same as the default geometry's key: ${key}`);
       }
     } finally {
       gpu.destroy();
@@ -472,26 +520,27 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (2) 故障注入（不一致経路の分岐）
+// (2) Fault injection (the branches of the mismatch path)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "dp4a 変種だけが既知解を外すと attention は emu へ落ちる（実 GPU・故障注入）",
+  "when only the dp4a variant misses the known answer, attention drops to emu (real GPU, fault injection)",
   async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A);
       assertEquals(decision.dot, "emu");
-      // 参照機は emu-exact、Apple M2 はエミュ側も 1 ULP 差なので band-single-arm 経由で emu
-      // （どちらも「壊れた dp4a を捨てて emu を採る」という主題は同じ）。
+      // The reference machine gives emu-exact; on Apple M2 the emulated side is also off by 1 ULP,
+      // so emu via band-single-arm (the subject — "discard the broken dp4a and take emu" — is the
+      // same either way).
       assert(
         decision.branch === "emu-exact" || decision.branch === "band-single-arm",
-        `想定外の分岐: ${decision.branch}`,
+        `unexpected branch: ${decision.branch}`,
       );
       assertEquals(
         decision.exact,
         decision.branch === "emu-exact",
-        "厳密一致フラグと分岐が食い違っている",
+        "the exact-match flag and the branch disagree",
       );
     } finally {
       gpu.destroy();
@@ -500,7 +549,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "両変種が既知解を外すと GpuFeatureError で落ちる（縮退先が無い・実 GPU・故障注入）",
+  "when both variants miss the known answer, it fails with GpuFeatureError (nothing to degrade to, real GPU, fault injection)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -508,11 +557,12 @@ test.skipIf(!GPU_AVAILABLE)(
         () => decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_BOTH),
         GpuFeatureError,
       );
-      // 診断は「どちらの腕が、どの生成物の、どの要素で外したか」まで持つ
+      // The diagnostic goes down to "which arm missed, in which generated code, at which element"
       assert(error.message.includes("attention_qk:v3:i8a8:"), error.message);
       assert(error.message.includes("dp4a:"), error.message);
       assert(error.message.includes("emu:"), error.message);
-      // 「帯は既に許容した上で外している」ことが読める（v2 の裁定順が診断に出る）
+      // It reads as "it missed after already allowing the band" (v2's order of decision shows in
+      // the diagnostic)
       assert(error.message.includes("sanity band"), error.message);
     } finally {
       gpu.destroy();
@@ -521,24 +571,30 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (2') 故障注入（判定則 v2 の帯の分岐 — Apple M2 の実測が要求した経路）
+// (2') Fault injection (the band branches of decision rule v2 — paths the Apple M2 data required)
 // ---------------------------------------------------------------------------
 
 test.skipIf(!GPU_AVAILABLE)(
-  "両腕が同一の微小エピローグ摂動で帯内に留まると dp4a のまま通る（実 GPU・故障注入）",
+  "when both arms stay inside the band under the same tiny epilogue perturbation, dp4a passes as is (real GPU, fault injection)",
   async () => {
     const gpu = await acquireGpu();
     try {
       const decision = await decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, NUDGE_BOTH);
-      // 腕同士がビット同一 = 変種選択は数値に無関係（ADR 0058 決定 2）→ 既定の dp4a を採る
+      // The arms are bit-identical to each other = the variant choice is irrelevant to the numbers
+      // (ADR 0058 decision 2) → take the default dp4a
       assertEquals(decision.branch, "band-both-identical");
       assertEquals(decision.dot, "dp4a");
-      // MUST: 厳密一致ではなかった事実が戻り値に残る（呼び手が警告を出せる形）
-      assert(!decision.exact, "帯内で通したのに厳密一致フラグが立っている");
-      assert(decision.maxAbsError > 0, "摂動が空振りしている（誤差 0）");
-      assert(decision.maxBandRatio <= 1, `帯余裕 ${decision.maxBandRatio} が帯を超えている`);
-      // 摂動は相対 ~1.2e-7 = 帯の 2 桁下（帯幅を緩めなくても収まることの実測）
-      assert(decision.maxBandRatio < 0.1, `帯余裕 ${decision.maxBandRatio} が想定より大きい`);
+      // MUST: the fact that it was not an exact match stays in the return value (so the caller can
+      // warn)
+      assert(!decision.exact, "passed inside the band yet the exact-match flag is set");
+      assert(decision.maxAbsError > 0, "the perturbation missed (error 0)");
+      assert(decision.maxBandRatio <= 1, `band margin ${decision.maxBandRatio} exceeds the band`);
+      // The perturbation is relative ~1.2e-7 = 2 orders of magnitude below the band (measured: it
+      // fits without loosening the band width)
+      assert(
+        decision.maxBandRatio < 0.1,
+        `band margin ${decision.maxBandRatio} is larger than expected`,
+      );
     } finally {
       gpu.destroy();
     }
@@ -546,7 +602,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "両腕が同一でも帯外の摂動なら GpuFeatureError（ビット同一は免罪符でない・実 GPU）",
+  "even with identical arms, a perturbation outside the band gives GpuFeatureError (bit identity is no excuse, real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -562,7 +618,7 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "片腕だけが帯内ならその腕を採る（M2 + dp4a 故障の姿・実 GPU・故障注入）",
+  "when only one arm is inside the band, that arm is taken (what M2 + a dp4a fault looks like, real GPU, fault injection)",
   async () => {
     const gpu = await acquireGpu();
     try {
@@ -573,8 +629,11 @@ test.skipIf(!GPU_AVAILABLE)(
       );
       assertEquals(decision.branch, "band-single-arm");
       assertEquals(decision.dot, "emu");
-      assert(!decision.exact, "帯内で通したのに厳密一致フラグが立っている");
-      assert(decision.maxBandRatio <= 1, `選んだ腕の帯余裕 ${decision.maxBandRatio} が帯外`);
+      assert(!decision.exact, "passed inside the band yet the exact-match flag is set");
+      assert(
+        decision.maxBandRatio <= 1,
+        `the band margin ${decision.maxBandRatio} of the chosen arm is outside the band`,
+      );
     } finally {
       gpu.destroy();
     }
@@ -582,10 +641,13 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 // ---------------------------------------------------------------------------
-// (3) Session からの利用（メモ化 1 回 / 席の反映 / a8 でない Session は払わない）
+// (3) Use from Sessions (memoized once / the slot is reflected / a non-a8 Session does not pay)
 // ---------------------------------------------------------------------------
 
-/** メモの席へ直に置く判定（カナリアを走らせずに席そのものの挙動を見るための実体）。 */
+/**
+ * A decision placed directly in the memo slot (to see the slot's own behaviour without running the
+ * canary).
+ */
 const seatDecision = (dot: I8a8Dot): AttentionI8a8Decision => ({
   dot,
   exact: true,
@@ -598,7 +660,7 @@ const QUERY = (i: number): number => (((i * 3) % 29) - 14) * 0.3717 + 0.0419;
 const KEY = (i: number): number => (((i * 3) % 41) - 20) * 0.2917 - 0.0173;
 const VALUE = (i: number): number => (((i * 5) % 17) - 8) * 0.3119;
 
-/** 融合 attention 1 ノードの Session を 1 回走らせ、その run の census を返す。 */
+/** Runs a Session of one fused attention node once and returns that run's census. */
 const runAttention = async (
   gpu: GpuContext,
   options: SessionOptions,
@@ -625,30 +687,31 @@ const runAttention = async (
 };
 
 test.skipIf(!GPU_AVAILABLE)(
-  "カナリアの判定は device 単位に 1 度で、a8 Session はその席を読む（実 GPU・故障注入）",
+  "the canary decides once per device, and a8 Sessions read that slot (real GPU, fault injection)",
   async () => {
     const gpu = await acquireGpu();
     try {
-      // 実機は健全なので、注入した判定をメモへ**先に**焼く（焼かなければ dp4a になる）。
-      // Session がこの席を読んでいることは、キーが `:dp4aEmu` になることでしか観測できない。
+      // The real machine is healthy, so the injected decision is burned into the memo **first**
+      // (otherwise it would be dp4a). That the Session reads this slot is observable only through
+      // the key becoming `:dp4aEmu`.
       const seeded = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() =>
         decideAttentionI8a8Dot(gpu, DEFAULT_CANARY_GEOMETRY, BREAK_DP4A),
       );
       assertEquals(seeded.dot, "emu");
 
-      // 席が Session へ配られていること（キーでしか見えない）は下の census が持つ
+      // That the slot reaches the Session (visible only in keys) is covered by the census below
       for (const _pass of [1, 2]) {
         await runAttention(gpu, { attentionCompute: "a8" });
       }
 
-      // 2 本目まで走らせてもカナリアは 1 度きり（メモが Promise で効いている）
+      // Even after running a 2nd one the canary runs only once (the memo works through the Promise)
       let extraRuns = 0;
       const memoized = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
         extraRuns += 1;
         return Promise.resolve(seatDecision("dp4a"));
       });
-      assertEquals(extraRuns, 0, "Session ごとにカナリアが走り直している");
-      assertEquals(memoized.dot, "emu", "メモが最初の判定を配っていない");
+      assertEquals(extraRuns, 0, "the canary runs again per Session");
+      assertEquals(memoized.dot, "emu", "the memo does not hand out the first decision");
     } finally {
       gpu.destroy();
     }
@@ -656,17 +719,18 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 /**
- * **census**（ADR 0058 決定 4）。注入した席（`BREAK_DP4A` で emu へ倒した判定）が Session の
- * 変種選択に届いていることは**キーでしか観測できない**（dp4a と emu は同じ整数を返すので
- * 値は 1 ビットも変わらない）。
+ * **census** (ADR 0058 decision 4). That the injected slot (a decision tipped to emu with
+ * `BREAK_DP4A`) reaches the Session's variant choice is **observable only through keys** (dp4a and
+ * emu return the same integers, so the values do not change by a single bit).
  *
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い機でも走る）。空の census は
- * 無条件に FAIL にする（「keys が空なら次の形へ」で守ると変種選択の検査が 1 つも走らないまま
- * 緑になる — tests/helpers/pipeline-census.ts の `requireCensus`）。
- * `acquireGpu` は呼ぶたび新しい device を作るのでメモの席もこのテスト専用。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing (runs on machines without
+ * timing too). An empty census FAILs unconditionally (guarding with "if keys is empty, go to the
+ * next shape" turns green without a single check of the variant choice running — `requireCensus` in
+ * tests/helpers/pipeline-census.ts). `acquireGpu` creates a new device on every call, so the memo
+ * slot is private to this test too.
  */
 test.skipIf(!GPU_AVAILABLE)(
-  "注入した席（emu）は a8 Session の ①QK / ③PV の両方に届く（実 GPU・故障注入）",
+  "the injected slot (emu) reaches both ①QK and ③PV of an a8 Session (real GPU, fault injection)",
   async () => {
     const gpu = await acquireGpu();
     const profile = deviceGeometryProfile(gpu);
@@ -683,27 +747,27 @@ test.skipIf(!GPU_AVAILABLE)(
           census,
           [
             {
-              label: "①QK の emu 変種",
+              label: "emu variant of ①QK",
               match: attentionQkI8a8Key(qkV4, false, "f32", profile.i8a8.attentionQk),
               atLeast: 1,
             },
             {
-              label: "①QK の dp4a 変種",
+              label: "dp4a variant of ①QK",
               match: attentionQkI8a8Key(qkV4, true, "f32", profile.i8a8.attentionQk),
               count: 0,
             },
             {
-              label: "③PV の emu 変種",
+              label: "emu variant of ③PV",
               match: attentionPvI8a8Key(pvV4, false, "f32", profile.i8a8.attentionPv),
               atLeast: 1,
             },
             {
-              label: "③PV の dp4a 変種",
+              label: "dp4a variant of ③PV",
               match: attentionPvI8a8Key(pvV4, true, "f32", profile.i8a8.attentionPv),
               count: 0,
             },
           ],
-          `${pass} 本目`,
+          `run ${pass}`,
         );
       }
     } finally {
@@ -713,19 +777,20 @@ test.skipIf(!GPU_AVAILABLE)(
 );
 
 test.skipIf(!GPU_AVAILABLE)(
-  "attentionCompute が 'a8' でない Session はカナリアを 1 dispatch も払わない（実 GPU）",
+  "a Session whose attentionCompute is not 'a8' pays not a single canary dispatch (real GPU)",
   async () => {
     const gpu = await acquireGpu();
     try {
       await runAttention(gpu, {});
       await runAttention(gpu, { attentionCompute: "f16" }).catch(() => undefined);
-      // 席が空のままなら、ここで渡した実体が初めて走る（= 上の 2 本は払っていない）
+      // If the slot is still empty, the instance passed here is the first to run (= the 2 above did
+      // not pay)
       let ran = 0;
       const verdict = await gpu[RUNTIME_INTERNAL].attentionI8a8Dot(() => {
         ran += 1;
         return Promise.resolve(seatDecision("emu"));
       });
-      assertEquals(ran, 1, "a8 でない Session がカナリアを走らせている");
+      assertEquals(ran, 1, "a non-a8 Session runs the canary");
       assertEquals(verdict.dot, "emu");
     } finally {
       gpu.destroy();

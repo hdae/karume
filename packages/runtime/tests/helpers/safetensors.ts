@@ -1,19 +1,21 @@
-// safetensors リーダ（`src/format/safetensors.ts`）のテスト用に、検査済みの / わざと壊した
-// safetensors バイナリを組むヘルパ。
+// Helpers that build valid / deliberately broken safetensors binaries for the tests of the
+// safetensors reader (`src/format/safetensors.ts`).
 //
-// Karume の配布形は容器（`krm` / `krg`）に移ったので、ここが作るのは**付帯資産の読み手**が
-// 相手にする素の safetensors だけである（ADR 0038 §2 の extras・golden io）。テストが期待する
-// 「正しい形」を 1 箇所に置き、異常系は各テストがそこから 1 点だけ壊す。
+// Karume's distribution form moved to containers (`krm` / `krg`), so all this builds is the plain
+// safetensors that **the readers of auxiliary assets** deal with (the extras of ADR 0038 §2, golden
+// io). The "correct shape" the tests expect lives in one place, and each failure-case test breaks
+// exactly one point of it.
 
 export const f32Bytes = (values: ArrayLike<number>): Uint8Array<ArrayBuffer> => {
   const array = Float32Array.from(values);
   return new Uint8Array(array.buffer);
 };
 
-/** ヘッダ JSON をテキストのまま詰める（壊れた JSON を作るための入口）。 */
+/** Packs the header JSON as raw text (the entry point for building broken JSON). */
 export const packSafetensorsRaw = (headerText: string, data: Uint8Array): ArrayBuffer => {
   const headerBytes = new TextEncoder().encode(headerText);
-  // データ節を 8 バイト境界に置く（safetensors の慣例。整列検査の前提でもある）
+  // Put the data section on an 8-byte boundary (the safetensors convention; the alignment check
+  // also assumes it)
   const headerLength = headerBytes.length + ((8 - (headerBytes.length % 8)) % 8);
   const buffer = new ArrayBuffer(8 + headerLength + data.length);
   const bytes = new Uint8Array(buffer);
@@ -24,7 +26,10 @@ export const packSafetensorsRaw = (headerText: string, data: Uint8Array): ArrayB
   return buffer;
 };
 
-/** ヘッダ表をそのまま詰める（宣言と実データの不整合を作れるよう検査しない）。 */
+/**
+ * Packs the header table as is (unchecked, so a mismatch between declaration and data can be
+ * built).
+ */
 export const packSafetensors = (header: Record<string, unknown>, data: Uint8Array): ArrayBuffer =>
   packSafetensorsRaw(JSON.stringify(header), data);
 
@@ -35,7 +40,7 @@ export type TensorSpec = {
   readonly data: Uint8Array;
 };
 
-/** 隙間なく詰めた整合ファイルを作る。 */
+/** Builds a consistent file packed without gaps. */
 export const buildSafetensors = (
   tensors: readonly TensorSpec[],
   metadata?: Record<string, string>,

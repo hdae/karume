@@ -14,19 +14,25 @@ import {
   sweepCaseEntries,
 } from "../src/tune/cases.ts";
 
-/** M が入るプロファイルの段の添字（`rows <= maxRows` で最初に当たる段 — runtime の表引きと同じ）。 */
+/**
+ * The index of the profile segment that M falls into (the first segment with `rows <= maxRows` —
+ * the same lookup as the runtime's).
+ */
 const profileSegmentOf = (rows: number): number =>
   PROFILE_GEMM_ROWS_BOUNDS.findIndex((maxRows) => rows <= maxRows);
 
-/** gemmRows を引く 3 経路（linear / matmul / bmm）のケースの M。bmm は行列 1 枚の M。 */
+/**
+ * The M of the cases of the three paths that look up gemmRows (linear / matmul / bmm). For bmm it
+ * is the M of one matrix.
+ */
 const gemmRowsCases = SWEEP_CASES.flatMap((sweepCase) =>
   sweepCase.op === "linear" || sweepCase.op === "matmul" || sweepCase.op === "bmm"
     ? [{ op: sweepCase.op, m: sweepCase.m }]
     : [],
 );
 
-describe("プロファイルの gemmRows の段の境界", () => {
-  it("末尾の Infinity を除いた境界は、linear / matmul / bmm の掃引ケースの M（≤ 512）の集合と一致する", () => {
+describe("the boundaries of the profile's gemmRows segments", () => {
+  it("the boundaries without the trailing Infinity equal the set of M (≤ 512) of the linear / matmul / bmm sweep cases", () => {
     const sweptRows = [...new Set(gemmRowsCases.map(({ m }) => m).filter((m) => m <= 512))].sort(
       (a, b) => a - b,
     );
@@ -34,7 +40,7 @@ describe("プロファイルの gemmRows の段の境界", () => {
     assertEquals(PROFILE_GEMM_ROWS_BOUNDS.at(-1), Number.POSITIVE_INFINITY);
   });
 
-  it("狭義昇順で、既定の表（GEMM_ROWS_BUCKETS）の境界を全て含む細分になっている", () => {
+  it("are strictly ascending and refine the default table (GEMM_ROWS_BUCKETS), containing all its boundaries", () => {
     for (let index = 1; index < PROFILE_GEMM_ROWS_BOUNDS.length; index++) {
       assert(PROFILE_GEMM_ROWS_BOUNDS[index - 1] < PROFILE_GEMM_ROWS_BOUNDS[index], `${index}`);
     }
@@ -43,9 +49,10 @@ describe("プロファイルの gemmRows の段の境界", () => {
     }
   });
 
-  it("どの段にも linear / matmul / bmm のケースが 1 本以上ある（> 512 の段の bmm を除く）", () => {
+  it("every segment has at least one linear / matmul / bmm case (except bmm in the > 512 segment)", () => {
     PROFILE_GEMM_ROWS_BOUNDS.forEach((maxRows, segment) => {
-      // > 512 の段の bmm は census に無く、ADR 0116 決定 4 の対象外（足すのは linear しか無かった段だけ）
+      // bmm in the > 512 segment is not in the census and is outside ADR 0116 decision 4 (cases are
+      // added only to segments that had nothing but linear)
       const ops =
         maxRows === Number.POSITIVE_INFINITY
           ? (["linear", "matmul"] as const)
@@ -55,15 +62,15 @@ describe("プロファイルの gemmRows の段の境界", () => {
           gemmRowsCases.some(
             (sweepCase) => sweepCase.op === op && profileSegmentOf(sweepCase.m) === segment,
           ),
-          `段 ≤ ${maxRows} に ${op} が無い`,
+          `segment ≤ ${maxRows} has no ${op}`,
         );
       }
     });
   });
 });
 
-describe("形状表", () => {
-  it("id は一意で、全 op 族が 1 ケース以上ある", () => {
+describe("shape table", () => {
+  it("ids are unique and every op family has at least one case", () => {
     const ids = SWEEP_CASES.map((sweepCase) => sweepCase.id);
     assertEquals(new Set(ids).size, ids.length);
     for (const op of SWEEP_OPS) {
@@ -74,7 +81,7 @@ describe("形状表", () => {
     }
   });
 
-  it("census 由来のケースは census 上の本数が正の整数で、演算数は正", () => {
+  it("census-derived cases have a positive integer census count and a positive operation count", () => {
     for (const sweepCase of SWEEP_CASES) {
       if (sweepCase.op === "matmul") continue;
       assert(Number.isInteger(sweepCase.censusCount) && sweepCase.censusCount > 0, sweepCase.id);
@@ -82,7 +89,7 @@ describe("形状表", () => {
     }
   });
 
-  it("matmul は census に無い鏡像で、本数 0・鏡像元は同じ M / N / K の linear のケース", () => {
+  it("matmul is a mirror absent from the census: count 0, mirrored from the linear case with the same M / N / K", () => {
     const matmuls = SWEEP_CASES.flatMap((sweepCase) =>
       sweepCase.op === "matmul" ? [sweepCase] : [],
     );
@@ -94,7 +101,7 @@ describe("形状表", () => {
       const mirror = SWEEP_CASES.find((other) => other.id === sweepCase.mirrorOf);
       assert(
         mirror !== undefined && mirror.op === "linear",
-        `${sweepCase.id}: 鏡像元が linear に無い`,
+        `${sweepCase.id}: the mirrored case is not among the linear cases`,
       );
       assertEquals(
         [mirror.m, mirror.n, mirror.k],
@@ -104,7 +111,7 @@ describe("形状表", () => {
     }
   });
 
-  it("matmul はプロファイルの gemmRows の 7 段を 1 本ずつ持ち、既定の 3 バケット（≤ 64 / 65〜512 / > 512）も全て覆う", () => {
+  it("matmul has one case per each of the profile's 7 gemmRows segments and also covers all 3 default buckets (≤ 64 / 65–512 / > 512)", () => {
     const matmuls = SWEEP_CASES.flatMap((sweepCase) =>
       sweepCase.op === "matmul" ? [sweepCase] : [],
     );
@@ -123,7 +130,7 @@ describe("形状表", () => {
     );
   });
 
-  it("本番と同じ vec4 経路に乗る形だけを持つ（掃引の対象は本番の生成物）", () => {
+  it("holds only shapes that take the same vec4 path as production (the sweep targets what production generates)", () => {
     for (const sweepCase of SWEEP_CASES) {
       switch (sweepCase.op) {
         case "linear":
@@ -132,7 +139,8 @@ describe("形状表", () => {
           assert(gemmUsesVec4(sweepCase.k, sweepCase.n), sweepCase.id);
           break;
         case "i8a8-linear":
-          // i8a8 の適格判定（k % 4 == 0）と i32 縮約の門（recipe-builders/linear.ts の述語）
+          // the i8a8 eligibility test (k % 4 == 0) and the i32 reduction check (the predicates of
+          // recipe-builders/linear.ts)
           assertEquals(sweepCase.k % 4, 0, sweepCase.id);
           assert(sweepCase.k <= LINEAR_I8A8_MAX_K, sweepCase.id);
           assertEquals(sweepCase.n % 4, 0, sweepCase.id);
@@ -143,7 +151,7 @@ describe("形状表", () => {
           assertEquals(sweepCase.score, "f32", sweepCase.id);
           break;
         case "i8a8-attention":
-          // ①は D % 4・③は N % 4 が適格条件、s16 は ①が v4 を取る形だけ
+          // ① is eligible with D % 4 and ③ with N % 4; s16 only for shapes where ① takes v4
           assertEquals(sweepCase.d % 4, 0, sweepCase.id);
           assertEquals(sweepCase.n % 4, 0, sweepCase.id);
           assertEquals(sweepCase.score, "f16", sweepCase.id);
@@ -214,7 +222,7 @@ describe("形状表", () => {
     }
   });
 
-  it("conv2d は m タイル 32 行と 64 行の両方の本番幾何を 1 行以上持つ", () => {
+  it("conv2d has at least one row for each of the production geometries with m tiles of 32 and 64 rows", () => {
     const mTiles = new Set(
       SWEEP_CASES.flatMap((sweepCase) =>
         sweepCase.op === "conv2d" ? [conv2dIgemmMTile(sweepCase.channelsOut)] : [],
@@ -226,7 +234,7 @@ describe("形状表", () => {
     );
   });
 
-  it("attention は ①QK と ③PV が同じ形の対で並ぶ", () => {
+  it("attention lists ①QK and ③PV in pairs of the same shape", () => {
     for (const op of ["attention", "i8a8-attention"] as const) {
       const shapes = (stage: "qk" | "pv"): string[] =>
         SWEEP_CASES.flatMap((sweepCase) =>

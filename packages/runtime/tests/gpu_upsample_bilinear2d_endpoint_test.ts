@@ -1,13 +1,17 @@
 /**
- * upsample_bilinear2d の 1 軸が 2^24 を超える形で、端点の添字が隣の平面へはみ出さないこと。
+ * upsample_bilinear2d on a shape with one axis above 2^24: the endpoint index does not run over
+ * into the next plane.
  *
- * scale = `fl((in − 1) / (out − 1))` と源座標 `fl(scale · 出力添字)` の f32 丸めで、末尾の源座標が
- * `in − 1` を超えうる（in_w = 16777220・out_w = 2 で 16777220 = in_w）。整数化した添字に上限が
- * 無いと、平面 0 の端点が平面 1 の先頭を読む（例外の出ない誤値）。torch の
- * `guard_index_and_lambda` と同じく添字を `in − 1` に留め、端点は入力の末尾になる。
+ * With the f32 rounding of scale = `fl((in − 1) / (out − 1))` and of the source coordinate
+ * `fl(scale · output index)`, the last source coordinate can exceed `in − 1` (in_w = 16777220 and
+ * out_w = 2 give 16777220 = in_w). Without an upper bound on the integer index, plane 0's endpoint
+ * reads the start of plane 1 (a wrong value with no exception). Like torch's
+ * `guard_index_and_lambda`, the index is clamped to `in − 1`, so the endpoint is the input's last
+ * element.
  *
- * 入力は 2 平面 × 16,777,220 要素（約 134 MB）。この上限は 1 軸がおよそ 2^23 を超える形でだけ
- * 発動する（in_w 8,650,802・out_w 34 でも末尾の源座標が in_w に届く）。
+ * The input is 2 planes × 16,777,220 elements (about 134 MB). The clamp only triggers on shapes
+ * with one axis above roughly 2^23 (with in_w 8,650,802 and out_w 34 the last source coordinate
+ * also reaches in_w).
  */
 import { assertEquals } from "@std/assert";
 import { describe, it } from "vite-plus/test";
@@ -20,7 +24,10 @@ const WIDTH_IN = 16_777_220;
 const INPUT_SHAPE = [1, 2, 1, WIDTH_IN];
 const OUTPUT_SHAPE = [1, 2, 1, 2];
 
-/** 平面 0 = [1, 1, …, 7]・平面 1 = [100, 2, …, 9]（端と先頭だけ値を変えて、どこを読んだか分かる形）。 */
+/**
+ * Plane 0 = [1, 1, …, 7], plane 1 = [100, 2, …, 9] (only the ends and starts get distinct values,
+ * so the output shows where it read).
+ */
 const input = (): Float32Array<ArrayBuffer> => {
   const data = new Float32Array(2 * WIDTH_IN);
   data.fill(1, 0, WIDTH_IN);
@@ -31,11 +38,11 @@ const input = (): Float32Array<ArrayBuffer> => {
   return data;
 };
 
-// 各平面の [先頭, 末尾]（縮小 out_w = 2 は両端の 2 点だけを読む）。
+// [first, last] of each plane (downscaling to out_w = 2 reads only the two end points).
 const EXPECTED = [1, 7, 100, 9];
 
-describe("upsample_bilinear2d: 1 軸が 2^24 を超える縮小の端点", () => {
-  it("CPU 参照は各平面の末尾を読む（隣の平面の先頭を読まない）", () => {
+describe("upsample_bilinear2d: endpoints of a downscale with one axis above 2^24", () => {
+  it("the CPU reference reads the last element of each plane (not the start of the next plane)", () => {
     const out = referenceUpsampleBilinear2d(
       { dtype: "f32", shape: INPUT_SHAPE, data: input() },
       { output_size: [1, 2] },
@@ -43,29 +50,32 @@ describe("upsample_bilinear2d: 1 軸が 2^24 を超える縮小の端点", () =>
     assertEquals([...out.data], EXPECTED);
   });
 
-  it.skipIf(!GPU_AVAILABLE)("GPU も各平面の末尾を読む（実 GPU）", async function () {
-    const gpu = await acquireGpu();
-    try {
-      const prepared = prepareContainer(
-        await openModelBytes(
-          singleOpDeclaration("upsample_bilinear2d", [INPUT_SHAPE], [OUTPUT_SHAPE], {
-            attrs: { output_size: [1, 2] },
-          }),
-          [],
-        ),
-        GRAPH_NAME,
-      );
-      const session = await prepared.createContainerSession(gpu);
+  it.skipIf(!GPU_AVAILABLE)(
+    "the GPU also reads the last element of each plane (real GPU)",
+    async function () {
+      const gpu = await acquireGpu();
       try {
-        const out = await session.run({
-          x0: { dtype: "f32", shape: INPUT_SHAPE, data: input() },
-        });
-        assertEquals([...out.y.data], EXPECTED);
+        const prepared = prepareContainer(
+          await openModelBytes(
+            singleOpDeclaration("upsample_bilinear2d", [INPUT_SHAPE], [OUTPUT_SHAPE], {
+              attrs: { output_size: [1, 2] },
+            }),
+            [],
+          ),
+          GRAPH_NAME,
+        );
+        const session = await prepared.createContainerSession(gpu);
+        try {
+          const out = await session.run({
+            x0: { dtype: "f32", shape: INPUT_SHAPE, data: input() },
+          });
+          assertEquals([...out.y.data], EXPECTED);
+        } finally {
+          await session.dispose();
+        }
       } finally {
-        await session.dispose();
+        gpu.destroy();
       }
-    } finally {
-      gpu.destroy();
-    }
-  });
+    },
+  );
 });
