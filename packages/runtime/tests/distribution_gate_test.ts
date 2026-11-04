@@ -336,14 +336,19 @@ const sameWeights = (
   );
 };
 
+/** The session knobs that select int8 activations (C2 of {@link defaultPresetViolations}). */
+const A8_KNOBS = ["linearCompute", "attentionCompute", "convCompute"] as const;
+
 /**
  * 1 モデルの既定プリセットとプリセット一覧が、配布形の満たすべき 3 制約を破っている箇所を返す
  * （違反ごとに 1 文・プリセットを名指し。満たしていれば空）。DECIDED: ADR 0128 決定 2。
  *
  * - C1: 既定プリセットは素の WebGPU で走る — `quants[defaultQuant].gpuFeatures` が無いか、
  *   true のメンバーを持たない（今日の語彙では `shaderF16` を要求しない）。
- * - C2: `linearCompute` か `attentionCompute` が `"a8"` のプリセットには、どちらも `"a8"` でなく
- *   weights の写像が同一（同じ部品・同じラベル = 同じコンテナ）の別名の兄弟プリセットがある。
+ * - C2: a preset with any of {@link A8_KNOBS} (`linearCompute`, `attentionCompute`,
+ *   `convCompute`) = `"a8"` has a sibling preset under another name with none of the three
+ *   and an identical weights map (same roles, same labels = same containers) — the three knobs
+ *   since ADR 0128's addendum of 2026-10-29 (amendment 5; `convCompute` is ADR 0133 decision 6).
  *   この兄弟が、dp4a の無い device で runtime が出す警告
  *   （packages/runtime/src/runtime/a8-emulation-warning.ts）の指す逃げ先で、追加の取得が要らない。
  * - C3: プリセットが 2 つ以上あるモデルでは、全プリセットが trim して空でない label と description を
@@ -362,15 +367,14 @@ const defaultPresetViolations = (entry: ModelEntry): string[] => {
   }
   const presets = Object.entries(entry.quants);
   for (const [name, quant] of presets) {
-    const knobs = (["linearCompute", "attentionCompute"] as const)
-      .filter((knob) => quant.session[knob] === "a8")
-      .map((knob) => `${knob}: "a8"`);
+    const knobs = A8_KNOBS.filter((knob) => quant.session[knob] === "a8").map(
+      (knob) => `${knob}: "a8"`,
+    );
     if (knobs.length === 0) continue;
     const sibling = presets.some(
       ([other, candidate]) =>
         other !== name &&
-        candidate.session.linearCompute !== "a8" &&
-        candidate.session.attentionCompute !== "a8" &&
+        A8_KNOBS.every((knob) => candidate.session[knob] !== "a8") &&
         sameWeights(quant.weights, candidate.weights),
     );
     if (!sibling) {
@@ -912,6 +916,28 @@ describe("配布門番の判定（既定プリセットとプリセット一覧 
     assertEquals(violations.length, 2, violations.join("\n"));
     assertStringIncludes(violations[0]!, "C2: プリセット 'a8'");
     assertStringIncludes(violations[1]!, "C2: プリセット 'attentionOnly'");
+  });
+
+  it("a preset whose only a8 knob is convCompute is a C2 violation without a sibling, naming the knob", () => {
+    const conv8 = { ...plainI8, session: { convCompute: "a8" } };
+    const f32 = { weights: { text: "f32", dit: "f32" }, session: {}, ...labelled };
+    const entry = entryOf({ conv8, f32 }, "f32");
+    assertSingleViolation(entry, "C2", "conv8");
+    assertStringIncludes(defaultPresetViolations(entry)[0]!, `convCompute: "a8"`);
+  });
+
+  it("a preset whose only a8 knob is convCompute passes C2 with a same-weights sibling without a8", () => {
+    const conv8 = { ...plainI8, session: { convCompute: "a8" } };
+    assertEquals(defaultPresetViolations(entryOf({ conv8, i8: plainI8 }, "i8")), []);
+  });
+
+  it('a would-be sibling that keeps convCompute: "a8" is not a sibling (C2 stays violated)', () => {
+    const keepsConv8 = { ...plainI8, session: { convCompute: "a8" } };
+    const entry = entryOf({ a8: a8I8, keepsConv8 }, "a8");
+    const violations = defaultPresetViolations(entry);
+    assertEquals(violations.length, 2, violations.join("\n"));
+    assertStringIncludes(violations[0]!, "C2: プリセット 'a8'");
+    assertStringIncludes(violations[1]!, "C2: プリセット 'keepsConv8'");
   });
 
   it("description の無いプリセットは C3 違反として、そのプリセットを名指しする", () => {
