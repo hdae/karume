@@ -113,9 +113,12 @@ test("rejection: mojibake, C1 and unassigned carry the reason in a PromptCleanEr
   assertEquals(rejectReason("cafÃ©"), "mojibake");
   assertEquals(rejectReason("a\x85b"), "c1");
   assertEquals(rejectReason("a͸b"), "unassigned");
-  const error = assertThrows(() => cleanPrompt(tables, "a\x85b", "ネガティブ"), ModelInputError);
+  const error = assertThrows(
+    () => cleanPrompt(tables, "a\x85b", "negativePrompt"),
+    ModelInputError,
+  );
   assert(error instanceof PromptCleanError);
-  assert(error.message.includes("ネガティブ"), error.message);
+  assert(error.message.includes("negativePrompt"), error.message);
   assert(error.message.includes("U+0085"), error.message);
 });
 
