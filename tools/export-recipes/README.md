@@ -90,7 +90,11 @@ The accepted set is `anima` / `anima-extra` / `sbv2` / `sbv2-fn` / `irodori` / `
 `lucida` / `depth-anything` / `vowel-detector` / `gemma4` / `gemma4-qat` / `gemma4-qat-mobile` / `wan` / `wan-ti2v` / `umt5` / `moss-image`. What the flags mean — `--model` for
 assembling several models into one repository, `--card-profile` for attribution, and the model
 card written after `verify_dist` — is the engine's contract and is documented in
-[`../exporter/README.md`](../exporter/README.md).
+[`../exporter/README.md`](../exporter/README.md). The house non-endorsement sentence every card
+opens with names, for each upstream HF repository, the publisher that `_shared/upstream.py`'s
+`UPSTREAM_AUTHORS` lists for its account; an upstream from an account missing there fails the card
+render, and so does one from our own account (`hdae/` — the vowel detector's card, whose upstream
+is our own release, is the one card without the sentence).
 
 **Cross-repository references** (ADR [0038](../../docs/decisions/0038-manifest-v1.md) §7, addendum
 2026-10-28). A pipeline declares which roles of a model are byte-identical to another distribution

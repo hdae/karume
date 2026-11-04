@@ -677,3 +677,27 @@ class TestSbv2EntryPoint:
         card = _profile_card(SBV2_CARD_PROFILES[name])
         assert "fromAssets" not in card
         assert "await Pipeline.fromPretrained" in card
+
+
+class TestSbv2HouseSentence:
+    @pytest.mark.parametrize(
+        ("profile", "sentence"),
+        [
+            (
+                SBV2_JVNV_PROFILE,
+                "This is an unofficial conversion of litagin/style_bert_vits2_jvnv and"
+                " ku-nlp/deberta-v2-large-japanese-char-wwm for Karume. It is not affiliated with"
+                " or endorsed by litagin and ku-nlp.",
+            ),
+            (
+                SBV2_FN_PROFILE,
+                "This is an unofficial conversion of rufflet17/voice_models for Karume. It is not"
+                " affiliated with or endorsed by rufflet17.",
+            ),
+        ],
+    )
+    def test_the_title_is_followed_by_the_house_sentence(
+        self, profile: Sbv2CardProfile, sentence: str
+    ) -> None:
+        lines = _profile_card(profile).splitlines()
+        assert lines[lines.index(f"# {profile.title}") + 2] == sentence

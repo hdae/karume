@@ -160,6 +160,14 @@ are the facts the manifest does not record (base model, license, provenance of t
 `README.md` is a metadata file on par with `karume.json`, so it is exempt from the undeclared-file
 check.
 
+Every card opens with **one house sentence** right under its title, in the same words everywhere
+(`karume.modelcard.introduction`, maintainer's decision of 2026-11-04): "This is an unofficial
+conversion of {upstream} for Karume. It is not affiliated with or endorsed by {author}." A
+distribution of several upstreams lists them, and their distinct authors, in one sentence. The
+template names the upstreams and their authors; one without an author fails the render. A
+non-endorsement sentence an upstream licence asks for in its own words stays where the template
+puts it, beside the house sentence.
+
 **Attribution is a separate axis from the template**: `--card-profile` picks which upstream family
 the card credits (source repository, source directories and version, license terms, citations).
 Naming one is **required** whenever a pipeline declares more than one profile, because a silent

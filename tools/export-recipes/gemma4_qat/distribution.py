@@ -9,6 +9,7 @@ from typing import Any
 
 from _shared.container_read import read_layouts
 from _shared.licenses import apache_license_2_0
+from _shared.upstream import hf_upstreams
 from gemma4.distribution import (
     GEMMA4_ASSETS,
     GEMMA4_ROLE,
@@ -38,6 +39,7 @@ from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     frontmatter,
+    introduction,
     models,
     quants,
     render,
@@ -409,9 +411,10 @@ def render_card(
     )
     sections = [
         frontmatter(metadata),
+        introduction(
+            "Gemma 4 Mobile QAT Text Decoder — Karume", hf_upstreams(metadata.base_model)
+        ),
         [
-            "# Gemma 4 Mobile QAT Text Decoder — Karume",
-            "",
             "Experimental text-only conversion of the official mobile QAT checkpoints.",
             "Fixed integers and scales are preserved; activations use "
             "static range quantization (SRQ).",

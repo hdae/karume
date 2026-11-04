@@ -741,3 +741,33 @@ class TestPipelineGate:
         manifest["models"][OFFICIAL_SECOND]["pipeline"] = "sbv2/1"
         with pytest.raises(ValueError, match="sbv2/1"):
             _official(manifest)
+
+
+def _house_sentence(card: str) -> str:
+    """The paragraph right under the card's title."""
+    lines = card.splitlines()
+    return lines[next(index for index, line in enumerate(lines) if line.startswith("# ")) + 2]
+
+
+class TestTheHouseSentence:
+    """The house non-endorsement sentence (`karume.modelcard.introduction`) beside the licence's
+    own §3(d) sentence, which stays word for word in the License section."""
+
+    def test_the_official_card_names_its_models_and_circlestone(self, card: str) -> None:
+        assert _house_sentence(card) == (
+            "This is an unofficial conversion of Anima Turbo v1.1 and Anima Aesthetic v1.1 for"
+            " Karume. It is not affiliated with or endorsed by CircleStone Labs LLC."
+        )
+
+    def test_the_extra_card_names_each_fine_tune_and_its_author(self, extra_card: str) -> None:
+        assert _house_sentence(extra_card) == (
+            "This is an unofficial conversion of WAI-ANIMA v1.0 (base 1.0) and copycat-anima"
+            " 20260610 for Karume. It is not affiliated with or endorsed by WAI0731 and calculater."
+        )
+
+    def test_the_licence_sentence_stays_as_it_is(self, card: str, extra_card: str) -> None:
+        for text in (card, extra_card):
+            assert (
+                "- This is not an official product of CircleStone Labs LLC, and it is not endorsed,"
+                " approved or\n  validated by CircleStone Labs LLC."
+            ) in text

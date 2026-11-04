@@ -16,12 +16,15 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
+    Upstream,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     model_sections,
     models,
     quants,
@@ -380,6 +383,15 @@ def _defaults(model: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _upstream_model(name: str) -> UpstreamModel:
+    """The origin of model `name` (the title's house sentence and the origins section read the
+    same one); a model without one fails the render."""
+    upstream = UPSTREAM_MODELS.get(name)
+    if upstream is None:
+        raise ValueError(f"モデル {name!r} の出所が card.py に無い — 帰属を書けない")
+    return upstream
+
+
 def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
     """モデルごとの出所（**このリポに入っているモデルだけ**を manifest から引いて並べる）。
 
@@ -397,9 +409,7 @@ def _origins(manifest: Mapping[str, Any], intro: tuple[str, ...]) -> list[str]:
         *intro,
     ]
     for name in manifest["models"]:
-        upstream = UPSTREAM_MODELS.get(name)
-        if upstream is None:
-            raise ValueError(f"モデル {name!r} の出所が card.py に無い — 帰属を書けない")
+        upstream = _upstream_model(name)
         lines += [
             "",
             f"### `{name}` — {upstream.title}",
@@ -485,6 +495,24 @@ EXTRA_ORIGINS_INTRO = (
 )
 
 
+def _introduction(manifest: Mapping[str, Any], title: str) -> list[str]:
+    """The title and the house sentence over the models this repository holds (manifest order).
+
+    The models are named by their titles — the fine-tunes are not on the Hub. An official model is
+    CircleStone's (the publisher of the base model's account); a community fine-tune (one with
+    permissions listed on its source page, as {@link _base_license} reads them) is its author's.
+    The §3(d) non-endorsement sentence of the License section stays as the licence words it; this
+    one does not replace it.
+    """
+    licensor = hf_upstreams(ANIMA_METADATA.base_model)[0].author
+    upstreams: list[Upstream] = []
+    for name in manifest["models"]:
+        upstream = _upstream_model(name)
+        author = upstream.author if upstream.permissions else licensor
+        upstreams.append(Upstream(upstream.title, author))
+    return introduction(title, upstreams)
+
+
 def render_base_card(
     manifest: Mapping[str, Any],
     repo: str,
@@ -500,7 +528,7 @@ def render_base_card(
     return render(
         (
             frontmatter(ANIMA_METADATA),
-            ["", f"# {ANIMA_OFFICIAL_TITLE}", ""],
+            _introduction(manifest, ANIMA_OFFICIAL_TITLE),
             _official_overview(manifest),
             [""],
             _origins(manifest, OFFICIAL_ORIGINS_INTRO),
@@ -529,7 +557,7 @@ def render_extra_card(
     return render(
         (
             frontmatter(ANIMA_METADATA),
-            ["", f"# {ANIMA_EXTRA_TITLE}", ""],
+            _introduction(manifest, ANIMA_EXTRA_TITLE),
             _extra_overview(manifest),
             [""],
             _origins(manifest, EXTRA_ORIGINS_INTRO),

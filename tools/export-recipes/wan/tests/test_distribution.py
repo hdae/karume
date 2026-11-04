@@ -1181,6 +1181,15 @@ class TestTheModelCard:
         with pytest.raises(ValueError, match=WAN_SUPPORTED_PIPELINE):
             _card(foreign)
 
+    def test_the_title_is_followed_by_the_house_sentence(self, assembled) -> None:
+        _, manifest = assembled
+        lines = _card(manifest).splitlines()
+        title = lines.index("# Wan2.1 T2V 1.3B — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of Wan-AI/Wan2.1-T2V-1.3B-Diffusers for Karume."
+            " It is not affiliated with or endorsed by Wan-AI."
+        )
+
     def test_it_refuses_to_attribute_a_wan22_model(self, assembled) -> None:
         """取得元の表に有る Wan2.2 のモデルでも、Wan2.1 のカードには出所を書かない。"""
         _, manifest = assembled

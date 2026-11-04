@@ -32,12 +32,14 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     knob,
     model_sections,
     models,
@@ -1359,10 +1361,11 @@ def render_wan_model_card(
     世代ごとに束ねて渡す — 既定は Wan2.1）。
     """
     require_pipeline(manifest, card.supported_pipeline)
+    metadata = _wan_metadata(manifest, card)
     return render(
         (
-            frontmatter(_wan_metadata(manifest, card)),
-            ["", f"# {card.title} — Karume", ""],
+            frontmatter(metadata),
+            introduction(f"{card.title} — Karume", hf_upstreams(metadata.base_model)),
             card.overview(manifest),
             [""],
             _wan_base_weights(manifest, card),

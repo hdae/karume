@@ -23,12 +23,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     knob,
     model_sections,
     models,
@@ -497,10 +499,11 @@ def render_gemma4_model_card(
 ) -> str:
     """gemma4 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, GEMMA4_SUPPORTED_PIPELINE)
+    metadata = _gemma4_metadata(manifest)
     return render(
         (
-            frontmatter(_gemma4_metadata(manifest)),
-            ["", f"# {GEMMA4_TITLE}", ""],
+            frontmatter(metadata),
+            introduction(GEMMA4_TITLE, hf_upstreams(metadata.base_model)),
             _gemma4_overview(manifest),
             [""],
             _gemma4_base_weights(manifest),
@@ -668,10 +671,11 @@ def render_gemma4_qat_q4_0_model_card(
         if drafters
         else []
     )
+    metadata = _qat_q4_0_metadata(manifest)
     return render(
         (
-            frontmatter(_qat_q4_0_metadata(manifest)),
-            ["", f"# {GEMMA4_QAT_Q4_0_TITLE}", ""],
+            frontmatter(metadata),
+            introduction(GEMMA4_QAT_Q4_0_TITLE, hf_upstreams(metadata.base_model)),
             _gemma4_overview(
                 manifest, GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM, _qat_q4_0_overview_bullets(manifest)
             ),

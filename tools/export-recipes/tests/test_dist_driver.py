@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import http.client
 import io
+import json
 import re
 import subprocess
 import sys
@@ -33,14 +34,16 @@ from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
 from gemma4.distribution import QAT_Q4_0_PIPELINE as GEMMA4_QAT_Q4_0_PIPELINE
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
-from karume.dist import PIPELINES as CORE_PIPELINES
 from karume.dist import (
+    MANIFEST_FILENAME,
     CrossRepoReference,
     DistError,
     ExternalComponents,
     declared_references,
     resolve_repo,
 )
+from karume.dist import PIPELINES as CORE_PIPELINES
+from karume.modelcard import HF_OWNER, UNOFFICIAL_CONVERSION_NOTICE
 from moss.distribution import PIPELINE as MOSS_PIPELINE
 from sbv2.distribution import FN_PIPELINE as SBV2_FN_PIPELINE
 from sbv2.distribution import PIPELINE as SBV2_PIPELINE
@@ -310,6 +313,55 @@ class TestDeclaredReferencesOfThePublishedRepositories:
             "karume-irodori-v4.1-small": ["karume-irodori-v4-small"],
             "karume-wan2.2": ["karume-umt5-xxl"],
         }
+
+
+#: The house non-endorsement sentence as a pattern (its two slots filled by anything).
+HOUSE_SENTENCE = re.compile(
+    re.escape(UNOFFICIAL_CONVERSION_NOTICE)
+    .replace(re.escape("{upstream}"), "(?P<upstream>.+)")
+    .replace(re.escape("{author}"), "(?P<author>.+)")
+)
+
+#: The pipelines whose card carries no house sentence: their upstream is our own release
+#: (`vowel_detector.card`), and the sentence would disclaim ourselves.
+FIRST_PARTY_PIPELINES = frozenset({"vowel-detector"})
+
+
+def _mirrors_built_by(name: str) -> list[Path]:
+    """The local distribution mirrors `--pipeline name` builds: those whose models the pipeline
+    names after the mirror's own repository (`resolve_repo` — how the card names its repository)."""
+    mirrors = []
+    for manifest_path in sorted(DIST_ROOT.glob(f"*/{MANIFEST_FILENAME}")):
+        models = list(json.loads(manifest_path.read_text(encoding="utf-8"))["models"])
+        try:
+            repo = resolve_repo(dist.PIPELINES[name], models, None)
+        except (DistError, KeyError, ValueError):
+            continue  # models this pipeline does not build
+        if repo == f"{HF_OWNER}/{manifest_path.parent.name}":
+            mirrors.append(manifest_path)
+    return mirrors
+
+
+class TestTheHouseSentenceOnEveryCard:
+    """Every card opens with the house non-endorsement sentence, right under its title
+    (maintainer's decision of 2026-11-04), drawn from each local mirror's own manifest — every
+    pipeline of the registry, every attribution profile."""
+
+    @pytest.mark.parametrize("name", sorted(dist.PIPELINES))
+    def test_the_card_carries_the_sentence_once_under_its_title(self, name: str) -> None:
+        mirrors = _mirrors_built_by(name)
+        if not mirrors:
+            pytest.skip(f"no distribution mirror under {DIST_ROOT} is built by --pipeline {name}")
+        for manifest_path in mirrors:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for render_card in dist.PIPELINES[name].card_profiles.values():
+                lines = render_card(manifest, f"{HF_OWNER}/{manifest_path.parent.name}").split("\n")
+                sentences = [line for line in lines if HOUSE_SENTENCE.fullmatch(line)]
+                if name in FIRST_PARTY_PIPELINES:
+                    assert sentences == [], manifest_path
+                    continue
+                title = next(index for index, line in enumerate(lines) if line.startswith("# "))
+                assert sentences == [lines[title + 2]], manifest_path
 
 
 #: A reference of the synthetic cases below.

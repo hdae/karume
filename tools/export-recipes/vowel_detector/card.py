@@ -254,6 +254,9 @@ def render_vowel_detector_model_card(
     return render(
         (
             frontmatter(_vowel_detector_metadata()),
+            # The one card without the house non-endorsement sentence
+            # (`karume.modelcard.introduction`): its upstream is our own release (`hdae/`), and
+            # the sentence would disclaim ourselves (`_shared.upstream.hf_upstreams` refuses it).
             ["", f"# {VOWEL_DETECTOR_TITLE}", ""],
             _vowel_detector_overview(manifest),
             [""],

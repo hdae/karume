@@ -140,3 +140,13 @@ class TestSiglip2EntryPoint:
         card = render_siglip2_model_card(_siglip2_manifest(), REPO)
         assert "fromAssets" not in card
         assert "await Pipeline.fromPretrained" in card
+
+
+class TestSiglip2HouseSentence:
+    def test_the_title_is_followed_by_the_house_sentence(self) -> None:
+        lines = render_siglip2_model_card(_siglip2_manifest(), REPO).splitlines()
+        title = lines.index("# SigLIP2 Vision Tower — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of google/siglip2-base-patch16-224 for Karume."
+            " It is not affiliated with or endorsed by Google."
+        )

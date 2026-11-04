@@ -22,12 +22,14 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     knob,
     model_sections,
     models,
@@ -457,7 +459,7 @@ def render_sbv2_model_card(
     return render(
         (
             frontmatter(profile.metadata),
-            ["", f"# {profile.title}", ""],
+            introduction(profile.title, hf_upstreams(profile.metadata.base_model)),
             _sbv2_overview(manifest),
             [""],
             _sbv2_base_weights(profile),

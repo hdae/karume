@@ -411,3 +411,22 @@ class TestBirefnetStorageAttribution:
         """段 2 の i8 は文面と一緒に足す — 推し量った文面を帰属節へ載せない。"""
         with pytest.raises(ValueError, match="i8"):
             render_birefnet_model_card(_with_seat(_birefnet_manifest(), "i8"), REPO, "hr")
+
+
+class TestBirefnetHouseSentence:
+    def test_the_title_is_followed_by_the_house_sentence(self) -> None:
+        lines = render_birefnet_model_card(_birefnet_manifest(), REPO, CHECKPOINT).splitlines()
+        title = lines.index("# BiRefNet HR — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of ZhengPeng7/BiRefNet_HR for Karume."
+            " It is not affiliated with or endorsed by ZhengPeng."
+        )
+
+    def test_the_lucida_card_names_the_fine_tune_it_converts(self) -> None:
+        card = render_birefnet_model_card(_birefnet_manifest(seats=SEATS["lucida"]), REPO, "lucida")
+        lines = card.splitlines()
+        title = lines.index("# Lucida (BiRefNet) — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of egeorcun/lucida for Karume."
+            " It is not affiliated with or endorsed by egeorcun."
+        )

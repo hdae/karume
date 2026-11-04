@@ -398,6 +398,15 @@ class TestTheModelCard:
         with pytest.raises(ValueError, match=UMT5_SUPPORTED_PIPELINE):
             render_umt5_model_card(foreign, "hdae/x")
 
+    def test_the_title_is_followed_by_the_house_sentence(self, assembled) -> None:
+        _, manifest = assembled
+        lines = render_umt5_model_card(manifest, "hdae/x").splitlines()
+        title = lines.index("# umT5-XXL text encoder (int8) — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of google/umt5-xxl for Karume."
+            " It is not affiliated with or endorsed by Google."
+        )
+
     def test_it_attributes_the_encoder_of_google_umt5_xxl(self, assembled) -> None:
         """帰属は本家の commit の encoder（decoder と lm_head は含めない）・Relation は Wan の
         2 つの checkpoint との確かめた関係（ADR 0122 決定 1）。本家の encoder はリポ直下にあるので、

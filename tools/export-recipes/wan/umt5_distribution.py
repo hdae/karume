@@ -41,7 +41,7 @@ from typing import Any
 
 from _shared.container_read import ContainerReadError, read_layouts
 from _shared.licenses import apache_license_2_0, cc_by_sa_4_0
-from _shared.upstream import assert_upstream_provenance
+from _shared.upstream import assert_upstream_provenance, hf_upstreams
 from karume.dist import (
     LICENSE_FILENAME,
     NOTICE_FILENAME,
@@ -60,7 +60,9 @@ from karume.modelcard import (
     REVISION_PIN_COMMENT,
     CardMetadata,
     FileRefKey,
+    Upstream,
     frontmatter,
+    introduction,
     model_sections,
     models,
     quants,
@@ -726,10 +728,13 @@ def render_umt5_model_card(
     `repo` は Usage の `Encoder.fromPretrained` に綴るこのリポの HF リポ ID。
     """
     require_pipeline(manifest, UMT5_SUPPORTED_PIPELINE)
+    metadata = _umt5_metadata(manifest)
     return render(
         (
-            frontmatter(_umt5_metadata(manifest)),
-            ["", "# umT5-XXL text encoder (int8) — Karume", ""],
+            frontmatter(metadata),
+            introduction(
+                "umT5-XXL text encoder (int8) — Karume", hf_upstreams(metadata.base_model)
+            ),
             _umt5_overview(manifest),
             [""],
             _umt5_base_weights(manifest),
@@ -992,7 +997,12 @@ def render_intake_model_card(
     return render(
         (
             head,
-            ["", f"# umT5-XXL compatible text encoder `{intake.name}` (int8) — Karume", ""],
+            # The intake records the upstream repository and nothing else about its publisher,
+            # so the house sentence names the HF account that publishes it.
+            introduction(
+                f"umT5-XXL compatible text encoder `{intake.name}` (int8) — Karume",
+                (Upstream(intake.repo, intake.repo.partition("/")[0]),),
+            ),
             _intake_header(intake),
             [""],
             _intake_overview(manifest, intake),

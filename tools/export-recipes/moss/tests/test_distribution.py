@@ -45,7 +45,7 @@ from karume.dist import (
 )
 from moss import distribution as dist
 from moss import sources
-from moss.card import render_moss_model_card
+from moss.card import MOSS_TITLE, render_moss_model_card
 
 
 def _series_present() -> bool:
@@ -401,14 +401,29 @@ class TestTheCard:
             ) in vae_bullet
 
     def test_only_black_forest_labs_is_named_as_not_endorsing(self) -> None:
+        """The FLUX marks sentence (the wording Black Forest Labs' cards ask for) names Black
+        Forest Labs alone; the card's house sentence, which names every upstream, is a separate
+        one and does not reach the notice."""
         card = render_moss_model_card(self._manifest(), "hdae/karume-moss-image")
-        for text in (card, dist.MOSS_NOTICE_MARKDOWN):
+        house = card.split("\n\n")[2]
+        assert house.startswith("This is an unofficial conversion of ")
+        for text in (card.replace(house, ""), dist.MOSS_NOTICE_MARKDOWN):
             parts = [bullet for block in text.split("\n\n") for bullet in block.split("\n- ")]
             (sentence,) = [part for part in parts if "endorsed" in part]
             assert "Black Forest Labs" in sentence
             assert "FLUX" in sentence
             assert "OpenMOSS" not in sentence
             assert "Qwen" not in sentence
+
+    def test_the_title_is_followed_by_the_house_sentence(self) -> None:
+        """Beside the FLUX marks sentence, not in place of it: every upstream and its publisher."""
+        lines = render_moss_model_card(self._manifest(), "hdae/karume-moss-image").splitlines()
+        title = lines.index(f"# {MOSS_TITLE}")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of OpenMOSS-Team/MOSS-Image-SFT, Qwen/Qwen3.5-9B and"
+            " black-forest-labs/FLUX.2-small-decoder for Karume. It is not affiliated with or"
+            " endorsed by OpenMOSS, Alibaba Cloud and Black Forest Labs."
+        )
 
     def test_the_notice_names_what_was_changed(self) -> None:
         notice = dist.MOSS_NOTICE_MARKDOWN

@@ -18,10 +18,13 @@ from typing import Any
 import pytest
 
 from karume.modelcard import (
+    UNOFFICIAL_CONVERSION_NOTICE,
     CardMetadata,
+    Upstream,
     file_ref_key,
     from_pretrained,
     frontmatter,
+    introduction,
     model_sections,
     models,
     quants,
@@ -72,6 +75,68 @@ class TestFrontmatterOptionalFields:
         assert "base_model_relation: quantized" in lines
         assert "license_name: owner-terms" in lines
         assert "license_link: https://example.invalid/terms" in lines
+
+
+class TestIntroduction:
+    """The title and the house non-endorsement sentence under it (maintainer's decision of
+    2026-11-04 — one wording on every card)."""
+
+    def test_the_wording_is_the_house_sentence(self) -> None:
+        assert UNOFFICIAL_CONVERSION_NOTICE == (
+            "This is an unofficial conversion of {upstream} for Karume."
+            " It is not affiliated with or endorsed by {author}."
+        )
+
+    def test_it_puts_the_sentence_right_under_the_title(self) -> None:
+        lines = introduction("Model — Karume", [Upstream("owner/model", "Owner Labs")])
+
+        assert lines == [
+            "",
+            "# Model — Karume",
+            "",
+            "This is an unofficial conversion of owner/model for Karume."
+            " It is not affiliated with or endorsed by Owner Labs.",
+            "",
+        ]
+
+    def test_an_author_with_its_own_full_stop_ends_the_sentence_once(self) -> None:
+        lines = introduction("T", [Upstream("owner/model", "Owner Inc.")])
+
+        assert lines[3].endswith(" endorsed by Owner Inc.")
+
+    def test_two_upstreams_of_one_author_name_the_author_once(self) -> None:
+        lines = introduction("T", [Upstream("org/a", "Org"), Upstream("org/b", "Org")])
+
+        assert lines[3] == (
+            "This is an unofficial conversion of org/a and org/b for Karume."
+            " It is not affiliated with or endorsed by Org."
+        )
+
+    def test_several_upstreams_and_authors_are_listed_in_order(self) -> None:
+        upstreams = [
+            Upstream("x/main", "X Labs"),
+            Upstream("y/encoder", "Y Corp"),
+            Upstream("x/vae", "X Labs"),
+            Upstream("z/decoder", "Z"),
+        ]
+
+        assert introduction("T", upstreams)[3] == (
+            "This is an unofficial conversion of x/main, y/encoder, x/vae and z/decoder for"
+            " Karume. It is not affiliated with or endorsed by X Labs, Y Corp and Z."
+        )
+
+    def test_a_card_without_an_upstream_is_not_drawn(self) -> None:
+        with pytest.raises(ValueError, match="no upstream declared"):
+            introduction("T", [])
+
+    @pytest.mark.parametrize("blank", ["", "  "])
+    def test_an_upstream_without_an_author_is_not_drawn(self, blank: str) -> None:
+        with pytest.raises(ValueError, match="no name or no author"):
+            introduction("T", [Upstream("org/a", "Org"), Upstream("org/b", blank)])
+
+    def test_an_upstream_without_a_name_is_not_drawn(self) -> None:
+        with pytest.raises(ValueError, match="no name or no author"):
+            introduction("T", [Upstream("", "Org")])
 
 
 # ---- public rendering pieces for recipes -----------------------------------------

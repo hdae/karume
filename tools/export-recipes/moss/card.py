@@ -18,12 +18,14 @@ from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     knob,
     model_sections,
     models,
@@ -232,10 +234,13 @@ def render_moss_model_card(
     no abbreviation line (`karume.modelcard.quants`).
     """
     require_pipeline(manifest, MOSS_SUPPORTED_PIPELINE)
+    metadata = _metadata()
     return render(
         (
-            frontmatter(_metadata()),
-            ["", f"# {MOSS_TITLE}", ""],
+            frontmatter(metadata),
+            # Beside, not instead of, the FLUX marks sentence of the attribution section — that one
+            # is the wording Black Forest Labs' cards ask for.
+            introduction(MOSS_TITLE, hf_upstreams(metadata.base_model)),
             _overview(manifest),
             [""],
             _base_weights(),

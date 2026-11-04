@@ -144,3 +144,15 @@ class TestIrodoriUpstreamAttribution:
         """表に無い版で黙って別の帰属を書かない（fail loudly）。"""
         with pytest.raises(ValueError, match="IRODORI_UPSTREAMS"):
             render_irodori_model_card(_irodori_manifest("v9-small"), REPO)
+
+
+class TestIrodoriHouseSentence:
+    def test_the_title_is_followed_by_the_house_sentence(self) -> None:
+        """One sentence over the three redistributed upstreams, each author named once."""
+        lines = render_irodori_model_card(_irodori_manifest("v4-small"), REPO).splitlines()
+        title = lines.index("# Irodori-TTS v4 Small — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of Aratako/Irodori-TTS-v4-Small,"
+            " sbintuitions/modernbert-ja-310m and Aratako/Semantic-DACVAE-Japanese-32dim for"
+            " Karume. It is not affiliated with or endorsed by Aratako and SB Intuitions."
+        )

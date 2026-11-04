@@ -713,7 +713,10 @@ configuration origin — never the Apache license and "no retraining" notice of 
 
 When the upstream declares no license, `write` and `dist.py` stop before writing anything unless
 `--allow-undeclared-license` is given; the container's `provenance.license` then carries
-`NOASSERTION`, the mirror has no `LICENSE.md`, and the card opens with "do not redistribute".
+`NOASSERTION`, the mirror has no `LICENSE.md`, and the card's first note, under the house
+non-endorsement sentence every card carries, says "do not redistribute". That sentence names the
+upstream repository and, as its publisher, the HF account it lives under (the record holds nothing
+else about the publisher).
 `tools/release/hf-upload.zsh upload` reads `provenance.license` from part 0 of every container before
 uploading and refuses `NOASSERTION` in any letter case, `unknown` and `none`, as well as a directory
 with no container at all, so a mirror copied or linked into `models/` by hand is stopped by its

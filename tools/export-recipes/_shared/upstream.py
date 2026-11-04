@@ -21,12 +21,13 @@ MUST: 記録が無い・読めないときは **fail loudly**（{@link UpstreamP
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from _shared.container_read import read_provenance
 from karume.container import Provenance
 from karume.dist import DistError
-from karume.modelcard import CardMetadata
+from karume.modelcard import HF_OWNER, CardMetadata, Upstream
 
 #: `hf download --local-dir` が取得の記録を置く場所（`<model_dir>` からの相対）。
 SNAPSHOT_RECORD_DIR = Path(".cache") / "huggingface" / "download"
@@ -185,3 +186,59 @@ def assert_upstream_provenance(container: Path, *, license: str, revision: str |
             f"{container} の provenance.upstreamRevision が {provenance.upstream_revision}、"
             f"期待する revision は {revision} — 別の revision から焼いた容器"
         )
+
+
+#: HF account (the owner part of a `base_model` repository ID) → who the cards name as its
+#: publisher in the house non-endorsement sentence ({@link karume.modelcard.introduction}). Spelled
+#: as this repository already names them where it does — in a licence's notice, a copyright line
+#: or a card's attribution section; an account with no such name is spelled as the account itself.
+#:
+#: MUST: an account missing here fails the card ({@link hf_upstreams}) — adding an upstream means
+#: stating who published it, never a placeholder.
+UPSTREAM_AUTHORS: Mapping[str, str] = {
+    # anima — the licensor in the CircleStone licence's attribution notice.
+    "circlestone-labs": "CircleStone Labs LLC",
+    # birefnet / lucida — the copyright lines of the bundled MIT licence.
+    "ZhengPeng7": "ZhengPeng",
+    "egeorcun": "egeorcun",
+    "depth-anything": "depth-anything",
+    # gemma4 / gemma4_qat / siglip2 / umt5 — Gemma's licensor and the publisher of the others.
+    "google": "Google",
+    # irodori — the copyright lines of the bundled MIT licence.
+    "Aratako": "Aratako",
+    "sbintuitions": "SB Intuitions",
+    # moss — the card's attribution section and the Qwen licence's copyright line.
+    "OpenMOSS-Team": "OpenMOSS",
+    "Qwen": "Alibaba Cloud",
+    "black-forest-labs": "Black Forest Labs",
+    # sbv2 — the voices' and the text encoder's publishers.
+    "litagin": "litagin",
+    "ku-nlp": "ku-nlp",
+    "rufflet17": "rufflet17",
+    # wan — the card's attribution section ("released by Wan-AI").
+    "Wan-AI": "Wan-AI",
+}
+
+
+def hf_upstreams(repos: Sequence[str]) -> tuple[Upstream, ...]:
+    """The house sentence's upstreams for HF repositories (a card's `base_model`, typically): each
+    repository ID with its account's publisher from {@link UPSTREAM_AUTHORS}.
+
+    MUST: a repository of our own account (`karume.modelcard.HF_OWNER`) is refused — a conversion
+    of our own release is not unofficial, and the sentence would disclaim ourselves.
+    """
+    upstreams: list[Upstream] = []
+    for repo in repos:
+        owner, _, name = repo.partition("/")
+        if not owner or not name:
+            raise ValueError(f"{repo!r} is not an HF repository ID (<owner>/<name>)")
+        if owner == HF_OWNER:
+            raise ValueError(f"{repo} is our own release — it is not an unofficial conversion")
+        author = UPSTREAM_AUTHORS.get(owner)
+        if author is None:
+            raise ValueError(
+                f"{repo}: the publisher of HF account '{owner}' is not in UPSTREAM_AUTHORS"
+                " — a card that cannot say whose work it converts is not drawn"
+            )
+        upstreams.append(Upstream(repo, author))
+    return tuple(upstreams)

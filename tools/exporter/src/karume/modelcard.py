@@ -12,12 +12,12 @@ explain and what to spell out in the usage section are family-specific facts, so
 `tools/export-recipes/<family>/card.py` (ADR 0065 decisions 1 and 2). The same layering as
 `karume.dist`.
 
-NOTE: the rendering components ({@link frontmatter} / {@link models} / {@link quants} /
-{@link model_sections} / {@link render} / {@link require_pipeline} / {@link default_model} /
-{@link knob} / {@link from_pretrained}) are **the public surface for recipes** (ADR 0065 stage 6).
-Since `card.py`, outside the wheel, calls them by name, keeping private names would make "calling
-across private" the default. Only the components closed within this module keep a leading `_`
-({@link _base_model} and the like).
+NOTE: the rendering components ({@link frontmatter} / {@link introduction} / {@link models} /
+{@link quants} / {@link model_sections} / {@link render} / {@link require_pipeline} /
+{@link default_model} / {@link knob} / {@link from_pretrained}) are **the public surface for
+recipes** (ADR 0065 stage 6). Since `card.py`, outside the wheel, calls them by name, keeping
+private names would make "calling across private" the default. Only the components closed within
+this module keep a leading `_` ({@link _base_model} and the like).
 
 **Attribution is a separate axis from the template** ({@link sbv2.card.Sbv2CardProfile}). Some
 pipelines use the same template while provenance, licence and citation change entirely with the
@@ -110,6 +110,57 @@ class CardMetadata:
     #: identifier **does not have them** (listing them empty reads as "an unnamed custom licence").
     license_name: str | None = None
     license_link: str | None = None
+
+
+#: **The house non-endorsement sentence**, the same words on every card (maintainer's decision of
+#: 2026-11-04): a distribution re-encodes someone else's weights, and a reader landing on it from a
+#: search must not take it for the upstream's own release. {@link introduction} fills it in.
+#: A sentence an upstream licence requires in its own words (anima's, MOSS-Image's) is kept as it
+#: is, beside this one — this sentence does not stand in for a licence clause.
+UNOFFICIAL_CONVERSION_NOTICE = (
+    "This is an unofficial conversion of {upstream} for Karume."
+    " It is not affiliated with or endorsed by {author}."
+)
+
+
+@dataclass(frozen=True)
+class Upstream:
+    """One upstream work a card names in {@link UNOFFICIAL_CONVERSION_NOTICE}: how it is spelled
+    (an HF repository ID, or a title for a work that is not on the Hub) and who published it."""
+
+    name: str
+    author: str
+
+
+def _spell_list(items: Sequence[str]) -> str:
+    """`A` / `A and B` / `A, B and C` (each item once, in order of appearance)."""
+    unique = list(dict.fromkeys(items))
+    if len(unique) == 1:
+        return unique[0]
+    return f"{', '.join(unique[:-1])} and {unique[-1]}"
+
+
+def introduction(title: str, upstreams: Sequence[Upstream]) -> list[str]:
+    """The card's title and, as the first paragraph under it, the house sentence
+    ({@link UNOFFICIAL_CONVERSION_NOTICE}) naming every upstream and every distinct author.
+
+    A distribution of several upstreams gets one sentence, the upstreams and the authors each
+    listed once ("an unofficial conversion of A and B … endorsed by X and Y").
+
+    MUST: an upstream without a name or an author fails the render — a card that cannot say whose
+    work it converts is not drawn (a placeholder would claim non-endorsement by no one).
+    """
+    if not upstreams:
+        raise ValueError(f"card '{title}': no upstream declared — the card cannot say whose work")
+    for upstream in upstreams:
+        if not upstream.name.strip() or not upstream.author.strip():
+            raise ValueError(f"card '{title}': upstream {upstream!r} has no name or no author")
+    notice = UNOFFICIAL_CONVERSION_NOTICE.format(
+        upstream=_spell_list([upstream.name for upstream in upstreams]),
+        author=_spell_list([upstream.author for upstream in upstreams]),
+    )
+    # An author spelled with its own full stop ("Example Inc.") ends the sentence already.
+    return ["", f"# {title}", "", notice.removesuffix(".") if notice.endswith("..") else notice, ""]
 
 
 def _download_size(size: int) -> str:

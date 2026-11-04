@@ -50,10 +50,6 @@ repositories are unchanged.
     names the preset `i4`, which `karume-gemma4` no longer ships (`bf16` alone, PLE schema 5): `--weights stored` fails
     loudly there (`--weights source` still scores the original checkpoint). Scoring a shipped Gemma 4 E2B line again
     needs the tool to read schemas 4 / 5 and a profile that names that line's preset.
-- **One wording for "unofficial converted / quantized model" on every card (maintainer 2026-11-01)**: today only anima
-  (its licence §3(d)) and MOSS-Image (the FLUX marks clause of Black Forest Labs' cards) carry a non-endorsement
-  sentence, each in its own words. Settle one house phrasing in the generic card renderer and decide where it is
-  shown; until then a sentence is added only where an upstream asks for it.
 - **Translation remainder of ADR [0130](decisions/0130-project-language.md) (0.15.x)**: the comments under
   `packages/*/tests` and `tools/export-recipes`, the areas the language allow-list marks `until: "0.15.x"`.
 - **Playground small item (review notes of 2026-10-28)**: the Wan2.2 / SBV2 pipeline hooks swallow a rejection from disposing an aborted build

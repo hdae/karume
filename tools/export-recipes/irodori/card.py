@@ -21,12 +21,14 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     knob,
     model_sections,
     models,
@@ -329,10 +331,11 @@ def render_irodori_model_card(
     """Irodori 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, IRODORI_SUPPORTED_PIPELINE)
     upstream = irodori_upstream(manifest["defaultModel"])
+    metadata = _irodori_metadata(upstream)
     return render(
         (
-            frontmatter(_irodori_metadata(upstream)),
-            ["", f"# {upstream.display} — Karume", ""],
+            frontmatter(metadata),
+            introduction(f"{upstream.display} — Karume", hf_upstreams(metadata.base_model)),
             _irodori_overview(manifest, upstream),
             [""],
             _irodori_base_weights(upstream),

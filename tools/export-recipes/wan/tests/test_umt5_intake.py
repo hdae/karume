@@ -1070,3 +1070,9 @@ class TestTheWholeChain:
         assert sorted(path.name for path in out_dir.iterdir() if path.is_file()) == sorted(
             [MODEL_CARD_FILENAME, NOTICE_FILENAME, MANIFEST_FILENAME]
         )
+        # The intake records only the repository, so its account is the publisher named.
+        card = (out_dir / MODEL_CARD_FILENAME).read_text(encoding="utf-8").splitlines()
+        assert (
+            f"This is an unofficial conversion of {REPO} for Karume."
+            " It is not affiliated with or endorsed by fixture-org."
+        ) in card

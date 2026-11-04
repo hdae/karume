@@ -18,12 +18,14 @@ from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     model_sections,
     models,
     quants,
@@ -223,10 +225,11 @@ def render_siglip2_model_card(
 ) -> str:
     """SigLIP2 配布形の `README.md` 本文を組み立てる（純関数・末尾改行つき）。"""
     require_pipeline(manifest, SIGLIP2_SUPPORTED_PIPELINE)
+    metadata = _siglip2_metadata(manifest)
     return render(
         (
-            frontmatter(_siglip2_metadata(manifest)),
-            ["", f"# {SIGLIP2_TITLE}", ""],
+            frontmatter(metadata),
+            introduction(SIGLIP2_TITLE, hf_upstreams(metadata.base_model)),
             _siglip2_overview(manifest),
             [""],
             _siglip2_base_weights(manifest),

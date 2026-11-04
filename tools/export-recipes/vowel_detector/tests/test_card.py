@@ -113,3 +113,12 @@ class TestVowelDetectorLengthRange:
 
         assert "from 100 ms to 19.0 s" in card
         assert "from **10 frames** (100 ms)" in card
+
+
+class TestVowelDetectorFirstParty:
+    def test_the_card_carries_no_house_sentence(self) -> None:
+        """Its upstream is our own release (`hdae/vowel-detector`): the house non-endorsement
+        sentence would disclaim ourselves, so this card alone goes without it."""
+        card = render_vowel_detector_model_card(_vowel_detector_manifest(), REPO)
+        assert "unofficial conversion" not in card
+        assert "endorsed" not in card

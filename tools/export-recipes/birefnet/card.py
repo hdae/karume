@@ -23,12 +23,14 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from _shared.upstream import hf_upstreams
 from karume.modelcard import (
     CardMetadata,
     FileRefKey,
     default_model,
     from_pretrained,
     frontmatter,
+    introduction,
     model_sections,
     models,
     quants,
@@ -630,10 +632,11 @@ def render_birefnet_model_card(
     """
     require_pipeline(manifest, BIREFNET_SUPPORTED_PIPELINE)
     entry = _birefnet_entry(checkpoint)
+    metadata = _birefnet_metadata(manifest, entry)
     return render(
         (
-            frontmatter(_birefnet_metadata(manifest, entry)),
-            ["", f"# {entry.title}", ""],
+            frontmatter(metadata),
+            introduction(entry.title, hf_upstreams(metadata.base_model)),
             _birefnet_overview(manifest, entry),
             [""],
             _birefnet_base_weights(manifest, checkpoint),

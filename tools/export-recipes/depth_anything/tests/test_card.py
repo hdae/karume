@@ -132,3 +132,13 @@ class TestDepthAnythingEntryPoint:
         card = render_depth_anything_model_card(_depth_anything_manifest(), REPO)
         assert "fromAssets" not in card
         assert "await Pipeline.fromPretrained" in card
+
+
+class TestDepthAnythingHouseSentence:
+    def test_the_title_is_followed_by_the_house_sentence(self) -> None:
+        lines = render_depth_anything_model_card(_depth_anything_manifest(), REPO).splitlines()
+        title = lines.index("# Depth Anything V2 Small — Karume")
+        assert lines[title + 2] == (
+            "This is an unofficial conversion of depth-anything/Depth-Anything-V2-Small-hf for"
+            " Karume. It is not affiliated with or endorsed by depth-anything."
+        )
