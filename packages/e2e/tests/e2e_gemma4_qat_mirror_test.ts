@@ -109,14 +109,14 @@ const DRAFTER = "drafter";
 const QUANT = "i4";
 /**
  * The seats per model (`gemma4/distribution.py` — `gemma4_qat_q4_0_quants`): the reference seat
- * `i4`, and for E2B / E4B the regular line's parallel and fused seats over the same containers.
+ * `i4`, and for E2B / E4B the parallel and fused seats over the same containers.
  */
 const SEATS: Record<Model, readonly string[]> = {
   e2b: [QUANT, "i4-gemvpar", "i4-fast"],
   e4b: [QUANT, "i4-gemvpar", "i4-fast"],
   "12b": [QUANT],
 };
-/** The session each seat declares (the regular line's — `GEMMA4_QUANTS`). */
+/** The session each seat declares (`GEMMA4_QAT_Q4_0_PARALLEL_QUANTS`). */
 const SEAT_SESSIONS: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
   [QUANT]: {},
   "i4-gemvpar": { linearGemvReduce: "parallel", stateAttentionReduce: "parallel" },

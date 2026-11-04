@@ -17,12 +17,9 @@
 //    torch drafter の golden と **99% 以上**一致する。karume 側の hidden は bf16 の target が出した
 //    もの（golden の hidden は f32 の代理 target）なので、ビット一致は求められない — 一致率の
 //    門である。target の token 列は golden の継続列で teacher forcing する。
-//    NOTE: the golden's proxy target is still the int4-rounded product the regular `i4` seats
-//    shipped (`export_drafter.write_goldens`); the seat this file opens is `bf16` since 2026-11-04,
-//    the drafter's one target. Re-taking the golden against the bf16 target is the recipe's
-//    follow-up (the drafter recipe still pairs with the int4 product); until then ③ is red under
-//    KARUME_UPSTREAM_PARITY=1 — measured 2026-11-04 on the RTX 3080 Ti: 1051 / 1800 = 58.4 % on
-//    `bf16`, 1800 / 1800 on the `i4-fast` seat the golden was taken for. The floor is not moved.
+//    The golden's proxy target is the product series as it stores the weights — the checkpoint's
+//    bf16 values, nothing rounded (`export_drafter.write_goldens`) — so it is the `bf16` seat this
+//    file opens, the drafter's one target.
 // ④ 寿命（実 GPU）… 借り手が生きている間は貸し手 context も貸し手 Session も dispose できず、
 //    順序（借り手 → 貸し手）どおりなら通る
 //

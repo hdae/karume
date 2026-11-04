@@ -1,15 +1,15 @@
-// Real-weight Gemma 4 E2B / E4B of the regular line's original-weights preset `bf16` — the
-// distribution's default since 2026-11-04 — through the distribution mirror (`models/karume-gemma4/`
+// Real-weight Gemma 4 E2B / E4B of the regular line's preset `bf16` — the original weights, the
+// distribution's one preset and default — through the distribution mirror (`models/karume-gemma4/`
 // — `dist.py --pipeline gemma4`).
 //
 // The preset's `model` container stores Google's BF16 checkpoint as it is, the per-layer embeddings
 // included (PLE index schema 5: a bf16 `values` table and no `scales` — ADR 0085 addendum
-// 2026-11-04). E2B's drafter is the regular int8 one: the same container the int4 presets load,
-// borrowing the bf16 target's `model.lm_head.weight` instead. The cases, per model:
+// 2026-11-04). E2B's drafter is the regular int8 one, borrowing the bf16 target's
+// `model.lm_head.weight`. The cases, per model:
 //
-// ① the manifest entry (no GPU): `defaultQuant` is `bf16`; the preset names the bf16 container
-//    (and E2B's int8 drafter) with the reference summation order (`session` {}), beside the int4
-//    presets; its container's PLE index is schema 5 with 2 bytes per value
+// ① the manifest entry (no GPU): `defaultQuant` is `bf16`, the one preset; it names the bf16
+//    container (and E2B's int8 drafter) with the reference summation order (`session` {}), the
+//    `model` role's one storage; its container's PLE index is schema 5 with 2 bytes per value
 // ② greedy parity (real GPU): `fromPretrained` with no `quant` (the default, so it is the bf16
 //    preset that runs), PLE gathered on the host: the greedy chain of each golden case of the bf16
 //    series equals the torch golden token for token — for E2B both without and with speculation.
@@ -70,7 +70,6 @@ type Model = (typeof MODELS)[number];
 const MODEL = "model";
 const DRAFTER = "drafter";
 const PRESET = "bf16";
-const INT4_PRESETS = ["i4", "i4-gemvpar", "i4-fast"] as const;
 /** The bf16 preset's choice of the mirror. */
 const choiceOf = (model: Model) => ({ model, quant: PRESET }) as const;
 
@@ -176,12 +175,12 @@ const bindingLimit = async (): Promise<number> => {
 
 for (const model of MODELS) {
   test.skipIf(!PRESENT[model])(
-    `gemma4 ${model}: bf16 is the default preset, the original weights beside the int4 presets (no GPU)`,
+    `gemma4 ${model}: bf16 is the one preset and the default, the original weights (no GPU)`,
     async () => {
       const entry = entryOf(model);
       assertEquals(entry.defaultQuant, PRESET, "default preset");
-      assertEquals(Object.keys(entry.quants), [...INT4_PRESETS, PRESET], "presets");
-      assertEquals(Object.keys(entry.weights[MODEL]).sort(), [PRESET, "i4"], "model's storages");
+      assertEquals(Object.keys(entry.quants), [PRESET], "presets");
+      assertEquals(Object.keys(entry.weights[MODEL]), [PRESET], "model's storages");
       const preset = entry.quants[PRESET];
       assertEquals(
         preset.weights,
@@ -190,9 +189,6 @@ for (const model of MODELS) {
       );
       assertEquals(preset.session ?? {}, {}, "the reference summation order (session {})");
       assertEquals(preset.label, "Original weights (bf16)", "label");
-      for (const name of INT4_PRESETS) {
-        assertEquals(entry.quants[name].weights[MODEL], "i4", `${name}: the int4 container`);
-      }
 
       const index = await bf16PleOf(model);
       assert(index.storage === "bf16", `PLE storage ${index.storage} (bf16 is needed)`);

@@ -65,9 +65,10 @@ test.skipIf(!available)(
   `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
   async () => {
     const manifest: ContainerManifest = JSON.parse(await readTextFile(manifestUrl));
-    // MUST: quant は名指しする（下の SRQ の期待値は i2 / i4 の格納と group 長に依存する —
-    // manifest の並びの先頭を採ると、quant を足した日に並び順で期待値が割れる）。
-    const head = containerPart0(manifest, "e2b", "model", "i4");
+    // MUST: the storage is named — the expectations below are one container's graph (the SRQ ones
+    // depend on the storage), and taking the manifest's first container would split them by order
+    // the day a storage is added.
+    const head = containerPart0(manifest, "e2b", "model", "bf16");
     if (head.repo !== undefined) {
       throw new Error("Gemma実資産の融合テストは自己完結配布を要求する");
     }

@@ -5,32 +5,8 @@
     "e2b/bf16": {
       "node-nvidia-geforce-rtx-3080-ti": "bbb82c1353e97232f13ec152c4eec8e8e79f40cd4f22607d940d64c3bea9f7c0"
     },
-    "e2b/i4": {
-      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
-      "deno-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
-      "node-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
-    },
-    "e2b/i4-fast": {
-      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
-      "deno-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
-      "node-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
-    },
-    "e2b/i4-gemvpar": {
-      "deno-intel-graphics-bmg-g21": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
-      "deno-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91",
-      "node-nvidia-geforce-rtx-3080-ti": "6b64f5934f60e625efece9d4445de19ee3c62274419d507470cf359102821d91"
-    },
     "e4b/bf16": {
       "node-nvidia-geforce-rtx-3080-ti": "dc7b1f48e0af02f9bab72c2e46186011b3394adf7b057abdc04f2a9aaf8293bf"
-    },
-    "e4b/i4": {
-      "node-nvidia-geforce-rtx-3080-ti": "6fd832b09a9d79e673da1451c43f7231e29b5eb4a78ed1f540b6015809baae03"
-    },
-    "e4b/i4-fast": {
-      "node-nvidia-geforce-rtx-3080-ti": "6fd832b09a9d79e673da1451c43f7231e29b5eb4a78ed1f540b6015809baae03"
-    },
-    "e4b/i4-gemvpar": {
-      "node-nvidia-geforce-rtx-3080-ti": "6fd832b09a9d79e673da1451c43f7231e29b5eb4a78ed1f540b6015809baae03"
     }
   }
 }
