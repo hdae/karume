@@ -1,6 +1,6 @@
 /**
- * The Gemma 4 chat: load regular Gemma 4 (`gemma.Pipeline`) or a mobile QAT model
- * (`gemma4Qat.Pipeline`) on the page's GPU, hold one multi-turn conversation in a
+ * The Gemma 4 chat: load regular Gemma 4 or its q4_0 QAT line (`gemma.Pipeline`), or a mobile QAT
+ * model (`gemma4QatMobile.Pipeline`), on the page's GPU, hold one multi-turn conversation in a
  * `ChatSession` (the KV is carried between turns that close with EOS), stream each reply, and
  * save a record of the chat: settings, per-turn statistics and generated token ids, and the Session
  * diagnostics when the pipeline was loaded with them.
@@ -37,7 +37,7 @@ import { useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { usePipelineSource } from "@/hooks/use-pipeline-source";
 import { useRunTask } from "@/hooks/use-run-task";
-import { mountStatus } from "@/lib/distributions";
+import { type DistributionStatus, mountStatus } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { recordEnvironment } from "@/lib/environment";
 import { manifestPresets } from "@/lib/presets";
@@ -179,24 +179,39 @@ const pipelineText = (state: GemmaPipelineState): string => {
 export const Gemma4Page = () => {
   const index = useDistributionIndex();
   const distributions = index.kind === "ready" ? index.index : undefined;
-  const regularStatus = mountStatus(distributions, "gemma4");
-  const qatStatus = mountStatus(distributions, "gemma4-qat");
-  const regularManifest = useManifest("gemma4", regularStatus);
-  const qatManifest = useManifest("gemma4-qat", qatStatus);
-  const manifestStates: Readonly<Record<GemmaMount, ManifestState>> = {
-    gemma4: regularManifest,
-    "gemma4-qat": qatManifest,
-  };
+  const statuses = useMemo(
+    (): Readonly<Record<GemmaMount, DistributionStatus | undefined>> => ({
+      gemma4: mountStatus(distributions, "gemma4"),
+      "gemma4-qat": mountStatus(distributions, "gemma4-qat"),
+      "gemma4-qat-mobile": mountStatus(distributions, "gemma4-qat-mobile"),
+    }),
+    [distributions],
+  );
+  const regularManifest = useManifest("gemma4", statuses.gemma4);
+  const qatManifest = useManifest("gemma4-qat", statuses["gemma4-qat"]);
+  const mobileManifest = useManifest("gemma4-qat-mobile", statuses["gemma4-qat-mobile"]);
+  const manifestStates = useMemo(
+    (): Readonly<Record<GemmaMount, ManifestState>> => ({
+      gemma4: regularManifest,
+      "gemma4-qat": qatManifest,
+      "gemma4-qat-mobile": mobileManifest,
+    }),
+    [regularManifest, qatManifest, mobileManifest],
+  );
   const manifests = useMemo<GemmaManifests>(() => {
-    const regular = manifestOf(regularManifest);
-    const qat = manifestOf(qatManifest);
-    return {
-      ...(regular === undefined ? {} : { gemma4: regular }),
-      ...(qat === undefined ? {} : { "gemma4-qat": qat }),
-    };
-  }, [regularManifest, qatManifest]);
+    const loaded: GemmaManifests = {};
+    for (const mount of GEMMA_MOUNTS) {
+      const manifest = manifestOf(manifestStates[mount]);
+      if (manifest !== undefined) loaded[mount] = manifest;
+    }
+    return loaded;
+  }, [manifestStates]);
+  const missing = GEMMA_MOUNTS.flatMap((mount) => {
+    const state = manifestStates[mount];
+    return state.kind === "missing" ? [state.directory] : [];
+  });
 
-  // The selection: model (across both mounts), preset, source, MTP drafter, diagnostics. The derived
+  // The selection: model (across the mounts), preset, source, MTP drafter, diagnostics. The derived
   // values are memoized: the page re-renders while a turn runs (the status ticker), and that host
   // work would land inside the decode window the page measures.
   const [chosenModel, setChosenModel] = useState<ModelKey | undefined>(undefined);
@@ -220,9 +235,7 @@ export const Gemma4Page = () => {
         ? chosenQuant
         : presets.defaultQuant;
   const config = useMemo(() => configOf(manifests, modelKey), [manifests, modelKey]);
-  const sourceChoice = usePipelineSource(
-    modelKey?.mount === "gemma4-qat" ? qatStatus : regularStatus,
-  );
+  const sourceChoice = usePipelineSource(statuses[modelKey?.mount ?? "gemma4"]);
   const [speculativeChosen, setSpeculativeChosen] = useState(false);
   const speculativeAvailable =
     selectedManifest !== undefined &&
@@ -599,12 +612,12 @@ export const Gemma4Page = () => {
       return undefined;
     }
     const { request, loadSeconds } = readyChat.pipeline;
-    const manifestState = request.mount === "gemma4" ? regularManifest : qatManifest;
+    const manifestState = manifestStates[request.mount];
     if (manifestState.kind !== "ready") return undefined;
     const preset = manifestPresets(manifestState.manifest, request.model).presets.find(
       ({ name }) => name === request.quant,
     );
-    const status = request.mount === "gemma4" ? regularStatus : qatStatus;
+    const status = statuses[request.mount];
     return buildGemmaRecord({
       environment: recordEnvironment(readyGpu),
       mount: request.mount,
@@ -623,16 +636,7 @@ export const Gemma4Page = () => {
       turns: turnRecords,
       diagnostics: request.diagnostics ? diagnostics : undefined,
     });
-  }, [
-    readyChat,
-    readyGpu,
-    turnRecords,
-    diagnostics,
-    regularManifest,
-    qatManifest,
-    regularStatus,
-    qatStatus,
-  ]);
+  }, [readyChat, readyGpu, turnRecords, diagnostics, manifestStates, statuses]);
 
   const chatSettingsChanged =
     readyChat !== undefined &&
@@ -664,13 +668,18 @@ export const Gemma4Page = () => {
           <ErrorAlert key={mount} title={`Manifest (${mount})`} error={state.error} />
         ) : null;
       })}
-      {regularManifest.kind === "missing" && qatManifest.kind === "missing" ? (
+      {missing.length === GEMMA_MOUNTS.length ? (
         <Alert>
           <AlertTitle>No Gemma 4 distribution</AlertTitle>
           <AlertDescription>
-            The dev server has neither <code>{regularManifest.directory}</code> nor{" "}
-            <code>{qatManifest.directory}</code> (a directory with a <code>karume.json</code>). Put
-            a distribution there and reload.
+            The dev server has none of{" "}
+            {missing.map((directory, at) => (
+              <span key={directory}>
+                {at > 0 ? " / " : ""}
+                <code>{directory}</code>
+              </span>
+            ))}{" "}
+            (a directory with a <code>karume.json</code>). Put a distribution there and reload.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -691,9 +700,11 @@ export const Gemma4Page = () => {
                 id="gemma4-model"
                 label="Model"
                 hint={
-                  modelKey?.mount === "gemma4-qat"
-                    ? "Mobile QAT (gemma4Qat.Pipeline): experimental, fixed int2/int4/int8 with SRQ, no MTP."
-                    : "Regular Gemma 4 (gemma.Pipeline)."
+                  modelKey?.mount === "gemma4-qat-mobile"
+                    ? "Mobile QAT (gemma4QatMobile.Pipeline): experimental, fixed int2/int4/int8 with SRQ, no MTP."
+                    : modelKey?.mount === "gemma4-qat"
+                      ? "q4_0 QAT line (gemma.Pipeline): Google's QAT checkpoints on their own int4 grid, with QAT MTP drafters."
+                      : "Regular Gemma 4 (gemma.Pipeline)."
                 }
               >
                 <ChoiceSelect
@@ -733,7 +744,7 @@ export const Gemma4Page = () => {
               <p className="-mt-2 text-xs text-muted-foreground">
                 {speculativeAvailable
                   ? "Also reads the drafter weights; the session then speculates with the self-tuning gate. It is designed to emit the same tokens as plain decoding."
-                  : "Not available for this model (no drafter weights, or the QAT distribution)."}
+                  : "Not available for this model (no drafter weights, or the mobile QAT distribution)."}
               </p>
               <div className="flex items-center gap-2">
                 <Switch

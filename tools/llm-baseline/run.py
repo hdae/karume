@@ -22,7 +22,7 @@ MANIFEST_FORMAT = "karume/5"
 
 def container_paths(profile: dict) -> list[Path]:
     """Return the container of the one component used for evaluation as the **part sequence** the
-    manifest declares.
+    manifest declares, for the quant the profile names (`data.profiles`).
 
     File names are not guessed (the manifest holds the numbered spelling). The reader's rule checks,
     the parse of the 2 documents and the merge with the binding table are the job of
@@ -36,7 +36,12 @@ def container_paths(profile: dict) -> list[Path]:
             f"a {MANIFEST_FORMAT} distribution is required (read {manifest['format']})"
         )
     model = manifest["models"][profile["model"]]
-    quant = model["defaultQuant"]
+    quant = profile["quant"]
+    if quant not in model["quants"]:
+        raise ValueError(
+            f"{root}: model '{profile['model']}' has no quant '{quant}'"
+            f" (declared: {', '.join(model['quants'])})"
+        )
     dtype = model["quants"][quant]["weights"][MODEL_GRAPH]
     parts = model["weights"][MODEL_GRAPH][dtype]["container"]["parts"]
     if any("repo" in part for part in parts):
@@ -101,6 +106,7 @@ def main() -> None:
             "files": files,
             "model": args.model,
             "weights": args.weights,
+            "quant": profile["quant"] if args.weights == "stored" else None,
             "code": [fingerprint(p) for p in sorted(Path(__file__).parent.glob("*.py"))],
         },
     )

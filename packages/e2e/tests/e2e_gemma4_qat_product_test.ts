@@ -15,10 +15,11 @@
 //
 // ## Assets
 //
-// An implementation-time series check (ADR 0139 decision 6): the q4_0 QAT line has no distribution
-// mirror yet, so the cases run only with KARUME_SERIES=1 on a machine that holds the series and the
-// E2B tokenizer series (`outputs/series/gemma4-e2b-tokenizer` — E2B and E4B share the tokenizer of
-// the regular line), and SKIP explicitly otherwise. `fromAssets` takes every part in RAM (about
+// An implementation-time series check (ADR 0139 decision 6) of the series the distribution
+// `karume-gemma4-qat` is assembled from (its mirror cases, the drafters included, are
+// `e2e_gemma4_qat_mirror_test.ts`): the cases run only with KARUME_SERIES=1 on a machine that holds the series and the
+// model's tokenizer series of the regular line (`outputs/series/gemma4-<model>-tokenizer`), and SKIP
+// explicitly otherwise. `fromAssets` takes every part in RAM (about
 // 2.8 GiB for E2B, 4.4 GiB for E4B), one pipeline at a time.
 
 import { isNotFound, readFile, readTextFileSync, statSync } from "@karume/test-support/fs";
@@ -43,7 +44,9 @@ import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/
 const SERIES = new URL("../../../outputs/series/", import.meta.url);
 /** The representative path of the `model` container in the series layout (parts are numbered). */
 const MODEL_FILE = "model.krm";
-const TOKENIZER = new URL("gemma4-e2b-tokenizer/tokenizer.json", SERIES);
+/** The model's compiled tokenizer (each model has its own — `gemma4.tokenizer`). */
+const tokenizerOf = (model: string): URL =>
+  new URL(`gemma4-${model}-tokenizer/tokenizer.json`, SERIES);
 const REFERENCE_FILE = "reference.json";
 /** The schema of the provenance record (spelling source: `gemma4/provenance.py`). */
 const REFERENCE_SCHEMA = 1;
@@ -152,14 +155,15 @@ for (const model of ["e2b", "e4b"] as const) {
   const series = `gemma4-${model}-qat-product`;
   const root = new URL(`${series}/`, SERIES);
   const representative = new URL(MODEL_FILE, root);
+  const tokenizerFile = tokenizerOf(model);
   const present =
     SERIES_CHECKS &&
     modelPresent(representative) &&
     isFile(new URL(REFERENCE_FILE, root)) &&
-    isFile(TOKENIZER);
+    isFile(tokenizerFile);
   if (SERIES_CHECKS && !present) {
     console.warn(
-      `[karume] ${root.pathname} (or ${TOKENIZER.pathname}) is absent, so the q4_0 QAT ${model}` +
+      `[karume] ${root.pathname} (or ${tokenizerFile.pathname}) is absent, so the q4_0 QAT ${model}` +
         " product cases SKIP (cd tools/export-recipes && uv run python -m gemma4.export_product_qat)",
     );
   }
@@ -183,7 +187,7 @@ for (const model of ["e2b", "e4b"] as const) {
     async () => {
       const opened = await openSeriesContainer(representative);
       const index = await readGemma4PleIndex(`test: ${series}`, gemma4PleAssetSource(opened));
-      assertEquals(index.storage, "i4", "PLE storage");
+      assert(index.storage === "i4", `PLE storage ${index.storage} (i4 is needed)`);
       assertEquals(index.groupSize, PLE_GROUP_SIZE, "PLE groupSize");
       assertEquals(index.tokens, VOCAB, "PLE token rows");
       assertEquals(
@@ -221,7 +225,7 @@ for (const model of ["e2b", "e4b"] as const) {
             {
               config: CONFIG,
               model: await Promise.all(resolveParts(representative).map((part) => readFile(part))),
-              tokenizer: await readFile(TOKENIZER),
+              tokenizer: await readFile(tokenizerFile),
             },
             { pleResidency: residency },
           );

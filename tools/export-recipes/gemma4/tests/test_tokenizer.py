@@ -67,49 +67,89 @@ class TestOutputPaths:
         assert tokenizer.FIXTURE_PATH.is_file()
 
 
-class TestTwelveB:
-    def test_12b_has_its_own_series_and_fixture(self) -> None:
-        """12B's paths come from the same word as the distribution's own series for it."""
-        assert tokenizer.asset_path("12b").parent.name == gemma4_series_name(
-            "12b", GEMMA4_TOKENIZER_SUFFIX
+class TestPerModelSeries:
+    @pytest.mark.parametrize("model", ["e4b", "12b"])
+    def test_the_model_has_its_own_series_and_fixture(self, model: str) -> None:
+        """The paths come from the same word as the distribution's own series for the model."""
+        assert tokenizer.asset_path(model).parent.name == gemma4_series_name(
+            model, GEMMA4_TOKENIZER_SUFFIX
         )
+        assert tokenizer.fixture_path(model).name == f"gemma4-{model}-parity.json"
+        assert GEMMA4_TOKENIZER_SERIES[model] == model
+
+    def test_e2b_keeps_its_paths(self) -> None:
         assert tokenizer.asset_path("e2b") == tokenizer.ASSET_PATH
         assert tokenizer.fixture_path("e2b") == tokenizer.FIXTURE_PATH
-        assert tokenizer.fixture_path("12b").name == "gemma4-12b-parity.json"
-        assert GEMMA4_TOKENIZER_SERIES["12b"] == "12b"
+        assert GEMMA4_TOKENIZER_SERIES["e2b"] == "e2b"
 
-    def test_the_12b_case_names_are_unique(self) -> None:
+    @pytest.mark.parametrize("model", tokenizer.MODELS)
+    def test_the_case_names_are_unique(self, model: str) -> None:
         names = [
             case.name
-            for case in (*SHARED_ENCODE_CASES, *tokenizer.CASES, *tokenizer.EXTRA_CASES["12b"])
+            for case in (*SHARED_ENCODE_CASES, *tokenizer.CASES, *tokenizer.EXTRA_CASES[model])
         ]
 
         assert sorted(names) == sorted(set(names))
 
-    def test_the_12b_cases_run_into_the_merges_12b_dropped(self) -> None:
-        """Each 12B case splits differently under E2B's merges — rebuilt from 12B's own
-        `tokenizer.json` with the merge list of E2B's compiled asset (everything else in the two
-        files is the same), so the cases measure the difference they are there for."""
+    @pytest.mark.parametrize(
+        ("model", "joined_by"),
+        [("12b", "e2b"), ("12b", "e4b"), ("e4b", "e2b")],
+        ids=["12b-vs-e2b", "12b-vs-e4b", "e4b-vs-e2b"],
+    )
+    def test_the_cases_run_into_the_merges_the_two_tokenizers_disagree_on(
+        self, model: str, joined_by: str
+    ) -> None:
+        """Each case of `model` splits differently under the merges of `joined_by` — rebuilt from
+        `model`'s own `tokenizer.json` with the merge list of `joined_by`'s compiled asset (the
+        vocabulary, added tokens and pipeline of the files are the same), so the cases measure the
+        difference they are there for. A 12B case is a merge 12B dropped (12B splits more); an E4B
+        case is a merge E2B dropped (E4B splits less)."""
         tokenizers = pytest.importorskip("tokenizers")
-        upstream = sources.tokenizer_dir("12b") / "tokenizer.json"
-        if not upstream.is_file() or not tokenizer.ASSET_PATH.is_file():
-            pytest.skip(f"needs {upstream} and {tokenizer.ASSET_PATH}")
+        upstream = sources.tokenizer_dir(model) / "tokenizer.json"
+        other = tokenizer.asset_path(joined_by)
+        if not upstream.is_file() or not other.is_file():
+            pytest.skip(f"needs {upstream} and {other}")
         raw = json.loads(upstream.read_text(encoding="utf-8"))
-        e2b = json.loads(tokenizer.ASSET_PATH.read_text(encoding="utf-8"))
-        vocab = e2b["vocab"]
-        e2b_merges = [
+        compiled = json.loads(other.read_text(encoding="utf-8"))
+        vocab = compiled["vocab"]
+        other_merges = [
             [vocab[int(left)], vocab[int(right)]]
-            for left, right in (line.split(" ") for line in e2b["mergesText"].split("\n"))
+            for left, right in (line.split(" ") for line in compiled["mergesText"].split("\n"))
         ]
-        twelve_b = tokenizers.Tokenizer.from_str(json.dumps(raw))
-        raw["model"]["merges"] = e2b_merges
-        like_e2b = tokenizers.Tokenizer.from_str(json.dumps(raw))
+        own = tokenizers.Tokenizer.from_str(json.dumps(raw))
+        raw["model"]["merges"] = other_merges
+        like_other = tokenizers.Tokenizer.from_str(json.dumps(raw))
 
-        for case in tokenizer.EXTRA_CASES["12b"]:
-            ours = twelve_b.encode(case.text, add_special_tokens=False).ids
-            theirs = like_e2b.encode(case.text, add_special_tokens=False).ids
+        cases = [case for case in tokenizer.EXTRA_CASES[model] if "dropped-merge" in case.name]
+        assert cases, model
+        for case in cases:
+            ours = own.encode(case.text, add_special_tokens=False).ids
+            theirs = like_other.encode(case.text, add_special_tokens=False).ids
             assert ours != theirs, case.name
-            assert len(ours) > len(theirs), case.name
+            if model == "12b":
+                assert len(ours) > len(theirs), case.name
+            else:
+                assert len(ours) < len(theirs), case.name
+
+    def test_e2b_s_case_is_the_renamed_entry(self) -> None:
+        """E2B's fix renamed id 249788 (`gemma4.tokenizer.EXTRA_CASES`): the character no longer
+        maps to it on E2B, but still does on E4B (needs both compiled assets)."""
+        tokenizers = pytest.importorskip("tokenizers")
+        (case,) = tokenizer.EXTRA_CASES["e2b"]
+        upstream = {
+            model: sources.tokenizer_dir(model) / "tokenizer.json" for model in ("e2b", "e4b")
+        }
+        if not all(path.is_file() for path in upstream.values()):
+            pytest.skip(f"needs {' and '.join(map(str, upstream.values()))}")
+        ids = {
+            model: tokenizers.Tokenizer.from_file(str(path))
+            .encode(case.text, add_special_tokens=False)
+            .ids
+            for model, path in upstream.items()
+        }
+
+        assert ids["e4b"] == [249788]
+        assert 249788 not in ids["e2b"]
 
 
 class TestEmitSourcePath:

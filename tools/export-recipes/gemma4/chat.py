@@ -392,8 +392,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     # The models with a fixture of their own (E4B is rendered in E2B's dialect).
     parser.add_argument("--model", choices=tuple(FIXTURE_PATHS), default="e2b")
     model = parser.parse_args(argv).model
-    # The tokenizer source, not the weights' (12B's QAT weights ship E2B's `tokenizer.json` —
-    # `gemma4.sources`).
+    # The tokenizer source, not the weights' (12B's QAT weights ship the `tokenizer.json` from
+    # before Google's glitch-token fixes — `gemma4.sources`).
     checkpoint_dir = sources.tokenizer_dir(model)
     fixture_path = FIXTURE_PATHS[model]
     tokenizer_json = checkpoint_dir / "tokenizer.json"

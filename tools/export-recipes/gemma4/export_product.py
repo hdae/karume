@@ -68,24 +68,22 @@ TS 側の loader の出力と突き合わせて見る。
     uv run --with 'transformers==5.14.1' python -m gemma4.export_product --storage bf16
     uv run --with 'transformers==5.14.1' python -m gemma4.export_product --storage bf16 --model e4b
 
-The same graph, trace, form check and PLE asset; what differs is the storage of the weights:
+The same graph, trace and form check; what differs is the storage of the weights:
 
 1. **The linears and the embedding are bf16** (ADR 0131 — the tied head reads the embedding). The
    checkpoint is BF16, so nothing is rounded: the loader's F32 values are the checkpoint's bits,
    and the writer stores a weight as bf16 only when the round trip is exact (it fails loudly
    otherwise). The form check counts every linear and the embedding as bf16, and no i8 / i4.
-2. **The PLE table stays i8 with one scale per row** (schema 3, {@link PLE_STORAGE}): the PLE
-   readers (`packages/models/src/gemma/ple-index.ts`, `ple.ts`, `ple-gpu.ts`) know `i8` / `i4` /
-   `i2` values with f32 scales and no bf16 values (ADR 0131's open point). The series is therefore
-   the original weights everywhere but the PLE table.
+2. **The PLE table is bf16 too** (index schema 5 — `karume.ple.PLE_FLOAT_INDEX_SCHEMA`, ADR 0085
+   addendum 2026-11-04): the `values` blocks hold the checkpoint's bf16 bits and there is no
+   `scales` table ({@link bf16_ple_tables} fails loudly on a value bf16 cannot hold). The series is
+   the original weights everywhere.
 3. **Own goldens**: the borrowed goldens of the logits opt-in series are the i4 model's, so the
    series takes its own (the q4_0 QAT series' rule — `gemma4.export_product_qat`): greedy
    continuations of `gemma4.export_decode.GREEDY_CASES` by full re-forward of the stored model,
    `gemma4.export_decode.GREEDY_STEPS` steps (`--steps`) and the margin floor
-   `gemma4.export_decode.MARGIN_FLOOR`, taken before the trace.
-4. **An upstream reference** (measured, not a gate): the same continuations of the model before the
-   PLE tables are rounded — the checkpoint's weights, computed in f32. The summary's `upstream`
-   gives, per case, how many leading steps of the goldens it shares.
+   `gemma4.export_decode.MARGIN_FLOOR`, taken before the trace. Nothing is rounded, so they are the
+   upstream checkpoint's own continuations (computed in f32).
 
     outputs/series/gemma4-<model>-product-bf16/model.krm                  the container + PLE assets
     outputs/series/gemma4-<model>-product-bf16/ple.probe.safetensors      the PLE probe reference
@@ -112,7 +110,6 @@ from _shared.container_read import open_container, read_asset
 from _shared.decode_series import (
     _write_greedy,
     assert_case_room,
-    greedy_continuation,
     positions_for,
 )
 from gemma4 import export as one_shot
@@ -120,6 +117,7 @@ from gemma4 import export_decode as decode
 from gemma4 import ple, provenance
 from gemma4.distribution import (
     GEMMA4_DEFAULT_MODEL,
+    GEMMA4_PRODUCT_BF16_SUFFIX,
     GEMMA4_PRODUCT_SUFFIX,
     GEMMA4_ROLE,
     gemma4_ple_dim,
@@ -131,6 +129,7 @@ from karume.ir import IrGraph
 from karume.ops import ARGMAX_OP, EMBEDDING_OP
 from karume.pipeline import export_module
 from karume.ple import (
+    PLE_FLOAT_INDEX_SCHEMA,
     PLE_GROUPED_INDEX_SCHEMA,
     PLE_INDEX_ASSET,
     PLE_INDEX_SCHEMA,
@@ -139,7 +138,7 @@ from karume.ple import (
     ple_block_ranges,
     ple_row_bytes,
 )
-from karume.quantize import fake_quant_int8, iter_quant_targets, quantize_to_int8
+from karume.quantize import iter_quant_targets, quantize_to_int8
 from karume.shapes import declared_shape
 from karume.states import to_states_form
 
@@ -176,7 +175,8 @@ EXAMPLE_ROWS = 2
 PLE_PROBE_FILE = "ple.probe.safetensors"
 
 #: PLE の格納（`values` の詰め方 — `scales` は常に f32）。
-#: The same in both storages of the series (module docstring, "bf16 storage").
+#: The i4 series' PLE storage; the bf16 series stores its PLE as bf16 (module docstring, "bf16
+#: storage").
 PLE_STORAGE = "i8"
 
 #: The storages of the linears and the embedding (`--storage` — module docstring).
@@ -184,10 +184,6 @@ I4_STORAGE = "i4"
 BF16_STORAGE = "bf16"
 STORAGES = (I4_STORAGE, BF16_STORAGE)
 
-#: The bf16 series' suffix (`outputs/series/gemma4-<model>-product-bf16/`). NOTE: no distribution
-#: reads the series yet; when one does, the word moves next to `GEMMA4_PRODUCT_SUFFIX`
-#: (`gemma4.distribution`), where the writer and the reader share it.
-BF16_PRODUCT_SUFFIX = f"{GEMMA4_PRODUCT_SUFFIX}-bf16"
 
 #: 行の種別（索引の欄名でもある — `karume.ple.PLE_ROLES` の綴り）。
 PLE_VALUES_KEY = "values"
@@ -278,14 +274,14 @@ def load_wrapper(model_dir: Path) -> ProductChunkWrapper:
 # ---- PLE 資産 --------------------------------------------------------------
 
 
-def ple_token_bytes(layers: int, dim: int) -> int:
+def ple_token_bytes(layers: int, dim: int, storage: str = PLE_STORAGE) -> int:
     """1 token ぶんの PLE バイト数（i8 値 `layers × dim` + f32 scale `layers`）。
 
     E2B は 35 × 256 + 35 × 4 = **9,100 バイト/token**。token-major の狙いそのもので、
-    1 token の PLE がこの長さの**連続 1 読み**になる（ADR 0085 決定 1）。
+    1 token の PLE がこの長さの**連続 1 読み**になる（ADR 0085 決定 1）。A bf16 table has no
+    scales: 35 × 256 × 2 = 17,920 bytes per token for E2B.
     """
-    row_bytes = ple_row_bytes(PLE_STORAGE, layers, dim)
-    return row_bytes[PLE_VALUES_KEY] + row_bytes[PLE_SCALES_KEY]
+    return sum(ple_row_bytes(storage, layers, dim).values())
 
 
 def ple_table_rows(tables: Sequence[torch.nn.Module], vocab_size: int) -> int:
@@ -349,6 +345,33 @@ def quantized_ple_tables(
         # 実体を手放す（席は呼び手が `del wrapper.per_layer` で落とす）。
         table.weight.data = torch.empty(0)
     return values, row_scales
+
+
+def bf16_ple_tables(tables: Sequence[torch.nn.Module]) -> list[torch.Tensor]:
+    """The PLE tables as their bf16 bits (`[V, D]` int16 views — the writer's form of bf16, ADR
+    0131 decision 2), each table's f32 released as it is converted.
+
+    MUST: every value round-trips `f32 → bf16 → f32` exactly — the checkpoint is BF16, so the
+    loaded F32 values are bf16 values; one that is not means the loader changed a value, and storing
+    it rounded would make the table no longer the original weights (fail loudly, as the writer does
+    for the bf16 linears).
+    MUST: release one table at a time (the same reason as {@link quantized_ple_tables}: the 35 f32
+    tables are 9.4GB).
+    """
+    values: list[torch.Tensor] = []
+    for index, table in enumerate(tables):
+        weight = table.weight.data
+        rounded = weight.to(torch.bfloat16)
+        if not torch.equal(rounded.to(torch.float32), weight):
+            worst = float((rounded.to(torch.float32) - weight).abs().max())
+            raise AssertionError(
+                f"PLE table {index} is not exact in bf16 (largest change {worst}) — the loaded"
+                " values are not the checkpoint's bf16 values"
+            )
+        values.append(rounded.view(torch.int16))
+        # Release the f32 (the caller drops the slot itself with `del wrapper.per_layer`).
+        table.weight.data = torch.empty(0)
+    return values
 
 
 #: 一時ファイルへ落とすときの 1 回ぶんの行数の目安（バイト）。転置の中間が RAM に載る量なので、
@@ -422,7 +445,7 @@ class PleContainerAssets:
 
 def ple_container_assets(
     values: Sequence[torch.Tensor],
-    row_scales: Sequence[torch.Tensor],
+    row_scales: Sequence[torch.Tensor] | None,
     *,
     tokens: int,
     layers: int,
@@ -442,21 +465,23 @@ def ple_container_assets(
     packed uint8 for `i4` / `i2`) and `row_scales` each layer's scales (`[tokens]`, or
     `[tokens, dim / group_size]` with a group size — the schema-4 index of the q4_0 QAT line,
     {@link gemma4.export_product_qat}). The defaults are this series' i8 with one scale per row.
+    A bf16 `storage` takes `values` as each layer's bf16 bits (`[tokens, dim]` int16 —
+    {@link bf16_ple_tables}) and `row_scales=None`, and builds the schema-5 index (no `scales`).
 
     MUST: 実体は `spill_dir`（作業席）の一時ファイルへ**1 度だけ**落とす（{@link _spill_tables}
     の MUST）— 呼び手はこの呼び出しの直後に `values` / `row_scales` を手放し、export 中に
     i8 の実体を持ち越さない。
     """
     row_bytes = ple_row_bytes(storage, layers, dim, group_size)
-    spills = {key: spill_dir / f".ple.{key}.spill" for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)}
-    readers = {
-        PLE_VALUES_KEY: _spill_tables(
-            values, row_bytes[PLE_VALUES_KEY], tokens, spills[PLE_VALUES_KEY]
-        ),
-        PLE_SCALES_KEY: _spill_tables(
-            row_scales, row_bytes[PLE_SCALES_KEY], tokens, spills[PLE_SCALES_KEY]
-        ),
-    }
+    # The row kinds the storage has (a bf16 table has no scales — `ple_assets` refuses a mismatch).
+    tables = {PLE_VALUES_KEY: values, PLE_SCALES_KEY: row_scales}
+    spills = {key: spill_dir / f".ple.{key}.spill" for key in row_bytes}
+    readers = {}
+    for key, path in spills.items():
+        layered = tables[key]
+        if layered is None:
+            raise ValueError(f"storage '{storage}' has {key} rows, but none were given")
+        readers[key] = _spill_tables(layered, row_bytes[key], tokens, path)
     return PleContainerAssets(
         ple_assets(
             storage=storage,
@@ -465,7 +490,7 @@ def ple_container_assets(
             dim=dim,
             embed_scale=embed_scale,
             read_values=readers[PLE_VALUES_KEY],
-            read_scales=readers[PLE_SCALES_KEY],
+            read_scales=readers.get(PLE_SCALES_KEY),
             group_size=group_size,
             block_bytes=block_bytes,
         ),
@@ -519,7 +544,8 @@ def assert_ple_assets(
     one scale per group of `groupSize` values of a (token, layer) row, in (layer, group) order, and
     goes through the same check: each group's values times its own scale. MUST: `groupSize` is
     present exactly in a schema-4 index — a schema-3 reader would apply a group's scale to the
-    whole row.
+    whole row. A schema-5 index (a bf16 table — the bf16 series) has `values` only: each row's bf16
+    bits widened to f32 times `embed_scale`. MUST: it spells neither `scales` nor `groupSize`.
 
     MUST: `torch.equal`（ビット一致）で見る — scale の対応を 1 層ずらしても、block の範囲を
     1 行ずらしても、形も型も dtype も合ったまま**別 token の有効な行**が出る。
@@ -537,17 +563,23 @@ def assert_ple_assets(
     embed_scale = float(index["embedScale"])
     storage = str(index["storage"])
     schema = index["schema"]
-    if schema == PLE_GROUPED_INDEX_SCHEMA:
+    floating = schema == PLE_FLOAT_INDEX_SCHEMA
+    if floating and "groupSize" not in index and PLE_SCALES_KEY not in index:
+        group_size = None
+    elif schema == PLE_GROUPED_INDEX_SCHEMA:
         group_size = int(index["groupSize"])
     elif schema == PLE_INDEX_SCHEMA and "groupSize" not in index:
         group_size = None
     else:
         raise AssertionError(
             f"PLE index schema {schema!r} with groupSize {index.get('groupSize')!r}"
-            f" (schema {PLE_INDEX_SCHEMA} has none, schema {PLE_GROUPED_INDEX_SCHEMA} needs one)"
+            f" (schema {PLE_INDEX_SCHEMA} has none, schema {PLE_GROUPED_INDEX_SCHEMA} needs one,"
+            f" schema {PLE_FLOAT_INDEX_SCHEMA} has neither it nor scales)"
         )
-    row_bytes = {key: int(index[key]["rowBytes"]) for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)}
     derived = ple_row_bytes(storage, layers, dim, group_size)
+    if floating != (PLE_SCALES_KEY not in derived):
+        raise AssertionError(f"PLE index schema {schema!r} with storage '{storage}'")
+    row_bytes = {key: int(index[key]["rowBytes"]) for key in derived}
     if row_bytes != derived:
         raise AssertionError(
             f"索引の rowBytes {row_bytes} が格納 '{storage}'・layers {layers}・dim {dim}"
@@ -590,15 +622,12 @@ def assert_ple_assets(
             del view, raw
         return picked
 
-    located: list[tuple[int, int, Mapping[str, Any], Mapping[str, Any]]] = []
+    located: list[tuple[int, int, Mapping[str, Any], Mapping[str, Any] | None]] = []
     for position, token in enumerate(probe):
-        blocks = {
-            key: _locate_block(index[key]["blocks"], token)
-            for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)
-        }
+        blocks = {key: _locate_block(index[key]["blocks"], token) for key in derived}
         values_block = blocks[PLE_VALUES_KEY]
-        scales_block = blocks[PLE_SCALES_KEY]
-        if values_block is None or scales_block is None:
+        scales_block = blocks.get(PLE_SCALES_KEY)
+        if values_block is None or (not floating and scales_block is None):
             continue
         located.append((position, token, values_block, scales_block))
     if len(located) != len(probe):
@@ -610,11 +639,21 @@ def assert_ple_assets(
     values = rows_of(
         [(block, token) for _p, token, block, _s in located], row_bytes[PLE_VALUES_KEY]
     )
-    scales = rows_of(
-        [(block, token) for _p, token, _v, block in located], row_bytes[PLE_SCALES_KEY]
+    scales = (
+        {}
+        if floating
+        else rows_of(
+            [(block, token) for _p, token, _v, block in located if block is not None],
+            row_bytes[PLE_SCALES_KEY],
+        )
     )
     for position, token, values_block, scales_block in located:
         packed = values[(str(values_block["asset"]), token)]
+        if scales_block is None:
+            # bf16: the row's bits widened to f32 (exact), then the embed scale.
+            widened = packed.view(torch.bfloat16).to(torch.float32).reshape(layers, dim)
+            rebuilt[0, position] = widened * embed_scale
+            continue
         quantized = (
             _unpack_ple_values(packed, storage)
             .reshape(layers, dim // group, group)
@@ -865,12 +904,6 @@ def export_series_bf16(
     )
 
 
-def is_ple_table(name: str) -> bool:
-    """Whether a module FQN is one of the PLE tables — the bf16 series' only i8 target (the PLE
-    readers have no bf16 storage — module docstring)."""
-    return name.startswith(one_shot.PER_LAYER_PREFIX)
-
-
 def _export_series(
     model_dir: Path,
     out_dir: Path,
@@ -890,10 +923,12 @@ def _export_series(
     実走が「検収門を通れる資産」を残す（据え替えと後片付けの規律は core の原語
     {@link karume.artifacts.staged_publication}）。
     MUST: 流用する golden の検めは席へ入る**前**（落ちるなら数十分の export を始める前に落とす）。
-    MUST: PLE を落とす順序は「参照と各ケースの入力を 35 表経路で組む → i8 へ落とす →
-    `per_layer` を落とす → export」。逆にすると参照側が i8 経路で作られ、ビット一致の門が
-    「同じ向きに間違った 2 つ」を突き合わせる形になる。bf16 の golden も 35 表経路で採るので、
-    i8 へ落とす前に採る。
+    MUST: the PLE order is "build the reference and each case's inputs on the 35-table path → turn
+    the tables into the stored values (i8 + per-row scale for the int4 series, the checkpoint's
+    bf16 values unchanged for the bf16 series — {@link bf16_ple_tables}) → drop `per_layer` →
+    export". The other way round, the reference is built on the stored path, and the bit-identity
+    gate compares two things wrong in the same direction. The bf16 series' goldens are a full
+    re-forward over the 35-table path too, so they are taken before the tables go.
     """
     if storage not in STORAGES:
         raise ValueError(f"storage '{storage}' is not one of {' / '.join(STORAGES)}")
@@ -918,19 +953,11 @@ def _export_series(
         assert steps is not None
         assert_case_room(greedy_cases, steps, limit)
         suppress = unified.suppress_tokens(model_dir, config)
-        # The upstream reference: the checkpoint's weights as loaded (the PLE tables not yet
-        # rounded), computed in f32 — measured against the goldens, not a gate. MUST: taken
-        # before the PLE rounding below (after it, both sides would hold the i8 tables).
-        print("[upstream] greedy continuations of the unrounded model", file=sys.stderr, flush=True)
         view = qat.GreedyView(wrapper, specs, suppress)
-        upstream = {
-            name: greedy_continuation(view, ids, steps, label=f"{name} (upstream)")[0]
-            for name, ids in greedy_cases
-        }
-        # The linears and the embedding keep the checkpoint's bf16 values (the writer stores a
-        # weight as bf16 only when the round trip is exact, else fails — ADR 0131 decision 2), so
-        # nothing but the PLE tables is rounded. MUST: before every reference value (ADR 0006).
-        int8 = fake_quant_int8(wrapper, include=is_ple_table)
+        # Nothing is rounded: the linears and the embedding keep the checkpoint's bf16 values (the
+        # writer stores a weight as bf16 only when the round trip is exact, else fails — ADR 0131
+        # decision 2), and so does the PLE table ({@link bf16_ple_tables}).
+        int8 = None
         int4 = None
         scales: dict[str, torch.Tensor] = {}
         # Every linear but the tied head, plus the embedding (the head reads the same tensor).
@@ -950,8 +977,9 @@ def _export_series(
     # {@link ple_table_rows}）。
     tokens = ple_table_rows(wrapper.per_layer, int(config.vocab_size))
     embed_scale = float(wrapper.per_layer_scale)
+    ple_storage = BF16_STORAGE if bf16 else PLE_STORAGE
     # block の切り目は寸法だけで決まる（実体は要らない）ので、i8 へ落とす前に probe を選べる。
-    ranges = ple_block_ranges(storage=PLE_STORAGE, tokens=tokens, layers=layers, dim=dim)
+    ranges = ple_block_ranges(storage=ple_storage, tokens=tokens, layers=layers, dim=dim)
     probe = ple_probe_tokens(tokens, ranges[PLE_VALUES_KEY])
 
     # PLE をグラフから外す前に、①逆量子化ビット一致の参照 ②各ケースのグラフ入力 を
@@ -972,8 +1000,8 @@ def _export_series(
         # ディレクトリの席は書き手が作る（原語は席を作らない — path しか渡さない）。
         staged.mkdir()
         if bf16:
-            # The goldens of the stored model (the PLE tables rounded, the rest the checkpoint's
-            # values), by full re-forward over the 35-table path — so before the tables go.
+            # The goldens of the stored model (the checkpoint's values throughout), by full
+            # re-forward over the 35-table path — so before the tables go.
             print(
                 f"[goldens] {[name for name, _ in greedy_cases]}, {steps} steps;"
                 f" suppressed ids {list(suppress)}",
@@ -985,8 +1013,13 @@ def _export_series(
             )
             del view
 
-        print("[ple] 35 表 → i8 値 + per-row scale", file=sys.stderr, flush=True)
-        values, row_scales = quantized_ple_tables(wrapper.per_layer, int8.scales)
+        row_scales: list[torch.Tensor] | None
+        if int8 is None:
+            print("[ple] 35 tables → bf16 values", file=sys.stderr, flush=True)
+            values, row_scales = bf16_ple_tables(wrapper.per_layer), None
+        else:
+            print("[ple] 35 表 → i8 値 + per-row scale", file=sys.stderr, flush=True)
+            values, row_scales = quantized_ple_tables(wrapper.per_layer, int8.scales)
         # 実体は上で手放し済み。席そのものを落として、未使用の 35 表を export へ持ち込まない。
         del wrapper.per_layer
 
@@ -998,12 +1031,14 @@ def _export_series(
             dim=dim,
             embed_scale=embed_scale,
             spill_dir=staged,
+            storage=ple_storage,
         )
         assets = ple_assets_built.assets
         # MUST: i8 実体は**ここで**手放す（以降は模型ぶんの RAM だけで export へ入る）— 資産の
         # 読み口は作業席の一時ファイルを指しているので、35 表を生かしておく理由がもう無い。
         values.clear()
-        row_scales.clear()
+        if row_scales is not None:
+            row_scales.clear()
         save_file(
             {
                 PROBE_TOKENS_KEY: torch.tensor(list(probe), dtype=torch.int32).contiguous(),
@@ -1036,11 +1071,11 @@ def _export_series(
         assert_ple_assets(staged / one_shot.MODEL_FILE, index, probe, probe_reference)
         # i8 の initializer は **PLE 35 表を外したぶんだけ減る** — 残るのは主 embedding
         # （tied lm_head と同一実体）1 本。台帳の本数から引くので、外し漏れは本数で落ちる。
-        # bf16: every linear and the embedding are bf16, and nothing is i8 / i4 (the PLE tables,
-        # the only i8 targets, left the graph).
+        # bf16: every linear and the embedding are bf16, and nothing is i8 / i4 (the PLE tables
+        # left the graph).
         storage_expectation = (
             {BF16_STORAGE: bf16_weights, "i8": 0, "i4": 0}
-            if int4 is None
+            if int8 is None or int4 is None
             else {"i8": len(int8.scales) - layers, "i4": len(int4.scales)}
         )
         form = assert_ir_form_product(verified, config, storage_expectation, tokens)
@@ -1094,15 +1129,19 @@ def _export_series(
         ),
         # PLE は容器の中の資産なので、バイト数は索引が名乗る行数 × 1 行から出す
         # （容器の part はグラフの重みと同居するので、ファイルサイズからは切り出せない）。
-        "ple_bytes": tokens * ple_token_bytes(layers, dim),
-        "ple_blocks": {key: len(index[key]["blocks"]) for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)},
+        "ple_bytes": tokens * ple_token_bytes(layers, dim, ple_storage),
+        "ple_blocks": {
+            key: len(index[key]["blocks"])
+            for key in (PLE_VALUES_KEY, PLE_SCALES_KEY)
+            if key in index
+        },
         "ple_probe_tokens": list(probe),
         "ops": sorted(verified.required_ops),
         "symbols": list(verified.symbols),
         "case_lengths": {name: int(ids.shape[1]) for name, ids in cases},
         "quantized": (
-            {BF16_STORAGE: bf16_weights, "i8": int8.describe()}
-            if int4 is None
+            {BF16_STORAGE: bf16_weights}
+            if int8 is None or int4 is None
             else {"i8": int8.describe(), "i4": int4.describe()}
         ),
         "form": form,
@@ -1119,28 +1158,9 @@ def _export_series(
                     name: tokenizer.decode(continuation)
                     for name, continuation in sorted(continuations.items())
                 },
-                # Per case, how many leading steps of the goldens the upstream reference shares
-                # (out of `greedy_steps`), and its own continuation where they part.
-                "upstream": {
-                    name: {
-                        "agreeing_steps": _leading_agreement(upstream[name], continuation),
-                        "continuation": tokenizer.decode(upstream[name]),
-                    }
-                    for name, continuation in sorted(continuations.items())
-                },
             }
         )
     return summary
-
-
-def _leading_agreement(left: Sequence[int], right: Sequence[int]) -> int:
-    """The number of leading positions at which two token sequences agree."""
-    count = 0
-    for a, b in zip(left, right, strict=True):
-        if a != b:
-            break
-        count += 1
-    return count
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -1164,7 +1184,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # `resolve_series_args` (the model defaults of `series_parser`).
     if bf16:
         if args.out is None:
-            args.out = one_shot.series_dir(args.model, BF16_PRODUCT_SUFFIX)
+            args.out = one_shot.series_dir(args.model, GEMMA4_PRODUCT_BF16_SUFFIX)
         if args.steps is None:
             args.steps = decode.GREEDY_STEPS[args.model]
         del args.reference

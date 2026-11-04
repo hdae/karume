@@ -10,13 +10,20 @@
  * 行読み / 常駐 hit）は「どの block の・どの区間が・何回読まれたか」でしか観測できないためで、
  * 同時発行のピーク（`peak.inFlight`）も持つ — 1 read = 1 fd を取る取得元では、上限が効いている
  * ことは回数ではなくピークでしか見えない。
+ *
+ * {@link pleBf16Fixture} builds the schema 5 form (a bf16 `values` table, no `scales`): its values
+ * are chosen to be exact in bf16, so the expected gather ({@link expectedBf16Value}) is the chosen
+ * number times the embed scale — the test never decodes bf16 bits itself.
  */
 
 import type { AssetReader } from "@karume/runtime";
 import {
+  BF16_BYTES,
+  FLOAT_SCHEMA,
   type Gemma4PleAssetSource,
-  type Gemma4PleIndex,
-  type Gemma4PleStorage,
+  type Gemma4PleFloatIndex,
+  type Gemma4PleQuantizedIndex,
+  type Gemma4PleQuantizedStorage,
   GROUPED_SCHEMA,
   packFactor,
   parseGemma4PleIndex,
@@ -27,7 +34,7 @@ import {
 
 /** 合成索引の寸法。 */
 export type PleFixtureSpec = {
-  readonly storage?: Gemma4PleStorage;
+  readonly storage?: Gemma4PleQuantizedStorage;
   readonly tokens: number;
   readonly layers: number;
   readonly dim: number;
@@ -51,10 +58,10 @@ export type BlockRead = {
   readonly length: number;
 };
 
-export type PleFixture = {
+/** What both fixture forms share (the document, the blocks and the recording reader). */
+export type PleFixtureBase = {
   /** 索引の生 JSON（`parseGemma4PleIndex` の門を直接叩くときの元）。 */
   readonly document: Record<string, unknown>;
-  readonly index: Gemma4PleIndex;
   /** block 名 → 実体。 */
   readonly blocks: ReadonlyMap<string, Uint8Array<ArrayBuffer>>;
   /** `createGemma4Ple` / `createGemma4PleResident` の `openBlock`。 */
@@ -64,6 +71,12 @@ export type PleFixture = {
   readonly reads: BlockRead[];
   readonly peak: { inFlight: number };
 };
+
+/** A quantized fixture (schema 3 / 4). */
+export type PleFixture = PleFixtureBase & { readonly index: Gemma4PleQuantizedIndex };
+
+/** A bf16 fixture (schema 5 — {@link pleBf16Fixture}). */
+export type PleBf16Fixture = PleFixtureBase & { readonly index: Gemma4PleFloatIndex };
 
 /** i8 の値は `id * 10 + 層 * 2 + 列`（packed では格納幅で切り詰める）。 */
 export const quantized = (id: number, layer: number, column: number): number =>
@@ -93,7 +106,7 @@ const groupsOf = (spec: PleFixtureSpec): number =>
 
 /** 格納 dtype で切り詰めた後の量子化値（packed は符号付き範囲へ折り返す）。 */
 export const storedValue = (
-  storage: Gemma4PleStorage,
+  storage: Gemma4PleQuantizedStorage,
   id: number,
   layer: number,
   column: number,
@@ -204,6 +217,7 @@ export const pleFixture = (spec: PleFixtureSpec, options: PleFixtureOptions = {}
     },
   };
   const index = parseGemma4PleIndex(document);
+  if (index.storage === "bf16") throw new Error("fixture: a quantized spec parsed as bf16");
   const blocks = new Map<string, Uint8Array<ArrayBuffer>>();
   for (const block of index.values.blocks) {
     blocks.set(block.asset, valuesBlockBytes(spec, block.start, block.stop));
@@ -211,6 +225,14 @@ export const pleFixture = (spec: PleFixtureSpec, options: PleFixtureOptions = {}
   for (const block of index.scales.blocks) {
     blocks.set(block.asset, scalesBlockBytes(spec, block.start, block.stop));
   }
+  return { document, index, ...recordingReader(blocks, options) };
+};
+
+/** The recording reader over a fixture's blocks (every open, every read, the in-flight peak). */
+const recordingReader = (
+  blocks: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
+  options: PleFixtureOptions,
+): Omit<PleFixtureBase, "document"> => {
   const opens: string[] = [];
   const reads: BlockRead[] = [];
   const peak = { inFlight: 0 };
@@ -245,11 +267,84 @@ export const pleFixture = (spec: PleFixtureSpec, options: PleFixtureOptions = {}
       },
     };
   };
-  return { document, index, blocks, openBlock, opens, reads, peak };
+  return { blocks, openBlock, opens, reads, peak };
+};
+
+/** The dimensions of a bf16 fixture (no scales, so no group). */
+export type PleBf16FixtureSpec = Omit<PleFixtureSpec, "storage" | "scaleRows" | "groupSize">;
+
+/**
+ * The value of (token, layer, column) in a bf16 fixture: a signed integer of at most 7 bits times a
+ * power of two that depends on the token and the layer — exact in bf16 (8 significant bits), so the
+ * stored bits are the number itself.
+ *
+ * MUST: depend on the token, the layer and the column (the same reason as {@link scaleOf}: a value
+ * that repeats per token would let a row read from the wrong token or block pass), and cover both
+ * signs and several exponents (a reader that drops the sign or the exponent bits shows).
+ */
+export const bf16ValueOf = (id: number, layer: number, column: number): number =>
+  (((quantized(id, layer, column) * 37) % 255) - 127) * 2 ** ((id % 5) - layer - 1);
+
+/** The gather's expected value of a bf16 fixture (the value times the embed scale, rounded to f32). */
+export const expectedBf16Value = (
+  spec: PleBf16FixtureSpec,
+  id: number,
+  layer: number,
+  column: number,
+): number => Math.fround(bf16ValueOf(id, layer, column) * spec.embedScale);
+
+/** One `values` block of a bf16 fixture: little-endian bf16 bits, token-major. */
+const bf16BlockBytes = (
+  spec: PleBf16FixtureSpec,
+  start: number,
+  stop: number,
+): Uint8Array<ArrayBuffer> => {
+  const rowBytes = spec.layers * spec.dim * BF16_BYTES;
+  const bytes = new Uint8Array(new ArrayBuffer((stop - start) * rowBytes));
+  const view = new DataView(bytes.buffer);
+  const bits = new Uint32Array(1);
+  const value = new Float32Array(bits.buffer);
+  for (let row = 0; row < stop - start; row += 1) {
+    for (let layer = 0; layer < spec.layers; layer += 1) {
+      for (let column = 0; column < spec.dim; column += 1) {
+        value[0] = bf16ValueOf(start + row, layer, column);
+        if ((bits[0] & 0xffff) !== 0) throw new Error("fixture: a value is not exact in bf16");
+        const offset = row * rowBytes + (layer * spec.dim + column) * BF16_BYTES;
+        view.setUint16(offset, bits[0] >>> 16, true);
+      }
+    }
+  }
+  return bytes;
+};
+
+/** The schema 5 fixture: a bf16 `values` table cut into blocks of `valueRows` tokens, no scales. */
+export const pleBf16Fixture = (
+  spec: PleBf16FixtureSpec,
+  options: PleFixtureOptions = {},
+): PleBf16Fixture => {
+  const document: Record<string, unknown> = {
+    schema: FLOAT_SCHEMA,
+    storage: "bf16",
+    tokens: spec.tokens,
+    layers: spec.layers,
+    dim: spec.dim,
+    embedScale: spec.embedScale,
+    values: {
+      rowBytes: spec.layers * spec.dim * BF16_BYTES,
+      blocks: partition(spec.tokens, spec.valueRows ?? spec.tokens, "ple.values"),
+    },
+  };
+  const index = parseGemma4PleIndex(document);
+  if (index.storage !== "bf16") throw new Error("fixture: a bf16 spec parsed as quantized");
+  const blocks = new Map<string, Uint8Array<ArrayBuffer>>();
+  for (const block of index.values.blocks) {
+    blocks.set(block.asset, bf16BlockBytes(spec, block.start, block.stop));
+  }
+  return { document, index, ...recordingReader(blocks, options) };
 };
 
 /** 索引が指す block 1 本ぶんのバイト数（テスト側が予算を組み立てるための口）。 */
-export const blockBytesOf = (index: Gemma4PleIndex, table: "values" | "scales"): number =>
+export const blockBytesOf = (index: Gemma4PleQuantizedIndex, table: "values" | "scales"): number =>
   (index[table].blocks[0].stop - index[table].blocks[0].start) * index[table].rowBytes;
 
 /**
@@ -260,7 +355,7 @@ export const blockBytesOf = (index: Gemma4PleIndex, table: "values" | "scales"):
  * `{role}` / `{length}` を渡すと役割・論理長だけを差し替えた形にする。
  */
 export const pleComponentOf = (
-  fixture: PleFixture,
+  fixture: PleFixtureBase,
   patch: Readonly<
     Record<string, { readonly role?: string; readonly length?: number } | undefined>
   > = {},

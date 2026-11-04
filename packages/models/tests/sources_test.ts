@@ -26,7 +26,6 @@ import * as anima from "../anima.ts";
 import * as irodori from "../irodori.ts";
 import * as sbv2 from "../sbv2.ts";
 import * as gemma from "../gemma.ts";
-import * as gemma4Qat from "../gemma4-qat.ts";
 import * as siglip2 from "../siglip2.ts";
 import * as depthAnything from "../depth-anything.ts";
 import * as birefnet from "../birefnet.ts";
@@ -108,13 +107,6 @@ const FAMILIES: readonly Family[] = [
     load: (ref, options) => gemma.Pipeline.fromPretrained(ref, options),
   },
   {
-    name: "gemma4Qat.SOURCES",
-    sources: gemma4Qat.SOURCES,
-    // First published in 0.15.1; E2B and E4B share one self-contained repository (default E2B).
-    keys: ["gemma4-qat"],
-    load: (ref, options) => gemma4Qat.Pipeline.fromPretrained(ref, options),
-  },
-  {
     name: "siglip2.SOURCES",
     sources: siglip2.SOURCES,
     // base と so400m は寸法だけが違う同じ経路なので 1 リポに同居する（既定 = base）。
@@ -172,7 +164,7 @@ for (const { name, sources, keys } of FAMILIES) {
 
 // 家族と公開リポの総数も名指しで置く。リポの新設（波 b の birefnet-hr / lucida・0.14.0 の umT5 / Wan2.2）は
 // ここを落とすので、`KARUME_SOURCES` への畳み込み漏れが黙って通らない。
-test("取得元対応表を持つのは 11 家族・公開リポは 14 本", () => {
+test("10 families have a source table, with 13 published repositories", () => {
   assertEquals(
     FAMILIES.map(({ name }) => name),
     [
@@ -180,7 +172,6 @@ test("取得元対応表を持つのは 11 家族・公開リポは 14 本", () 
       "irodori.SOURCES",
       "sbv2.SOURCES",
       "gemma.SOURCES",
-      "gemma4Qat.SOURCES",
       "siglip2.SOURCES",
       "depthAnything.SOURCES",
       "birefnet.SOURCES",
@@ -189,7 +180,7 @@ test("取得元対応表を持つのは 11 家族・公開リポは 14 本", () 
       "moss.SOURCES",
     ],
   );
-  assertEquals(Object.keys(KARUME_SOURCES).length, 14);
+  assertEquals(Object.keys(KARUME_SOURCES).length, 13);
 });
 
 for (const { name, sources } of FAMILIES) {

@@ -1,6 +1,6 @@
 /**
  * `@karume/models` — the barrel of the pipelines. Offered alongside the per-family subpaths
- * (`./anima` / `./birefnet` / `./depth-anything` / `./gemma` / `./gemma4-qat` / `./irodori` /
+ * (`./anima` / `./birefnet` / `./depth-anything` / `./gemma` / `./gemma4-qat-mobile` / `./irodori` /
  * `./sbv2` / `./siglip2` / `./umt5` / `./vowel-detector` / `./wan` / `./moss`) (ADR 0037).
  *
  * Two kinds of export:
@@ -8,7 +8,7 @@
  * - **The shared surface, flat** — what belongs to no single family: the option types shared by
  *   every `fromPretrained`, {@link ModelInputError}, {@link KARUME_SOURCES} and the PNG / WAV /
  *   image helpers.
- * - **One namespace per family** (`anima`, `birefnet`, `depthAnything`, `gemma`, `gemma4Qat`,
+ * - **One namespace per family** (`anima`, `birefnet`, `depthAnything`, `gemma`, `gemma4QatMobile`,
  *   `irodori`, `sbv2`, `siglip2`, `umt5`, `vowelDetector`, `wan`, `moss` — the subpath key in
  *   camelCase).
  *   Each namespace **is** that subpath's module (`export * as`), so the barrel and the subpaths
@@ -111,11 +111,11 @@ export * as depthAnything from "./depth-anything.ts";
 export * as gemma from "./gemma.ts";
 
 /**
- * Gemma 4 QAT — E2B / E4B of the fixed mobile QAT (experimental; shares Gemma's conversation API).
- * This namespace is the module of the subpath `@karume/models/gemma4-qat`; its members and their
- * docs are on that page: https://jsr.io/@karume/models/doc/gemma4-qat
+ * Gemma 4 mobile QAT — E2B / E4B of the fixed mobile QAT (experimental; shares Gemma's conversation
+ * API). This namespace is the module of the subpath `@karume/models/gemma4-qat-mobile`; its members
+ * and their docs are on that page: https://jsr.io/@karume/models/doc/gemma4-qat-mobile
  */
-export * as gemma4Qat from "./gemma4-qat.ts";
+export * as gemma4QatMobile from "./gemma4-qat-mobile.ts";
 
 /**
  * Irodori — text → speech. This namespace is the module of the subpath `@karume/models/irodori`;

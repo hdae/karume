@@ -8,7 +8,7 @@ import type { SamplerSpec } from "@karume/models/gemma";
 
 import type { RecordEnvironment } from "@/lib/environment";
 import type { SourceRecord } from "@/lib/record";
-import type { GemmaMount } from "@/models/gemma4/settings";
+import { entryPointOf, type GemmaEntryPoint, type GemmaMount } from "@/models/gemma4/settings";
 
 import {
   type ArmPipelineOptions,
@@ -21,8 +21,14 @@ import {
 import type { ChatRecord, RunArm, VisitRecord } from "./run";
 import { type ArmPromptSummary, summarizeRuns } from "./summary";
 
-/** The version of the saved record; bump it when a field changes meaning or goes away. */
-export const RECORD_FORMAT = "karume-playground-gemma4-bench/1";
+/**
+ * The version of the saved record; bump it when a field changes meaning or goes away.
+ *
+ * Version 2: an arm's and a distribution's mount `gemma4-qat` names the q4_0 QAT line (read by
+ * `gemma.Pipeline`); the mobile QAT line, which version 1 recorded as `gemma4-qat`, is
+ * `gemma4-qat-mobile` (pipeline `gemma4QatMobile.Pipeline`).
+ */
+export const RECORD_FORMAT = "karume-playground-gemma4-bench/2";
 
 /** Trademark marks dropped from the key's base (`Intel(R) Graphics` → `intel graphics`). */
 const TRADEMARKS = ["(r)", "(tm)", "(c)"] as const;
@@ -55,7 +61,7 @@ export type ArmRecord = {
   /** sha256 of the mount's `karume.json`. */
   readonly manifestSha256: string;
   readonly source: SourceRecord;
-  readonly pipeline: "gemma.Pipeline" | "gemma4Qat.Pipeline";
+  readonly pipeline: GemmaEntryPoint;
   readonly model: string;
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   readonly tap: boolean;
@@ -148,7 +154,7 @@ export const buildBenchRecord = (input: {
         directory: distribution.directory,
         manifestSha256: distribution.manifestSha256,
         source,
-        pipeline: arm.mount === "gemma4" ? "gemma.Pipeline" : "gemma4Qat.Pipeline",
+        pipeline: entryPointOf(arm.mount),
         model: arm.model,
         preset: { quant: arm.quant, label: arm.quantLabel, isDefault: arm.isDefaultQuant },
         tap: arm.tap,

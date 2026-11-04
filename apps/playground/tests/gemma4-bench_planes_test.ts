@@ -42,7 +42,7 @@ const manifest = {
 
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
   id: 0,
-  key: { mount: "gemma4-qat", model: "e2b" },
+  key: { mount: "gemma4-qat-mobile", model: "e2b" },
   tap: true,
   ...patch,
 });
@@ -52,7 +52,7 @@ describe("the byte-plane GEMV switch", () => {
     it("passes linearGemvPlanes alone, whatever the preset declares", () => {
       for (const quant of ["i4-fast", "i4"]) {
         const arm = resolveArm(draft({ quant, linearGemvPlanes: true }), {
-          "gemma4-qat": manifest,
+          "gemma4-qat-mobile": manifest,
         });
         expect(arm.ok && arm.arm.session).toEqual({ linearGemvPlanes: true });
       }
@@ -60,7 +60,7 @@ describe("the byte-plane GEMV switch", () => {
 
     it("passes it next to what the integer switch passes when both are on", () => {
       const plain = resolveArm(draft({ quant: "i4", integerGemv: true, linearGemvPlanes: true }), {
-        "gemma4-qat": manifest,
+        "gemma4-qat-mobile": manifest,
       });
       expect(plain.ok && plain.arm.session).toEqual({
         integerGemv: true,
@@ -72,15 +72,15 @@ describe("the byte-plane GEMV switch", () => {
 
     it("passes no Session options when both switches are off", () => {
       for (const linearGemvPlanes of [false, undefined]) {
-        const off = resolveArm(draft({ linearGemvPlanes }), { "gemma4-qat": manifest });
+        const off = resolveArm(draft({ linearGemvPlanes }), { "gemma4-qat-mobile": manifest });
         expect(off.ok && off.arm.session).toBeUndefined();
       }
     });
 
     it("is labelled as planes, after the integer mark and before the tap's own", () => {
-      const arm = { mount: "gemma4-qat", model: "e2b", quant: "i4-fast" } as const;
+      const arm = { mount: "gemma4-qat-mobile", model: "e2b", quant: "i4-fast" } as const;
       expect(armLabel({ ...arm, tap: true, session: { linearGemvPlanes: true } })).toBe(
-        "QAT e2b i4-fast (planes)",
+        "mobile QAT e2b i4-fast (planes)",
       );
       expect(
         armLabel({
@@ -88,10 +88,10 @@ describe("the byte-plane GEMV switch", () => {
           tap: false,
           session: { integerGemv: true, linearGemvPlanes: true },
         }),
-      ).toBe("QAT e2b i4-fast (integer) (planes) (tap off)");
+      ).toBe("mobile QAT e2b i4-fast (integer) (planes) (tap off)");
       expect(
         armLabel({ ...arm, tap: true, split: true, session: { linearGemvPlanes: true } }),
-      ).toBe("QAT e2b i4-fast (planes) (split)");
+      ).toBe("mobile QAT e2b i4-fast (planes) (split)");
     });
   });
 
@@ -114,7 +114,7 @@ describe("the byte-plane GEMV switch", () => {
       },
     };
     const armOf = (session?: RunArm["session"]): RunArm => ({
-      mount: "gemma4-qat",
+      mount: "gemma4-qat-mobile",
       model: "e2b",
       quant: "i4-fast",
       quantLabel: "int4 fast",
@@ -131,7 +131,7 @@ describe("the byte-plane GEMV switch", () => {
         complete: true,
         settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
         arms: [armOf(), armOf({ linearGemvPlanes: true })],
-        distributions: { "gemma4-qat": { directory: "qat", manifestSha256: "00" } },
+        distributions: { "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00" } },
         source: { kind: "direct" },
         visits: [],
         chats: [],

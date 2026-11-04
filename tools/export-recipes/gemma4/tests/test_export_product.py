@@ -51,8 +51,8 @@ from karume.container import container_parts
 from karume.convert import PRESERVED_OP_PREFIXES_WITH_ATTENTION
 from karume.pipeline import export_module
 from karume.ple import (
+    PLE_FLOAT_INDEX_SCHEMA,
     PLE_INDEX_ASSET,
-    PLE_INDEX_SCHEMA,
     PleError,
     ple_block_ranges,
     ple_row_bytes,
@@ -96,6 +96,9 @@ class TestPleTokenBytes:
     def test_the_real_model_lands_on_the_recorded_figure(self):
         """実物（35 層 × 256）の 9,100 バイト/token — ADR 0085 の連続 1 読みの長さ。"""
         assert product.ple_token_bytes(35, 256) == 9100
+
+    def test_a_bf16_table_has_two_bytes_per_value_and_no_scales(self):
+        assert product.ple_token_bytes(35, 256, product.BF16_STORAGE) == 35 * 256 * 2
 
 
 class TestPleBlockRanges:
@@ -947,14 +950,13 @@ class TestExportSeries:
 
 # ---- bf16 storage -----------------------------------------------------------
 
-#: The bf16 series' summary: the i4 series' fields, then the own goldens and the upstream reference.
+#: The bf16 series' summary: the i4 series' fields, then the own goldens.
 BF16_SUMMARY_KEYS = [
     *PRODUCT_SUMMARY_KEYS,
     "greedy",
     "greedy_steps",
     "margin_min",
     "continuation",
-    "upstream",
 ]
 
 #: The tiny bf16 series' greedy steps.
@@ -964,8 +966,9 @@ BF16_STEPS = 2
 @pytest.fixture
 def tiny_bf16_series(monkeypatch, tiny_product_series):
     """{@link tiny_product_series} with a bf16 checkpoint (the tiny model and tables rounded to
-    bf16 as the loader returns them — the real checkpoint is BF16), the loaded 2-D weights
-    recorded, generation defaults in the checkpoint directory and the margin floor at 0."""
+    bf16 as the loader returns them — the real checkpoint is BF16), the loaded 2-D weights and PLE
+    tables (`ple.<layer>`) recorded, generation defaults in the checkpoint directory and the margin
+    floor at 0."""
     cases, checkpoint, _reference, seen = tiny_product_series
     load = gx.load_model_and_tables
     weights: dict[str, torch.Tensor] = {}
@@ -980,6 +983,9 @@ def tiny_bf16_series(monkeypatch, tiny_product_series):
                 for name, parameter in model.named_parameters()
                 if parameter.dim() == 2
             }
+        )
+        weights.update(
+            {f"ple.{layer}": table.weight.detach().clone() for layer, table in enumerate(tables)}
         )
         return model, tables
 
@@ -1043,15 +1049,36 @@ class TestExportSeriesBf16:
             )
             assert torch.equal(decoded, weights[source]), key
 
-    def test_the_ple_stays_schema_3_i8_and_reads_back_bit_for_bit(self, tiny_bf16_series, tmp_path):
-        _, checkpoint, _, _ = tiny_bf16_series
+    def test_the_ple_is_schema_5_bf16_and_holds_the_loaded_tables_bit_for_bit(
+        self, tiny_bf16_series, tmp_path
+    ):
+        """Every token row of the stored table (not only the probe) is the loaded tables' bf16 bits,
+        and the probe check passes on the published container."""
+        _, checkpoint, weights, _ = tiny_bf16_series
         out_dir = tmp_path / "series"
 
         product.export_series_bf16(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS)
 
         index = _published_index(out_dir)
-        assert index["schema"] == PLE_INDEX_SCHEMA
-        assert index["storage"] == product.PLE_STORAGE == "i8"
+        assert index["schema"] == PLE_FLOAT_INDEX_SCHEMA == 5
+        assert index["storage"] == product.BF16_STORAGE
+        assert "scales" not in index
+        roles = {
+            role for role, _length in read_asset_declarations(out_dir / gx.MODEL_FILE).values()
+        }
+        assert "ple-scales" not in roles
+        layers, dim = int(index["layers"]), int(index["dim"])
+        stored = torch.cat(
+            [
+                torch.frombuffer(
+                    bytearray(read_asset(out_dir / gx.MODEL_FILE, block["asset"])),
+                    dtype=torch.int16,
+                )
+                for block in index["values"]["blocks"]
+            ]
+        ).view(torch.bfloat16)
+        loaded = torch.stack([weights[f"ple.{layer}"] for layer in range(layers)], dim=1)
+        assert torch.equal(stored.to(torch.float32).reshape(-1, layers, dim), loaded)
         with safe_open(str(out_dir / product.PLE_PROBE_FILE), framework="pt") as handle:
             probe = [int(token) for token in handle.get_tensor(product.PROBE_TOKENS_KEY)]
             expected = handle.get_tensor(product.PROBE_INPUTS_KEY)
@@ -1071,11 +1098,8 @@ class TestExportSeriesBf16:
             f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}" for name, _ in cases
         )
 
-    def test_the_goldens_are_the_stored_model_s_and_upstream_is_measured_against_them(
-        self, tiny_bf16_series, tmp_path
-    ):
-        """Each golden is the greedy continuation its file records, and `upstream` counts the
-        leading steps the unrounded model shares with it (at most every step)."""
+    def test_the_goldens_are_the_stored_model_s(self, tiny_bf16_series, tmp_path):
+        """Each golden is the greedy continuation its file records."""
         cases, checkpoint, _, _ = tiny_bf16_series
         out_dir = tmp_path / "series"
 
@@ -1090,7 +1114,6 @@ class TestExportSeriesBf16:
                 expected = handle.get_tensor(shared.EXPECTED_KEY).tolist()
             assert len(expected) == BF16_STEPS
             assert summary["continuation"][name] == _StubSeriesTokenizer().decode(expected)
-            assert 0 <= summary["upstream"][name]["agreeing_steps"] <= BF16_STEPS
 
     def test_a_knob_of_the_other_storage_fails_before_the_load(self, monkeypatch, capsys):
         monkeypatch.setattr(
@@ -1104,11 +1127,25 @@ class TestExportSeriesBf16:
         assert "--reference" in capsys.readouterr().err
 
 
-class TestLeadingAgreement:
-    def test_it_counts_the_shared_prefix(self):
-        assert product._leading_agreement([1, 2, 3], [1, 2, 4]) == 2
-        assert product._leading_agreement([1, 2], [1, 2]) == 2
-        assert product._leading_agreement([5], [1]) == 0
+class TestBf16PleTables:
+    def test_it_keeps_the_bits_and_releases_each_f32_table(self):
+        source = torch.tensor([[1.5, -0.25], [3.0e-3, 0.0]]).to(torch.bfloat16).to(torch.float32)
+        tables = [torch.nn.Embedding.from_pretrained(source.clone()) for _ in range(2)]
+
+        values = product.bf16_ple_tables(tables)
+
+        assert [value.dtype for value in values] == [torch.int16, torch.int16]
+        assert all(
+            torch.equal(value.view(torch.bfloat16).to(torch.float32), source) for value in values
+        )
+        assert all(table.weight.numel() == 0 for table in tables)
+
+    def test_a_value_bf16_cannot_hold_fails(self):
+        # 1 + 2^-10 needs 10 mantissa bits; bf16 has 7.
+        table = torch.nn.Embedding.from_pretrained(torch.tensor([[1.0 + 2**-10, 1.0]]))
+
+        with pytest.raises(AssertionError, match="PLE table 0 is not exact in bf16"):
+            product.bf16_ple_tables([table])
 
 
 def provenance_file() -> str:

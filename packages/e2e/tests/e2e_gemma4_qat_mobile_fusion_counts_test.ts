@@ -3,7 +3,7 @@
  * only; the shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`).
  * The non-QAT Gemma 4 graphs have their own gate in `e2e_gemma4_fusion_counts_test.ts`.
  *
- * MUST: the asset is `models/karume-gemma4-qat/` (untracked local asset); where it is missing the
+ * MUST: the asset is `models/karume-gemma4-qat-mobile/` (untracked local asset); where it is missing the
  * case SKIPs explicitly with a reason (ADR 0005).
  */
 
@@ -18,7 +18,7 @@ import {
 import { decodeFusionCounts, exists, NONE } from "./helpers/fusion-counts.ts";
 
 // 配布形も先頭part（part 0）をmanifestから引く。旧seriesとQATの両方で発行順を守る。
-const family = "gemma4-qat";
+const family = "gemma4-qat-mobile";
 const root = new URL(`../../../models/karume-${family}/`, import.meta.url);
 const manifestUrl = new URL("karume.json", root);
 const available = await exists(manifestUrl);

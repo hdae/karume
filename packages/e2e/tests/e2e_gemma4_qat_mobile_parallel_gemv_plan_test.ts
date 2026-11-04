@@ -1,6 +1,6 @@
 /**
  * Parallel GEMV keys planned for every linear of the real QAT E4B graph (no GPU). It lives in e2e
- * because it reads the distribution mirror `models/karume-gemma4-qat/`; the asset-free census of the
+ * because it reads the distribution mirror `models/karume-gemma4-qat-mobile/`; the asset-free census of the
  * same kernel is in `packages/runtime/tests/gpu_linear_gemv_parallel_test.ts`.
  */
 import { isNotFound, readTextFile, stat } from "@karume/test-support/fs";
@@ -31,7 +31,7 @@ import {
  * 各 linear が計画上どのキーへ落ちるか（recipe-builder と同じ述語）を固定する。
  * 通常 E4B は配布ミラーがまだ無いので対象外。
  */
-const QAT_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
+const QAT_ROOT = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
 const QAT_MANIFEST = new URL("karume.json", QAT_ROOT);
 
 /** 資産の有無（NotFound 以外は伝播 — マウント異常を SKIP に化かさない）。 */

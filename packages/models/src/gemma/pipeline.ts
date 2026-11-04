@@ -223,10 +223,11 @@ export type PipelineOptions = {
    *
    * NOTE: taken in bytes, not as a count — the block width changes with the asset generation, so
    * "N blocks" would mean different RAM per generation (ADR 0085 addendum 2026-09-02).
-   * NOTE: the budget bounds whole blocks only. On top of it sits a row cache of at most 256
-   * quantized rows (regular E2B 2,329,600 B, QAT E2B 1,182,720 B), kept only while the budget is
-   * above 0, so the host RAM PLE holds is at most the budget plus that headroom (ADR 0085 addendum
-   * 2026-10-27). Tightening the budget increases block re-reads (ADR 0085).
+   * NOTE: the budget bounds whole blocks only. On top of it sits a row cache of at most 256 rows
+   * (256 rows of regular E2B: 4,587,520 B with its default `bf16` preset, 2,329,600 B with its int4
+   * presets, whose PLE is i8; q4_0 QAT E2B 1,433,600 B; mobile QAT E2B 1,182,720 B), kept only while
+   * the budget is above 0, so the host RAM PLE holds is at most the budget plus that headroom (ADR
+   * 0085 addendum 2026-10-27). Tightening the budget increases block re-reads (ADR 0085).
    *
    * MUST: refused (fails loudly) for a model without PLE (gemma-4-12B-it) — there is nothing to
    * budget ({@link assertGemma4PleFreeOptions}).
@@ -235,14 +236,18 @@ export type PipelineOptions = {
   /**
    * Where PLE is placed (default `"host"` = as it is today; ADR 0085 addendum (GPU residency)).
    *
-   * `"gpu"` uploads PLE's quantized bytes to the GPU **once at load** and builds each run's
-   * `per_layer_inputs` with an on-GPU gather (the host dequantization and writeBuffer disappear —
-   * about 0.25 ms/token in decode). Prefill and decode take the same path.
+   * `"gpu"` uploads PLE's stored values (the quantized bytes, or the bf16 values of an
+   * original-weights preset) to the GPU **once at load** and builds each run's `per_layer_inputs`
+   * with an on-GPU gather (the host dequantization and writeBuffer disappear — about 0.25 ms/token in
+   * decode). Prefill and decode take the same path.
    *
    * MUST: it is a single binding, so on a device where the byte size of values does not fit
    * `maxStorageBufferBindingSize` / `maxBufferSize` it **fails loudly** (it does not silently fall
-   * back to the host path). The amount is set by the distribution — QAT E2B (i4) is 1.09 GiB, QAT E4B
-   * (i2) 672 MiB, and regular Gemma 4 E2B (i8) 2.19 GiB.
+   * back to the host path). The amount is set by the distribution and the preset: the regular
+   * Gemma 4 line's default `bf16` preset needs 4.37 GiB (E2B — 4,697,620,480 B) and 5.25 GiB
+   * (E4B — 5,637,144,576 B), more than a 2 GiB binding limit holds, while its int4 presets (i8 PLE)
+   * need 2.19 GiB (E2B) and 2.63 GiB (E4B); the q4_0 QAT line (i4) 1.09 GiB (E2B) and 1.31 GiB
+   * (E4B); the mobile QAT line 1.09 GiB (E2B, i4) and 672 MiB (E4B, i2).
    *
    * MUST: it **cannot be combined** with the host-side row cache
    * ({@link PipelineOptions.maxResidentPleBytes}) (under GPU residency that budget would never
@@ -380,7 +385,8 @@ export type PipelineOptions = {
    * quant's session → sequential. fromAssets has no quant, so it is sequential when unspecified. No
    * automatic selection by model configuration. The runtime's SessionOptions is the source of truth
    * for the meaning and the shapes it applies to. Passed to both target and drafter (ADR 0098).
-   * Especially for QAT, the generated sequence may change.
+   * Especially for the mobile QAT line (its activations are re-quantized), the generated sequence
+   * may change.
    */
   readonly linearGemvReduce?: SessionOptions["linearGemvReduce"];
   /**
@@ -399,8 +405,8 @@ export type PipelineOptions = {
    */
   readonly fuseLinearStaticQuantize?: SessionOptions["fuseLinearStaticQuantize"];
   /**
-   * The optional gelu_tanh→mul→fixed-SRQ fusion (the QAT per-layer-input gate). The runtime setting
-   * of the same name is the source of truth for its meaning and scope (perf-ledger K-48). Resolved
+   * The optional gelu_tanh→mul→fixed-SRQ fusion (the mobile QAT per-layer-input gate). The runtime
+   * setting of the same name is the source of truth for its meaning and scope (perf-ledger K-48). Resolved
    * in the order explicit value → the selected quant's session → the runtime default, and passed to
    * both target and drafter. fromAssets has no quant, so it is the runtime default when unspecified.
    */
@@ -413,20 +419,21 @@ export type PipelineOptions = {
    */
   readonly packedStaticQuantize?: SessionOptions["packedStaticQuantize"];
   /**
-   * Runs the eligible decode linears (i2 and i4 at the measured QAT E2B shapes — ADR 0140) on the
-   * integer GEMV. The runtime setting of the same name is
+   * Runs the eligible decode linears (i2 and i4 at the measured mobile QAT E2B shapes — ADR 0140) on
+   * the integer GEMV. The runtime setting of the same name is
    * the source of truth for its meaning and scope. Rejected unless the effective
    * `packedStaticQuantize` is `true`. Resolved in the order explicit value → the selected quant's
-   * session → the runtime default, and passed to both target and drafter. Only the QAT graphs have
-   * linears at those shapes; fromAssets has no quant, so it is the runtime default when unspecified.
+   * session → the runtime default, and passed to both target and drafter. Only the mobile QAT graphs
+   * have linears at those shapes; fromAssets has no quant, so it is the runtime default when
+   * unspecified.
    */
   readonly integerGemv?: SessionOptions["integerGemv"];
   /**
-   * Runs the eligible i2 linears (the QAT E2B lm_head, at its measured shape) on the byte-plane
-   * GEMV. The runtime setting of the same name is the source of truth for its meaning and scope; it
+   * Runs the eligible i2 linears (the mobile QAT E2B lm_head, at its measured shape) on the
+   * byte-plane GEMV. The runtime setting of the same name is the source of truth for its meaning and scope; it
    * needs no other option. Resolved in the order explicit value → the selected quant's session → the
-   * runtime default, and passed to both target and drafter. Only the QAT graphs have i2 linears at
-   * that shape; fromAssets has no quant, so it is the runtime default when unspecified.
+   * runtime default, and passed to both target and drafter. Only the mobile QAT graphs have i2
+   * linears at that shape; fromAssets has no quant, so it is the runtime default when unspecified.
    */
   readonly linearGemvPlanes?: SessionOptions["linearGemvPlanes"];
   /**
@@ -697,7 +704,7 @@ export type ChatOptions = {
 
 /**
  * The internal state of {@link Pipeline} (not exposed on the public surface — exported only for the
- * QAT subclass in `./qat-pipeline.ts`).
+ * mobile QAT subclass in `./qat-pipeline.ts`).
  */
 export type Gemma4State = {
   /**
@@ -1181,10 +1188,12 @@ export const buildGemma4Program = (
   // The supplier is **the same one** admission looked at (`open` only looks up the opened component).
   const model = open(MODEL);
   if (admission.family === "gemma4-qat") {
-    // The QAT models always carry PLE (`admitGemma4Qat` refuses a graph without the input), so
-    // reaching here without an index is a broken invariant, not a model to run.
+    // The mobile QAT models always carry PLE (`admitGemma4Qat` refuses a graph without the input),
+    // so reaching here without an index is a broken invariant, not a model to run.
     if (plePlan.residency === "none") {
-      throw new Error(`${entry}: internal inconsistency: a QAT model was admitted without PLE`);
+      throw new Error(
+        `${entry}: internal inconsistency: a mobile QAT model was admitted without PLE`,
+      );
     }
     // The model name is the value admission settled, used as is (not re-derived from the layer count).
     assertGemma4QatPle(admission.model, model.graph, plePlan.index);
@@ -1277,7 +1286,7 @@ export const buildGemma4Program = (
  * {@link Pipeline.fromAssets} (bytes already fetched) — the constructor is private so that no
  * half-built state that bypasses the asset checks can be created (ADR 0008).
  *
- * Exported only for the QAT subclass in `./qat-pipeline.ts`; no entry re-exports it.
+ * Exported only for the mobile QAT subclass in `./qat-pipeline.ts`; no entry re-exports it.
  */
 export class GemmaPipeline {
   readonly #state: Gemma4State;
@@ -1306,7 +1315,10 @@ export class GemmaPipeline {
     const entry = gemmaEntryName(family);
     const where = `${entry}.fromPretrained`;
     if (family === "gemma4-qat" && options.speculative !== undefined) {
-      throw new Error(`${where}: MTP is not supported for QAT`);
+      throw new Error(
+        `${where}: MTP is not supported for the mobile QAT line (it ships no drafter; the q4_0` +
+          " QAT line's drafters run through gemma.Pipeline)",
+      );
     }
     if (options.speculative !== undefined) {
       assertSpeculative(where, options.speculative);
@@ -1315,12 +1327,12 @@ export class GemmaPipeline {
     // goes through the same function too, but that is after the GB-scale load).
     resolveGemma4PleResidency(where, options);
     assertGemma4DecodeAheadOptions(where, options);
+    // The mobile QAT family has no source table (its distribution has no published revision —
+    // `@karume/models/gemma4-qat-mobile`), so an omitted ref gets no hint there.
     const source = toManifestSource(
       ref,
       where,
-      family === "gemma4"
-        ? 'SOURCES["gemma4"] (@karume/models/gemma)'
-        : 'SOURCES["gemma4-qat"] (@karume/models/gemma4-qat)',
+      family === "gemma4" ? 'SOURCES["gemma4"] (@karume/models/gemma)' : undefined,
     );
     const hubOptions: FetchAssetsOptions = hubLoadOptions(options);
     const loaded = await loadManifest(source, hubOptions);

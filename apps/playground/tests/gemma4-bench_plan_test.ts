@@ -45,7 +45,7 @@ const manifest = (defaultModel: string, models: readonly string[]): Manifest =>
 
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
   id: 0,
-  key: { mount: "gemma4-qat", model: "e2b" },
+  key: { mount: "gemma4-qat-mobile", model: "e2b" },
   tap: true,
   ...patch,
 });
@@ -68,25 +68,25 @@ describe("the arms", () => {
   describe("by default", () => {
     it("takes each loaded distribution's default model, regular Gemma 4 first, tap on", () => {
       const drafts = defaultArmDrafts({
-        "gemma4-qat": manifest("e2b", ["e2b", "e4b"]),
+        "gemma4-qat-mobile": manifest("e2b", ["e2b", "e4b"]),
         gemma4: manifest("e2b", ["e2b", "e4b"]),
       });
       expect(drafts.map(({ key, tap }) => ({ ...key, tap }))).toEqual([
         { mount: "gemma4", model: "e2b", tap: true },
-        { mount: "gemma4-qat", model: "e2b", tap: true },
+        { mount: "gemma4-qat-mobile", model: "e2b", tap: true },
       ]);
       expect(new Set(drafts.map(({ id }) => id)).size).toBe(2);
     });
 
     it("leaves out a distribution whose manifest is not loaded", () => {
-      expect(defaultArmDrafts({ "gemma4-qat": manifest("e4b", ["e4b"]) })).toEqual([
-        { id: 1, key: { mount: "gemma4-qat", model: "e4b" }, tap: true },
+      expect(defaultArmDrafts({ "gemma4-qat-mobile": manifest("e4b", ["e4b"]) })).toEqual([
+        { id: 2, key: { mount: "gemma4-qat-mobile", model: "e4b" }, tap: true },
       ]);
     });
   });
 
   describe("resolved against the manifests", () => {
-    const manifests = { "gemma4-qat": manifest("e2b", ["e2b", "e4b", "e12b"]) };
+    const manifests = { "gemma4-qat-mobile": manifest("e2b", ["e2b", "e4b", "e12b"]) };
 
     it("preselects the model's default preset", () => {
       const resolved = resolveArm(draft(), manifests);
@@ -118,18 +118,18 @@ describe("the arms", () => {
     });
 
     it("refuses a QAT model the QAT entry point does not accept", () => {
-      expect(resolveArm(draft({ key: { mount: "gemma4-qat", model: "e12b" } }), manifests)).toEqual(
-        { ok: false, error: "gemma4Qat.Pipeline does not accept the model 'e12b'." },
-      );
+      expect(
+        resolveArm(draft({ key: { mount: "gemma4-qat-mobile", model: "e12b" } }), manifests),
+      ).toEqual({ ok: false, error: "gemma4QatMobile.Pipeline does not accept the model 'e12b'." });
     });
 
     it("refuses a model of a manifest that is not loaded, or that it does not have", () => {
       expect(resolveArm(draft({ key: { mount: "gemma4", model: "e2b" } }), manifests).ok).toBe(
         false,
       );
-      expect(resolveArm(draft({ key: { mount: "gemma4-qat", model: "e9b" } }), manifests).ok).toBe(
-        false,
-      );
+      expect(
+        resolveArm(draft({ key: { mount: "gemma4-qat-mobile", model: "e9b" } }), manifests).ok,
+      ).toBe(false);
     });
   });
 
@@ -137,8 +137,8 @@ describe("the arms", () => {
     expect(armLabel({ mount: "gemma4", model: "e2b", quant: "i4-fast", tap: true })).toBe(
       "Gemma 4 e2b i4-fast",
     );
-    expect(armLabel({ mount: "gemma4-qat", model: "e4b", quant: "i4", tap: false })).toBe(
-      "QAT e4b i4 (tap off)",
+    expect(armLabel({ mount: "gemma4-qat-mobile", model: "e4b", quant: "i4", tap: false })).toBe(
+      "mobile QAT e4b i4 (tap off)",
     );
   });
 });

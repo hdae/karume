@@ -38,7 +38,12 @@ from gemma4 import export_drafter_qat as qd
 from gemma4 import export_product_qat as qat
 from gemma4 import export_unified as unified
 from gemma4 import provenance, sources
-from gemma4.distribution import gemma4_series_name
+from gemma4.card import GEMMA4_QAT_DRAFTER_UPSTREAM
+from gemma4.distribution import (
+    GEMMA4_QAT_DRAFTER_SUFFIX,
+    GEMMA4_QAT_PRODUCT_SUFFIX,
+    gemma4_series_name,
+)
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from karume.container import Provenance
 from karume.emit import FixedQuantizedWeight, unpack_int4
@@ -188,13 +193,13 @@ class TestThePins:
         checkpoint) — each drafter with the QAT weights of its own model."""
         assert set(sources.QAT_DRAFTER_PINS) == set(sources.QAT_TARGET_PINS)
         for model, pins in sources.QAT_TARGET_PINS.items():
-            assert pins.weights.repo == sources.QAT_DRAFTER_UPSTREAM[model].removesuffix(
+            assert pins.weights.repo == GEMMA4_QAT_DRAFTER_UPSTREAM[model].removesuffix(
                 "-assistant"
             ), model
 
     def test_the_regular_assistant_is_not_a_qat_drafter(self) -> None:
         """Google's card: a QAT target needs a QAT drafter of the same precision."""
-        assert drafter.ASSISTANT_REPO not in sources.QAT_DRAFTER_UPSTREAM.values()
+        assert drafter.ASSISTANT_REPO not in GEMMA4_QAT_DRAFTER_UPSTREAM.values()
 
     def test_a_model_without_a_qat_drafter_fails_loudly(self) -> None:
         with pytest.raises(ValueError, match="no q4_0 QAT drafter"):
@@ -707,8 +712,8 @@ class TestTheCommandLine:
         assert options["model_dir"] == sources.qat_checkpoint_dir("e4b")
         assert options["tokenizer_dir"] == sources.qat_tokenizer_dir("e4b")
         assert options["drafter_dir"] == sources.qat_drafter_dir("e4b")
-        assert options["out"].name == gemma4_series_name("e4b", qd.QAT_DRAFTER_SUFFIX)
-        assert options["product_dir"].name == gemma4_series_name("e4b", qat.QAT_PRODUCT_SUFFIX)
+        assert options["out"].name == gemma4_series_name("e4b", GEMMA4_QAT_DRAFTER_SUFFIX)
+        assert options["product_dir"].name == gemma4_series_name("e4b", GEMMA4_QAT_PRODUCT_SUFFIX)
         assert options["device"] == "cpu"
         assert "sym_max" not in options
 

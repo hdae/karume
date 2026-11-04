@@ -104,7 +104,7 @@ class TestQatGraph:
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
     def test_models_share_only_the_qat_family(self, model):
-        assert repo_name(model) == "karume-gemma4-qat"
+        assert repo_name(model) == "karume-gemma4-qat-mobile"
         assert series_name(model) == f"gemma4-qat-{model}-product"
         assert checkpoint_name(model).endswith("-qat-mobile-transformers")
 

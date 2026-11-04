@@ -1,5 +1,5 @@
 /**
- * The Gemma 4 chat record (`format: "karume-playground-gemma4/2"`): the environment, the
+ * The Gemma 4 chat record (`format: "karume-playground-gemma4/3"`): the environment, the
  * distribution and source, the loaded model and preset, the chat settings, every turn with its
  * request, stop, statistics and generated token ids, and the Session diagnostics when the pipeline was
  * loaded with them. Pure (the
@@ -16,11 +16,17 @@ import type {
 import type { RecordEnvironment } from "@/lib/environment";
 import type { ComponentRecord, SourceRecord } from "@/lib/record";
 
-import type { ChatSettings, GemmaMount } from "./settings";
+import { type ChatSettings, entryPointOf, type GemmaEntryPoint, type GemmaMount } from "./settings";
 import type { TurnTiming } from "./turns";
 
-/** The version of the saved record; bump it when a field changes meaning or goes away. */
-export const RECORD_FORMAT = "karume-playground-gemma4/2";
+/**
+ * The version of the saved record; bump it when a field changes meaning or goes away.
+ *
+ * Version 3: `distribution.mount` `gemma4-qat` names the q4_0 QAT line (read by `gemma.Pipeline`),
+ * and the mobile QAT line, which version 2 recorded as mount `gemma4-qat` with pipeline
+ * `gemma4Qat.Pipeline`, is mount `gemma4-qat-mobile` with pipeline `gemma4QatMobile.Pipeline`.
+ */
+export const RECORD_FORMAT = "karume-playground-gemma4/3";
 
 /** How a turn stopped (the stop of the turn's stream, flattened for JSON). */
 export type StopRecord = {
@@ -107,8 +113,8 @@ export type GemmaRecord = RecordEnvironment & {
     readonly manifestSha256: string;
   };
   readonly source: SourceRecord;
-  /** The entry point: `Pipeline` (gemma4) or `gemma4Qat.Pipeline` (gemma4-qat). */
-  readonly pipeline: "gemma.Pipeline" | "gemma4Qat.Pipeline";
+  /** The entry point: `Pipeline` (gemma4, gemma4-qat) or `gemma4QatMobile.Pipeline` (gemma4-qat-mobile). */
+  readonly pipeline: GemmaEntryPoint;
   readonly model: string;
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   /** Whether the MTP drafter was built (`speculative` of `fromPretrained`). */
@@ -150,7 +156,7 @@ export const buildGemmaRecord = (input: {
     manifestSha256: input.manifestSha256,
   },
   source: input.source,
-  pipeline: input.mount === "gemma4" ? "gemma.Pipeline" : "gemma4Qat.Pipeline",
+  pipeline: entryPointOf(input.mount),
   model: input.model,
   preset: input.preset,
   speculative: input.speculative,

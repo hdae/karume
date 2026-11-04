@@ -42,10 +42,14 @@ from gemma4 import export as gx
 from gemma4 import export_decode as decode
 from gemma4 import export_drafter as drafter
 from gemma4 import export_drafter_qat as qd
-from gemma4 import export_product_qat as qat
 from gemma4 import export_unified as unified
 from gemma4 import sources
-from gemma4.distribution import GEMMA4_PRODUCT_SUFFIX, gemma4_series_name
+from gemma4.distribution import (
+    GEMMA4_PRODUCT_SUFFIX,
+    GEMMA4_QAT_DRAFTER_SUFFIX,
+    GEMMA4_QAT_PRODUCT_SUFFIX,
+    gemma4_series_name,
+)
 from gemma4.rope import FULL_ATTENTION, SLIDING_ATTENTION
 from gemma4.tests.test_export_drafter_qat import _grid_tensor
 from gemma4.tests.test_export_unified import write_checkpoint
@@ -404,7 +408,7 @@ class TestTheTwelveBDefaults:
     """`--model 12b`: 12B's one pinned line as the target, its product series as the lender."""
 
     def test_the_lender_is_the_qat_product_series_or_12b_s_product_series(self) -> None:
-        assert qd.lender_suffix("e2b") == qd.lender_suffix("e4b") == qat.QAT_PRODUCT_SUFFIX
+        assert qd.lender_suffix("e2b") == qd.lender_suffix("e4b") == GEMMA4_QAT_PRODUCT_SUFFIX
         assert qd.lender_suffix("12b") == GEMMA4_PRODUCT_SUFFIX
         with pytest.raises(ValueError, match="no q4_0 QAT target"):
             qd.lender_suffix("31b")
@@ -415,7 +419,7 @@ class TestTheTwelveBDefaults:
         assert options["model_dir"] == sources.checkpoint_dir("12b")
         assert options["tokenizer_dir"] == sources.tokenizer_dir("12b")
         assert options["drafter_dir"] == sources.qat_drafter_dir("12b")
-        assert options["out"].name == gemma4_series_name("12b", qd.QAT_DRAFTER_SUFFIX)
+        assert options["out"].name == gemma4_series_name("12b", GEMMA4_QAT_DRAFTER_SUFFIX)
         assert options["out"].name == "gemma4-12b-qat-drafter"
         assert options["product_dir"].name == "gemma4-12b-product"
 

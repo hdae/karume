@@ -149,7 +149,8 @@ export type BenchArm = {
 
 export const MOUNT_SHORT_LABELS: Readonly<Record<GemmaMount, string>> = {
   gemma4: "Gemma 4",
-  "gemma4-qat": "QAT",
+  "gemma4-qat": "QAT q4_0",
+  "gemma4-qat-mobile": "mobile QAT",
 };
 
 export const armLabel = (
@@ -190,8 +191,8 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
   if (manifest.models[model] === undefined) {
     return { ok: false, error: `The ${mount} manifest has no model '${model}'.` };
   }
-  if (mount === "gemma4-qat" && !isQatModel(model)) {
-    return { ok: false, error: `gemma4Qat.Pipeline does not accept the model '${model}'.` };
+  if (mount === "gemma4-qat-mobile" && !isQatModel(model)) {
+    return { ok: false, error: `gemma4QatMobile.Pipeline does not accept the model '${model}'.` };
   }
   const { presets, defaultQuant } = manifestPresets(manifest, model);
   const preset =

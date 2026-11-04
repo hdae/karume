@@ -19,7 +19,7 @@ MUST: **数値・ダウンロード量・quant 表・dtype ラベルは 1 つ残
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any
 
@@ -67,6 +67,37 @@ GEMMA4_UPSTREAM: Mapping[str, str] = {
 #: tokenizer, the chat template and the generation defaults (`gemma4.sources.HUB_PINS`).
 GEMMA4_WEIGHTS_UPSTREAM: Mapping[str, str] = {"12b": "google/gemma-4-12B-it-qat-q4_0-unquantized"}
 
+#: Model → Google's q4_0 quantization-aware-trained checkpoint of its `-it` model (README front
+#: matter at the pinned revisions: `license: apache-2.0`, `base_model` the regular `-it` model).
+#: Same architecture and config as the regular checkpoint; every 2-D text weight lies on a q4_0
+#: grid (`gemma4.export_product_qat`). Unlike the regular checkpoints, the KV-shared layers carry
+#: no k / v residues. Read by `gemma4.sources.QAT_PINS` and attributed by the q4_0 QAT line's card
+#: ({@link render_gemma4_qat_q4_0_model_card}).
+GEMMA4_QAT_WEIGHTS_UPSTREAM: Mapping[str, str] = {
+    "e2b": "google/gemma-4-E2B-it-qat-q4_0-unquantized",
+    "e4b": "google/gemma-4-E4B-it-qat-q4_0-unquantized",
+}
+
+#: Model → the weights of its q4_0 QAT line (the line `karume-gemma4-qat` ships): E2B / E4B's
+#: QAT checkpoints ({@link GEMMA4_QAT_WEIGHTS_UPSTREAM}) and 12B's one line, whose weights are
+#: already its QAT checkpoint ({@link GEMMA4_WEIGHTS_UPSTREAM} — `gemma4.sources.QAT_TARGET_PINS`
+#: pairs them the same way).
+GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM: Mapping[str, str] = {
+    **GEMMA4_QAT_WEIGHTS_UPSTREAM,
+    "12b": GEMMA4_WEIGHTS_UPSTREAM["12b"],
+}
+
+#: Model → Google's q4_0 quantization-aware-trained MTP drafter (the "assistant") of its QAT
+#: target ({@link GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM}). Google's model card: with a QAT target, the
+#: assistant "must also be a QAT checkpoint with the same precision" — the regular E2B assistant
+#: ({@link GEMMA4_DRAFTER_UPSTREAM}) does not pair with the QAT line. Read by
+#: `gemma4.sources.QAT_DRAFTER_PINS`; the q4_0 QAT line ships every one of them.
+GEMMA4_QAT_DRAFTER_UPSTREAM: Mapping[str, str] = {
+    "e2b": "google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant",
+    "e4b": "google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant",
+    "12b": "google/gemma-4-12B-it-qat-q4_0-unquantized-assistant",
+}
+
 #: Models whose text decoder carries per-layer embeddings (PLE — container assets the host
 #: gathers). 12B has none (`text_config.hidden_size_per_layer_input` is 0 and its class,
 #: `gemma4_unified`, has no PLE branch). A checkpoint fact the manifest does not carry (the PLE
@@ -74,13 +105,13 @@ GEMMA4_WEIGHTS_UPSTREAM: Mapping[str, str] = {"12b": "google/gemma-4-12B-it-qat-
 #: checks it against the upstream config of every model it assembles, so the two cannot drift.
 GEMMA4_PLE_MODELS: frozenset[str] = frozenset({"e2b", "e4b"})
 
-#: Model → the storage of its embedding table (the tied output head). E2B / E4B round it to int8
-#: per row (a recipe choice); 12B's lies on the QAT checkpoint's 4-bit grid and is imported as is,
-#: packed int4 group 32 like its linears, so its container holds no int8 tensor at all. Another
-#: fact the manifest does not carry; `gemma4.distribution.gemma4_plan` holds every container to
-#: it (the storage gates), so the card cannot state another storage. Key set =
-#: {@link GEMMA4_UPSTREAM} (tests).
-GEMMA4_EMBEDDING_STORAGE: Mapping[str, str] = {"e2b": "i8", "e4b": "i8", "12b": "i4"}
+#: Model → the storage of its embedding table (the tied output head) in the regular line: E2B / E4B
+#: round it to int8 per row (a recipe choice). Another fact the manifest does not carry;
+#: `gemma4.distribution.gemma4_plan` holds every container to it (the storage gates), so the card
+#: cannot state another storage. Key set = the regular line's models
+#: (`gemma4.distribution.GEMMA4_REGULAR_MODELS` — tests); the q4_0 QAT line stores every embedding
+#: as int4 on the checkpoint's grid (`gemma4.distribution.GEMMA4_QAT_Q4_0_STORAGE`).
+GEMMA4_EMBEDDING_STORAGE: Mapping[str, str] = {"e2b": "i8", "e4b": "i8"}
 
 #: Model → what the upstream checkpoint carries besides the text decoder (never read here, never
 #: shipped). E2B / E4B hold vision and audio encoder towers; 12B is encoder-free and projects image
@@ -96,6 +127,9 @@ GEMMA4_FRONT_ENDS: Mapping[str, str] = {
 #: 運んでいるモデル」を manifest のこのキーから引くので、綴りの正本をここに置き、
 #: `gemma4.distribution` が import する（distribution → card の一方向を保つため）。
 GEMMA4_DRAFTER_ROLE = "drafter"
+#: The main model's weights role (the spelling `gemma4.distribution.GEMMA4_ROLE` imports — the card
+#: reads which storages the presets load from it, {@link _gemma4_storage_phrase}).
+GEMMA4_MODEL_ROLE = "model"
 
 #: モデル名 → MTP drafter の上流（ADR 0096 段 2）。帰属表（モデル名 → 上流）とは別の席で
 #: 持つ — `e2b` 1 モデルが 2 つの上流チェックポイントから出来ているため。**この表に無い
@@ -125,11 +159,6 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
                 " — 出所を名乗れないカードは描かない"
             )
         upstream.append(GEMMA4_UPSTREAM[name])
-        # MUST: the weights' own checkpoint too, when it is another repository — the weights are
-        # redistributed from it (`karume.modelcard.CardMetadata`: every redistributed upstream is
-        # listed; the base model stays first, as the QAT checkpoint names it its `base_model`).
-        if name in GEMMA4_WEIGHTS_UPSTREAM:
-            upstream.append(GEMMA4_WEIGHTS_UPSTREAM[name])
     # MUST: drafter の上流も `base_model` に載せる — 再配布しているのは 2 本で、片方を
     # 落とすと「出所を名乗っていない再配布」になる（`GEMMA4_DRAFTER_UPSTREAM` の MUST）。
     # 逆に drafter を運んでいないモデルの drafter は名乗らない（配っていない上流を出所に書かない）。
@@ -137,7 +166,8 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
     return CardMetadata(
         pipeline_tag=GEMMA4_PIPELINE_TAG,
         base_model=tuple(upstream),
-        # 格納形を int4 / int8 へ落とし直しているので `quantized` が事実として当たる。
+        # 格納形を int4 / int8 へ落とし直しているので `quantized` が事実として当たる（the int4
+        # presets; the original-weights preset beside them keeps the bf16 values).
         base_model_relation="quantized",
         license=GEMMA4_LICENSE,
         # NOTE: `license_link` は HF が `license: other` のときに読む席だが、**上流カード自身が
@@ -170,12 +200,17 @@ def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
     return upstream
 
 
-def _gemma4_upstream_spellings(manifest: Mapping[str, Any]) -> str:
+def _gemma4_upstream_spellings(
+    manifest: Mapping[str, Any], upstream: Mapping[str, str] = GEMMA4_UPSTREAM
+) -> str:
     """散文が名乗る上流の綴り — **この配布形が実際に運んでいるモデル**だけを manifest から引く。
+
+    `upstream` is the line's attribution table (the base models for the regular line, the QAT
+    checkpoints for the q4_0 QAT line — {@link GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM}).
 
     MUST: 散文にモデルの綴りを焼かない（{@link GEMMA4_TITLE} の MUST と同じ理由）。
     """
-    return " / ".join(f"`{GEMMA4_UPSTREAM[name]}`" for name in manifest["models"])
+    return " / ".join(f"`{upstream[name]}`" for name in manifest["models"])
 
 
 def _spell_models(names: Iterable[str]) -> str:
@@ -238,12 +273,19 @@ def _gemma4_position_limits(manifest: Mapping[str, Any]) -> str:
     return f"the model's declared position limit ({limits})"
 
 
-def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
+def _gemma4_overview(
+    manifest: Mapping[str, Any],
+    upstream: Mapping[str, str] = GEMMA4_UPSTREAM,
+    extra: Sequence[str] = (),
+) -> list[str]:
+    """The overview; `upstream` names the line's checkpoints ({@link _gemma4_upstream_spellings})
+    and `extra` is the line's own bullets, placed after the tokenizer bullet."""
     config = default_model(manifest)["pipelineConfig"]
     return [
         "## What is this",
         "",
-        f"A chat distribution: the **text decoder** of {_gemma4_upstream_spellings(manifest)},",
+        f"A chat distribution: the **text decoder** of"
+        f" {_gemma4_upstream_spellings(manifest, upstream)},",
         "converted into the WebGPU inference runtime **Karume**'s container format (a `.krm` part",
         "sequence whose first part carries the graph and model descriptors). Runs as-is in the",
         "browser and in Deno — string in, string out.",
@@ -251,6 +293,7 @@ def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
         "- **Tokenizer and chat format ship with the weights.** `chat()` renders the turns,",
         "  encodes them, samples, and decodes incrementally, so callers hand over messages and",
         "  read back text fragments as they are decided.",
+        *extra,
         *_gemma4_ple_bullet(manifest),
         f"- **Context**: the default capacity is {config['capacity']} tokens per conversation, and",
         "  the loader accepts any capacity between the chunk length in use and",
@@ -267,32 +310,43 @@ def _gemma4_overview(manifest: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _gemma4_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
+    """The attribution's opening sentence: how the manifest ships the main model's weights, from
+    the dtypes of its `model` role (`bf16` = the checkpoint's values unchanged, any other storage
+    a quantized form)."""
+    dtypes = {
+        dtype
+        for model in manifest["models"].values()
+        for dtype in model["weights"][GEMMA4_MODEL_ROLE]
+    }
+    unchanged = "bf16" in dtypes
+    quantized = bool(dtypes - {"bf16"})
+    if unchanged and quantized:
+        return [
+            "Converted from the upstream checkpoint, its weights shipped both unchanged (bf16) and",
+            "quantized — the original checkpoint files are not distributed here.",
+        ]
+    form = "unchanged (bf16)" if unchanged else "quantized"
+    return [
+        f"Converted from the upstream checkpoint, its weights shipped {form} — the original",
+        "checkpoint files are not distributed here.",
+    ]
+
+
 def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     """帰属節。使われ方（能力・制限・安全性・評価）は**上流カードへ誘導する**。"""
     lines = [
         "## Base weights and attribution",
         "",
-        "Converted and quantized from the upstream checkpoint — the original weights are not",
-        "distributed here.",
+        *_gemma4_storage_lines(manifest),
         "",
     ]
     for name in manifest["models"]:
         repo = GEMMA4_UPSTREAM[name]
-        weights = GEMMA4_WEIGHTS_UPSTREAM.get(name)
-        if weights is None:
-            lines.append(
-                f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
-                f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
-                f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
-            )
-            continue
         lines.append(
-            f"- **`{name}`**: the weights are [{weights}](https://huggingface.co/{weights}),"
-            " Google's quantization-aware-trained (QAT, Q4_0) checkpoint of the base model"
-            f" [{repo}](https://huggingface.co/{repo}), which is also the source of the tokenizer,"
-            " the chat template and the generation defaults; both are licensed **Apache 2.0**"
-            f" ([license]({GEMMA4_LICENSE_LINK}) / [full text]({GEMMA4_LICENSE_TEXT_LINK}); a"
-            " verbatim copy is in `LICENSE.md`)."
+            f"- **`{name}`**: [{repo}](https://huggingface.co/{repo}), licensed"
+            f" **Apache 2.0** ([license]({GEMMA4_LICENSE_LINK}) /"
+            f" [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
         )
     for drafter in _gemma4_drafter_upstreams(manifest):
         lines.append(
@@ -302,10 +356,11 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             " It is redistributed here with its clustered sparse output head replaced by a dense"
             " projection over the full vocabulary, and it reads the key/value states and embedding"
             " table of the main model rather than carrying its own. Its own weights are quantized"
-            " to int8 throughout, linear layers included, rather than to packed int4."
+            " to int8 throughout, linear layers included, rather than to the packed int4 of the"
+            " main model's int4 presets, whichever preset of the main model it runs with."
         )
     lines += [
-        *_gemma4_changes(manifest),
+        *_GEMMA4_CHANGES,
         "  No retraining and no fine-tuning.",
         "- **What the model can and cannot do** — capabilities, limitations, intended use,",
         "  evaluations and safety guidance — is documented on the upstream model card, and this",
@@ -315,70 +370,25 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-#: The "Changes made here" item of a manifest whose models all carry per-layer embeddings (the
-#: E2B / E4B text, unchanged).
-_ALL_PLE_CHANGES: tuple[str, ...] = (
+#: The "Changes made here" item (the regular line's models all carry per-layer embeddings).
+_GEMMA4_CHANGES: tuple[str, ...] = (
     "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
-    "  decoder was extracted and re-expressed in the Karume container format; linear weights",
-    "  were quantized to packed int4 (group 32) and the embedding tables to int8; the",
+    "  decoder was extracted and re-expressed in the Karume container format; the weights ship",
+    "  in two storages, the checkpoint's bf16 values unchanged and a form whose linear weights",
+    "  were quantized to packed int4 (group 32) and embedding tables to int8; the",
     "  per-layer embeddings were moved out of the graph into container assets that the host",
     "  gathers; the exit was narrowed to the selected rows' logits and hidden states; rotary",
     "  cos/sin arrive as host-generated inputs.",
 )
 
 
-def _gemma4_changes(manifest: Mapping[str, Any]) -> list[str]:
-    """The "Changes made here" item; the per-layer-embedding clause names its models when the
-    manifest mixes PLE and PLE-free models (an all-PLE manifest keeps the text it always had)."""
-    names = list(manifest["models"])
-    carriers = [name for name in names if name in GEMMA4_PLE_MODELS]
-    if carriers == names:
-        return list(_ALL_PLE_CHANGES)
-    ple = (
-        f" the per-layer embeddings of {_spell_models(carriers)} were moved out of the graph into"
-        " container assets that the host gathers;"
-        if carriers
-        else ""
-    )
-    qat = [name for name in names if name in GEMMA4_WEIGHTS_UPSTREAM]
-    grid = (
-        f" — for {_spell_models(qat)}, the QAT checkpoint's own 4-bit grid (its codes and one"
-        " step per group) is stored rather than rounded again —"
-        if qat
-        else ""
-    )
-    return [
-        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
-        "  decoder was extracted and re-expressed in the Karume container format; linear weights",
-        f"  were quantized to packed int4 (group 32){grid} and {_gemma4_embedding_clause(names)};"
-        f"{ple} the",
-        "  exit was narrowed to the selected rows' logits and hidden states; rotary cos/sin arrive",
-        "  as host-generated inputs.",
-    ]
-
-
-def _gemma4_embedding_clause(names: list[str]) -> str:
-    """What happened to the embedding tables, per storage ({@link GEMMA4_EMBEDDING_STORAGE}):
-    "the embedding tables to int8" when every model rounds it to int8, else one clause per
-    storage — 12B's embedding is not rounded to int8 but keeps its grid as packed int4."""
-    int8 = [name for name in names if GEMMA4_EMBEDDING_STORAGE[name] == "i8"]
-    int4 = [name for name in names if GEMMA4_EMBEDDING_STORAGE[name] == "i4"]
-    clauses: list[str] = []
-    if int8:
-        clauses.append(
-            f"the embedding tables{f' of {_spell_models(int8)}' if int4 else ''} to int8"
-        )
-    if int4:
-        clauses.append(
-            f"the embedding table{'s' if len(int4) > 1 else ''} of {_spell_models(int4)}, on"
-            " the same 4-bit grid, to packed int4 (group 32)"
-        )
-    return " and ".join(clauses)
-
-
-def _gemma4_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
+def _gemma4_usage(
+    manifest: Mapping[str, Any], repo: str, extra_options: Sequence[str] = ()
+) -> list[str]:
     """Usage 例。**動く最小形**（`fromPretrained` → `chat`）を 1 本だけ出し、普通に触りそうな
     optional はコメントアウトで併記する（選べる値は manifest から機械導出）。
+
+    `extra_options` is the line's own commented-out option lines, after `model` / `quant`.
 
     NOTE: `fromAssets` は案内しない（2026-08-29 裁定 — 全 family 共通）。
     """
@@ -400,6 +410,7 @@ def _gemma4_usage(manifest: Mapping[str, Any], repo: str) -> list[str]:
             [
                 f'  // model: "{model_name}", // default — available: {model_names}',
                 f'  // quant: "{quant}", // default — available: {quant_names}',
+                *extra_options,
             ],
             disposable="await using",
         ),
@@ -494,6 +505,179 @@ def render_gemma4_model_card(
             models(manifest),
             [""],
             _gemma4_usage(manifest, repo),
+            *model_sections(
+                manifest, (partial(quants, host_assets=host_assets), _gemma4_generation)
+            ),
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# The q4_0 QAT line (`karume-gemma4-qat` — `gemma4.distribution.QAT_Q4_0_PIPELINE`)
+# ---------------------------------------------------------------------------
+
+#: The q4_0 QAT line's title (the regular title's MUST: no model spelling).
+GEMMA4_QAT_Q4_0_TITLE = "Gemma 4 q4_0 QAT Text Decoder — Karume"
+
+
+def _qat_q4_0_weights(name: str) -> str:
+    """The QAT checkpoint model `name`'s weights come from; a model the line does not know fails
+    the render (a card that cannot name its source is not drawn)."""
+    weights = GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM.get(name)
+    if weights is None:
+        raise ValueError(
+            f"model '{name}' has no q4_0 QAT checkpoint in the attribution table"
+            f" (known: {sorted(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM)}) — a card that cannot name its"
+            " source is not drawn"
+        )
+    return weights
+
+
+def _qat_q4_0_drafters(manifest: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """(model, QAT drafter upstream) for every model whose manifest entry carries a drafter, in
+    the manifest's order (the regular card's rule: the manifest says which drafters ship)."""
+    drafters: list[tuple[str, str]] = []
+    for name, model in manifest["models"].items():
+        if GEMMA4_DRAFTER_ROLE not in model["weights"]:
+            continue
+        upstream = GEMMA4_QAT_DRAFTER_UPSTREAM.get(name)
+        if upstream is None:
+            raise ValueError(
+                f"model '{name}' carries a drafter, but no QAT drafter upstream is listed"
+                f" (known: {sorted(GEMMA4_QAT_DRAFTER_UPSTREAM)}) — a card that cannot name its"
+                " source is not drawn"
+            )
+        drafters.append((name, upstream))
+    return drafters
+
+
+def _qat_q4_0_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
+    """Every redistributed upstream: per model its base model, then its QAT checkpoint (the QAT
+    checkpoint names the base model its `base_model`, so the base model comes first), then the
+    QAT drafters the manifest carries."""
+    upstream: list[str] = []
+    for name in manifest["models"]:
+        weights = _qat_q4_0_weights(name)
+        upstream += [GEMMA4_UPSTREAM[name], weights]
+    upstream += [drafter for _, drafter in _qat_q4_0_drafters(manifest)]
+    return CardMetadata(
+        pipeline_tag=GEMMA4_PIPELINE_TAG,
+        base_model=tuple(upstream),
+        # The stored int4 codes and steps are refitted from the checkpoint's BF16 values of a
+        # quantization-aware-trained model — a quantized form of the base model.
+        base_model_relation="quantized",
+        license=GEMMA4_LICENSE,
+        license_link=GEMMA4_LICENSE_LINK,
+        tags=(GEMMA4_PIPELINE_TAG, "webgpu", "gemma", "llm", "qat"),
+    )
+
+
+def _qat_q4_0_overview_bullets(manifest: Mapping[str, Any]) -> list[str]:
+    """The line's own overview bullets: the stored grid and the drafters (each derived from the
+    manifest's models)."""
+    names = list(manifest["models"])
+    carriers = [name for name in names if name in GEMMA4_PLE_MODELS]
+    stored = [
+        "the linear weights",
+        "the embedding table (also the output head)",
+        *([f"the per-layer embeddings of {_spell_models(carriers)}"] if carriers else []),
+    ]
+    listed = f"{', '.join(stored[:-1])} and {stored[-1]}"
+    lines = [
+        "- **Every weight keeps the checkpoint's own 4-bit grid.**"
+        f" {listed[0].upper()}{listed[1:]} are stored as the q4_0 codes",
+        "  with one step per group of 32 values (packed int4) — not rounded again.",
+    ]
+    drafters = [name for name, _ in _qat_q4_0_drafters(manifest)]
+    if drafters:
+        lines += [
+            f"- **Speculative decoding**: {_spell_models(drafters)} also ship Google's QAT",
+            "  multi-token-prediction drafter, which borrows the main model's key/value states and",
+            "  embedding table; pass `speculative: {}` when loading to use it.",
+        ]
+    return lines
+
+
+def _qat_q4_0_base_weights(manifest: Mapping[str, Any]) -> list[str]:
+    """The attribution section: each model's QAT checkpoint and base model, each drafter, the
+    changes made, and a pointer to the upstream card (the regular card's rule)."""
+    lines = [
+        "## Base weights and attribution",
+        "",
+        "Converted from Google's quantization-aware-trained (QAT, Q4_0) checkpoints — the original",
+        "checkpoints are not distributed here.",
+        "",
+    ]
+    license_links = (
+        f"([license]({GEMMA4_LICENSE_LINK}) / [full text]({GEMMA4_LICENSE_TEXT_LINK}); a verbatim"
+        " copy is in `LICENSE.md`)"
+    )
+    for name in manifest["models"]:
+        weights, base = _qat_q4_0_weights(name), GEMMA4_UPSTREAM[name]
+        lines.append(
+            f"- **`{name}`**: the weights are [{weights}](https://huggingface.co/{weights}),"
+            " Google's QAT (Q4_0) checkpoint of the base model"
+            f" [{base}](https://huggingface.co/{base}), which is also the source of the tokenizer,"
+            " the chat template and the generation defaults; both are licensed **Apache 2.0**"
+            f" {license_links}."
+        )
+    for name, drafter in _qat_q4_0_drafters(manifest):
+        lines.append(
+            f"- **`{name}` drafter**: [{drafter}](https://huggingface.co/{drafter}), the QAT"
+            " multi-token-prediction drafter head, licensed **Apache 2.0** under the same terms."
+            " It reads the key/value states and the embedding table of the main model rather than"
+            " carrying its own, and runs its output head over the full vocabulary (a clustered"
+            " sparse head an assistant checkpoint carries is not used)."
+        )
+    carriers = [name for name in manifest["models"] if name in GEMMA4_PLE_MODELS]
+    ple = (
+        f" the per-layer embeddings of {_spell_models(carriers)} were moved out of the graph into"
+        " container assets that the host gathers, on the same grid;"
+        if carriers
+        else ""
+    )
+    lines += [
+        "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
+        "  decoder was extracted and re-expressed in the Karume container format; the linear",
+        "  weights and the embedding table keep the checkpoint's own 4-bit grid, stored as packed",
+        "  int4 (group 32: its codes and one step per group, refitted from the stored values)",
+        f"  rather than rounded again;{ple} the exit was narrowed to the selected rows' logits and",
+        "  hidden states; rotary cos/sin arrive as host-generated inputs; the drafters' weights",
+        "  keep their own grid the same way.",
+        "  No retraining and no fine-tuning.",
+        "- **What the model can and cannot do** — capabilities, limitations, intended use,",
+        "  evaluations and safety guidance — is documented on the upstream model card, and this",
+        f"  repository does not restate it: read [{GEMMA4_UPSTREAM[manifest['defaultModel']]}]"
+        f"(https://huggingface.co/{GEMMA4_UPSTREAM[manifest['defaultModel']]}) before using it.",
+    ]
+    return lines
+
+
+def render_gemma4_qat_q4_0_model_card(
+    manifest: Mapping[str, Any], repo: str, host_assets: Mapping[FileRefKey, int] = {}
+) -> str:
+    """The q4_0 QAT line's `README.md` (a pure function, trailing newline): the regular card's
+    overview, usage and per-model sections, with the line's own title, attribution and bullets."""
+    require_pipeline(manifest, GEMMA4_SUPPORTED_PIPELINE)
+    drafters = [name for name, _ in _qat_q4_0_drafters(manifest)]
+    speculative = (
+        [f"  // speculative: {{}}, // load the MTP drafter — available for: {' / '.join(drafters)}"]
+        if drafters
+        else []
+    )
+    return render(
+        (
+            frontmatter(_qat_q4_0_metadata(manifest)),
+            ["", f"# {GEMMA4_QAT_Q4_0_TITLE}", ""],
+            _gemma4_overview(
+                manifest, GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM, _qat_q4_0_overview_bullets(manifest)
+            ),
+            [""],
+            _qat_q4_0_base_weights(manifest),
+            [""],
+            models(manifest),
+            [""],
+            _gemma4_usage(manifest, repo, speculative),
             *model_sections(
                 manifest, (partial(quants, host_assets=host_assets), _gemma4_generation)
             ),

@@ -33,9 +33,10 @@ import { createBpeModel } from "../src/text/bpe.ts";
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { Tokenizer } from "../src/gemma/text/tokenizer.ts";
 import { readFileIfPresent } from "./helpers/read-if-present.ts";
-import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
+import { mirrorHasModel, mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
 import {
   GEMMA4_12B_IN_MIRROR,
+  GEMMA4_QAT_MIRROR,
   GEMMA4_12B_TOKENIZER_SERIES,
   readGemma4_12bTokenizer,
 } from "./helpers/gemma-mirror.ts";
@@ -118,8 +119,9 @@ type RealAsset = {
 };
 
 const GEMMA4_ASSET: RealAsset = {
-  // E2B and E4B share this tokenizer (one series, `e2b`); 12B has its own ({@link GEMMA4_12B_ASSET}
-  // — 239 BPE merges fewer). e2b is named so the selection is fixed.
+  // E2B's tokenizer. Every model has its own since Google's glitch-token fixes (E2B drops 267 BPE
+  // merges, E4B 253 — {@link GEMMA4_E4B_ASSET}; 12B 239 — {@link GEMMA4_12B_ASSET}); the
+  // vocabulary is the same. e2b is named so the selection is fixed.
   read: async () =>
     mirrorPresent(GEMMA4_MIRROR)
       ? await readMirrorAsset(GEMMA4_MIRROR, "tokenizer", { model: "e2b" })
@@ -131,17 +133,29 @@ const GEMMA4_ASSET: RealAsset = {
   suffix: "",
 };
 
+const GEMMA4_E4B_ASSET: RealAsset = {
+  read: async () =>
+    mirrorHasModel(GEMMA4_MIRROR, "e4b")
+      ? await readMirrorAsset(GEMMA4_MIRROR, "tokenizer", { model: "e4b" })
+      : undefined,
+  absent:
+    `[karume] the distribution mirror ${GEMMA4_MIRROR.pathname} has no model e4b, so the gemma4 ` +
+    "E4B full-vocabulary tokenizer cases SKIP. Assemble: cd tools/export-recipes && uv run python " +
+    "dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4",
+  suffix: "",
+};
+
 const GEMMA4_12B_ASSET: RealAsset = {
   // The distribution's asset when the mirror carries model 12b; before the mirror is assembled with
   // it, the series is read as an implementation-time check (KARUME_SERIES=1 — ADR 0139 decision 6).
   read: readGemma4_12bTokenizer,
   absent:
-    `[karume] the distribution mirror ${GEMMA4_MIRROR.pathname} has no model 12b` +
+    `[karume] the distribution mirror ${GEMMA4_QAT_MIRROR.pathname} has no model 12b` +
     (SERIES_CHECKS
       ? ` and outputs/series/${GEMMA4_12B_TOKENIZER_SERIES}/tokenizer.json is absent`
       : "") +
     ", so the gemma4 12B full-vocabulary tokenizer cases SKIP. Assemble: cd tools/export-recipes" +
-    " && uv run python dist.py --pipeline gemma4",
+    " && uv run python dist.py --pipeline gemma4-qat",
   suffix: GEMMA4_12B_IN_MIRROR ? "" : SERIES_CHECKS_OPT_IN,
 };
 
@@ -364,6 +378,7 @@ describe("資産 JSON の門: 信用できない外部入力として扱う", ()
 
 for (const { family, fixtureName, real } of [
   { family: "gemma4", fixtureName: "gemma4", real: GEMMA4_ASSET },
+  { family: "gemma4 E4B", fixtureName: "gemma4-e4b", real: GEMMA4_E4B_ASSET },
   { family: "gemma4 12B", fixtureName: "gemma4-12b", real: GEMMA4_12B_ASSET },
   { family: "EmbeddingGemma", fixtureName: "embeddinggemma", real: EMBEDDINGGEMMA_ASSET },
 ]) {
@@ -494,20 +509,26 @@ for (const { family, fixtureName, real } of [
   );
 }
 
-// The reason 12B has its own tokenizer series: its tokenizer.json drops 239 of E2B / E4B's BPE
-// merges, so E2B's asset gives other ids for some inputs. The 12B fixture's `dropped-merge*` cases
-// hit those merges; on E2B's full asset they must tokenize differently, or the cases (and the
-// series split they justify) prove nothing.
+// The reason E4B and 12B have tokenizer series of their own: their tokenizer.json drops other BPE
+// merges than E2B's, so E2B's asset gives other ids for some inputs. The 12B fixture's
+// `dropped-merge*` cases hit merges E2B has and 12B dropped, the E4B fixture's
+// `e2b-dropped-merge*` cases merges E4B has and E2B dropped; on E2B's full asset they must tokenize
+// differently, or the cases (and the series split they justify) prove nothing.
 const e2bFull = await GEMMA4_ASSET.read();
-test.skipIf(e2bFull === undefined)(
-  "gemma4 12B fixture: the dropped-merge cases tokenize differently with the E2B / E4B asset",
-  async () => {
-    const fixture = await readFixture("gemma4-12b");
-    const e2b = new Tokenizer(parseGemmaTokenizerAsset(e2bFull as Uint8Array<ArrayBuffer>));
-    const dropped = fixture.encode.filter((row) => row.name.startsWith("dropped-merge"));
-    assert(dropped.length > 0, "the 12B fixture has no dropped-merge case");
-    for (const testCase of dropped) {
-      assertNotEquals(e2b.encode(testCase.text), testCase.ids, testCase.name);
-    }
-  },
-);
+for (const { model, prefix } of [
+  { model: "12b", prefix: "dropped-merge" },
+  { model: "e4b", prefix: "e2b-dropped-merge" },
+]) {
+  test.skipIf(e2bFull === undefined)(
+    `gemma4 ${model.toUpperCase()} fixture: the ${prefix} cases tokenize differently with the E2B asset`,
+    async () => {
+      const fixture = await readFixture(`gemma4-${model}`);
+      const e2b = new Tokenizer(parseGemmaTokenizerAsset(e2bFull as Uint8Array<ArrayBuffer>));
+      const dropped = fixture.encode.filter((row) => row.name.startsWith(prefix));
+      assert(dropped.length > 0, `the ${model} fixture has no ${prefix} case`);
+      for (const testCase of dropped) {
+        assertNotEquals(e2b.encode(testCase.text), testCase.ids, testCase.name);
+      }
+    },
+  );
+}

@@ -31,7 +31,9 @@
  * the i4 group scale per element, so the same graph applies each group's own step. Dequantization
  * is one f32 multiplication `f32(q) × scale` in `embedding`, and `embed_scale` is applied
  * **afterwards** in a separate node — the same two steps and the same rounding points as the host's
- * `Math.fround(q × scale) × embedScale`.
+ * `Math.fround(q × scale) × embedScale`. A bf16 index (schema 5) binds `values` with the runtime's
+ * `bf16` codec and no scale (ADR 0131 — `embedding` widens each value with `bitcast<f32>`, exact),
+ * so the gather is the host's `f32(bf16) × embedScale` with no new WGSL.
  *
  * ## MUST: single binding (the maintainer's ruling of 2026-09-19, option A)
  *
@@ -64,7 +66,10 @@
  * host RAM peak is "the whole scale table + up to 3 blocks" (the piece being uploaded + 2 read
  * ahead; no copy, so the scale counts once). Estimating with the blocks alone drops the dominant
  * term entirely. The scale table is not subject to the `krm` block limit (32 MiB) — the in-memory
- * container does not compare the length of a synthesized block with the limit.
+ * container does not compare the length of a synthesized block with the limit. A bf16 index has no
+ * scale table, so its peak is the blocks alone — but its `values` are 2 bytes per element (E2B
+ * 4.70 GB, E4B 5.64 GB), which the single-binding rule below refuses on a device whose binding limit
+ * is below that.
  *
  * MUST: **do not hold a reader longer than one read** (the same MUST as `./ple.ts`). The
  * `AssetReader` of an unverified source keeps the block for the reader's lifetime, so holding
@@ -98,7 +103,7 @@ import {
   gemma4PleBlockBytes,
   type Gemma4PleIndex,
   type Gemma4PleTable,
-  packFactor,
+  layerValueBytes,
 } from "./ple-index.ts";
 
 /** Where PLE is placed (the value range of {@link PipelineOptions.pleResidency}). */
@@ -154,8 +159,18 @@ const EXPANDED_OUTPUT = "ple_rows";
 /**
  * Storage dtype → registered name in the codec ledger (how `values` is packed — container-v1 §6.3).
  */
-const pleCodec = (index: Gemma4PleIndex): CodecName =>
-  index.storage === "i2" ? "int2-off" : index.storage === "i4" ? "int4-sym-g" : "int8-sym";
+const pleCodec = (index: Gemma4PleIndex): CodecName => {
+  switch (index.storage) {
+    case "i2":
+      return "int2-off";
+    case "i4":
+      return "int4-sym-g";
+    case "i8":
+      return "int8-sym";
+    case "bf16":
+      return "bf16";
+  }
+};
 
 /**
  * The bytes GPU residency needs (**decided by the index alone** — known before reading any bytes).
@@ -167,7 +182,7 @@ export const gemma4PleGpuBytes = (
   index: Gemma4PleIndex,
 ): { readonly values: number; readonly scales: number; readonly total: number } => {
   const values = index.tokens * index.values.rowBytes;
-  const scales = index.tokens * index.scales.rowBytes;
+  const scales = index.storage === "bf16" ? 0 : index.tokens * index.scales.rowBytes;
   return { values, scales, total: values + scales };
 };
 
@@ -403,7 +418,7 @@ export type Gemma4PleResidentOptions = {
    * chunk length).
    */
   readonly rows: readonly number[];
-  /** The subject of diagnostics (`gemma.Pipeline` / `gemma4Qat.Pipeline`). */
+  /** The subject of diagnostics (`gemma.Pipeline` / `gemma4QatMobile.Pipeline`). */
   readonly entry: string;
   /**
    * Also build the resident-id form ({@link Gemma4PleResident.residentIds} — the decode run-ahead).
@@ -432,8 +447,7 @@ export const buildGemma4PleGatherContainer = async (
   openBlock: (asset: string) => AssetReader,
   entry: string,
 ): Promise<BoundContainer> => {
-  const factor = packFactor(index);
-  const rowBytes = index.dim / factor;
+  const rowBytes = layerValueBytes(index);
   if (!Number.isSafeInteger(rowBytes) || rowBytes % 4 !== 0) {
     throw new Error(
       `${entry}: one PLE layer of ${index.dim} elements (storage ${index.storage}) is` +
@@ -443,26 +457,27 @@ export const buildGemma4PleGatherContainer = async (
   // MUST: only i4 has a group codec (`int4-sym-g`); i8 / i2 are per-channel, so a grouped index of
   // those storages cannot be bound as one weight. Fail before a single block byte is read instead
   // of letting the container merge refuse it after the scale table was collected.
-  if (index.groupSize !== index.dim && index.storage !== "i4") {
+  if (index.storage !== "bf16" && index.groupSize !== index.dim && index.storage !== "i4") {
     throw new Error(
       `${entry}: pleResidency: "gpu" needs storage i4 for a PLE with one scale per ` +
         `${index.groupSize} values (storage ${index.storage} has one scale per row only) — read it` +
         ` with the default pleResidency: "host"`,
     );
   }
-  const bytes = gemma4PleGpuBytes(index);
-  const scale = await readScaleTable(index.scales, openBlock, bytes.scales);
   // Schema 3: i4 has group = row length (meeting ADR 0069 decision 2's "power of two ≥ 16"); i8 / i2
   // are per-channel with groupSize = row length. Either way there is one group, so the scale is
   // exactly the f32 column `[tokens × layers, 1]` (= the order `readScaleTable` laid out). Schema 4
   // (i4): the scale rows are (layer, group) order, so the same bytes are the group scale matrix
-  // `[tokens × layers, dim / groupSize]`.
-  const encoding: MemoryEncoding = {
-    codec: pleCodec(index),
-    rowAxis: 0,
-    groupSize: index.groupSize,
-    scale,
-  };
+  // `[tokens × layers, dim / groupSize]`. Schema 5 (bf16): an unquantized codec, no scale at all.
+  const encoding: MemoryEncoding =
+    index.storage === "bf16"
+      ? { codec: pleCodec(index) }
+      : {
+          codec: pleCodec(index),
+          rowAxis: 0,
+          groupSize: index.groupSize,
+          scale: await readScaleTable(index.scales, openBlock, gemma4PleGpuBytes(index).scales),
+        };
   const table = index.values;
   const readBlock = (block: Gemma4PleBlock) => (): Promise<Uint8Array<ArrayBuffer>> =>
     readBlockRange(openBlock, block, 0, gemma4PleBlockBytes(table, block));
@@ -507,7 +522,7 @@ const assertBindingLimits = (options: Gemma4PleResidentOptions, valuesBytes: num
   ).filter(([, granted]) => granted < valuesBytes);
   if (shortfalls.length === 0) return;
   throw new Error(
-    `${options.entry}: pleResidency: "gpu" puts the PLE's ${valuesBytes} bytes of quantized data` +
+    `${options.entry}: pleResidency: "gpu" puts the PLE's ${valuesBytes} bytes of ${options.index.storage} values` +
       ` in a single binding, but this device has ` +
       shortfalls.map(([key, granted]) => `${key} ${granted}`).join(" / ") +
       ` (short by ${shortfalls

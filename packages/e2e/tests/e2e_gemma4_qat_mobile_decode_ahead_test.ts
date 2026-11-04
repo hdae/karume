@@ -19,22 +19,22 @@
  *
  * ## Assets
  *
- * The QAT distribution mirror `models/karume-gemma4-qat/` (outside git; assemble it with dist.py in
+ * The mobile QAT distribution mirror `models/karume-gemma4-qat-mobile/` (outside git; assemble it with dist.py in
  * tools/export-recipes). Without the mirror or a GPU every case SKIPs explicitly (ADR 0005).
  */
 import { test } from "vite-plus/test";
 import { assert, assertEquals } from "@std/assert";
 import { nodeDirectory } from "@karume/hub/node";
 import { chatPrompt, chatTurn, type ChatStop } from "../../models/gemma.ts";
-import * as gemma4Qat from "../../models/gemma4-qat.ts";
+import * as gemma4QatMobile from "../../models/gemma4-qat-mobile.ts";
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
-const QAT_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
+const QAT_ROOT = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
 const QAT_PRESENT = mirrorAvailable(QAT_ROOT);
 if (!QAT_PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4-qat/ is absent (or not karume/5), so the decode run-ahead " +
+    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/5), so the decode run-ahead " +
       "cases SKIP (assemble it with dist.py in tools/export-recipes)",
   );
 }
@@ -58,7 +58,7 @@ type Observed = {
 
 /** Everything one depth produces (one pipeline load per depth). */
 const observe = async (model: "e2b" | "e4b", depth: number): Promise<Observed> => {
-  const pipeline = await gemma4Qat.Pipeline.fromPretrained(nodeDirectory(QAT_ROOT), {
+  const pipeline = await gemma4QatMobile.Pipeline.fromPretrained(nodeDirectory(QAT_ROOT), {
     model,
     pleResidency: "gpu",
     decodeAhead: depth,

@@ -114,10 +114,10 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/gemma4",
     title: "Gemma 4 chat",
     summary:
-      "A chat with Gemma 4 E2B, or the fixed mobile QAT (E2B / E4B), streaming tokens on the GPU.",
+      "A chat with Gemma 4 (E2B / E4B), its q4_0 QAT line (E2B / E4B / 12B, MTP drafters) or the fixed mobile QAT (E2B / E4B), streaming tokens on the GPU.",
     group: "Text",
     icon: MessageSquareTextIcon,
-    mounts: ["gemma4", "gemma4-qat"],
+    mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
   },
   {
     path: "/attention-bench",
@@ -132,10 +132,10 @@ export const MODEL_PAGES: readonly ModelPage[] = [
     path: "/gemma4-bench",
     title: "Gemma 4 decode bench",
     summary:
-      "Decode A/B of regular Gemma 4 and the mobile QAT distribution (model × preset, GPU tap on or off) in interleaved rounds: decode tokens/s, TTFT, prefill, and GPU busy time, dispatches, passes and submits per token.",
+      "Decode A/B of regular Gemma 4, its q4_0 QAT line and the mobile QAT distribution (model × preset, GPU tap on or off) in interleaved rounds: decode tokens/s, TTFT, prefill, and GPU busy time, dispatches, passes and submits per token.",
     group: "Benchmarks",
     icon: GaugeIcon,
-    mounts: ["gemma4", "gemma4-qat"],
+    mounts: ["gemma4", "gemma4-qat", "gemma4-qat-mobile"],
   },
   {
     path: "/geometry-sweep",

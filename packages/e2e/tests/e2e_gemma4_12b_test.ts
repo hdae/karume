@@ -5,10 +5,12 @@
 // inputs), no KV sharing, a 1024 window and 8 / 1 KV heads on sliding / full layers, and its own
 // tokenizer and chat template. The cases:
 //
-// ① the manifest entry: model `12b` in the gemma4 distribution, one quant `i4` (session {}), the
-//    12B pipelineConfig (chatDialect "gemma4-unified", suppressTokens [258882, 258883] — upstream
-//    generation_config's suppress_tokens, sorted — and maxPosition 262144), its own tokenizer asset
-//    and no drafter; the E2B / E4B entries keep their configs without either key
+// ① the manifest entry: model `12b` in the q4_0 QAT line's distribution (`karume-gemma4-qat`, the
+//    one distribution that ships 12B), one quant `i4` (session {}), the 12B pipelineConfig
+//    (chatDialect "gemma4-unified", suppressTokens [258882, 258883] — upstream generation_config's
+//    suppress_tokens, sorted — and maxPosition 262144), its own tokenizer asset and its QAT drafter
+//    (`e2e_gemma4_qat_mirror_test.ts` pins the drafter itself); the E2B / E4B entries keep their
+//    configs without either key
 // ② the product graph without PLE: inputs = input_ids / four RoPE / last_row (no per_layer_inputs),
 //    outputs = logits [1,R,V] then hidden [1,R,3840], 96 state slots (48 layers × k / v — no KV
 //    sharing; sliding [1,8,1032,256], full [1,1,C,512]) and no PLE asset in the container
@@ -29,7 +31,7 @@
 //
 // ## Assets
 //
-// The model is the distribution mirror's `model` component of model `12b` (`models/karume-gemma4/`,
+// The model is the distribution mirror's `model` component of model `12b` (`models/karume-gemma4-qat/`,
 // quant i4 — about 6.9 GiB of weights), opened through the manifest (ADR 0139 decision 1). Without
 // the mirror, or with a mirror that has no model `12b`, every case SKIPs explicitly. The goldens are
 // the product series' outputs in the test-asset root (`goldens/gemma4-12b-product/` —
@@ -79,8 +81,8 @@ import {
 } from "../../models/tests/helpers/mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
-/** The distribution mirror (one repository for the family — E2B, E4B and 12B). */
-const MIRROR = mirrorRoot("karume-gemma4");
+/** The q4_0 QAT line's distribution mirror (E2B, E4B and 12B — the one that ships 12B). */
+const MIRROR = mirrorRoot("karume-gemma4-qat");
 /** The seat this file reads (the only quant of model 12b). */
 const CHOICE = { model: "12b", quant: "i4" } as const;
 /** The component key, which is also the container's graph name (container-v1 §2.1). */
@@ -177,7 +179,7 @@ if (!MODEL_PRESENT) {
   console.warn(
     `[karume] the distribution mirror ${MIRROR.pathname} is absent, not karume/5, or has no model ` +
       `'${CHOICE.model}', so the Gemma 4 12B cases SKIP. Assemble: cd tools/export-recipes && uv run ` +
-      "python dist.py --pipeline gemma4",
+      "python dist.py --pipeline gemma4-qat",
   );
 }
 
@@ -263,8 +265,12 @@ test.skipIf(!MODEL_PRESENT)(
     assertEquals(entry.available.quants, [CHOICE.quant], "quants (only i4 this round)");
     assertEquals(entry.defaultQuant, CHOICE.quant, "defaultQuant");
     assertEquals(entry.quants[CHOICE.quant].session, {}, "the i4 seat carries no session knobs");
-    // No drafter for 12B yet; PLE would be assets of `model`, and there are none (②).
-    assertEquals(Object.keys(entry.weights), [MODEL_GRAPH], "weights (the product graph only)");
+    // The product graph and its QAT drafter; PLE would be assets of `model`, and there are none (②).
+    assertEquals(
+      Object.keys(entry.weights).sort(),
+      ["drafter", MODEL_GRAPH],
+      "weights (the product graph and its drafter)",
+    );
     assertEquals(Object.keys(entry.assets), ["tokenizer"], "assets (the tokenizer only)");
 
     const config = parsePipelineConfig(entry.pipelineConfig);
@@ -281,8 +287,8 @@ test.skipIf(!MODEL_PRESENT)(
     assertEquals(config.rope, ROPE, "rope (from config.json)");
     assertEquals(config.sampler, SAMPLER, "sampler (from generation_config.json)");
 
-    // 12B drops 239 BPE merges against the E2B / E4B tokenizer — sharing E2B's asset would give
-    // other tokens for some inputs.
+    // 12B's glitch-token fix drops other BPE merges than E2B's and E4B's — sharing their asset
+    // would give other tokens for some inputs.
     const others = ["e2b", "e4b"].filter((model) => Object.hasOwn(MANIFEST?.models ?? {}, model));
     assert(others.includes("e2b"), "the mirror has no e2b (the family's default model)");
     for (const other of others) {

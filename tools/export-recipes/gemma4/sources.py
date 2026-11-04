@@ -12,9 +12,10 @@ cache at pinned commits ({@link HUB_PINS}), from **two** repositories:
   these weights.
 - **the tokenizer, the chat template and the generation defaults** — `google/gemma-4-12B-it`.
   The QAT repository's `tokenizer_config.json`, `generation_config.json` and
-  `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is E2B's
-  (SHA-256 `cc8d3a0c…`, not 12B-it's `9788bdb6…`; 239 merges differ) — a packaging slip of the
-  QAT repository: the model is a QAT fine-tune of 12B-it, whose tokenizer is `9788bdb6…`.
+  `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is the one every
+  Gemma 4 repository shipped before Google's glitch-token fixes (SHA-256 `cc8d3a0c…` — 12B-it's
+  own until its commit of 2026-10-30, `9788bdb6…` since, 239 merges fewer): the QAT repositories
+  have not received the fix.
 
 E2B / E4B also have a **q4_0 QAT line** ({@link QAT_PINS} — `gemma4.export_product_qat`): the
 weights and their config are Google's quantization-aware-trained checkpoints
@@ -51,7 +52,12 @@ from pathlib import Path
 from _shared.paths import INPUTS_ROOT, REPO_ROOT
 from _shared.upstream import hub_snapshot_dir
 
-from .card import GEMMA4_UPSTREAM, GEMMA4_WEIGHTS_UPSTREAM
+from .card import (
+    GEMMA4_QAT_DRAFTER_UPSTREAM,
+    GEMMA4_QAT_WEIGHTS_UPSTREAM,
+    GEMMA4_UPSTREAM,
+    GEMMA4_WEIGHTS_UPSTREAM,
+)
 
 #: The family's directory of hand-placed upstream checkpoints (`inputs/gemma4/<checkpoint>/`).
 INPUTS_DIRNAME = "gemma4"
@@ -112,7 +118,8 @@ class ModelPins:
 #:   `vocab_size_per_layer_input` (0 instead of 262144 — unread: the class has no per-layer
 #:   embeddings); the audio and vision sub-configs drop a few fields.
 #: - tokenizer: `main` of `google/gemma-4-12B-it` (the commit 12B was first pinned at) — the LFS
-#:   blob name of `tokenizer.json` (module docstring: the QAT repository's is E2B's).
+#:   blob name of `tokenizer.json` (module docstring: the QAT repository's is the file from before
+#:   Google's glitch-token fixes).
 #:
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
 _TWELVE_B_WEIGHTS = HubPin(
@@ -132,33 +139,28 @@ HUB_PINS: Mapping[str, ModelPins] = {
     "12b": ModelPins(weights=_TWELVE_B_WEIGHTS, tokenizer=_TWELVE_B_TOKENIZER),
 }
 
-#: Model → Google's q4_0 quantization-aware-trained checkpoint of its `-it` model (README front
-#: matter at the pinned revisions: `license: apache-2.0`, `base_model` the regular `-it` model).
-#: Same architecture and config as the regular checkpoint; every 2-D text weight lies on a q4_0
-#: grid (`gemma4.export_product_qat`). Unlike the regular checkpoints, the KV-shared layers carry
-#: no k / v residues.
-QAT_WEIGHTS_UPSTREAM: Mapping[str, str] = {
-    "e2b": "google/gemma-4-E2B-it-qat-q4_0-unquantized",
-    "e4b": "google/gemma-4-E4B-it-qat-q4_0-unquantized",
-}
-
 #: Model → the pinned sources of its q4_0 QAT line, all four in the hub cache on 2026-11-03:
 #:
-#: - weights: `main` of {@link QAT_WEIGHTS_UPSTREAM} — the LFS blob name of `model.safetensors`
-#:   (E2B 10,208,852,878 B / E4B 15,882,477,468 B) and the SHA-256 of `config.json`'s bytes.
+#: - weights: `main` of `gemma4.card.GEMMA4_QAT_WEIGHTS_UPSTREAM` — the LFS blob name of
+#:   `model.safetensors` (E2B 10,208,852,878 B / E4B 15,882,477,468 B) and the SHA-256 of
+#:   `config.json`'s bytes.
 #:   Against the regular `-it` config the text config differs in no field the export reads (the
 #:   `transformers_version` and two null MoE fields).
 #: - tokenizer: the regular `-it` repository at the commit the hand-placed checkpoint was fetched
 #:   at (the `.metadata` record of `inputs/gemma4/gemma-4-E{2,4}B-it/`) — the LFS blob name of
-#:   `tokenizer.json`. The QAT repositories ship the same `tokenizer.json`, but their
-#:   `tokenizer_config.json` and `generation_config.json` are other bytes; reading the tokenizer
-#:   files from the regular repository keeps the line's tokenizer the regular product's.
+#:   `tokenizer.json`. Both are Google's commits of 2026-11-03 that changed `tokenizer.json` alone
+#:   ("Remediate 233 / 219 glitch tokens" — E2B drops 267 BPE merges and renames id 249788 to
+#:   `<glitch_pruned_249788>`, E4B drops 253 merges), so E2B's and E4B's `tokenizer.json` are no
+#:   longer the same bytes. The QAT repositories still ship the tokenizer from before that fix
+#:   (SHA-256 `cc8d3a0c…`), and their `tokenizer_config.json` and `generation_config.json` are other
+#:   bytes; reading the tokenizer files from the regular repository keeps the line's tokenizer the
+#:   regular product's.
 #:
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
 QAT_PINS: Mapping[str, ModelPins] = {
     "e2b": ModelPins(
         weights=HubPin(
-            repo=QAT_WEIGHTS_UPSTREAM["e2b"],
+            repo=GEMMA4_QAT_WEIGHTS_UPSTREAM["e2b"],
             revision="6befbaca7398925921802abd1f277b495b78b738",
             sha256={
                 "model.safetensors": (
@@ -169,17 +171,17 @@ QAT_PINS: Mapping[str, ModelPins] = {
         ),
         tokenizer=HubPin(
             repo=GEMMA4_UPSTREAM["e2b"],
-            revision="3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+            revision="4adf15748de9e1a0097b6274cee9c15836c41c37",
             sha256={
                 "tokenizer.json": (
-                    "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+                    "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2"
                 )
             },
         ),
     ),
     "e4b": ModelPins(
         weights=HubPin(
-            repo=QAT_WEIGHTS_UPSTREAM["e4b"],
+            repo=GEMMA4_QAT_WEIGHTS_UPSTREAM["e4b"],
             revision="476025a01dbf99361c062bbeca3d6a76bb4c4566",
             sha256={
                 "model.safetensors": (
@@ -190,26 +192,16 @@ QAT_PINS: Mapping[str, ModelPins] = {
         ),
         tokenizer=HubPin(
             repo=GEMMA4_UPSTREAM["e4b"],
-            revision="ee0ef6023621cff504d758262d4e04895a5af4a2",
+            revision="4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
             sha256={
                 "tokenizer.json": (
-                    "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+                    "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc"
                 )
             },
         ),
     ),
 }
 
-
-#: Model → Google's q4_0 quantization-aware-trained MTP drafter (the "assistant") of its QAT
-#: target ({@link QAT_WEIGHTS_UPSTREAM}). Google's model card: with a QAT target, the assistant
-#: "must also be a QAT checkpoint with the same precision" — the regular E2B assistant
-#: (`gemma4.export_drafter`) does not pair with the QAT line.
-QAT_DRAFTER_UPSTREAM: Mapping[str, str] = {
-    "e2b": "google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant",
-    "e4b": "google/gemma-4-E4B-it-qat-q4_0-unquantized-assistant",
-    "12b": "google/gemma-4-12B-it-qat-q4_0-unquantized-assistant",
-}
 
 #: Model → the pinned snapshot of its q4_0 QAT drafter (`gemma4.export_drafter_qat`), all three in
 #: the hub cache on 2026-11-03 (README front matter: `license: apache-2.0`, `base_model` the regular
@@ -228,7 +220,7 @@ QAT_DRAFTER_UPSTREAM: Mapping[str, str] = {
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
 QAT_DRAFTER_PINS: Mapping[str, HubPin] = {
     "e2b": HubPin(
-        repo=QAT_DRAFTER_UPSTREAM["e2b"],
+        repo=GEMMA4_QAT_DRAFTER_UPSTREAM["e2b"],
         revision="ebc7e1a211354561464cb82ed6d886792138dcb6",
         sha256={
             "model.safetensors": (
@@ -238,7 +230,7 @@ QAT_DRAFTER_PINS: Mapping[str, HubPin] = {
         },
     ),
     "e4b": HubPin(
-        repo=QAT_DRAFTER_UPSTREAM["e4b"],
+        repo=GEMMA4_QAT_DRAFTER_UPSTREAM["e4b"],
         revision="27f8d204f09f2be353d6ff0bf0d012792b13c79f",
         sha256={
             "model.safetensors": (
@@ -248,7 +240,7 @@ QAT_DRAFTER_PINS: Mapping[str, HubPin] = {
         },
     ),
     "12b": HubPin(
-        repo=QAT_DRAFTER_UPSTREAM["12b"],
+        repo=GEMMA4_QAT_DRAFTER_UPSTREAM["12b"],
         revision="18934064dd4c5c6cc3621f6381e7d377fc8cb7bd",
         sha256={
             "model.safetensors": (

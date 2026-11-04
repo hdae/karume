@@ -30,7 +30,7 @@ const manifest = {
 
 const draft = (patch: Partial<ArmDraft> = {}): ArmDraft => ({
   id: 0,
-  key: { mount: "gemma4-qat", model: "e2b" },
+  key: { mount: "gemma4-qat-mobile", model: "e2b" },
   tap: true,
   ...patch,
 });
@@ -39,7 +39,7 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
   describe("an arm", () => {
     it("passes pleResidency and decodeAhead as pipeline options", () => {
       const arm = resolveArm(draft({ pleOnGpu: true, decodeAhead: "4" }), {
-        "gemma4-qat": manifest,
+        "gemma4-qat-mobile": manifest,
       });
       expect(arm.ok && arm.arm.pipeline).toEqual({ pleResidency: "gpu", decodeAhead: 4 });
       // The pipeline options are not Session options.
@@ -48,26 +48,26 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
 
     it("passes the PLE placement alone at depth 1, and nothing when both are off", () => {
       const ple = resolveArm(draft({ pleOnGpu: true, decodeAhead: "1" }), {
-        "gemma4-qat": manifest,
+        "gemma4-qat-mobile": manifest,
       });
       expect(ple.ok && ple.arm.pipeline).toEqual({ pleResidency: "gpu" });
       for (const off of [draft(), draft({ pleOnGpu: false, decodeAhead: "1" })]) {
-        const arm = resolveArm(off, { "gemma4-qat": manifest });
+        const arm = resolveArm(off, { "gemma4-qat-mobile": manifest });
         expect(arm.ok && arm.arm.pipeline).toBeUndefined();
       }
     });
 
     it("cannot run ahead without the PLE on the GPU, and says why", () => {
-      const arm = resolveArm(draft({ decodeAhead: "2" }), { "gemma4-qat": manifest });
+      const arm = resolveArm(draft({ decodeAhead: "2" }), { "gemma4-qat-mobile": manifest });
       expect(arm.ok).toBe(false);
       expect(!arm.ok && arm.error).toContain("PLE on GPU");
     });
 
     it("is labelled with the placement and the depth, before the tap's own marks", () => {
-      const arm = { mount: "gemma4-qat", model: "e2b", quant: "i4" } as const;
+      const arm = { mount: "gemma4-qat-mobile", model: "e2b", quant: "i4" } as const;
       expect(
         armLabel({ ...arm, tap: true, pipeline: { pleResidency: "gpu", decodeAhead: 8 } }),
-      ).toBe("QAT e2b i4 (PLE GPU) (ahead 8)");
+      ).toBe("mobile QAT e2b i4 (PLE GPU) (ahead 8)");
       expect(
         armLabel({
           ...arm,
@@ -75,7 +75,7 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
           session: { linearGemvPlanes: true },
           pipeline: { pleResidency: "gpu" },
         }),
-      ).toBe("QAT e2b i4 (planes) (PLE GPU) (tap off)");
+      ).toBe("mobile QAT e2b i4 (planes) (PLE GPU) (tap off)");
     });
   });
 
@@ -98,7 +98,7 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
       },
     };
     const armOf = (pipeline?: RunArm["pipeline"]): RunArm => ({
-      mount: "gemma4-qat",
+      mount: "gemma4-qat-mobile",
       model: "e2b",
       quant: "i4",
       quantLabel: "int4",
@@ -115,7 +115,7 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
         complete: true,
         settings: { chats: 2, newTokens: 2, rounds: 1, sampler: "greedy", prompts: ["few-ids"] },
         arms: [armOf(), armOf({ pleResidency: "gpu", decodeAhead: 4 })],
-        distributions: { "gemma4-qat": { directory: "qat", manifestSha256: "00" } },
+        distributions: { "gemma4-qat-mobile": { directory: "qat", manifestSha256: "00" } },
         source: { kind: "direct" },
         visits: [],
         chats: [],
@@ -124,6 +124,8 @@ describe("the PLE-on-GPU and decode-ahead switches", () => {
         {},
         { pleResidency: "gpu", decodeAhead: 4 },
       ]);
+      // Version 2: mount `gemma4-qat` is the q4_0 QAT line since the mobile line's rename.
+      expect(record.format).toBe("karume-playground-gemma4-bench/2");
     });
   });
 });

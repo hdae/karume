@@ -59,7 +59,7 @@
         "kind": "namespace"
       },
       {
-        "name": "gemma4Qat",
+        "name": "gemma4QatMobile",
         "kind": "namespace"
       },
       {
@@ -467,7 +467,7 @@
         "kind": "function"
       }
     ],
-    "./gemma4-qat": [
+    "./gemma4-qat-mobile": [
       {
         "name": "Assets",
         "kind": "typeAlias"
@@ -583,10 +583,6 @@
       {
         "name": "RunPhase",
         "kind": "typeAlias"
-      },
-      {
-        "name": "SOURCES",
-        "kind": "variable"
       },
       {
         "name": "SamplerSpec",

@@ -8,10 +8,13 @@
  *
  * `core` is everything the family lanes do not claim. A family lane claims every test whose file
  * name carries the family's token, in `packages/models/tests` (host-side tests of the family) and in
- * `packages/e2e/tests` (real-weight end-to-end tests). Lanes may overlap with each other (the QAT
- * lane shares one file with gemma4) but never with `core`; `verify_lanes_test.ts` checks the
- * coverage, the disjointness, that no lane is empty, and that no family row is dropped (core holds
- * only the GPU-free end-to-end gates; a family lane without end-to-end tests is named there).
+ * `packages/e2e/tests` (real-weight end-to-end tests). Lanes may overlap with each other (the mobile
+ * QAT lane `models:gemma4-qat-mobile` shares `e2e_gemma4_ple_gpu_test.ts` with `models:gemma4`,
+ * which also runs the q4_0 QAT line's tests — `e2e_gemma4_qat_{mirror,reference,product}_test.ts`)
+ * but never with `core`;
+ * `verify_lanes_test.ts` checks the coverage, the disjointness, that no lane is empty, and that no
+ * family row is dropped (core holds only the GPU-free end-to-end gates; a family lane without
+ * end-to-end tests is named there).
  */
 
 export type Lane = {
@@ -43,8 +46,8 @@ export const FAMILY_LANES: readonly Lane[] = [
   family("anima", both("anima")),
   family("sbv2", both("sbv2")),
   family("irodori", both("irodori")),
-  family("gemma4", both("gemma4"), both("gemma4_qat")),
-  family("gemma4-qat", [...both("gemma4_qat"), `${E2E}/e2e_gemma4_ple_gpu_test.ts`]),
+  family("gemma4", both("gemma4"), both("gemma4_qat_mobile")),
+  family("gemma4-qat-mobile", [...both("gemma4_qat_mobile"), `${E2E}/e2e_gemma4_ple_gpu_test.ts`]),
   family("birefnet", both("birefnet")),
   family("depth-anything", both("depth_anything")),
   family("siglip2", both("siglip2")),

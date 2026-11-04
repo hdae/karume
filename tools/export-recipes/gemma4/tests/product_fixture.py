@@ -14,6 +14,7 @@ MUST: **実物と違う数**にする（語彙 6・層 2・次元 3・hidden 5�
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -28,6 +29,7 @@ from gemma4.distribution import (
     GEMMA4_DRAFT_STEPS,
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_SUFFIX,
+    GEMMA4_PRODUCT_BF16_SUFFIX,
     GEMMA4_ROLE,
     GEMMA4_ROPE_LAYER_TYPES,
     GEMMA4_ROPE_PARTS,
@@ -47,7 +49,7 @@ from karume.ir import (
     IrStorage,
     IrValue,
 )
-from karume.ple import ple_assets
+from karume.ple import PLE_SCALE_BYTES, ple_assets, ple_row_bytes
 from karume.publish import publish_container
 from karume.quantize import (
     channel_scale,
@@ -124,6 +126,8 @@ BAKED_ROPE_TABLE = "model.model.rotary_emb.full_attention_cos_table"
 
 #: PLE の綴り（`karume.ple` / `packages/models/src/gemma/ple-index.ts` の正本）。
 PLE_STORAGE = "i8"
+#: The original-weights container's storage (weights and PLE — `product_container(original=True)`).
+ORIGINAL_STORAGE = "bf16"
 PLE_EMBED_SCALE = 2.0
 
 #: 貸し手の主表テンソルキー（{@link product_container} の `declare` が組む綴り）。借り手の
@@ -132,6 +136,11 @@ LENDER_SHARED_TENSOR = "gemma4.embed_i8"
 
 #: compile 済みトークナイザ資産の形式識別子（`_shared/gemma_tokenizer.py`）。
 TOKENIZER_FORMAT = "karume-gemma-tokenizer/1"
+
+#: The upstream `tokenizer.json` stand-in {@link write_series} places in the checkpoint directory;
+#: the asset of {@link tokenizer_asset} records its SHA-256 as its source by default (the
+#: distribution's gate compares the SHA-256 only — `assert_gemma4_tokenizer_source`).
+UPSTREAM_TOKENIZER = b'{"model": "upstream tokenizer.json stand-in"}'
 
 #: 上流 `generation_config.json` の推奨（**実物と違う値** — 写経していれば落ちる）。
 GENERATION_CONFIG: Mapping[str, Any] = {
@@ -195,26 +204,37 @@ def ple_container_assets(
     dim: int = DIM,
     embed_scale: float = PLE_EMBED_SCALE,
     block_bytes: int = BLOCK_MAX_BYTES,
+    storage: str = PLE_STORAGE,
+    group_size: int | None = None,
 ) -> dict[str, AssetInput]:
     """PLE を容器の資産へ（索引 schema 3 + `values` / `scales` の block 列）。
 
     切り方も索引の綴りも core の {@link karume.ple.ple_assets} が持つ — 写しを綴ると、規則が
     動いた日にフィクスチャだけが古びる。`block_bytes` を下げると block が複数本へ割れる
-    （索引と資産宣言の突合を複数 block で踏む席）。
+    （索引と資産宣言の突合を複数 block で踏む席）。`storage` / `group_size` write another
+    storage and schema 4 (one scale per group — the q4_0 QAT line's form); the bytes are the
+    sizes the writer expects (`karume.ple.ple_row_bytes`), their values arbitrary. `storage="bf16"`
+    writes schema 5 (the values alone — the original-weights container's form).
     """
-    values = np.arange(tokens * layers * dim, dtype=np.int8).reshape(tokens, layers * dim)
-    scales = np.full((tokens, layers), 0.5, dtype=np.float32)
+    row_bytes = ple_row_bytes(storage, layers, dim, group_size)
+    values = np.arange(tokens * row_bytes["values"], dtype=np.uint8)
     value_bytes = memoryview(values).cast("B")
-    scale_bytes = memoryview(scales).cast("B")
+    # A float storage (`bf16` — schema 5) has no scales table.
+    read_scales = None
+    if "scales" in row_bytes:
+        groups = row_bytes["scales"] // PLE_SCALE_BYTES
+        scale_bytes = memoryview(np.full(tokens * groups, 0.5, dtype=np.float32)).cast("B")
+        read_scales = lambda begin, end: scale_bytes[begin:end]  # noqa: E731
     return ple_assets(
-        storage=PLE_STORAGE,
+        storage=storage,
         tokens=tokens,
         layers=layers,
         dim=dim,
         embed_scale=embed_scale,
         read_values=lambda begin, end: value_bytes[begin:end],
-        read_scales=lambda begin, end: scale_bytes[begin:end],
+        read_scales=read_scales,
         block_bytes=block_bytes,
+        group_size=group_size,
     )
 
 
@@ -232,6 +252,7 @@ def product_container(
     ple: bool = True,
     provenance: Provenance = FIXTURE_PROVENANCE,
     embedding_storage: str = "i8",
+    original: bool = False,
 ) -> list[bytes]:
     """製品グラフ 1 本ぶんの part バイト列（読む順 — 先頭が part 0）。
 
@@ -249,6 +270,11 @@ def product_container(
     holds no int8 tensor).
     `swap_outputs` は出口 2 本の順序だけを入れ替える（行軸まで同型なので、幅の突合以外は
     素通りする組 — 順序の門）。
+    `original=True` is the original-weights container (the regular line's `bf16` preset): every
+    stand-in weight is stored as bf16 (no int8 / int4) and the default PLE assets are schema 5. The
+    slots keep their names, so the embedding's key is still the table the regular drafter borrows
+    ({@link LENDER_SHARED_TENSOR}) — the real pair shares `model.lm_head.weight`, a name that does
+    not depend on the storage.
     """
     widths = {**ROPE_HEAD_DIMS, **dict(head_dims or {})}
     initializers: dict[str, IrInitializer] = {}
@@ -274,7 +300,11 @@ def product_container(
     declare(bias, _ramp(_OUT))
     for name, storage in (("linear_i4", "i4"), (f"embed_{embedding_storage}", embedding_storage)):
         weight = _ramp(_OUT, _IN)
-        if storage == "i4":
+        if original:
+            # bf16-exact values (the round trip the writer requires of a bf16 weight).
+            weight = weight.to(torch.bfloat16).to(torch.float32)
+            overrides[declare(name, weight)] = "bf16"
+        elif storage == "i4":
             scale = group_scale(weight, GROUP_SIZE)
             weight = dequantize_int4(quantize_to_int4(weight, scale), scale)
             key = declare(name, weight)
@@ -363,8 +393,21 @@ def product_container(
         nodes=nodes,
     )
     if assets is None:
-        assets = ple_container_assets(tokens=vocab, layers=layers, dim=dim) if ple else {}
-    return _publish(graph, tensors, "i4", scales, overrides, assets=assets, provenance=provenance)
+        ple_storage = ORIGINAL_STORAGE if original else PLE_STORAGE
+        assets = (
+            ple_container_assets(tokens=vocab, layers=layers, dim=dim, storage=ple_storage)
+            if ple
+            else {}
+        )
+    return _publish(
+        graph,
+        tensors,
+        ORIGINAL_STORAGE if original else "i4",
+        scales,
+        overrides,
+        assets=assets,
+        provenance=provenance,
+    )
 
 
 def drafter_container(
@@ -377,8 +420,16 @@ def drafter_container(
     shared: bool = True,
     capacity_symbol: str | None = CAPACITY_SYMBOL,
     storage: str = "i8",
+    head_storage: str = "i8",
+    shared_tensor: str = LENDER_SHARED_TENSOR,
+    shared_storage: str = "i8",
+    provenance: Provenance = FIXTURE_PROVENANCE,
 ) -> list[bytes]:
     """**借り手**グラフ 1 本ぶんの part バイト列（ADR 0096 段 2 — 単独では実行できない資産）。
+
+    `head_storage` / `shared_tensor` / `shared_storage` / `provenance` build the q4_0 QAT line's
+    drafter: its head int4 too, its shared declaration naming the lender's int4 table
+    (`"gemma4.embed_i4"`, declared `"i4"`), and the container naming its drafter's revision.
 
     貸し手（{@link product_container}）と噛み合う形にする: 同じスロット名 `l0.k` / `l0.v` を
     **external** で宣言し、共有 initializer が貸し手の主表テンソルキーを名指し、記号は容量の
@@ -409,7 +460,8 @@ def drafter_container(
     #    そのまま格納の門の入力になる。
     declare("x", _ramp(1, _IN))
     declare("bias", _ramp(_OUT))
-    for name, slot_storage in ((f"linear_{storage}", storage), ("head_i8", "i8")):
+    slots = ((f"linear_{storage}", storage), (f"head_{head_storage}", head_storage))
+    for name, slot_storage in slots:
         weight = _ramp(_OUT, _IN)
         if slot_storage == "i4":
             scale = group_scale(weight, GROUP_SIZE)
@@ -429,7 +481,7 @@ def drafter_container(
     embedded = "embedded"
     if shared:
         initializers["target_embed"] = IrInitializer(
-            shared=IrShared(tensor=LENDER_SHARED_TENSOR), storage=IrStorage(dtype="i8")
+            shared=IrShared(tensor=shared_tensor), storage=IrStorage(dtype=shared_storage)
         )
         values["target_embed"] = IrValue(dtype="f32", shape=[vocab, hidden_size])
         values[embedded] = IrValue(dtype="f32", shape=[1, 1, hidden_size])
@@ -493,12 +545,26 @@ def drafter_container(
         },
         nodes=nodes,
     )
-    return _publish(graph, tensors, storage, scales, overrides, named=GEMMA4_DRAFTER_ROLE)
+    return _publish(
+        graph, tensors, storage, scales, overrides, named=GEMMA4_DRAFTER_ROLE, provenance=provenance
+    )
 
 
-def tokenizer_asset(*, vocab: int = VOCAB, format_id: str = TOKENIZER_FORMAT) -> dict[str, Any]:
-    """compile 済みトークナイザ資産の、門が読む欄だけを持つ最小形。"""
-    return {"format": format_id, "vocab": [f"t{index}" for index in range(vocab)]}
+def tokenizer_asset(
+    *,
+    vocab: int = VOCAB,
+    format_id: str = TOKENIZER_FORMAT,
+    source: bytes | None = UPSTREAM_TOKENIZER,
+) -> dict[str, Any]:
+    """compile 済みトークナイザ資産の、門が読む欄だけを持つ最小形。
+
+    `source` is the bytes of the `tokenizer.json` the asset says it was compiled from (its
+    SHA-256 goes into `source.sha256`, as the compile script writes it); `None` = no recorded
+    source."""
+    asset: dict[str, Any] = {"format": format_id, "vocab": [f"t{index}" for index in range(vocab)]}
+    if source is not None:
+        asset["source"] = {"sha256": hashlib.sha256(source).hexdigest()}
+    return asset
 
 
 def write_series(
@@ -509,15 +575,21 @@ def write_series(
     container: Sequence[bytes] | None = None,
     drafter: Path | None = None,
     drafter_bytes: Sequence[bytes] | None = None,
+    original: Path | None = None,
+    original_bytes: Sequence[bytes] | None = None,
     tokenizer: Mapping[str, Any] | None = None,
     generation_config: Mapping[str, Any] | None = None,
     text_config: Mapping[str, Any] | None = None,
 ) -> None:
-    """系列 2 本 + チェックポイントを書く。
+    """Writes the series and the checkpoint directory (its `tokenizer.json` is
+    {@link UPSTREAM_TOKENIZER}, the source the default tokenizer asset records).
 
     製品系列には**配布へ入らない**同居物（`ple.probe.safetensors` / `reference.json`）も置く
     — 出力 path 表に載らないものが混ざらないことの証跡になる。PLE は製品コンテナの**資産**
     なので、系列に独立したファイルとしては現れない（ADR 0109 決定 4）。
+
+    The original-weights series (the regular line's `bf16` preset — `original` /
+    `original_bytes`) is written next to `product` by default, like the drafter series.
     """
     from container_series import write_component  # conftest が張る recipe 共有ヘルパ
 
@@ -534,6 +606,17 @@ def write_series(
         borrower / "model.krm",
         list(drafter_bytes if drafter_bytes is not None else drafter_container()),
     )
+    bf16 = (
+        original
+        if original is not None
+        else product.parent / gemma4_series_name(GEMMA4_DEFAULT_MODEL, GEMMA4_PRODUCT_BF16_SUFFIX)
+    )
+    write_component(
+        bf16 / "model.krm",
+        list(original_bytes if original_bytes is not None else product_container(original=True)),
+    )
+    (bf16 / "greedy.capital-en.safetensors").write_bytes(b"not distributed")
+    (bf16 / "reference.json").write_text("{}\n", encoding="utf-8")
     # 配布へ入らない同居物（golden と出所記録）— 出力 path 表に載らないことの証跡。
     (borrower / "drafter-golden.short-en.safetensors").write_bytes(b"not distributed")
     (borrower / "reference.json").write_text("{}\n", encoding="utf-8")
@@ -546,6 +629,7 @@ def write_series(
         encoding="utf-8",
     )
     model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "tokenizer.json").write_bytes(UPSTREAM_TOKENIZER)
     (model_dir / "generation_config.json").write_text(
         json.dumps(dict(generation_config if generation_config is not None else GENERATION_CONFIG)),
         encoding="utf-8",

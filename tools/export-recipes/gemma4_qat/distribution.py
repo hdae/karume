@@ -314,8 +314,10 @@ def qat_plan(series_dir: Path, model: str) -> ModelPlan:
 
 
 def repo_name(model: str) -> str:
+    """The mobile QAT line's one repository (renamed from `karume-gemma4-qat` on 2026-11-04 —
+    that name holds the q4_0 QAT line, `gemma4.distribution.QAT_Q4_0_PIPELINE`)."""
     checkpoint_name(model)
-    return "karume-gemma4-qat"
+    return "karume-gemma4-qat-mobile"
 
 
 #: The SPDX identifier of every pinned upstream ({@link SOURCES}) and how the card spells it. A pin
@@ -391,7 +393,7 @@ def render_card(
     sections = [
         frontmatter(metadata),
         [
-            "# Gemma 4 QAT Text Decoder — Karume",
+            "# Gemma 4 Mobile QAT Text Decoder — Karume",
             "",
             "Experimental text-only conversion of the official mobile QAT checkpoints.",
             "Fixed integers and scales are preserved; activations use "
@@ -456,6 +458,6 @@ PIPELINE = Pipeline(
     default_model="e2b",
     repo_name=repo_name,
     plan=qat_plan,
-    card_profiles={"gemma4-qat": render_card},
+    card_profiles={"gemma4-qat-mobile": render_card},
     root_files={"LICENSE.md": apache_license_2_0(), "NOTICE.md": NOTICE},
 )

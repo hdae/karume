@@ -92,6 +92,13 @@ import {
 } from "@karume/test-support/test-assets";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+/**
+ * The seat these cases were written against: `i4-fast`, the regular distribution's default until
+ * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
+ * reading the int4 container (and its session options) their goldens and floors were taken on —
+ * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ */
+const INT4_SEAT = { quant: "i4-fast" } as const;
 const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
@@ -210,7 +217,7 @@ test.skipIf(!MIRROR_PRESENT)(
   () => {
     const entry = mirrorManifest().models[mirrorManifest().defaultModel];
     assertEquals(Object.keys(entry.weights).sort(), [DRAFTER, MODEL], "weights の役割");
-    const quant = entry.quants[entry.defaultQuant];
+    const quant = entry.quants[INT4_SEAT.quant];
     // 完全写像（parse が保証する）— target は混成（埋め込み i8 + linear i4）の "i4"、drafter は
     // **i8 単一**（linear まで i8 — i4 g32 に落とすと受理率が 1〜3 割落ちる・ADR 0096 追記）。
     assertEquals(Object.keys(quant.weights).sort(), [DRAFTER, MODEL], "quant の weights 写像");
@@ -249,7 +256,7 @@ test.skipIf(!MIRROR_PRESENT)(
   async () => {
     // `openGemma4Ple` は `readGemma4PleIndex`（索引 × 容器の資産の全件列挙）を通す — drafter を
     // 足しても足さなくても、PLE は `model` 容器の中だけで閉じる（旧 `deferred` の突合の後継）。
-    const { index } = await openGemma4Ple(MIRROR_DIR);
+    const { index } = await openGemma4Ple(MIRROR_DIR, INT4_SEAT);
     assertEquals(index.tokens, VOCAB, "索引の行数（= 主 embedding の vocab）");
     assert(index.values.blocks.length > 1, "values の block が 1 本（vocab レンジ分割が無い）");
   },
@@ -259,8 +266,8 @@ test.skipIf(!MIRROR_PRESENT)(
 // ② コンテナの形（GPU 不要）
 // ---------------------------------------------------------------------------
 
-const targetComponent = () => openMirrorComponent(MIRROR_DIR, MODEL);
-const drafterComponent = () => openMirrorComponent(MIRROR_DIR, DRAFTER);
+const targetComponent = () => openMirrorComponent(MIRROR_DIR, MODEL, INT4_SEAT);
+const drafterComponent = () => openMirrorComponent(MIRROR_DIR, DRAFTER, INT4_SEAT);
 
 /** ミラーの `pipelineConfig`（RoPE の宣言と容量の出どころ）。 */
 const pipelineConfig = () => {
@@ -544,7 +551,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
 
     beforeAll(async () => {
       config = pipelineConfig();
-      const { index, openBlock } = await openGemma4Ple(MIRROR_DIR);
+      const { index, openBlock } = await openGemma4Ple(MIRROR_DIR, INT4_SEAT);
       ple = createGemma4Ple({
         index,
         openBlock,
@@ -746,8 +753,9 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
 
       const started = performance.now();
       pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        ...INT4_SEAT,
         speculative: { k: GEMMA4_DRAFT_STEPS },
-        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
       });
       console.log(
         `[e2e] gemma4 drafter pipeline: 投機ありのロード ${(performance.now() - started).toFixed(

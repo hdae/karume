@@ -7,7 +7,7 @@
  *
  * It serves the side that "walks every published distribution repo" (connectivity smoke tests,
  * cache prefetch, listings); a consumer that uses only one family does better for tree-shaking by
- * looking up that family's table on its subpath (importing the barrel pulls in the config modules of 11
+ * looking up that family's table on its subpath (importing the barrel pulls in the config modules of 10
  * families).
  *
  * MUST: fold the family tables **as they are** — re-spelling them here would create a shape where
@@ -35,7 +35,6 @@ export const KARUME_SOURCES = {
   ...irodori.SOURCES,
   ...sbv2.SOURCES,
   ...gemma.SOURCES,
-  ...gemma.QAT_SOURCES,
   ...siglip2.SOURCES,
   ...depthAnything.SOURCES,
   ...birefnet.SOURCES,

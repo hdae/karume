@@ -185,6 +185,13 @@ const VOCAB = 262144;
 
 /** The distribution mirror: ①〜⑤ read its product container, ⑥ its drafter pipeline. */
 const MIRROR_DIR = mirrorRoot("karume-gemma4");
+/**
+ * The seat these cases were written against: `i4-fast`, the regular distribution's default until
+ * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
+ * reading the int4 container (and its session options) their goldens and floors were taken on —
+ * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ */
+const INT4_SEAT = { quant: "i4-fast" } as const;
 
 const exists = (url: URL): boolean => {
   try {
@@ -666,8 +673,9 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
     beforeAll(async () => {
       const started = performance.now();
       loaded = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        ...INT4_SEAT,
         speculative: { k: GEMMA4_DRAFT_STEPS },
-        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
       });
       console.log(
         `[e2e] gemma4 sequence ⑥: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,

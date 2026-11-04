@@ -1,15 +1,16 @@
 """Pure functions that build PLE (per-layer embedding) into **container assets** (ADR 0085 / 0109
 decision 4).
 
-PLE is a table with one row per vocabulary entry (`values` and `scales`), not a weight — the host
-range-reads it per token and sends it to the GPU (ADR 0085). What the sidecar (`ple.json` +
-`ple-NNNNN.safetensors`) used to hold moved into the container's `assets`:
+PLE is a table with one row per vocabulary entry (`values`, plus `scales` for a quantized table),
+not a weight — the host range-reads it per token and sends it to the GPU (ADR 0085). What the
+sidecar (`ple.json` + `ple-NNNNN.safetensors`) used to hold moved into the container's `assets`:
 
-- `ple.values.<k>` / `ple.scales.<k>` (roles `ple-values` / `ple-scales`) — a block list cut in
-  **multiples of a row**, each at most the block limit. They need range reads, so **1 block =
-  1 part** ("placed alone in a dedicated part" of container-v1 §4.2).
-- `ple_index` (role `ple-index`, schema 3) — an index that holds only the row byte size and the
-  token range of each block. Readers translate token → (block, row offset) from it.
+- `ple.values.<k>` / `ple.scales.<k>` (roles `ple-values` / `ple-scales`; a float table has no
+  `scales` blocks) — a block list cut in **multiples of a row**, each at most the block limit. They
+  need range reads, so **1 block = 1 part** ("placed alone in a dedicated part" of container-v1
+  §4.2).
+- `ple_index` (role `ple-index`, schema 3, 4 or 5 — below) — an index that holds only the row byte
+  size and the token range of each block. Readers translate token → (block, row offset) from it.
 
 The scales come in two forms. Schema 3 holds one f32 per (token, layer) row. Schema 4
 ({@link PLE_GROUPED_INDEX_SCHEMA}) is schema 3 plus a required `groupSize`: one f32 per group of
@@ -17,6 +18,11 @@ The scales come in two forms. Schema 3 holds one f32 per (token, layer) row. Sch
 `layers * dim / groupSize` f32 in (layer, group) order. It is the form of a table whose groups do
 not share a step — Gemma 4's q4_0 QAT checkpoints store the table on a 4-bit grid with one step
 per 32 values, and schema 3 cannot hold those values exactly. `group_size=None` writes schema 3.
+
+Schema 5 ({@link PLE_FLOAT_INDEX_SCHEMA}) is a float table: `storage` `bf16`, the values are the
+checkpoint's own floats (2 bytes each, little-endian bf16 bits), and there is **no** `scales` table
+(neither the field nor its blocks). It is the original-weights form of a BF16 checkpoint (ADR 0085
+addendum 2026-11-04). Schema 3 / 4 documents do not change by a byte.
 
 MUST: assets are built through **this one path** (the migration CLI and the recipes alike). If two
 paths spelled it, "a container migrated from the old sidecar" and "a container written directly by
@@ -46,6 +52,9 @@ PLE_INDEX_SCHEMA = 3
 #: Version of the PLE index with one scale per group of `groupSize` values (module docstring).
 PLE_GROUPED_INDEX_SCHEMA = 4
 
+#: Version of the PLE index of a float table: `values` only, no `scales` (module docstring).
+PLE_FLOAT_INDEX_SCHEMA = 5
+
 #: Role of the PLE asset (the interpreter name on the models side — the runtime does not
 #: interpret it).
 PLE_INDEX_ROLE = "ple-index"
@@ -60,35 +69,48 @@ PLE_PACK_FACTOR: Mapping[str, int] = {"i8": 1, "i2": 4, "i4": 2}
 #: Bytes per PLE scale (f32 — same as above).
 PLE_SCALE_BYTES = 4
 
+#: Float PLE storage → bytes per value (no scales — schema 5; same mirror as above).
+PLE_FLOAT_BYTES: Mapping[str, int] = {"bf16": 2}
+
 
 class PleError(ValueError):
-    """PLE dimensions cannot become assets (not divisible by the storage's pack factor, or not a
-    single row fits in a block)."""
+    """PLE dimensions cannot become assets (not divisible by the storage's pack factor, not a
+    single row fits in a block, or a scale reader / group size the storage does not match)."""
 
 
 def ple_row_bytes(
     storage: str, layers: int, dim: int, group_size: int | None = None
 ) -> dict[str, int]:
     """Row kind → bytes per row (`values` is packed; `scales` is one f32 per layer, or one per
-    group of `group_size` values with a group size — schema 4).
+    group of `group_size` values with a group size — schema 4). A float storage (schema 5) has
+    `values` only, {@link PLE_FLOAT_BYTES} per value.
 
-    MUST: both are multiples of 4 (blocks are cut in **multiples of a row**, so unless the row is a
-    multiple of 4 the block tail cannot be 4-byte aligned without padding — container-v1 §4.1).
+    MUST: every row kind is a multiple of 4 (blocks are cut in **multiples of a row**, so unless the
+    row is a multiple of 4 the block tail cannot be 4-byte aligned without padding —
+    container-v1 §4.1).
     MUST: a group size divides `dim` — a group never crosses a (token, layer) row.
+    MUST: a float storage takes no group size — it has no scales to group.
     """
+    width = PLE_FLOAT_BYTES.get(storage)
     factor = PLE_PACK_FACTOR.get(storage)
-    if factor is None:
-        raise PleError(f"unknown PLE storage '{storage}' ({' / '.join(sorted(PLE_PACK_FACTOR))})")
-    if dim % factor != 0:
-        raise PleError(
-            f"dim {dim} is not divisible by the storage '{storage}' pack factor {factor}"
-        )
-    groups = 1
-    if group_size is not None:
-        if group_size <= 0 or dim % group_size != 0:
-            raise PleError(f"group size {group_size} does not divide dim {dim}")
-        groups = dim // group_size
-    row_bytes = {"values": layers * dim // factor, "scales": layers * groups * PLE_SCALE_BYTES}
+    if width is not None:
+        if group_size is not None:
+            raise PleError(f"storage '{storage}' has no scales, so no group size ({group_size})")
+        row_bytes = {"values": layers * dim * width}
+    elif factor is None:
+        known = sorted([*PLE_PACK_FACTOR, *PLE_FLOAT_BYTES])
+        raise PleError(f"unknown PLE storage '{storage}' ({' / '.join(known)})")
+    else:
+        if dim % factor != 0:
+            raise PleError(
+                f"dim {dim} is not divisible by the storage '{storage}' pack factor {factor}"
+            )
+        groups = 1
+        if group_size is not None:
+            if group_size <= 0 or dim % group_size != 0:
+                raise PleError(f"group size {group_size} does not divide dim {dim}")
+            groups = dim // group_size
+        row_bytes = {"values": layers * dim // factor, "scales": layers * groups * PLE_SCALE_BYTES}
     for key, stride in row_bytes.items():
         if stride % BLOCK_TAIL_ALIGN != 0:
             raise PleError(
@@ -133,18 +155,19 @@ def ple_assets(
     dim: int,
     embed_scale: float,
     read_values: Callable[[int, int], Buffer],
-    read_scales: Callable[[int, int], Buffer],
+    read_scales: Callable[[int, int], Buffer] | None = None,
     group_size: int | None = None,
     block_bytes: int = BLOCK_MAX_BYTES,
 ) -> dict[str, AssetInput]:
     """PLE into container assets (index schema 3 — schema 4 with `group_size` — + the `values` /
-    `scales` block lists).
+    `scales` block lists; a float storage writes schema 5 and the `values` block list alone).
 
     `read_values` / `read_scales` are calls that return **the byte range `[begin, end)` of the
     concatenated row-major payload** (each call MUST return the same bytes — the writer calls
     twice). The migration CLI passes range reads over the old shard list; a recipe passes slices
     of an in-memory tensor. The old shard boundaries carry no meaning (everything is concatenated
-    in token order and cut again).
+    in token order and cut again). MUST: `read_scales` is given exactly when the storage has
+    scales (a quantized one) — a float table's scale reader would be silently ignored.
 
     The returned order is the physical layout order as is (`values` block list → `scales` block
     list → index).
@@ -158,10 +181,21 @@ def ple_assets(
         group_size=group_size,
         block_bytes=block_bytes,
     )
-    readers = {"values": read_values, "scales": read_scales}
+    readers = {"values": read_values}
+    if read_scales is not None:
+        readers["scales"] = read_scales
+    if readers.keys() != row_bytes.keys():
+        raise PleError(
+            f"storage '{storage}' "
+            + ("needs a scale reader" if "scales" in row_bytes else "has no scales to read")
+        )
     assets: dict[str, AssetInput] = {}
+    if storage in PLE_FLOAT_BYTES:
+        schema = PLE_FLOAT_INDEX_SCHEMA
+    else:
+        schema = PLE_INDEX_SCHEMA if group_size is None else PLE_GROUPED_INDEX_SCHEMA
     document: dict[str, Any] = {
-        "schema": PLE_INDEX_SCHEMA if group_size is None else PLE_GROUPED_INDEX_SCHEMA,
+        "schema": schema,
         "storage": storage,
         "tokens": tokens,
         "layers": layers,
@@ -171,6 +205,8 @@ def ple_assets(
     if group_size is not None:
         document["groupSize"] = group_size
     for key, role in PLE_ROLES.items():
+        if key not in row_bytes:
+            continue
         stride = row_bytes[key]
         read = readers[key]
         blocks: list[dict[str, Any]] = []

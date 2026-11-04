@@ -8,20 +8,20 @@ import {
   ChatSession,
   type ChatSessionHost,
   Pipeline,
-} from "../../models/gemma4-qat.ts";
+} from "../../models/gemma4-qat-mobile.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
-const root = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
+const root = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
 // 無い機も旧 major が残っている機も明示 SKIP（helper の MUST — ADR 0109 決定 9）。
 const available = mirrorAvailable(root);
 if (!available) {
   console.warn(
-    "[karume] models/karume-gemma4-qat/ が無い（か karume/5 でない）ため QAT 実重み検査を SKIP。tools/export-recipes の dist.py --pipeline gemma4-qat で作成する。",
+    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/5), so the mobile QAT real-weight checks SKIP. Assemble it with dist.py --pipeline gemma4-qat-mobile in tools/export-recipes.",
   );
 }
 for (const model of ["e2b", "e4b"] as const) {
   describe.skipIf(!available || !GPU_AVAILABLE)(
-    `gemma4-qat ${model}: 公開入口・KV継続・中断復帰・解放（実GPU）`,
+    `gemma4-qat-mobile ${model}: 公開入口・KV継続・中断復帰・解放（実GPU）`,
     () => {
       let abortOnDecode: AbortController | undefined;
       const states: { contextCount: number; residentBytes: number }[] = [];
@@ -204,7 +204,7 @@ const qatAssets = (model: "e2b" | "e4b"): Promise<Assets> =>
 
 for (const model of ["e2b", "e4b"] as const) {
   test.skipIf(!available || !GPU_AVAILABLE)(
-    `gemma4-qat ${model}: fromAssets も同じ構築と応答を通る（実GPU）`,
+    `gemma4-qat-mobile ${model}: fromAssets も同じ構築と応答を通る（実GPU）`,
     async () => {
       const pipeline = await Pipeline.fromAssets(await qatAssets(model), {
         maxResidentPleBytes: 0,

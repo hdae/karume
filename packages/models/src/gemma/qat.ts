@@ -1,6 +1,6 @@
 /**
  * What the QAT family has of its own: the option types and the RoPE inputs of its entry
- * (`@karume/models/gemma4-qat`), and the structural checks — separately from regular Gemma's entry,
+ * (`@karume/models/gemma4-qat-mobile`), and the structural checks — separately from regular Gemma's entry,
  * it requires fixed storage and SRQ.
  *
  * The public declarations carry the names users import (`PipelineOptions`, `FromPretrainedOptions`,
@@ -51,7 +51,7 @@ const PLE_DIM = 256;
 
 export const assertGemma4QatModel = (model: string): Gemma4QatModel => {
   if (model !== "e2b" && model !== "e4b") {
-    throw new Error(`gemma4Qat.Pipeline: unsupported model '${model}'`);
+    throw new Error(`gemma4QatMobile.Pipeline: unsupported model '${model}'`);
   }
   return model;
 };
@@ -59,28 +59,30 @@ export const assertGemma4QatModel = (model: string): Gemma4QatModel => {
 export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel => {
   const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")?.shape;
   if (shape === undefined) {
-    throw new Error("gemma4Qat.Pipeline: graph input per_layer_inputs is missing");
+    throw new Error("gemma4QatMobile.Pipeline: graph input per_layer_inputs is missing");
   }
   const model = shape[2] === 35 ? "e2b" : shape[2] === 42 ? "e4b" : undefined;
   if (model === undefined) {
     throw new Error(
-      `gemma4Qat.Pipeline: the layer count ${shape[2]} of per_layer_inputs is not E2B 35 / E4B 42`,
+      `gemma4QatMobile.Pipeline: the layer count ${shape[2]} of per_layer_inputs is not E2B 35 / E4B 42`,
     );
   }
   if (shape[3] !== PLE_DIM) {
     throw new Error(
-      `gemma4Qat.Pipeline: the PLE dimension ${shape[3]} of per_layer_inputs is not ${PLE_DIM}`,
+      `gemma4QatMobile.Pipeline: the PLE dimension ${shape[3]} of per_layer_inputs is not ${PLE_DIM}`,
     );
   }
   const hidden = graph.values[graph.outputs[1]]?.shape[2];
   const expectedHidden = model === "e2b" ? 1536 : 2560;
   if (hidden !== expectedHidden) {
     throw new Error(
-      `gemma4Qat.Pipeline: hidden width ${hidden} is not ${model}'s ${expectedHidden}`,
+      `gemma4QatMobile.Pipeline: hidden width ${hidden} is not ${model}'s ${expectedHidden}`,
     );
   }
   if (selected !== undefined && assertGemma4QatModel(selected) !== model) {
-    throw new Error("gemma4Qat.Pipeline: the model name and the graph's configuration differ");
+    throw new Error(
+      "gemma4QatMobile.Pipeline: the model name and the graph's configuration differ",
+    );
   }
   const producers = new Map(
     graph.nodes.flatMap((node) => node.outs.map((out) => [out, node] as const)),
@@ -97,12 +99,12 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
     (node) => node.op === "embedding" && node.ins[1] === "input_ids",
   );
   if (embeddings.length !== 1) {
-    throw new Error("gemma4Qat.Pipeline: there is not exactly one token embedding");
+    throw new Error("gemma4QatMobile.Pipeline: there is not exactly one token embedding");
   }
   const tokenWeight = embeddings[0].ins[0];
   const tokenStorage = graph.initializers[tokenWeight]?.storage;
   if (tokenStorage === undefined || codecLayout(tokenStorage.codec) !== "i2") {
-    throw new Error("gemma4Qat.Pipeline: the token embedding needs fixed INT2");
+    throw new Error("gemma4QatMobile.Pipeline: the token embedding needs fixed INT2");
   }
   let heads = 0,
     ordinary = 0;
@@ -119,16 +121,18 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
       continue;
     }
     if (weight === undefined) {
-      throw new Error(`gemma4Qat.Pipeline: linear weight '${node.ins[1]}' is not an initializer`);
+      throw new Error(
+        `gemma4QatMobile.Pipeline: linear weight '${node.ins[1]}' is not an initializer`,
+      );
     }
     if (weight.shared !== undefined) {
       throw new Error(
-        `gemma4Qat.Pipeline: linear weight '${node.ins[1]}' is a shared initializer (QAT does not accept it)`,
+        `gemma4QatMobile.Pipeline: linear weight '${node.ins[1]}' is a shared initializer (QAT does not accept it)`,
       );
     }
     const layout = codecLayout(weight.storage.codec);
     if (!["i2", "i4", "i8"].includes(layout)) {
-      throw new Error("gemma4Qat.Pipeline: linear needs fixed INT2/INT4/INT8");
+      throw new Error("gemma4QatMobile.Pipeline: linear needs fixed INT2/INT4/INT8");
     }
     storages.add(layout);
     if (node.ins[1] === tokenWeight) {
@@ -146,17 +150,17 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
       after?.length !== 1 ||
       after[0].op !== "static_quantize"
     ) {
-      throw new Error("gemma4Qat.Pipeline: linear needs fixed SRQ before and after it");
+      throw new Error("gemma4QatMobile.Pipeline: linear needs fixed SRQ before and after it");
     }
   }
   if (heads !== 1) {
     throw new Error(
-      `gemma4Qat.Pipeline: ${heads} heads share the token embedding (exactly 1 is needed)`,
+      `gemma4QatMobile.Pipeline: ${heads} heads share the token embedding (exactly 1 is needed)`,
     );
   }
   if (ordinary !== 1) {
     throw new Error(
-      `gemma4Qat.Pipeline: per_layer_model_projection has ${ordinary} f32 linears (exactly 1 is needed)`,
+      `gemma4QatMobile.Pipeline: per_layer_model_projection has ${ordinary} f32 linears (exactly 1 is needed)`,
     );
   }
   // i2 is always satisfied by the shared head (the head uses the same i2 initializer as the token
@@ -165,7 +169,7 @@ export const admitGemma4Qat = (graph: Graph, selected?: string): Gemma4QatModel 
   // the official E2B / E4B (ADR 0097 addendum 7).
   if (!["i4", "i8"].every((dtype) => storages.has(dtype))) {
     throw new Error(
-      `gemma4Qat.Pipeline: the storage of the quantized linears does not include both fixed INT4 and INT8` +
+      `gemma4QatMobile.Pipeline: the storage of the quantized linears does not include both fixed INT4 and INT8` +
         ` (${[...storages].sort().join(" / ")})`,
     );
   }
@@ -179,7 +183,7 @@ export const assertGemma4QatPle = (
 ): void => {
   if (index.storage !== PLE_STORAGE[model]) {
     throw new Error(
-      `gemma4Qat.Pipeline: PLE storage '${index.storage}' differs from ${model}'s` +
+      `gemma4QatMobile.Pipeline: PLE storage '${index.storage}' differs from ${model}'s` +
         ` '${PLE_STORAGE[model]}'`,
     );
   }
@@ -188,13 +192,13 @@ export const assertGemma4QatPle = (
   const shape = graph.inputs.find((input) => input.name === "per_layer_inputs")?.shape;
   if (index.layers !== shape?.[2]) {
     throw new Error(
-      `gemma4Qat.Pipeline: PLE layer count ${index.layers} differs from the graph's per_layer_inputs` +
+      `gemma4QatMobile.Pipeline: PLE layer count ${index.layers} differs from the graph's per_layer_inputs` +
         ` ${shape?.[2]}`,
     );
   }
   if (index.dim !== shape[3]) {
     throw new Error(
-      `gemma4Qat.Pipeline: PLE dimension ${index.dim} differs from the graph's per_layer_inputs` +
+      `gemma4QatMobile.Pipeline: PLE dimension ${index.dim} differs from the graph's per_layer_inputs` +
         ` ${shape[3]}`,
     );
   }

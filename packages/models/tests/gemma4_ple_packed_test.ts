@@ -57,6 +57,7 @@ for (const dtype of ["i2", "i4"] as const) {
     const distinct = new Set(ids).size;
     const factor = dtype === "i2" ? 4 : 2;
     assertEquals(index.storage, dtype);
+    assert(index.storage !== "bf16"); // narrows to the quantized form (the line above pins which)
     assertEquals(index.values.rowBytes, (index.layers * index.dim) / factor);
     assertEquals(
       gemma4PleTotalBytes(index),

@@ -28,7 +28,7 @@ import { localDirectory } from "@karume/hub";
 import { toManifestSource, toRepoRef } from "../src/hub/repo-ref.ts";
 import * as anima from "../anima.ts";
 import * as birefnet from "../birefnet.ts";
-import * as gemma4Qat from "../gemma4-qat.ts";
+import * as gemma4QatMobile from "../gemma4-qat-mobile.ts";
 import * as umt5 from "../umt5.ts";
 import * as wan from "../wan.ts";
 import * as moss from "../moss.ts";
@@ -213,15 +213,17 @@ test("fromPretrained: MOSS-Image points at its source table when ref is missing"
   assertMatch(error.message, /(?<![\w.])SOURCES\["moss-image"\] \(@karume\/models\/moss\)/);
 });
 
-test("fromPretrained: Gemma 4 QAT points at its source table when ref is missing", async () => {
-  // The table came with the family's first publication (0.15.1). It shares the load body with
-  // regular Gemma (`GemmaPipeline.loadPretrained`), so each family must name its own table.
+test("fromPretrained: Gemma 4 mobile QAT names no source table when ref is missing", async () => {
+  // The family has no table (its renamed distribution `karume-gemma4-qat-mobile` has no published
+  // revision yet — like Wan2.1). It shares the load body with regular Gemma
+  // (`GemmaPipeline.loadPretrained`), so the hint of Gemma's table must not leak into its message.
   const fetchStub: typeof globalThis.fetch = (input) =>
     Promise.reject(new Error(`repo_ref_test: reached the fetch layer (${describeRequest(input)})`));
   const error = await assertRejects(
-    () => gemma4Qat.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
+    () => gemma4QatMobile.Pipeline.fromPretrained({ repo: "" }, { fetch: fetchStub }),
     Error,
-    "gemma4Qat.Pipeline.fromPretrained: repo is required",
+    "gemma4QatMobile.Pipeline.fromPretrained: repo is required",
   );
-  assertMatch(error.message, /(?<![\w.])SOURCES\["gemma4-qat"\] \(@karume\/models\/gemma4-qat\)/);
+  assertStringIncludes(error.message, "pass a repo name string (= tracks main)");
+  assertEquals(error.message.includes("SOURCES"), false, error.message);
 });

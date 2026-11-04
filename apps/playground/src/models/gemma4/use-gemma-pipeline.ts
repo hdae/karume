@@ -1,6 +1,7 @@
 /**
  * Builds the Gemma 4 pipeline the page asked for (**Load**) on the page's GPU: `gemma.Pipeline` for
- * the `gemma4` mount, `gemma4Qat.Pipeline` for `gemma4-qat`. Construction reads every weight and
+ * the `gemma4` and `gemma4-qat` mounts, `gemma4QatMobile.Pipeline` for `gemma4-qat-mobile`.
+ * Construction reads every weight and
  * builds the Session (gigabytes), so it runs only on an explicit request, and again when the GPU is
  * re-acquired after a device loss. The previous pipeline is disposed when the request changes or the
  * page is left (dispose waits for a running turn); a dispose that fails is reported, not dropped.
@@ -11,14 +12,14 @@
  */
 
 import { type FromPretrainedOptions, Pipeline, type RunPhase } from "@karume/models/gemma";
-import * as gemma4Qat from "@karume/models/gemma4-qat";
+import * as gemma4QatMobile from "@karume/models/gemma4-qat-mobile";
 import type { GpuContext, SessionDiagnostics } from "@karume/runtime";
 import { type RefObject, useEffect, useState } from "react";
 
 import type { TrackGpuWork } from "@/hooks/use-gpu";
 import { type PipelineSource, pretrainedRef } from "@/lib/distributions";
 
-import { type GemmaMount, isQatModel } from "./settings";
+import { entryPointOf, type GemmaMount, isQatModel } from "./settings";
 
 /** What **Load** asks for (a new object per press, so pressing again rebuilds). */
 export type LoadRequest = {
@@ -26,7 +27,7 @@ export type LoadRequest = {
   readonly model: string;
   readonly quant: string;
   readonly source: PipelineSource;
-  /** Build the MTP drafter (`speculative` of `fromPretrained`; regular Gemma 4 only). */
+  /** Build the MTP drafter (`speculative` of `fromPretrained`; the regular entry point only). */
   readonly speculative: boolean;
   /**
    * Pass `onRunDiagnostics`. It changes the decode path: the pipeline builds its on-GPU greedy
@@ -35,7 +36,7 @@ export type LoadRequest = {
   readonly diagnostics: boolean;
 };
 
-export type GemmaPipeline = Pipeline | gemma4Qat.Pipeline;
+export type GemmaPipeline = Pipeline | gemma4QatMobile.Pipeline;
 
 export type GemmaPipelineState =
   | { readonly kind: "idle" }
@@ -54,8 +55,8 @@ export type DiagnosticsSink = (diagnostics: SessionDiagnostics, phase: RunPhase)
 const MIB = 2 ** 20;
 
 /**
- * Builds the pipeline a request names: `gemma.Pipeline` for the `gemma4` mount,
- * `gemma4Qat.Pipeline` for `gemma4-qat` (no MTP drafter, models `e2b` / `e4b` only — refused
+ * Builds the pipeline a request names: `gemma.Pipeline` for the `gemma4` and `gemma4-qat` mounts,
+ * `gemma4QatMobile.Pipeline` for `gemma4-qat-mobile` (no MTP drafter, models `e2b` / `e4b` only — refused
  * here, before any read). The one build path of the chat page and the decode bench, so both load a
  * model the same way. Without `onRunDiagnostics` the pipeline keeps its on-GPU greedy selection.
  * `sessionOptions` are passed to `fromPretrained` as explicit Session options (the pipeline resolves
@@ -87,19 +88,19 @@ export const buildGemmaPipeline = async (input: {
     ...(onRunDiagnostics === undefined ? {} : { onRunDiagnostics }),
     ...(onProgress === undefined ? {} : { onProgress }),
   };
-  if (request.mount === "gemma4") {
+  if (entryPointOf(request.mount) === "gemma.Pipeline") {
     return await Pipeline.fromPretrained(ref, {
       ...common,
       model: request.model,
       ...(request.speculative ? { speculative: {} } : {}),
     });
   }
-  if (request.speculative) throw new Error("The QAT distribution has no MTP drafter");
+  if (request.speculative) throw new Error("The mobile QAT distribution has no MTP drafter");
   const { model } = request;
   if (!isQatModel(model)) {
-    throw new Error(`gemma4Qat.Pipeline accepts the models e2b and e4b, not '${model}'`);
+    throw new Error(`gemma4QatMobile.Pipeline accepts the models e2b and e4b, not '${model}'`);
   }
-  return await gemma4Qat.Pipeline.fromPretrained(ref, { ...common, model });
+  return await gemma4QatMobile.Pipeline.fromPretrained(ref, { ...common, model });
 };
 
 /**

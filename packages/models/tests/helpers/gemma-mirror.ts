@@ -104,23 +104,27 @@ export const gemma4MirrorAssets = async (
   };
 };
 
-/** The distribution mirror of the gemma4 family (E2B, E4B and 12B). */
-export const GEMMA4_MIRROR: URL = mirrorRoot("karume-gemma4");
+/**
+ * The q4_0 QAT line's distribution mirror (E2B, E4B and 12B with their QAT drafters — the only
+ * distribution that ships 12B).
+ */
+export const GEMMA4_QAT_MIRROR: URL = mirrorRoot("karume-gemma4-qat");
 
 /** gemma-4-12B-it's tokenizer series (`gemma4.tokenizer --model 12b`). */
 export const GEMMA4_12B_TOKENIZER_SERIES = "gemma4-12b-tokenizer";
 
 /** Whether {@link readGemma4_12bTokenizer} reads the mirror (false = the opt-in series, or nothing). */
-export const GEMMA4_12B_IN_MIRROR: boolean = mirrorHasModel(GEMMA4_MIRROR, "12b");
+export const GEMMA4_12B_IN_MIRROR: boolean = mirrorHasModel(GEMMA4_QAT_MIRROR, "12b");
 
 /**
- * gemma-4-12B-it's compiled tokenizer (its own asset — 239 BPE merges fewer than E2B / E4B's):
+ * gemma-4-12B-it's compiled tokenizer (its own asset — its glitch-token fix drops other BPE merges than
+ * E2B's and E4B's):
  * the mirror's model `12b` asset when the mirror carries it, else the series as an
  * implementation-time check under KARUME_SERIES=1 (ADR 0139 decision 6), else `undefined`.
  */
 export const readGemma4_12bTokenizer = async (): Promise<Uint8Array<ArrayBuffer> | undefined> => {
   if (GEMMA4_12B_IN_MIRROR)
-    return await readMirrorAsset(GEMMA4_MIRROR, "tokenizer", { model: "12b" });
+    return await readMirrorAsset(GEMMA4_QAT_MIRROR, "tokenizer", { model: "12b" });
   if (!SERIES_CHECKS) return undefined;
   return await readFileIfPresent(
     new URL(

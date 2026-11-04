@@ -105,9 +105,10 @@ describe("parseGemma4PleIndex: 壊れた索引を黙って読まない", () => {
   });
 
   it("旧 sidecar の版は読まない（両読みしない）", () => {
-    // Schema 4 (grouped scales) is read since the q4_0 QAT line — `gemma4_ple_grouped_test.ts`;
-    // 5 stands for a version this reader does not know.
-    for (const schema of [1, 2, 5]) {
+    // Schema 4 (grouped scales) is read since the q4_0 QAT line — `gemma4_ple_grouped_test.ts` —
+    // and schema 5 (a bf16 table) since the original-weights preset — `gemma4_ple_bf16_test.ts`;
+    // 6 stands for a version this reader does not know.
+    for (const schema of [1, 2, 6]) {
       assertThrows(
         () => parseGemma4PleIndex({ ...raw, schema }),
         Error,

@@ -12,9 +12,12 @@
  * would differ unnoticed).
  * MUST: maps are read only through `Object.hasOwn` (cross-cutting invariant).
  *
- * NOTE: the public distribution repository tables ({@link SOURCES}, and {@link QAT_SOURCES} of
- * the QAT family) also live here. They are not values derivable from the manifest but the "which
- * manifest to fetch" side, so a distribution cannot carry them (ADR 0073).
+ * NOTE: the public distribution repository table ({@link SOURCES}) also lives here. It is not a
+ * value derivable from the manifest but the "which manifest to fetch" side, so a distribution cannot
+ * carry it (ADR 0073). The mobile QAT family (`@karume/models/gemma4-qat-mobile`) has no table:
+ * its distribution `karume-gemma4-qat-mobile` has no published revision yet (ADR 0073 decision 1).
+ * The q4_0 QAT line `karume-gemma4-qat` (a `gemma4/1` distribution this family's `Pipeline`
+ * reads) has no entry in {@link SOURCES} yet for the same reason.
  */
 
 import type { HubRepoRef } from "@karume/hub";
@@ -39,9 +42,10 @@ export const GEMMA4_PIPELINE_MAJOR = 1;
  * (pinned commit SHAs — ADR 0073).
  *
  * The key is the basename of the HF repository name without `karume-` (`"karume-" + key` gives back
- * the repository basename — this invariant is checked by `tests/sources_test.ts`). One family = one
- * repository, so a future E4B / 12B also lives in this one entry (`"gemma4"`) (non-default models
- * are chosen with `{ model }`).
+ * the repository basename — this invariant is checked by `tests/sources_test.ts`). One entry per
+ * repository, several models in each (non-default models are chosen with `{ model }`): the regular
+ * line `"gemma4"` (E2B / E4B), and the q4_0 QAT line `karume-gemma4-qat` (E2B / E4B / 12B), which
+ * gets its key `"gemma4-qat"` when it is published.
  *
  * Pass it **as an opt-in when you want to follow the package version automatically** — to pin
  * reproducibility yourself, write your own `{ repo, revision }` instead of using this table
@@ -60,34 +64,6 @@ export const SOURCES = {
   gemma4: {
     repo: "hdae/karume-gemma4",
     revision: "1df13a401cbf469dcd6e495ad6616ae4b4fdb507",
-  },
-} as const satisfies Record<string, HubRepoRef>;
-
-/**
- * The **public distribution repository table** of the fixed mobile QAT family
- * (`@karume/models/gemma4-qat` exports it as `SOURCES` — ADR 0092, one table per family, **no
- * default entry**). The values are **the sources this package version verified** (pinned commit
- * SHAs — ADR 0073).
- *
- * The key follows the same rule as {@link SOURCES} (`"karume-" + key` gives back the repository
- * basename — `tests/sources_test.ts`):
- *
- * - `"gemma4-qat"` = `hdae/karume-gemma4-qat` (E2B and E4B in one repository, default E2B; chosen
- *   with `{ model }` — self-contained, no cross-repository reference)
- *
- * It lives in this module next to regular Gemma's table because both families share this
- * directory, and the recipe-side check (`tools/export-recipes/tests/test_dist_driver.py`) reads the
- * repositories of `packages/models/src/<family>/config.ts`.
- *
- * MUST: the revision is a commit SHA, for the reasons given on {@link SOURCES}.
- */
-// NOTE: the revision is updated to main's SHA after the upload, in §3 of the release runbook
-// (docs/release-runbook.md) (inheriting the maintenance duty of ADR 0073 decision 3 — hand-written
-// + runbook gate).
-export const QAT_SOURCES = {
-  "gemma4-qat": {
-    repo: "hdae/karume-gemma4-qat",
-    revision: "574cacb8f24b242ee5a8aac9145cf99a3ae61750",
   },
 } as const satisfies Record<string, HubRepoRef>;
 

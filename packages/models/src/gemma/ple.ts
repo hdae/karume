@@ -24,7 +24,8 @@
  * `values` (**token-major** `[tokens, layers, dim]`) and `scales` (`[tokens, layers]` f32 — schema 4:
  * `[tokens, layers, dim / groupSize]`, one per group of a layer's values) are each cut into a list
  * of blocks at or below the block limit and **in whole rows**, and stored in the
- * container as assets with the roles `ple-values` / `ple-scales`. A block that needs range reads
+ * container as assets with the roles `ple-values` / `ple-scales`. A bf16 index (schema 5) has the
+ * `values` table alone — the checkpoint's bf16 values, no scales. A block that needs range reads
  * sits alone in its own part (container-v1 §4.2), so reading one row does not drag in the
  * neighbouring weights. The block boundaries of the two tables are **independent** (one row =
  * 8,960 B of values / 140 B of scales, so the same 32 MiB spans a different number of tokens).
@@ -34,7 +35,9 @@
  * While PLE was in the graph, `embedding` computed `f32(i8) × per-row scale` and the `mul` right
  * after it multiplied by `embed_scale` (= `hidden_size_per_layer_input ** 0.5` = 16.0). This file
  * builds it in **the same order** (`(q × scale) × embedScale`). `embedScale` is a power of two, so
- * the f32 multiplication is exact and matching the order is enough (ADR 0085 decision 4). If it
+ * the f32 multiplication is exact and matching the order is enough (ADR 0085 decision 4). A bf16 row
+ * has no first step: the value is the bf16 bits widened to f32 (`bits << 16` — exact, the host
+ * mirror of the GPU `embedding`'s `bitcast<f32>`, runtime `format/bf16.ts`), then `× embedScale`. If it
  * diverged, token-sequence parity would break and the proof of "unchanged behaviour" would be
  * unusable. The check is the `ple.probe.safetensors` comparison in
  * `packages/e2e/tests/e2e_gemma4_product_test.ts` (**exact equality** with the values torch
@@ -92,12 +95,14 @@ import type { AssetReader, Tensor } from "@karume/runtime";
 import { ModelInputError } from "../errors.ts";
 import { readAssetRange } from "../hub/asset-readers.ts";
 import {
+  BF16_BYTES,
   defaultGemma4PleResidentBytes,
   type Gemma4PleBlock,
   gemma4PleBlockBytes,
   gemma4PleBlockOf,
   type Gemma4PleIndex,
   type Gemma4PleTable,
+  gemma4PleTables,
   largestBlockBytes,
   packFactor,
   scalesPerLayer,
@@ -261,12 +266,12 @@ const ROW_READ_CONCURRENCY = 16;
 const ROW_CACHE_CAPACITY = 256;
 
 /**
- * One row that was looked up (kept as quantized bytes, so the dequantization order does not
- * change). Both arrays occupy their own buffers of exactly one row.
+ * One row that was looked up (kept as stored bytes, so the dequantization order does not
+ * change). Each array occupies its own buffer of exactly one row; a bf16 row has no scales.
  */
 type CachedRow = {
   readonly values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>;
-  readonly scales: Float32Array<ArrayBuffer>;
+  readonly scales: Float32Array<ArrayBuffer> | undefined;
 };
 
 /**
@@ -331,8 +336,9 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   if (budget > 0 && budget < largest) {
     throw new ModelInputError(
       `maxResidentBytes ${budget} is less than one PLE block, ${largest} bytes` +
-        ` (this index has ${index.values.blocks.length} values blocks /` +
-        ` ${index.scales.blocks.length} scales blocks — pass 0 for no residency)`,
+        ` (this index has ${gemma4PleTables(index)
+          .map(([name, table]) => `${table.blocks.length} ${name} blocks`)
+          .join(" / ")} — pass 0 for no residency)`,
     );
   }
   // (1) the index's row count and (2) the main embedding's vocab row count (ADR 0085 decision 5's
@@ -345,12 +351,25 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     );
   }
   const stride = index.layers * index.dim;
-  const factor = packFactor(index);
   const rowValueBytes = index.values.rowBytes;
-  /** Scales of one layer of a row (1 = one per row — schema 3). */
-  const groups = scalesPerLayer(index);
+  /** The scale table (absent for a bf16 index — its values are not quantized). */
+  const scaleTable = index.storage === "bf16" ? undefined : index.scales;
+  /** Values per byte (0 for bf16, whose values are wider than a byte — {@link writeRow}). */
+  const factor = index.storage === "bf16" ? 0 : packFactor(index);
+  /** Scales of one layer of a row (1 = one per row — schema 3; 0 for bf16). */
+  const groups = index.storage === "bf16" ? 0 : scalesPerLayer(index);
   /** **Element count** of one row of `scales` (f32 × layers × groups). */
   const scaleStride = index.layers * groups;
+  /** Values that share one scale (unused for bf16). */
+  const groupSize = index.storage === "bf16" ? index.dim : index.groupSize;
+  /**
+   * One f32 and its bits: a bf16 value is widened by writing its bits into the upper half
+   * (`bits << 16` — exact, no rounding; the definition of the runtime's `format/bf16.ts`, which the
+   * GPU `embedding` follows with `bitcast<f32>`). Owned by this gather, written and read inside one
+   * synchronous `writeRow`.
+   */
+  const widened = new Float32Array(1);
+  const widenedBits = new Uint32Array(widened.buffer);
   /**
    * Rows are kept as quantized bytes too, so the dequantization order does not change. Insertion
    * order = LRU.
@@ -429,17 +448,27 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
    * GPU-side `embedding` and the `mul` right after it). JS arithmetic is f64, so the first step is
    * brought down to f32 with `Math.fround` before multiplying — rounding once in f64 can give a
    * different result from the two-step rounding in the subnormal range (ADR 0085 decision 4).
+   * A bf16 row (`scales` undefined) widens each value to f32 exactly (`widened`) and multiplies by
+   * the embed scale — the GPU's `embedding` output is that same exact f32.
    */
   const writeRow = (
     data: Float32Array<ArrayBuffer>,
     target: number,
     values: Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer>,
     valuesFrom: number,
-    scales: Float32Array<ArrayBuffer>,
+    scales: Float32Array<ArrayBuffer> | undefined,
     scalesFrom: number,
   ): void => {
     let cursor = target;
-    const { groupSize } = index;
+    if (scales === undefined) {
+      const end = cursor + stride;
+      for (let byte = valuesFrom; cursor < end; byte += BF16_BYTES, cursor += 1) {
+        // Little-endian bf16 bits (the writer's int16 view — ADR 0131 decision 2).
+        widenedBits[0] = (values[byte] | (values[byte + 1] << 8)) << 16;
+        data[cursor] = widened[0] * index.embedScale;
+      }
+      return;
+    }
     for (let layer = 0; layer < index.layers; layer += 1) {
       // One scale per group of `groupSize` values (schema 3: one group = the whole layer).
       const scaleBase = scalesFrom + layer * groups;
@@ -638,6 +667,8 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     return blocks;
   };
 
+  // bf16 values are read as bytes (`writeRow` assembles the little-endian 16-bit words — a
+  // `Uint16Array` view of a block would need 2-byte alignment the row reads do not guarantee).
   const valuesView = (buffer: ArrayBuffer): Int8Array<ArrayBuffer> | Uint8Array<ArrayBuffer> =>
     index.storage === "i8" ? new Int8Array(buffer) : new Uint8Array(buffer);
   const scalesView = (buffer: ArrayBuffer): Float32Array<ArrayBuffer> => new Float32Array(buffer);
@@ -698,22 +729,21 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
       }
       if (missing.length > 0) {
         // (2) Group by block per table, and decide the policy **after touching the hits of both
-        // tables**.
+        // tables** (a bf16 index has the values table alone).
         const planned = { value: 0 };
         const valuePlan = groupTable(index.values, missing);
-        const scalePlan = groupTable(index.scales, missing);
-        touchHits(valuePlan, planned);
-        touchHits(scalePlan, planned);
-        decideTable(valuePlan, planned);
-        decideTable(scalePlan, planned);
+        const scalePlan = scaleTable === undefined ? undefined : groupTable(scaleTable, missing);
+        const plans = scalePlan === undefined ? [valuePlan] : [valuePlan, scalePlan];
+        for (const plan of plans) touchHits(plan, planned);
+        for (const plan of plans) decideTable(plan, planned);
         // (3) Run the row reads first (an extension of hits-first — running them after waiting for
         // the whole reads would let that eviction drop this gather's row-cache hits). The waits (=
         // the failure record) are set up before the row reads, so that a whole-block failure also
         // stops new row reads.
         const failure: GatherFailure = {};
         const valueFull = awaitFull(valuePlan, failure);
-        const scaleFull = awaitFull(scalePlan, failure);
-        await gatherRows([valuePlan, scalePlan], options, failure);
+        const scaleFull = scalePlan === undefined ? undefined : awaitFull(scalePlan, failure);
+        await gatherRows(plans, options, failure);
         const valueBlocks = await valueFull;
         const scaleBlocks = await scaleFull;
         // MUST: reject only after every started read has settled (do not overlap old reads with a
@@ -727,9 +757,12 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         for (const [at, id] of missing.entries()) {
           const positions = rows.get(id) as number[];
           const values = supplyOf(valuePlan, id, valueBlocks, valuesView, rowValueBytes);
-          const scales = supplyOf(scalePlan, id, scaleBlocks, scalesView, scaleStride);
+          const scales =
+            scalePlan === undefined || scaleBlocks === undefined
+              ? undefined
+              : supplyOf(scalePlan, id, scaleBlocks, scalesView, scaleStride);
           const first = positions[0] * stride;
-          writeRow(data, first, values.array, values.from, scales.array, scales.from);
+          writeRow(data, first, values.array, values.from, scales?.array, scales?.from ?? 0);
           copyDuplicates(data, positions, first);
           // Every admitted row goes into the row cache, whichever path supplied it. Nothing is
           // kept with a budget of 0, and nothing is revived after abort or dispose.
@@ -737,7 +770,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
             rowCache.delete(id);
             rowCache.set(id, {
               values: ownedRow(values, rowValueBytes),
-              scales: ownedRow(scales, scaleStride),
+              scales: scales === undefined ? undefined : ownedRow(scales, scaleStride),
             });
             for (const oldest of rowCache.keys()) {
               if (rowCache.size <= ROW_CACHE_CAPACITY) break;
@@ -751,7 +784,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     stats(): Gemma4PleStats {
       let rowCacheBytes = 0;
       for (const row of rowCache.values()) {
-        rowCacheBytes += row.values.buffer.byteLength + row.scales.buffer.byteLength;
+        rowCacheBytes += row.values.buffer.byteLength + (row.scales?.buffer.byteLength ?? 0);
       }
       return {
         loads,

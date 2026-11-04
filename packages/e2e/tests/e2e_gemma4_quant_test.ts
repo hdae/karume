@@ -14,7 +14,7 @@ import { localDirectory, parseManifest } from "@karume/hub";
 import { nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
 import { chatPrompt, Pipeline, type RunPhase } from "../../models/gemma.ts";
-import * as gemma4Qat from "../../models/gemma4-qat.ts";
+import * as gemma4QatMobile from "../../models/gemma4-qat-mobile.ts";
 import { assertSeatsApplied, mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
 import type { SessionOverrides } from "../../models/src/session/options.ts";
 import {
@@ -32,8 +32,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /** QAT E2B decode 計画で packed になる SRQ の本数（e2e_*_fusion_counts_test.ts と同じ値）。 */
 const DECODE_PACKED = 70;
 
+/** The mirror each family (= manifest pipeline name) is read from. */
+const MIRRORS = { gemma4: "karume-gemma4", "gemma4-qat": "karume-gemma4-qat-mobile" } as const;
+
 for (const family of ["gemma4", "gemma4-qat"] as const) {
-  const root = new URL(`../../../models/karume-${family}/`, import.meta.url);
+  const root = new URL(`../../../models/${MIRRORS[family]}/`, import.meta.url);
   const available = mirrorAvailable(root);
   if (!available) {
     console.warn(
@@ -195,12 +198,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   census.push(d.lastRunPipelines);
                   byPhase.set(phase.kind, [...(byPhase.get(phase.kind) ?? []), d.lastRunPipelines]);
                 },
-              } satisfies gemma4Qat.FromPretrainedOptions;
+              } satisfies gemma4QatMobile.FromPretrainedOptions;
               const source = nodeDirectory(temp);
               const pipeline =
                 family === "gemma4"
                   ? await Pipeline.fromPretrained(source, options)
-                  : await gemma4Qat.Pipeline.fromPretrained(source, options);
+                  : await gemma4QatMobile.Pipeline.fromPretrained(source, options);
               try {
                 const stream = pipeline.chat(
                   [
@@ -379,12 +382,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
           const loadUnsupported = () =>
             family === "gemma4"
               ? Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" })
-              : gemma4Qat.Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" });
+              : gemma4QatMobile.Pipeline.fromPretrained(noWeightsSource, { quant: "unsupported" });
           await assertRejects(loadUnsupported, Error, "session.linearCompute is not supported");
           if (family === "gemma4-qat") {
             await assertRejects(
               () =>
-                gemma4Qat.Pipeline.fromPretrained(noWeightsSource, {
+                gemma4QatMobile.Pipeline.fromPretrained(noWeightsSource, {
                   linearGemvReduce: "sequential",
                 }),
               Error,
@@ -419,7 +422,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             const gpu = await acquireGpu();
             try {
               const phases: Record<string, number[]> = {};
-              const pipeline = await gemma4Qat.Pipeline.fromPretrained(nodeDirectory(root), {
+              const pipeline = await gemma4QatMobile.Pipeline.fromPretrained(nodeDirectory(root), {
                 gpu,
                 model: "e2b",
                 chunkLength: 32,

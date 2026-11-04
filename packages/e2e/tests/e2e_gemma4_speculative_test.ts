@@ -89,6 +89,13 @@ import {
 } from "../../models/tests/helpers/ple-budget.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+/**
+ * The seat these cases were written against: `i4-fast`, the regular distribution's default until
+ * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
+ * reading the int4 container (and its session options) their goldens and floors were taken on —
+ * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ */
+const INT4_SEAT = { quant: "i4-fast" } as const;
 const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");
 
 /** SKIP 時にそのまま貼れる組み立てコマンド（段 2 の門と同文）。 */
@@ -341,10 +348,11 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     beforeAll(async () => {
       const started = performance.now();
       pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        ...INT4_SEAT,
         speculative: { k: GEMMA4_DRAFT_STEPS },
         // 参照経路（runtime の既定）— decode も verify も同じ縮約カーネルを通る席。
         stateAttentionReduce: "sequential",
-        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
       });
       console.log(
         `[e2e] gemma4 投機①: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,
@@ -529,8 +537,9 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     beforeAll(async () => {
       const started = performance.now();
       pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        ...INT4_SEAT,
         speculative: { k: GEMMA4_DRAFT_STEPS },
-        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
         onRunDiagnostics: (diagnostics, phase) => {
           records?.push(recordOf(diagnostics, phase));
         },
@@ -823,14 +832,14 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       rope = config.rope;
       golden = await readGoldenCase("short-en");
       prompt = golden.prompt;
-      const { index, openBlock } = await openGemma4Ple(MIRROR_DIR);
+      const { index, openBlock } = await openGemma4Ple(MIRROR_DIR, INT4_SEAT);
       ple = createGemma4Ple({
         index,
         openBlock,
         vocabSize: VOCAB,
         maxResidentBytes: allResidentBytes(index),
       });
-      component = await openMirrorComponent(MIRROR_DIR, "model");
+      component = await openMirrorComponent(MIRROR_DIR, "model", INT4_SEAT);
       gpu = await acquireGpu();
     });
 

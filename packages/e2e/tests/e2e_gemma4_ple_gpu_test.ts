@@ -15,10 +15,12 @@
  *
  * ## 資産
  *
- * ①② read the PLE of the QAT mirror's e2b `model` container (`models/karume-gemma4-qat/` — the
- * container is byte-identical to the `gemma4-qat-e2b-product` series it was assembled from) and the
+ * ①② read the PLE of the mobile QAT mirror's e2b `model` container
+ * (`models/karume-gemma4-qat-mobile/` — the container is byte-identical to the mobile line's
+ * `gemma4-qat-e2b-product` series it was assembled from; the q4_0 QAT line's E2B series is the
+ * other spelling, `gemma4-e2b-qat-product`, and is not read here) and the
  * probe from the test-asset root (`goldens/gemma4-qat-e2b-product/ple.probe.safetensors` —
- * ADR 0139 decisions 1 and 2); ③ reads the mirrors `models/karume-gemma4-qat/` and
+ * ADR 0139 decisions 1 and 2); ③ reads the mirrors `models/karume-gemma4-qat-mobile/` and
  * `models/karume-gemma4/`. 無い環境では**明示 SKIP** する（ADR 0005）。The probe follows ADR 0139's
  * fetched rule: absent from a complete fetch of the pinned test-asset dataset it FAILs ①② (the
  * dataset at the pin lacks it); without a complete fetch ①② SKIP with the reason in the title.
@@ -35,7 +37,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { acquireGpu, parseSafetensors, type Tensor } from "@karume/runtime";
 import { nodeDirectory } from "@karume/hub/node";
 import { Pipeline } from "../../models/gemma.ts";
-import * as gemma4Qat from "../../models/gemma4-qat.ts";
+import * as gemma4QatMobile from "../../models/gemma4-qat-mobile.ts";
 import { createGemma4Ple } from "../../models/src/gemma/ple.ts";
 import { createGemma4PleResident, gemma4PleGpuBytes } from "../../models/src/gemma/ple-gpu.ts";
 import { mirrorAvailable, openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
@@ -48,10 +50,20 @@ import {
   testAssetsFetched,
 } from "@karume/test-support/test-assets";
 
-/** The QAT product series' goldens (the PLE probe). */
+/**
+ * The mobile QAT product series' goldens (the PLE probe — not the q4_0 line's
+ * `gemma4-e2b-qat-product`).
+ */
 const PRODUCT_ROOT = goldenDir("gemma4-qat-e2b-product");
-const QAT_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
+const QAT_ROOT = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
 const GEMMA_ROOT = new URL("../../../models/karume-gemma4/", import.meta.url);
+/**
+ * The seat these cases were written against: `i4-fast`, the regular distribution's default until
+ * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
+ * reading the int4 container (and its session options) their goldens and floors were taken on —
+ * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ */
+const INT4_SEAT = { quant: "i4-fast" } as const;
 const PLE_PROBE_FILE = "ple.probe.safetensors";
 const PROBE_TOKENS_KEY = "tokens";
 const PROBE_INPUTS_KEY = "per_layer_inputs";
@@ -92,7 +104,7 @@ const PROBE_SKIP_REASON = PROBE_SKIP
 
 if (!QAT_PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4-qat/ is absent (or not karume/5), so the PLE GPU-resident " +
+    "[karume] models/karume-gemma4-qat-mobile/ is absent (or not karume/5), so the PLE GPU-resident " +
       "golden case ①② and the QAT generation-parity cases SKIP (assemble it with dist.py in " +
       "tools/export-recipes)",
   );
@@ -161,7 +173,7 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
         inputName: "per_layer_inputs",
         idsName: "input_ids",
         rows: [1, tokens.length],
-        entry: "gemma4Qat.Pipeline",
+        entry: "gemma4QatMobile.Pipeline",
       });
       try {
         assertEquals(resident.residentBytes, bytes.total, "常駐した量子化バイト列");
@@ -215,7 +227,7 @@ for (const model of ["e2b", "e4b"] as const) {
     async () => {
       const source = nodeDirectory(QAT_ROOT);
       const expected = await generateIds(() =>
-        gemma4Qat.Pipeline.fromPretrained(source, { model }),
+        gemma4QatMobile.Pipeline.fromPretrained(source, { model }),
       );
       assertEquals(
         expected.length,
@@ -223,7 +235,7 @@ for (const model of ["e2b", "e4b"] as const) {
         "host 経路が刻みぶん生成していない（parity が空振りする）",
       );
       const actual = await generateIds(() =>
-        gemma4Qat.Pipeline.fromPretrained(source, { model, pleResidency: "gpu" }),
+        gemma4QatMobile.Pipeline.fromPretrained(source, { model, pleResidency: "gpu" }),
       );
       assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
     },
@@ -235,7 +247,7 @@ test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
   async () => {
     const source = nodeDirectory(GEMMA_ROOT);
     // 索引は配布形ミラーの `model` 容器の資産（ADR 0109 決定 4）— 開くのは part 0 と索引だけ。
-    const { index } = await openGemma4Ple(GEMMA_ROOT);
+    const { index } = await openGemma4Ple(GEMMA_ROOT, INT4_SEAT);
     const bytes = gemma4PleGpuBytes(index);
     const gpu = await acquireGpu();
     const fits =
@@ -245,20 +257,20 @@ test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
     if (!fits) {
       // MUST: 黙ってホスト経路へ退避しない（席を要求した利用者に不足を返す）。
       await assertRejects(
-        () => Pipeline.fromPretrained(source, { pleResidency: "gpu" }),
+        () => Pipeline.fromPretrained(source, { ...INT4_SEAT, pleResidency: "gpu" }),
         Error,
         "maxStorageBufferBindingSize",
       );
       return;
     }
-    const expected = await generateIds(() => Pipeline.fromPretrained(source, {}));
+    const expected = await generateIds(() => Pipeline.fromPretrained(source, INT4_SEAT));
     assertEquals(
       expected.length,
       GREEDY_STEPS,
       "host 経路が刻みぶん生成していない（parity が空振りする）",
     );
     const actual = await generateIds(() =>
-      Pipeline.fromPretrained(source, { pleResidency: "gpu" }),
+      Pipeline.fromPretrained(source, { ...INT4_SEAT, pleResidency: "gpu" }),
     );
     assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
   },
@@ -276,7 +288,7 @@ test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
     ): Promise<{ ids: number[]; fences: number }> => {
       const gpu = await acquireGpu();
       try {
-        const pipeline = await gemma4Qat.Pipeline.fromPretrained(source, {
+        const pipeline = await gemma4QatMobile.Pipeline.fromPretrained(source, {
           model: "e2b",
           pleResidency,
           gpu,

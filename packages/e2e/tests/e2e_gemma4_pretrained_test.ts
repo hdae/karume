@@ -59,6 +59,13 @@ import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budg
 import { mirrorAvailable, openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+/**
+ * The seat these cases were written against: `i4-fast`, the regular distribution's default until
+ * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
+ * reading the int4 container (and its session options) their goldens and floors were taken on —
+ * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ */
+const INT4_SEAT = { quant: "i4-fast" } as const;
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -69,7 +76,8 @@ const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pip
  * 本数を意味してしまう（ADR 0085 追記 2026-09-02 の「本数ではなくバイト」はテスト側の定数にも
  * 同じく効く）。ミラーが無い環境では評価しない（SKIP 判定の後で呼ぶ）。
  */
-const maxResidentPleBytes = (): Promise<number> => allResidentPleBytesOfMirror(MIRROR_DIR);
+const maxResidentPleBytes = (): Promise<number> =>
+  allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT);
 
 /** 上流 `generation_config.json` の推奨（配布形が `pipelineConfig.sampler` へ焼いた値）。 */
 const RECOMMENDED_SAMPLER = { temperature: 1, topK: 64, topP: 0.95 } as const;
@@ -147,13 +155,33 @@ test.skipIf(!AVAILABLE)("gemma4 配布形: manifest の宣言と PLE 索引の�
     "weights は製品グラフ + drafter の 2 本（PLE は容器の資産・tokenizer は assets の席）",
   );
   assertEquals(Object.keys(entry.assets), ["tokenizer"], "manifest の assets は tokenizer だけ");
-  // ④ 索引（schema 3）が名指しする block が、そのまま `model` 容器の資産として在る — 突合は
-  // helper（`readGemma4PleIndex`）が全件で行い、片方だけ焼き直したミラーはここで落ちる。
-  const { index } = await openGemma4Ple(MIRROR_DIR);
+  // ④ The blocks each index names are the `model` container's assets as they are — the helper
+  // (`readGemma4PleIndex`) matches every one, so a mirror with one side rebuilt fails here. Both
+  // `model` containers are opened by name: the int4 seat's index (schema 3 — i8 values and one f32
+  // scale per (token, layer) row) and the default `bf16` preset's (schema 5 — the bf16 values, no
+  // scale table).
+  const { index } = await openGemma4Ple(MIRROR_DIR, INT4_SEAT);
+  assert(index.storage === "i8", `the int4 seat's PLE storage is ${index.storage} (i8 is needed)`);
+  assertEquals(index.groupSize, index.dim, "schema 3: one scale per (token, layer) row");
   assert(index.values.blocks.length > 0, "PLE 索引が values の block を 1 本も持たない");
   assert(index.scales.blocks.length > 0, "PLE 索引が scales の block を 1 本も持たない");
   assertEquals(index.values.blocks.at(-1)?.stop, index.tokens, "values の区間が tokens で閉じる");
   assertEquals(index.scales.blocks.at(-1)?.stop, index.tokens, "scales の区間が tokens で閉じる");
+  assertEquals(entry.defaultQuant, "bf16", "the default preset");
+  const { index: original } = await openGemma4Ple(MIRROR_DIR);
+  assert(original.storage === "bf16", `the default preset's PLE storage is ${original.storage}`);
+  assert(!("scales" in original), "a schema 5 index has no scale table");
+  assertEquals(
+    original.values.rowBytes,
+    original.layers * original.dim * 2,
+    "schema 5: 2 bytes per bf16 value",
+  );
+  assert(original.values.blocks.length > 0, "the bf16 index names no values block");
+  assertEquals(original.values.blocks.at(-1)?.stop, original.tokens, "bf16 values close at tokens");
+  // Both presets are one model: the same table shape behind both storages.
+  for (const field of ["tokens", "layers", "dim", "embedScale"] as const) {
+    assertEquals(original[field], index[field], `the two presets' PLE ${field}`);
+  }
 });
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
@@ -168,6 +196,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       // directory keeps the distribution out of RAM and out of any user cache.
       cacheDir = await makeTempDir({ prefix: "karume-gemma4-cache-" });
       pipeline = await Pipeline.fromPretrained(server.source, {
+        ...INT4_SEAT,
         caches: nodeCacheStorage(cacheDir),
         maxResidentPleBytes: await maxResidentPleBytes(),
       });
@@ -233,7 +262,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
  *   戻っていること — 家族のコード既定が再び紛れ込むと赤になる）。
  * - `i4-gemvpar`（`stateAttentionReduce: "parallel"` を宣言）は ③' で走り、③ のキーが出ない。
  * - 同じ席でも明示の `"sequential"` が宣言に勝つ（戻す口が生きていること）。
- * - 既定 quant（E2B = `i4-fast`・`"parallel-fused"` を宣言）は ③ のキーが出ない。融合 kernel
+ * - `i4-fast`（`"parallel-fused"` を宣言 — the default until 2026-11-04）は ③ のキーが出ない。融合 kernel
  *   （`attention_state_stats_pv`）が選ばれるかは列上限で決まるので、③' か融合のどちらかが走れば足りる。
  *
  * NOTE: 席が効くのは **decode（M = 1）の dispatch だけ**になった（perf-ledger K-13 段 2）。
@@ -260,7 +289,11 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         options: { quant: "i4-gemvpar", stateAttentionReduce: "sequential" },
         expect: "sequential",
       },
-      { name: "既定 quant（宣言 parallel-fused）→ ③ 無し", options: {}, expect: "parallel-fused" },
+      {
+        name: "i4-fast（宣言 parallel-fused）→ ③ 無し",
+        options: INT4_SEAT,
+        expect: "parallel-fused",
+      },
     ] as const;
     let server: LocalDistServer;
     let cacheDir: string;
@@ -281,10 +314,8 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     for (const one of cases) {
       it(one.name, async () => {
         // 実効の束（選んだ quant 席の宣言 + 明示指定を家族の合成に通した値）→ 束の census 表の行。
-        const {
-          quant = entry.defaultQuant,
-          ...overrides
-        }: { readonly quant?: string } & SessionOverrides = one.options;
+        // Every case names its seat (the default preset is `bf16` since 2026-11-04).
+        const { quant, ...overrides }: { readonly quant: string } & SessionOverrides = one.options;
         const row = censusRowOf(
           "gemma4",
           "e2b",
@@ -405,6 +436,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     let pipeline: Pipeline;
     beforeAll(async () => {
       pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+        ...INT4_SEAT,
         maxResidentPleBytes: await maxResidentPleBytes(),
         // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
         fetch: fetchStub,

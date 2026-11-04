@@ -1,7 +1,8 @@
 /**
- * The Gemma 4 chat page's settings: the models of the two mounts (regular Gemma 4 and the mobile QAT
- * distribution), the per-turn form (sampler and max new tokens) and the chat form (the settings a
- * `ChatSession` takes at construction), with their parsing. Pure, so `vp test` covers it.
+ * The Gemma 4 chat page's settings: the models of the three mounts (regular Gemma 4, the q4_0 QAT
+ * line and the mobile QAT distribution), the per-turn form (sampler and max new tokens) and the chat
+ * form (the settings a `ChatSession` takes at construction), with their parsing. Pure, so `vp test`
+ * covers it.
  */
 
 import type { Manifest } from "@karume/hub";
@@ -16,15 +17,30 @@ import {
 
 import type { Choice } from "@/components/choice-select";
 
-/** The mounts this page reads; each one is built with its own family entry point. */
-export const GEMMA_MOUNTS = ["gemma4", "gemma4-qat"] as const;
+/**
+ * The mounts this page reads, each built with its family's entry point ({@link entryPointOf}):
+ * regular Gemma 4 (`karume-gemma4`), the q4_0 QAT line (`karume-gemma4-qat` — a `gemma4/1`
+ * distribution with MTP drafters) and the mobile QAT distribution (`karume-gemma4-qat-mobile`).
+ */
+export const GEMMA_MOUNTS = ["gemma4", "gemma4-qat", "gemma4-qat-mobile"] as const;
 export type GemmaMount = (typeof GEMMA_MOUNTS)[number];
 
-/** `Pipeline` for `gemma4`, `gemma4Qat.Pipeline` for `gemma4-qat`. */
 export const MOUNT_LABELS: Readonly<Record<GemmaMount, string>> = {
   gemma4: "Gemma 4",
-  "gemma4-qat": "Gemma 4 QAT",
+  "gemma4-qat": "Gemma 4 QAT (q4_0)",
+  "gemma4-qat-mobile": "Gemma 4 mobile QAT",
 };
+
+/** The entry point a saved record names. */
+export type GemmaEntryPoint = "gemma.Pipeline" | "gemma4QatMobile.Pipeline";
+
+/**
+ * The entry point a mount is built with: `gemma4QatMobile.Pipeline` for the mobile QAT
+ * distribution, the regular `Pipeline` for the others (the q4_0 QAT line is a `gemma4/1`
+ * distribution).
+ */
+export const entryPointOf = (mount: GemmaMount): GemmaEntryPoint =>
+  mount === "gemma4-qat-mobile" ? "gemma4QatMobile.Pipeline" : "gemma.Pipeline";
 
 /** One model of one mount (the select's value is `<mount>/<model>`). */
 export type ModelKey = { readonly mount: GemmaMount; readonly model: string };
@@ -42,7 +58,7 @@ export const parseModelKey = (value: string): ModelKey | undefined => {
   return isGemmaMount(mount) && model !== "" ? { mount, model } : undefined;
 };
 
-/** The models `gemma4Qat.Pipeline.fromPretrained` accepts (`model` is typed `"e2b" | "e4b"`). */
+/** The models `gemma4QatMobile.Pipeline.fromPretrained` accepts (`model` is typed `"e2b" | "e4b"`). */
 export type QatModel = "e2b" | "e4b";
 export const isQatModel = (model: string): model is QatModel => model === "e2b" || model === "e4b";
 
@@ -51,7 +67,7 @@ export type GemmaManifests = Partial<Record<GemmaMount, Manifest>>;
 
 /**
  * Every model of every loaded manifest, in mount order then manifest order, each manifest's
- * `defaultModel` marked "(default)". A QAT model the entry point does not accept is listed disabled
+ * `defaultModel` marked "(default)". A mobile QAT model the entry point does not accept is listed disabled
  * (choosing it could only fail at load).
  */
 export const gemmaModelChoices = (manifests: GemmaManifests): readonly Choice<string>[] =>
@@ -59,11 +75,11 @@ export const gemmaModelChoices = (manifests: GemmaManifests): readonly Choice<st
     const manifest = manifests[mount];
     if (manifest === undefined) return [];
     return Object.keys(manifest.models).map((model) => {
-      const unsupported = mount === "gemma4-qat" && !isQatModel(model);
+      const unsupported = mount === "gemma4-qat-mobile" && !isQatModel(model);
       return {
         value: modelKeyValue({ mount, model }),
         label: `${MOUNT_LABELS[mount]} — ${model}${model === manifest.defaultModel ? " (default)" : ""}${
-          unsupported ? " (not accepted by gemma4Qat.Pipeline)" : ""
+          unsupported ? " (not accepted by gemma4QatMobile.Pipeline)" : ""
         }`,
         ...(unsupported ? { disabled: true } : {}),
       };
@@ -71,8 +87,8 @@ export const gemmaModelChoices = (manifests: GemmaManifests): readonly Choice<st
   });
 
 /**
- * The model the page starts with: regular Gemma 4's default model when its manifest is there, else
- * the QAT distribution's.
+ * The model the page starts with: the default model of the first mount (in {@link GEMMA_MOUNTS}
+ * order) whose manifest is there.
  */
 export const defaultModelKey = (manifests: GemmaManifests): ModelKey | undefined => {
   for (const mount of GEMMA_MOUNTS) {
@@ -101,10 +117,12 @@ export const modelConfig = (manifest: Manifest, model: string): PipelineConfig =
 /**
  * Whether the model has drafter weights, i.e. whether the MTP drafter (`speculative` of
  * `Pipeline.fromPretrained`) can be built (every preset then maps them — a quant is a complete
- * mapping of the model's weights). Regular Gemma 4 only: `gemma4Qat.Pipeline` takes no drafter.
+ * mapping of the model's weights). The regular entry point only: `gemma4QatMobile.Pipeline` takes no
+ * drafter.
  */
 export const hasDrafter = (manifest: Manifest, { mount, model }: ModelKey): boolean =>
-  mount === "gemma4" && manifest.models[model]?.weights["drafter"] !== undefined;
+  entryPointOf(mount) === "gemma.Pipeline" &&
+  manifest.models[model]?.weights["drafter"] !== undefined;
 
 /** The per-turn form, as typed (parsed by {@link parseTurnForm}). */
 export type TurnForm = {

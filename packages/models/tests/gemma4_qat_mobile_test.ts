@@ -3,8 +3,8 @@ import { describe, it } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { admitGemma4Qat, assertGemma4QatModel, assertGemma4QatPle } from "../src/gemma/qat.ts";
 import { ropeInputs, type RopeSpec } from "../src/gemma/rope.ts";
-import * as gemma4Qat from "../gemma4-qat.ts";
-import type { Gemma4PleIndex } from "../src/gemma/ple-index.ts";
+import * as gemma4QatMobile from "../gemma4-qat-mobile.ts";
+import type { Gemma4PleQuantizedIndex } from "../src/gemma/ple-index.ts";
 import { pleFixture } from "./helpers/ple-fixture.ts";
 
 type Graph = Parameters<typeof admitGemma4Qat>[0];
@@ -148,7 +148,7 @@ const graphOf = (model: "e2b" | "e4b", fault?: Fault): Graph => {
 };
 
 /** 索引 1 本（block 1 本の合成 — 寸法だけが門の対象なので桁は小さくてよい）。 */
-const pleIndexOf = (model: "e2b" | "e4b"): Gemma4PleIndex =>
+const pleIndexOf = (model: "e2b" | "e4b"): Gemma4PleQuantizedIndex =>
   pleFixture({
     tokens: 64,
     layers: model === "e2b" ? 35 : 42,
@@ -242,14 +242,15 @@ describe("固定 QAT は MTP 指定を資産取得より前に拒否する", () 
   // 効かない。実行時の拒否が**資産を 1 byte も取る前**に出ることを、存在しない取得元で確かめる。
   it("fromPretrained", async () => {
     await assertRejects(
-      () => gemma4Qat.Pipeline.fromPretrained("does-not-exist", { speculative: true } as never),
+      () =>
+        gemma4QatMobile.Pipeline.fromPretrained("does-not-exist", { speculative: true } as never),
       Error,
-      "MTP is not supported for QAT",
+      "MTP is not supported for the mobile QAT line",
     );
   });
   it("fromAssets", async () => {
     await assertRejects(
-      () => gemma4Qat.Pipeline.fromAssets({} as never, { speculative: true } as never),
+      () => gemma4QatMobile.Pipeline.fromAssets({} as never, { speculative: true } as never),
       Error,
       "speculative is not accepted",
     );
@@ -262,7 +263,7 @@ describe("QAT のホスト RoPE", () => {
     full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
   } satisfies RopeSpec;
   it("pad と回転しない次元を厳密に保存し、入力4本を返す", () => {
-    const input = gemma4Qat.ropeInputs(spec, [0, 17, 127]);
+    const input = gemma4QatMobile.ropeInputs(spec, [0, 17, 127]);
     assertEquals(Object.keys(input).length, 4);
     for (const [key, tensor] of Object.entries(input)) {
       const width = key.includes("full_attention") ? 512 : 256;
@@ -290,7 +291,7 @@ describe("QAT のホスト RoPE", () => {
     // Torch f32: sin(tensor(127) * (1 / tensor(10))) = 0x3e086dee。
     // theta=10000、次元32/256は逆周波数1/10。べき乗そのものは厳密なので角度の丸めだけを検査する。
     const key = "rope_sliding_attention_sin";
-    assertEquals(gemma4Qat.ropeInputs(spec, [127])[key].data[32], 0.13323184847831726);
+    assertEquals(gemma4QatMobile.ropeInputs(spec, [127])[key].data[32], 0.13323184847831726);
     assertEquals(ropeInputs(spec, [127])[key].data[32], 0.13323204219341278);
   });
   it("両層種別 × 位置 5 点の cos / sin を golden とビット単位で突合する", async () => {
@@ -307,7 +308,7 @@ describe("QAT のホスト RoPE", () => {
       readonly tables: Readonly<Record<string, string>>;
     };
     assertEquals(golden.spec, spec);
-    const inputs = gemma4Qat.ropeInputs(golden.spec, golden.positions);
+    const inputs = gemma4QatMobile.ropeInputs(golden.spec, golden.positions);
     assertEquals(Object.keys(inputs).sort(), Object.keys(golden.tables).sort());
     for (const [name, base64] of Object.entries(golden.tables)) {
       const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
@@ -326,10 +327,10 @@ describe("QAT のホスト RoPE", () => {
     }
   });
   it("不正な位置と f32 で表せない逆周波数を拒否する", () => {
-    assertThrows(() => gemma4Qat.ropeInputs(spec, [-1]), Error, "non-negative integer");
+    assertThrows(() => gemma4QatMobile.ropeInputs(spec, [-1]), Error, "non-negative integer");
     assertThrows(
       () =>
-        gemma4Qat.ropeInputs(
+        gemma4QatMobile.ropeInputs(
           {
             ...spec,
             full_attention: { theta: 1e300, headDim: 4, rotaryDim: 4 },

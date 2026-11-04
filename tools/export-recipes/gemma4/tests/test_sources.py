@@ -15,8 +15,14 @@ import pytest
 from _shared.paths import INPUTS_ROOT
 from gemma4 import sources
 
-#: The QAT repository's `tokenizer.json` (E2B's — the packaging slip `gemma4.sources` describes).
-E2B_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+#: The `tokenizer.json` every Gemma 4 repository shipped before Google's glitch-token fixes — what
+#: the QAT repositories still ship (`gemma4.sources`).
+PRE_FIX_TOKENIZER_SHA256 = "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f"
+#: The regular `-it` repositories' `tokenizer.json` after the fixes of 2026-11-03 (one per model).
+FIXED_TOKENIZER_SHA256 = {
+    "e2b": "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2",
+    "e4b": "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc",
+}
 
 
 def _snapshot(
@@ -117,7 +123,9 @@ class TestTwelveBPins:
         assert sorted(pins.tokenizer.sha256) == ["tokenizer.json"]
 
     def test_the_tokenizer_pin_is_not_the_tokenizer_the_qat_repository_ships(self) -> None:
-        assert sources.HUB_PINS["12b"].tokenizer.sha256["tokenizer.json"] != E2B_TOKENIZER_SHA256
+        assert (
+            sources.HUB_PINS["12b"].tokenizer.sha256["tokenizer.json"] != PRE_FIX_TOKENIZER_SHA256
+        )
 
     def test_the_cached_snapshots_match_the_pins(self) -> None:
         """The real hub cache (needs both snapshots)."""
@@ -137,7 +145,7 @@ class TestTwelveBPins:
         if not (weights_dir / "tokenizer.json").is_file():
             pytest.skip(f"12B's QAT snapshot is not in the hub cache ({weights_dir})")
 
-        with pytest.raises(sources.SourcePinError, match=E2B_TOKENIZER_SHA256):
+        with pytest.raises(sources.SourcePinError, match=PRE_FIX_TOKENIZER_SHA256):
             sources.assert_snapshot_pin(weights_dir, sources.HUB_PINS["12b"].tokenizer)
 
 
@@ -210,12 +218,12 @@ class TestQatPins:
             (
                 "e2b",
                 "6befbaca7398925921802abd1f277b495b78b738",
-                "3e22461f65e89153144f8adb70e3b8c2cc9845a7",
+                "4adf15748de9e1a0097b6274cee9c15836c41c37",
             ),
             (
                 "e4b",
                 "476025a01dbf99361c062bbeca3d6a76bb4c4566",
-                "ee0ef6023621cff504d758262d4e04895a5af4a2",
+                "4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
             ),
         ],
     )
@@ -230,7 +238,7 @@ class TestQatPins:
         assert sorted(pins.weights.sha256) == ["config.json", "model.safetensors"]
         assert pins.tokenizer.repo == f"google/gemma-4-{name}-it"
         assert pins.tokenizer.revision == tokenizer
-        assert pins.tokenizer.sha256 == {"tokenizer.json": E2B_TOKENIZER_SHA256}
+        assert pins.tokenizer.sha256 == {"tokenizer.json": FIXED_TOKENIZER_SHA256[model]}
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
     def test_the_tokenizer_revision_is_the_regular_line_s(self, model: str) -> None:

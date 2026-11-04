@@ -133,7 +133,11 @@ PIPELINES: Mapping[str, Pipeline] = {
     "depth-anything": depth_anything_distribution.PIPELINE,
     "vowel-detector": vowel_detector_distribution.PIPELINE,
     "gemma4": gemma4_distribution.PIPELINE,
-    "gemma4-qat": gemma4_qat_distribution.PIPELINE,
+    # The q4_0 QAT line of the `gemma4/1` contract (`karume-gemma4-qat` — E2B / E4B / 12B with
+    # their QAT drafters) and the mobile QAT family (`karume-gemma4-qat-mobile` — contract
+    # `gemma4-qat/1`).
+    "gemma4-qat": gemma4_distribution.QAT_Q4_0_PIPELINE,
+    "gemma4-qat-mobile": gemma4_qat_distribution.PIPELINE,
     "wan": wan_distribution.PIPELINE,
     # Wan の世代は別リポ（ADR 0092 決定 2 — `karume-wan2.2`）なので Pipeline も別席。
     "wan-ti2v": wan_distribution.TI2V_PIPELINE,

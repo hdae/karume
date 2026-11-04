@@ -30,6 +30,7 @@ from birefnet.distribution import LUCIDA_PIPELINE
 from birefnet.distribution import PIPELINE as BIREFNET_PIPELINE
 from depth_anything.distribution import PIPELINE as DEPTH_ANYTHING_PIPELINE
 from gemma4.distribution import PIPELINE as GEMMA4_PIPELINE
+from gemma4.distribution import QAT_Q4_0_PIPELINE as GEMMA4_QAT_Q4_0_PIPELINE
 from gemma4_qat.distribution import PIPELINE as GEMMA4_QAT_PIPELINE
 from irodori.distribution import PIPELINE as IRODORI_PIPELINE
 from karume.dist import PIPELINES as CORE_PIPELINES
@@ -63,7 +64,8 @@ RECIPE_PIPELINES = {
     "depth-anything": DEPTH_ANYTHING_PIPELINE,
     "vowel-detector": VOWEL_DETECTOR_PIPELINE,
     "gemma4": GEMMA4_PIPELINE,
-    "gemma4-qat": GEMMA4_QAT_PIPELINE,
+    "gemma4-qat": GEMMA4_QAT_Q4_0_PIPELINE,
+    "gemma4-qat-mobile": GEMMA4_QAT_PIPELINE,
     "wan": WAN_PIPELINE,
     "wan-ti2v": WAN_TI2V_PIPELINE,
     "umt5": UMT5_PIPELINE,
@@ -156,6 +158,7 @@ class TestRegistry:
             "irodori",
             "gemma4",
             "gemma4-qat",
+            "gemma4-qat-mobile",
             "siglip2",
             "birefnet",
             "lucida",
@@ -232,7 +235,9 @@ RELEASE_REPOSITORIES = [
     ("lucida", ["1024", "2048"], None, "karume-lucida"),
     ("depth-anything", ["small"], None, "karume-depth-anything-v2"),
     ("gemma4", ["e2b"], None, "karume-gemma4"),
-    ("gemma4-qat", ["e2b", "e4b"], None, "karume-gemma4-qat"),
+    # The q4_0 QAT line (`--pipeline gemma4-qat` → karume-gemma4-qat) and the mobile QAT line
+    # (`--pipeline gemma4-qat-mobile` → karume-gemma4-qat-mobile, renamed 2026-11-04) have no
+    # published revision yet, so neither has a TS table entry.
     ("irodori", ["v4-small"], None, "karume-irodori-v4-small"),
     ("irodori", ["v4.1-small"], None, "karume-irodori-v4.1-small"),
     # `--repo` 無しで公開リポを指す（Pipeline がファミリーのリポ名を宣言する — W-RC5-2）。

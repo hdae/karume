@@ -12,7 +12,7 @@
     "./sbv2": "./sbv2.ts",
     "./siglip2": "./siglip2.ts",
     "./vowel-detector": "./vowel-detector.ts",
-    "./gemma4-qat": "./gemma4-qat.ts",
+    "./gemma4-qat-mobile": "./gemma4-qat-mobile.ts",
     "./umt5": "./umt5.ts",
     "./wan": "./wan.ts",
     "./moss": "./moss.ts"

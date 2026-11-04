@@ -205,11 +205,11 @@ describe("the split summary", () => {
   it("writes the breakdown as text: per split arm and prompt, families then keys with their shares", () => {
     const entries = summarizeRuns([run(0, chats[0]), run(0, chats[2])], 1, ["few-ids"]);
     const text = splitSummaryText(entries, [
-      { mount: "gemma4-qat", model: "e2b", quant: "i4", tap: true, split: true },
+      { mount: "gemma4-qat-mobile", model: "e2b", quant: "i4", tap: true, split: true },
     ]);
     const lines = text.split("\n");
     expect(lines[0]).toBe(
-      "arm 1 QAT e2b i4 (split) · Story request · 2 warm chats · GPU 4.150 ms/token (split)",
+      "arm 1 mobile QAT e2b i4 (split) · Story request · 2 warm chats · GPU 4.150 ms/token (split)",
     );
     expect(lines).toContain(`     2.500  60.2%      1.0  linear`);
     expect(lines).toContain(`     1.500  36.1%      2.0  norm  ${NORM}`);
@@ -244,19 +244,19 @@ describe("a split arm", () => {
       },
     },
   } as unknown as Manifest;
-  const draft = { id: 0, key: { mount: "gemma4-qat" as const, model: "e2b" }, split: true };
+  const draft = { id: 0, key: { mount: "gemma4-qat-mobile" as const, model: "e2b" }, split: true };
 
   it("is labelled as split", () => {
     expect(
-      armLabel({ mount: "gemma4-qat", model: "e2b", quant: "i4", tap: true, split: true }),
-    ).toBe("QAT e2b i4 (split)");
+      armLabel({ mount: "gemma4-qat-mobile", model: "e2b", quant: "i4", tap: true, split: true }),
+    ).toBe("mobile QAT e2b i4 (split)");
   });
 
   it("splits only with the tap on", () => {
-    const on = resolveArm({ ...draft, tap: true }, { "gemma4-qat": manifest });
-    const off = resolveArm({ ...draft, tap: false }, { "gemma4-qat": manifest });
+    const on = resolveArm({ ...draft, tap: true }, { "gemma4-qat-mobile": manifest });
+    const off = resolveArm({ ...draft, tap: false }, { "gemma4-qat-mobile": manifest });
     expect(on.ok && on.arm.split).toBe(true);
     expect(off.ok && off.arm.split).toBeUndefined();
-    expect(off.ok && armLabel(off.arm)).toBe("QAT e2b i4 (tap off)");
+    expect(off.ok && armLabel(off.arm)).toBe("mobile QAT e2b i4 (tap off)");
   });
 });

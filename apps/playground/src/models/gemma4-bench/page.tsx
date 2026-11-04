@@ -1,6 +1,7 @@
 /**
- * The Gemma 4 decode bench: A/B arms of regular Gemma 4 (`gemma.Pipeline`) and the mobile QAT
- * distribution (`gemma4Qat.Pipeline`) — model × preset, with the GPU tap on or off — run over a
+ * The Gemma 4 decode bench: A/B arms of regular Gemma 4 and its q4_0 QAT line (`gemma.Pipeline`)
+ * and the mobile QAT distribution (`gemma4QatMobile.Pipeline`) — model × preset, with the GPU tap on
+ * or off — run over a
  * fixed prompt set in interleaved rounds, with decode rates from the stream timings and the tap's GPU
  * busy time, dispatches, passes and submits per token, and a record of every chat. A split arm runs
  * every dispatch in its own timed pass and breaks decode GPU time down per op family and pipeline
@@ -41,7 +42,7 @@ import { useDistributionIndex } from "@/hooks/use-distribution-index";
 import { type GpuOptions, useGpu } from "@/hooks/use-gpu";
 import { type ManifestState, useManifest } from "@/hooks/use-manifest";
 import { type RunProgress, useRunTask } from "@/hooks/use-run-task";
-import { mountStatus, type PipelineSource } from "@/lib/distributions";
+import { type DistributionStatus, mountStatus, type PipelineSource } from "@/lib/distributions";
 import { fileStamp } from "@/lib/download";
 import { type RecordEnvironment, recordEnvironment } from "@/lib/environment";
 import { manifestPresets } from "@/lib/presets";
@@ -156,32 +157,48 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
 
   const index = useDistributionIndex();
   const distributionIndex = index.kind === "ready" ? index.index : undefined;
-  const regularStatus = mountStatus(distributionIndex, "gemma4");
-  const qatStatus = mountStatus(distributionIndex, "gemma4-qat");
-  const regularManifest = useManifest("gemma4", regularStatus);
-  const qatManifest = useManifest("gemma4-qat", qatStatus);
-  const manifestStates: Readonly<Record<GemmaMount, ManifestState>> = {
-    gemma4: regularManifest,
-    "gemma4-qat": qatManifest,
-  };
+  const statuses = useMemo(
+    (): Readonly<Record<GemmaMount, DistributionStatus | undefined>> => ({
+      gemma4: mountStatus(distributionIndex, "gemma4"),
+      "gemma4-qat": mountStatus(distributionIndex, "gemma4-qat"),
+      "gemma4-qat-mobile": mountStatus(distributionIndex, "gemma4-qat-mobile"),
+    }),
+    [distributionIndex],
+  );
+  const regularManifest = useManifest("gemma4", statuses.gemma4);
+  const qatManifest = useManifest("gemma4-qat", statuses["gemma4-qat"]);
+  const mobileManifest = useManifest("gemma4-qat-mobile", statuses["gemma4-qat-mobile"]);
+  const manifestStates = useMemo(
+    (): Readonly<Record<GemmaMount, ManifestState>> => ({
+      gemma4: regularManifest,
+      "gemma4-qat": qatManifest,
+      "gemma4-qat-mobile": mobileManifest,
+    }),
+    [regularManifest, qatManifest, mobileManifest],
+  );
   const manifests = useMemo<GemmaManifests>(() => {
-    const regular = manifestOf(regularManifest);
-    const qat = manifestOf(qatManifest);
-    return {
-      ...(regular === undefined ? {} : { gemma4: regular }),
-      ...(qat === undefined ? {} : { "gemma4-qat": qat }),
-    };
-  }, [regularManifest, qatManifest]);
+    const loaded: GemmaManifests = {};
+    for (const mount of GEMMA_MOUNTS) {
+      const manifest = manifestOf(manifestStates[mount]);
+      if (manifest !== undefined) loaded[mount] = manifest;
+    }
+    return loaded;
+  }, [manifestStates]);
   const distributions = useMemo(() => {
     const facts: Partial<Record<GemmaMount, ArmDistribution>> = {};
-    if (regularManifest.kind === "ready" && regularStatus !== undefined) {
-      facts.gemma4 = { directory: regularStatus.directory, manifestSha256: regularManifest.sha256 };
-    }
-    if (qatManifest.kind === "ready" && qatStatus !== undefined) {
-      facts["gemma4-qat"] = { directory: qatStatus.directory, manifestSha256: qatManifest.sha256 };
+    for (const mount of GEMMA_MOUNTS) {
+      const state = manifestStates[mount];
+      const status = statuses[mount];
+      if (state.kind === "ready" && status !== undefined) {
+        facts[mount] = { directory: status.directory, manifestSha256: state.sha256 };
+      }
     }
     return facts;
-  }, [regularManifest, qatManifest, regularStatus, qatStatus]);
+  }, [manifestStates, statuses]);
+  const missing = GEMMA_MOUNTS.flatMap((mount) => {
+    const state = manifestStates[mount];
+    return state.kind === "missing" ? [state.directory] : [];
+  });
 
   // The arms: the defaults until edited.
   const [armEdit, setArmEdit] = useState<readonly ArmDraft[] | undefined>(undefined);
@@ -333,12 +350,18 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
           <ErrorAlert key={mount} title={`Manifest (${mount})`} error={state.error} />
         ) : null;
       })}
-      {regularManifest.kind === "missing" && qatManifest.kind === "missing" ? (
+      {missing.length === GEMMA_MOUNTS.length ? (
         <Alert>
           <AlertTitle>No Gemma 4 distribution</AlertTitle>
           <AlertDescription>
-            The dev server has neither <code>{regularManifest.directory}</code> nor{" "}
-            <code>{qatManifest.directory}</code>. Put a distribution there and reload.
+            The dev server has none of{" "}
+            {missing.map((directory, at) => (
+              <span key={directory}>
+                {at > 0 ? " / " : ""}
+                <code>{directory}</code>
+              </span>
+            ))}
+            . Put a distribution there and reload.
           </AlertDescription>
         </Alert>
       ) : null}

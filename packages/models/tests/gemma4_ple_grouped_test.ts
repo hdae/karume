@@ -78,6 +78,7 @@ describe("parseGemma4PleIndex: schema 4", () => {
   it("accepts groupSize and derives the scales row from the group count", () => {
     assertEquals(document.schema, 4);
     const index = parseGemma4PleIndex(document);
+    assert(index.storage !== "bf16", "a schema 4 document parsed as bf16");
     assertEquals(index.groupSize, SPEC.groupSize);
     assertEquals(index.scales.rowBytes, SPEC.layers * (SPEC.dim / 16) * SCALE_BYTES);
   });
@@ -121,6 +122,7 @@ describe("parseGemma4PleIndex: schema 4", () => {
     assertEquals(schema3.schema, 3);
     assertEquals(Object.hasOwn(schema3, "groupSize"), false);
     const index = parseGemma4PleIndex(schema3);
+    assert(index.storage !== "bf16", "a schema 3 document parsed as bf16");
     // The accepted form carries the row as the one group.
     assertEquals(index.groupSize, SPEC.dim);
     assertEquals(index.scales.rowBytes, SPEC.layers * SCALE_BYTES);

@@ -1,6 +1,9 @@
 /**
- * gemma 系列（gemma4 / gemma4-qat）の **quant 席 1 つぶんの sha 参照行** — 実走と実物の作り方と、
- * 決着までの 1 本（`e2e_gemma4_reference_test.ts` / `e2e_gemma4_qat_reference_test.ts` が共有する）。
+ * The **sha256 reference row of one quant seat** of the gemma lines — the regular `karume-gemma4`,
+ * the q4_0 QAT `karume-gemma4-qat` and the mobile QAT `karume-gemma4-qat-mobile`: how the run and
+ * its artifact are made, and the one path to the settlement (shared by
+ * `e2e_gemma4_reference_test.ts` / `e2e_gemma4_qat_reference_test.ts` /
+ * `e2e_gemma4_qat_mobile_reference_test.ts`).
  *
  * ## 何を固定するのか
  *
@@ -49,7 +52,7 @@ export const REFERENCE_PROMPT = "Explain in about five sentences why the sky is 
 /** 抽選する token 数の上限（停止 token もこの数に含まれる — `ChatOptions.maxNewTokens`）。 */
 export const REFERENCE_MAX_NEW_TOKENS = 64;
 
-/** 走行に要る pipeline の面（`gemma.Pipeline` / `gemma4Qat.Pipeline` の共通部分）。 */
+/** The pipeline surface a run needs (common to `gemma.Pipeline` and `gemma4QatMobile.Pipeline`). */
 export type ChatPipeline = {
   chat(messages: readonly ChatMessage[], options: ChatOptions): ChatStream;
   dispose(): Promise<void>;

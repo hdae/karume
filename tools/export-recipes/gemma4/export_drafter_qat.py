@@ -109,8 +109,8 @@ cases continue coherently.
     outputs/series/gemma4-<model>-qat-drafter/drafter-golden.<case>.safetensors  expected drafts
     outputs/series/gemma4-<model>-qat-drafter/reference.json                     provenance
 
-NOTE: no distribution reads the series yet; `gemma4.distribution` still requires the drafter
-component to be i8 and refuses i4 in it.
+The q4_0 QAT line's distribution (`gemma4.distribution.QAT_Q4_0_PIPELINE`) ships the series as
+the `drafter` role of its model, int4 alone (the regular line's drafter stays int8).
 
 MUST: transformers is imported inside functions (the loader's rule).
 """
@@ -137,7 +137,11 @@ from gemma4 import export_product_qat as qat
 from gemma4 import export_unified as unified
 from gemma4 import provenance, sources
 from gemma4.card import GEMMA4_LICENSE
-from gemma4.distribution import GEMMA4_DRAFTER_ROLE, GEMMA4_PRODUCT_SUFFIX
+from gemma4.distribution import (
+    GEMMA4_DRAFTER_ROLE,
+    GEMMA4_QAT_DRAFTER_SUFFIX,
+    gemma4_qat_q4_0_product_suffix,
+)
 from gemma4.export_drafter import DrafterWrapper, LenderSlots
 from gemma4.sources import HubPin, ModelPins
 from karume.artifacts import staged_publication
@@ -149,11 +153,6 @@ from karume.pipeline import publish_model
 from karume.states import to_external_states_form
 from karume.verify import VerifiedContainer
 from qwen3_5.export import MEMORY_FLOOR_GIB, MemoryWatch
-
-#: The series suffix (`outputs/series/gemma4-<model>-qat-drafter/` — the regular drafter's
-#: `gemma4-<model>-drafter` with the QAT product's `qat-` in front). NOTE: no distribution reads the
-#: series yet; when one does, the word moves next to `GEMMA4_DRAFTER_SUFFIX`.
-QAT_DRAFTER_SUFFIX = "qat-drafter"
 
 #: The q4_0 grid's group (the QAT product series' — the borrowed table must share it).
 GROUP_SIZE = qat.GROUP_SIZE
@@ -187,7 +186,7 @@ def lender_suffix(model: str) -> str:
     pinned weights are the QAT checkpoint (12B — `gemma4.export_unified`). A model without a QAT
     target fails loudly (`gemma4.sources.qat_target_pins`)."""
     sources.qat_target_pins(model)
-    return qat.QAT_PRODUCT_SUFFIX if model in sources.QAT_PINS else GEMMA4_PRODUCT_SUFFIX
+    return gemma4_qat_q4_0_product_suffix(model)
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     models with a QAT drafter, and every source defaulting to its pin."""
     parser = one_shot.series_parser(
         __doc__.split("\n\n")[0],
-        partial(one_shot.series_dir, suffix=QAT_DRAFTER_SUFFIX),
+        partial(one_shot.series_dir, suffix=GEMMA4_QAT_DRAFTER_SUFFIX),
         with_sym_max=False,
         models=tuple(sorted(sources.QAT_DRAFTER_PINS)),
     )

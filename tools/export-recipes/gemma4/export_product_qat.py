@@ -60,9 +60,9 @@ goldens are taken.
     outputs/series/gemma4-<model>-qat-product/reference.json             provenance (both sources,
                                                                          own goldens)
 
-NOTE: the TypeScript reader (`packages/models/src/gemma/ple-index.ts`) reads schema 3 only, so the
-series is not loadable by the runtime yet; the regular and the mobile QAT series stay schema 3
-until the reader moves.
+The TypeScript reader (`packages/models/src/gemma/ple-index.ts`) reads schema 3 and 4; the q4_0
+QAT line's distribution (`gemma4.distribution.QAT_Q4_0_PIPELINE`) takes this series and requires
+schema 4. The regular and the mobile QAT series stay schema 3.
 
 The embedding's group scale is `262144 × hidden / 32` F32 — 48 MiB for E2B, 80 MiB for E4B — over
 the 32 MiB block limit, so the writer splits it on the embedding's pieces (container-v1 §5 rule ③,
@@ -94,7 +94,7 @@ from gemma4 import export_product as product
 from gemma4 import export_unified as unified
 from gemma4 import ple, provenance, sources
 from gemma4.card import GEMMA4_LICENSE
-from gemma4.distribution import GEMMA4_DEFAULT_MODEL, GEMMA4_ROLE
+from gemma4.distribution import GEMMA4_DEFAULT_MODEL, GEMMA4_QAT_PRODUCT_SUFFIX, GEMMA4_ROLE
 from gemma4.sources import ModelPins
 from karume.artifacts import staged_publication
 from karume.container import Provenance, container_parts
@@ -105,11 +105,6 @@ from karume.pipeline import publish_model
 from karume.ple import PLE_INDEX_ASSET, ple_block_ranges
 from karume.quantize import DEFAULT_GROUP_SIZE, dequantize_int4
 from qwen3_5.export import MEMORY_FLOOR_GIB, MemoryWatch
-
-#: The series suffix (`outputs/series/gemma4-<model>-qat-product/`). NOTE: no distribution reads
-#: the series yet; when one does, the word moves next to `GEMMA4_PRODUCT_SUFFIX`
-#: (`gemma4.distribution`), where the writer and the reader share it.
-QAT_PRODUCT_SUFFIX = "qat-product"
 
 #: The q4_0 grid's group: 32 consecutive values along the last axis share a step.
 GROUP_SIZE = DEFAULT_GROUP_SIZE
@@ -550,7 +545,7 @@ def export_series(
 
 def main(argv: Sequence[str] | None = None) -> None:
     parser = one_shot.series_parser(
-        __doc__.split("\n\n")[0], partial(one_shot.series_dir, suffix=QAT_PRODUCT_SUFFIX)
+        __doc__.split("\n\n")[0], partial(one_shot.series_dir, suffix=GEMMA4_QAT_PRODUCT_SUFFIX)
     )
     # The weights' default is the QAT line's pinned snapshot, not the regular line's hand-placed
     # checkpoint (`series_parser` registers that one).

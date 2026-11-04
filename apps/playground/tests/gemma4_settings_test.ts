@@ -5,6 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   defaultModelKey,
   effectiveModelKey,
+  entryPointOf,
   gemmaModelChoices,
   hasDrafter,
   isQatModel,
@@ -88,7 +89,10 @@ const qat = gemmaManifest(["e2b", "e4b"], { withDrafter: false });
 
 describe("model keys", () => {
   it("round-trips a mount and a model through the select value", () => {
-    expect(parseModelKey("gemma4-qat/e4b")).toEqual({ mount: "gemma4-qat", model: "e4b" });
+    expect(parseModelKey("gemma4-qat-mobile/e4b")).toEqual({
+      mount: "gemma4-qat-mobile",
+      model: "e4b",
+    });
   });
 
   it("rejects an unknown mount or an empty model", () => {
@@ -97,7 +101,7 @@ describe("model keys", () => {
     expect(parseModelKey("gemma4")).toBeUndefined();
   });
 
-  it("accepts only the models gemma4Qat.Pipeline takes", () => {
+  it("accepts only the models gemma4QatMobile.Pipeline takes", () => {
     expect(isQatModel("e2b")).toBe(true);
     expect(isQatModel("e4b")).toBe(true);
     expect(isQatModel("12b")).toBe(false);
@@ -106,46 +110,49 @@ describe("model keys", () => {
 
 describe("gemmaModelChoices", () => {
   it("lists every model of both mounts, each manifest's default marked", () => {
-    expect(gemmaModelChoices({ gemma4: regular, "gemma4-qat": qat })).toEqual([
+    expect(gemmaModelChoices({ gemma4: regular, "gemma4-qat-mobile": qat })).toEqual([
       { value: "gemma4/e2b", label: "Gemma 4 — e2b (default)" },
-      { value: "gemma4-qat/e2b", label: "Gemma 4 QAT — e2b (default)" },
-      { value: "gemma4-qat/e4b", label: "Gemma 4 QAT — e4b" },
+      { value: "gemma4-qat-mobile/e2b", label: "Gemma 4 mobile QAT — e2b (default)" },
+      { value: "gemma4-qat-mobile/e4b", label: "Gemma 4 mobile QAT — e4b" },
     ]);
   });
 
   it("disables a QAT model the entry point does not accept", () => {
     const odd = gemmaManifest(["e2b", "12b"], { withDrafter: false });
-    expect(gemmaModelChoices({ "gemma4-qat": odd }).at(-1)).toEqual({
-      value: "gemma4-qat/12b",
-      label: "Gemma 4 QAT — 12b (not accepted by gemma4Qat.Pipeline)",
+    expect(gemmaModelChoices({ "gemma4-qat-mobile": odd }).at(-1)).toEqual({
+      value: "gemma4-qat-mobile/12b",
+      label: "Gemma 4 mobile QAT — 12b (not accepted by gemma4QatMobile.Pipeline)",
       disabled: true,
     });
   });
 
   it("lists nothing for a mount whose manifest is not there", () => {
-    expect(gemmaModelChoices({ "gemma4-qat": qat }).map(({ value }) => value)).toEqual([
-      "gemma4-qat/e2b",
-      "gemma4-qat/e4b",
+    expect(gemmaModelChoices({ "gemma4-qat-mobile": qat }).map(({ value }) => value)).toEqual([
+      "gemma4-qat-mobile/e2b",
+      "gemma4-qat-mobile/e4b",
     ]);
   });
 });
 
 describe("the model the page starts with", () => {
   it("prefers regular Gemma 4's default model", () => {
-    expect(defaultModelKey({ gemma4: regular, "gemma4-qat": qat })).toEqual({
+    expect(defaultModelKey({ gemma4: regular, "gemma4-qat-mobile": qat })).toEqual({
       mount: "gemma4",
       model: "e2b",
     });
   });
 
   it("falls back to the QAT distribution when regular Gemma 4 is missing", () => {
-    expect(defaultModelKey({ "gemma4-qat": qat })).toEqual({ mount: "gemma4-qat", model: "e2b" });
+    expect(defaultModelKey({ "gemma4-qat-mobile": qat })).toEqual({
+      mount: "gemma4-qat-mobile",
+      model: "e2b",
+    });
   });
 
   it("keeps a chosen model while its manifest holds it, else returns to the default", () => {
-    const manifests = { gemma4: regular, "gemma4-qat": qat };
-    expect(effectiveModelKey({ mount: "gemma4-qat", model: "e4b" }, manifests)).toEqual({
-      mount: "gemma4-qat",
+    const manifests = { gemma4: regular, "gemma4-qat-mobile": qat };
+    expect(effectiveModelKey({ mount: "gemma4-qat-mobile", model: "e4b" }, manifests)).toEqual({
+      mount: "gemma4-qat-mobile",
       model: "e4b",
     });
     expect(effectiveModelKey({ mount: "gemma4", model: "e4b" }, manifests)).toEqual({
@@ -156,10 +163,25 @@ describe("the model the page starts with", () => {
 });
 
 describe("hasDrafter", () => {
-  it("is true only for a regular Gemma 4 model with drafter weights", () => {
+  it("is true only for a model of the regular entry point with drafter weights", () => {
     expect(hasDrafter(regular, { mount: "gemma4", model: "e2b" })).toBe(true);
     expect(hasDrafter(qat, { mount: "gemma4", model: "e2b" })).toBe(false);
-    expect(hasDrafter(regular, { mount: "gemma4-qat", model: "e2b" })).toBe(false);
+    expect(hasDrafter(regular, { mount: "gemma4-qat-mobile", model: "e2b" })).toBe(false);
+  });
+
+  it("is true for the q4_0 QAT line, which the regular entry point reads with its drafters", () => {
+    const line = gemmaManifest(["e2b", "e4b", "12b"], { withDrafter: true });
+    for (const model of ["e2b", "e4b", "12b"]) {
+      expect(hasDrafter(line, { mount: "gemma4-qat", model })).toBe(true);
+    }
+  });
+});
+
+describe("entryPointOf", () => {
+  it("builds only the mobile QAT mount with the mobile entry point", () => {
+    expect(entryPointOf("gemma4")).toBe("gemma.Pipeline");
+    expect(entryPointOf("gemma4-qat")).toBe("gemma.Pipeline");
+    expect(entryPointOf("gemma4-qat-mobile")).toBe("gemma4QatMobile.Pipeline");
   });
 });
 

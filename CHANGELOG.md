@@ -17,14 +17,15 @@ measurements in `docs/research/`.
 
 ### Added
 
-- `@karume/models/gemma` (also `@karume/models/gemma4-qat`): the PLE index schema 4, the form of
-  the q4_0 QAT line of Gemma 4 E2B / E4B. It adds a required `groupSize`: one f32 scale per
+- `@karume/models/gemma`: the PLE index schema 4, the form of the q4_0 QAT line of Gemma 4
+  E2B / E4B (`karume-gemma4-qat`). It adds a required `groupSize`: one f32 scale per
   `groupSize` consecutive values of a (token, layer) row instead of one per row, so a table on the
   checkpoint's own 4-bit grid (one step per 32 values) is read exactly. The host gather and the
   GPU-resident PLE (`pleResidency: "gpu"`, storage `i4`) both apply each group's scale; schema 3
   is read as before. A schema 4 index without a valid `groupSize`, a schema 3 index that spells
   one, and a grouped `i8` / `i2` index under `pleResidency: "gpu"` fail loudly.
-- `@karume/models/gemma`: Gemma 4 12B (text only) as model `12b` of the gemma4 distribution. Its
+- `@karume/models/gemma`: Gemma 4 12B (text only) as model `12b` of the q4_0 QAT distribution
+  `karume-gemma4-qat` (below). Its
   weights are Google's q4_0 quantization-aware-trained checkpoint
   (`gemma-4-12B-it-qat-q4_0-unquantized`) with that checkpoint's own 4-bit grid stored as is,
   for the linear weights and the tied embedding alike (round-to-nearest i4 on `gemma-4-12B-it`
@@ -33,10 +34,8 @@ measurements in `docs/research/`.
   container carries no PLE assets, and admission settles which kind a distribution is from both
   declarations (a mix of the two fails loudly). For such a model `pleResidency` and
   `maxResidentPleBytes` are refused as input errors before any weight part is fetched. 12B ships
-  its own tokenizer (239 BPE merges fewer than E2B / E4B's). The local mirror is assembled by the
-  recipe (`dist.py --pipeline gemma4`); the published distribution and the `gemma.SOURCES` pin
-  follow separately.
-- `PipelineConfig.chatDialect` (`@karume/models/gemma`, also `@karume/models/gemma4-qat`) and its
+  its own tokenizer, `gemma-4-12B-it`'s.
+- `PipelineConfig.chatDialect` (`@karume/models/gemma`, also `@karume/models/gemma4-qat-mobile`) and its
   type `ChatDialect`: the chat template a model follows — `"gemma4"` (E2B / E4B; the default when
   the key is absent) or `"gemma4-unified"` (12B, whose generation prompt ends with an empty thought
   channel when thinking is off). It rides on `Pipeline.tokenizer`, so `chatPrompt` / `chatTurn`
@@ -59,7 +58,7 @@ measurements in `docs/research/`.
   with `onRunDiagnostics`, decode one step per batch as before. Each turn's `GenerationStop.decodeAhead` (also on a
   `ChatStop` closed by a stop string) records the depth, the batches it ran (`0` = the run-ahead was not taken) and the
   steps they computed; its type `GenerationDecodeAhead` is exported from `@karume/models/gemma`. On an Apple M2 under
-  Chrome, QAT E2B at depth 4 decoded about 22.8 → 20.65 ms per token (ADR 0142).
+  Chrome, mobile QAT E2B at depth 4 decoded about 22.8 → 20.65 ms per token (ADR 0142).
 - `GenerationRun.chain` (`@karume/runtime`, default `false`): a run with `commit: "deferred"` may be chained onto the
   rows already awaiting commit on its context instead of being refused. It is placed at the end of the uncommitted range
   (reserved when it is issued); several chained runs may be unsettled together only inside one `BatchScope`; the whole
@@ -67,19 +66,63 @@ measurements in `docs/research/`.
   `≤ chunkLength`); and one `context.commit(rows)` folds the whole chain. `chain` without `commit: "deferred"` fails
   at issue, and every refusal for runs that do not pass `chain` is unchanged (ADR 0142 decision 1).
 - `SessionOptions.integerGemv` (`@karume/runtime`, default `false`; requires `packedStaticQuantize: true`, rejected
-  without it): the QAT decode linears at the measured QAT Gemma 4 E2B shapes (i2 gate / up and down of the KV-shared
+  without it): the mobile QAT decode linears at the measured mobile QAT Gemma 4 E2B shapes (i2 gate / up and down of the KV-shared
   layers, i4 o and the own-KV layers' down) run on an integer GEMV that sums the products of the weight codes and the
   packed int8 activation codes exactly per group and applies the scales once in a fixed order. Outputs change relative
   to the parallel GEMV (exact against its TS mirror). The manifest vocabulary `SessionSpec` (`@karume/hub`) gains the
   same optional boolean, and the Gemma pipelines (`@karume/models`) take it from a quant's `session` or as an explicit
   option; no preset declares it, and a reader without the key rejects a manifest that declares it. On an Apple M2 under
-  Chrome, QAT E2B `i4-fast` decoded about 27.8 → 22.8 ms per token (ADR 0140).
+  Chrome, mobile QAT E2B `i4-fast` decoded about 27.8 → 22.8 ms per token (ADR 0140).
 - `SessionOptions.linearGemvPlanes` (`@karume/runtime`, default `false`; needs no other option): an i2 linear with f32
-  activations at a measured shape — today only the QAT Gemma 4 E2B lm_head (262144 × 1536) — runs on a byte-plane GEMV
+  activations at a measured shape — today only the mobile QAT Gemma 4 E2B lm_head (262144 × 1536) — runs on a byte-plane GEMV
   (an exact decode of the i2 codes; only the addition order and the channel scale applied once after the sum differ from
   the reference op). Outputs may change relative to the sequential GEMV. `SessionSpec` (`@karume/hub`) and the Gemma
   pipelines carry the key as for `integerGemv`; no preset declares it. On an Apple M2 the kernel ran about 2987 →
   2393 µs (median); the end-to-end decode did not change measurably (ADR 0141).
+- `@karume/models/gemma`: the PLE index schema 5, a bf16 `values` table with no scales (no
+  `scales` and no `groupSize` — either key fails loudly, and schema 3 / 4 do not accept `bf16`).
+  The host gather widens each value to f32 exactly and applies the embed scale; the GPU-resident
+  PLE binds the table with the runtime's bf16 codec. A bf16 table is larger than the binding limit
+  of many devices (E2B 4.70 GB, E4B 5.64 GB), where `pleResidency: "gpu"` fails loudly. The
+  exporter (`karume.ple`) writes schema 5 for `storage="bf16"`; the bytes of schema 3 / 4 indexes
+  are unchanged.
+- The q4_0 QAT line of Gemma 4, `karume-gemma4-qat` (read by `@karume/models/gemma`; not yet
+  published): Google's q4_0 quantization-aware-trained E2B / E4B / 12B on their own int4 grid
+  (group 32 — the linears, the tied embedding and, for E2B / E4B, the PLE in index schema 4), each
+  with its QAT multi-token-prediction drafter on the same grid, so `speculative: {}` works for all
+  three models. Default preset `i4`; E2B / E4B also have `i4-gemvpar` / `i4-fast` (the regular
+  line's parallel GEMV, RMS fusion and fused attention over the same weights). The E2B / E4B
+  tokenizers are the regular `-it` models' (with the 2026-11-03 fixes below).
+
+### Changed
+
+- The E2B / E4B tokenizers move to Google's glitch-token fixes of 2026-11-03
+  (`google/gemma-4-E2B-it@4adf1574`, `google/gemma-4-E4B-it@4ecc2ba6`; `tokenizer.json` only —
+  E2B drops 267 BPE merges and renames id 249788 to `<glitch_pruned_249788>`, E4B drops 253).
+  E2B and E4B no longer share one tokenizer file: each model of `karume-gemma4` and
+  `karume-gemma4-qat` ships its own `<model>/tokenizer/tokenizer.json`. The mobile QAT line keeps
+  the tokenizer its upstream repositories ship, which have not received the fix.
+
+### Fixed
+
+- `@karume/runtime`: a session could not borrow a bf16-resident weight through `sharedWeights` —
+  the borrower expected the uncompressed class and the build failed with "the consuming residency
+  class is not compatible with the lender's". The borrower now follows the lender's plan as for
+  f16. This is what lets the Gemma 4 E2B drafter run next to the `bf16` preset.
+
+### Breaking
+
+- `@karume/models/gemma4-qat` is renamed `@karume/models/gemma4-qat-mobile` (barrel
+  namespace `gemma4QatMobile`, diagnostics `gemma4QatMobile.Pipeline: …`), and the mobile QAT
+  distribution becomes `karume-gemma4-qat-mobile`. The subpath exports no `SOURCES` and
+  `KARUME_SOURCES` has no mobile entry until the renamed repository is published; the name
+  `karume-gemma4-qat` now means the q4_0 QAT line above (ADR 0097 addendum 10).
+- The regular `karume-gemma4` distribution ships E2B and E4B only (12B moved to the
+  q4_0 QAT line) and gains the preset `bf16` — the checkpoint's original bf16 weights, the
+  per-layer embeddings included (PLE index schema 5) — as the default of both models
+  (ADR 0128 addendum 2026-11-04). `i4` / `i4-gemvpar` / `i4-fast` stay, chosen by name. On an RTX
+  3080 Ti `bf16` decoded about 3–4× slower than `i4-fast` (E2B 24.1 vs 6.5 ms per token, E4B 42.3
+  vs 13.0) and peaked at about 4.5 GiB (E2B) / 9.2 GiB (E4B) of GPU memory.
 
 ## [0.15.1] - 2026-11-01
 

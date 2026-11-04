@@ -58,7 +58,7 @@ import {
   defaultGemma4PleResidentBytes,
   gemma4PleBlockBytes,
   gemma4PleBlockOf,
-  type Gemma4PleIndex,
+  type Gemma4PleQuantizedIndex,
   type Gemma4PleTable,
   PLE_INDEX_ASSET,
 } from "../../models/src/gemma/ple-index.ts";
@@ -375,8 +375,14 @@ const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
   return createGemma4Ple({ index, openBlock, vocabSize: VOCAB, maxResidentBytes });
 };
 
-const readPleIndex = async (): Promise<Gemma4PleIndex> =>
-  (await openGemma4Ple(MIRROR, PRODUCT_CHOICE)).index;
+const readPleIndex = async (): Promise<Gemma4PleQuantizedIndex> => {
+  const { index } = await openGemma4Ple(MIRROR, PRODUCT_CHOICE);
+  assert(
+    index.storage !== "bf16",
+    "the i4 product's PLE index is bf16 (a quantized one is read here)",
+  );
+  return index;
+};
 
 /**
  * 全量読みへ倒す一意行数の下限（`src/gemma/ple.ts` の `FULL_BLOCK_ROWS` の写し）。
@@ -828,7 +834,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
   `Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     let logitsName: string;
-    let index: Gemma4PleIndex;
+    let index: Gemma4PleQuantizedIndex;
     let ple: Gemma4Ple;
     let gpu: GpuContext | undefined;
     let session: Awaited<ReturnType<PreparedModel["createContainerSession"]>> | undefined;

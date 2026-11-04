@@ -2,7 +2,7 @@
  * Gemma 4's decode run-ahead (`PipelineOptions.decodeAhead`) — the parts that need no GPU: the
  * option's acceptance, the on-GPU index expansion of the PLE's resident-id form, and the assembly
  * of the run-ahead in the greedy output. The token ids on a real GPU are
- * `packages/e2e/tests/e2e_gemma4_qat_decode_ahead_test.ts`.
+ * `packages/e2e/tests/e2e_gemma4_qat_mobile_decode_ahead_test.ts`.
  */
 import { describe, expect, it } from "vite-plus/test";
 import {

@@ -116,11 +116,13 @@ describe("buildGemmaRecord", () => {
   it("starts with the format and the environment and names the entry point by mount", () => {
     const record = buildGemmaRecord({ ...input, mount: "gemma4" });
     expect(record.format).toBe(RECORD_FORMAT);
-    expect(record.format).toBe("karume-playground-gemma4/2");
+    expect(record.format).toBe("karume-playground-gemma4/3");
     expect(record.page).toBe("gemma4");
     expect(record.recordedAt).toBe(environment.recordedAt);
     expect(record.pipeline).toBe("gemma.Pipeline");
-    expect(buildGemmaRecord({ ...input, mount: "gemma4-qat" }).pipeline).toBe("gemma4Qat.Pipeline");
+    expect(buildGemmaRecord({ ...input, mount: "gemma4-qat-mobile" }).pipeline).toBe(
+      "gemma4QatMobile.Pipeline",
+    );
   });
 
   it("keeps the turns with their token ids", () => {

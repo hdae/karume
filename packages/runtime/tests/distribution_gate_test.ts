@@ -3,7 +3,7 @@
 //
 // 配布形ミラー（`models/karume-<family>/`）を根にする検査 — anima / sbv2 / irodori / gemma4 /
 // QAT / wan の実資産 e2e（packages/models/tests/e2e_*_test.ts と helpers/irodori-assets.ts）・融合ヒット数の
-// 配布形節（anima / anima-extra / irodori / gemma4 / gemma4-qat / wan — tests/e2e_*_fusion_counts_test.ts）
+// 配布形節（anima / anima-extra / irodori / gemma4 / gemma4-qat-mobile / wan — tests/e2e_*_fusion_counts_test.ts）
 // — は、いずれも `karume.json` の有無で `ignore` し `console.warn` だけを残して緑になる。
 // `outputs/series/` だけ持つ機（新しい作業機・worktree を別ホストへ持ち出した場合）では
 // e2e_assets_gate_test.ts が緑のまま実資産検査が丸ごと消えるので、ここで 1 本落とす。
@@ -83,18 +83,24 @@ const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 /**
  * The distribution mirrors the guard **requires to exist** (the roster of the absence check — the
  * reach of the manifest checks is derived from the layout by {@link discoverDistributions}) = the
- * 14 published repositories (including `karume-umt5-xxl` and `karume-wan2.2`, first published in
- * 0.14.0, and `karume-moss-image` and `karume-gemma4-qat`, first published in 0.15.1) + the
- * unpublished `karume-wan2.1`.
+ * 14 repositories with a published revision (including `karume-umt5-xxl` and `karume-wan2.2`,
+ * first published in 0.14.0, and `karume-moss-image` and `karume-gemma4-qat`, first published in
+ * 0.15.1) + `karume-wan2.1` (never published) and `karume-gemma4-qat-mobile` (no published revision
+ * under this name yet).
  *
  * 公開済みの 2 本は公開前から門番に載っていた: `karume-umt5-xxl` は Wan の GPU 経路の e2e が越境参照の根にし
  * （ADR 0119 段 10d・無いと欠如が無音の SKIP になる）、`karume-wan2.2` は Wan2.2 の通しの e2e
  * （`e2e_wan_ti2v_pipeline_test.ts`）と DiT の e2e の実用席の記録（`e2e_wan_ti2v_dit_test.ts` — 席の束を manifest から
  * 読む）が根にする（ADR 0121 段 8）。
  *
- * `karume-gemma4-qat` was on the roster long before its publication: the QAT public-entry e2e and
- * the fusion hit-count check root on it, so it was listed before the guard's reach was widened
- * (dropping it would have loosened an existing check).
+ * `karume-gemma4-qat-mobile` is the mobile QAT distribution first published in 0.15.1 as
+ * `karume-gemma4-qat` and renamed on 2026-11-04 (no published revision under the new name yet): the
+ * mobile QAT public-entry e2e and the fusion hit-count check root on it. The local
+ * `karume-gemma4-qat` mirror now holds the q4_0 QAT line (E2B / E4B / 12B with their drafters),
+ * which the q4_0 QAT mirror e2e, its sha256 rows and the 12B e2e root on. That content has no
+ * published revision yet: the HF repository `hdae/karume-gemma4-qat` exists, and its revision
+ * pinned by 0.15.1 holds the mobile QAT content, so publishing the q4_0 line adds a revision to a
+ * repository whose earlier revision 0.15.1 users still pin.
  *
  * `karume-wan2.1` は未公開
  * （HF に公開しない — ADR 0118 追記（2026-10-15））だが、Wan の通しの e2e（`e2e_wan_pipeline_test.ts`）と
@@ -111,6 +117,7 @@ const DISTRIBUTIONS = [
   "karume-depth-anything-v2",
   "karume-gemma4",
   "karume-gemma4-qat",
+  "karume-gemma4-qat-mobile",
   "karume-irodori-v4-small",
   "karume-irodori-v4.1-small",
   "karume-lucida",

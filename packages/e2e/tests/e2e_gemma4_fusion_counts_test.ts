@@ -1,7 +1,7 @@
 /**
  * Fusion hit counts of the Gemma 4 E2B decode graphs (no GPU — `planFusions` on part 0 only; the
  * shared planning side and the rationale live in `runtime/tests/helpers/fusion-counts.ts`). The QAT
- * distribution has its own gate in `e2e_gemma4_qat_fusion_counts_test.ts` (the gemma4-qat lane).
+ * distribution has its own gate in `e2e_gemma4_qat_mobile_fusion_counts_test.ts` (the gemma4-qat-mobile lane).
  *
  * MUST: the assets are `outputs/series/gemma4-e2b-decode/` and `models/karume-gemma4/`
  * (untracked local assets); where they are missing the cases SKIP explicitly with a reason

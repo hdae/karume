@@ -10,7 +10,7 @@
 // ② the barrel's own values are exactly the shared values plus those namespaces (a family name
 //   exported flat again, or a new flat export, is red — added exports pass the type checker);
 // ③ the intent per family: what must be public and what must not (the gemma lists, the source
-//   tables, gemma4-qat).
+//   tables, gemma4-qat-mobile).
 //
 // It is the declaration of intent. The snapshot gate (`public_surface_test.ts`) detects every
 // change, type exports included; type exports cannot be observed at run time, so the shared types
@@ -73,7 +73,7 @@ const subpathModules = async (): Promise<
 test("barrel: the namespace names follow the subpath keys", () => {
   assertEquals(namespaceOf("./sbv2"), "sbv2");
   assertEquals(namespaceOf("./depth-anything"), "depthAnything");
-  assertEquals(namespaceOf("./gemma4-qat"), "gemma4Qat");
+  assertEquals(namespaceOf("./gemma4-qat-mobile"), "gemma4QatMobile");
   assertEquals(namespaceOf("./vowel-detector"), "vowelDetector");
 });
 
@@ -253,7 +253,6 @@ const SOURCE_TABLE_SUBPATHS: readonly string[] = [
   "./irodori",
   "./sbv2",
   "./gemma",
-  "./gemma4-qat",
   "./siglip2",
   "./depth-anything",
   "./birefnet",
@@ -317,13 +316,13 @@ test("barrel: KARUME_SOURCES is exactly the union of the family tables", async (
   );
 });
 
-test("gemma4-qat: exports its own entry points and not Gemma's pipeline", async () => {
-  const qat = await import("../gemma4-qat.ts");
+test("gemma4-qat-mobile: exports its own entry points and not Gemma's pipeline", async () => {
+  const qat = await import("../gemma4-qat-mobile.ts");
   for (const name of ["Pipeline", "ropeInputs"]) {
-    assert(Object.hasOwn(qat, name), `./gemma4-qat has no ${name}`);
+    assert(Object.hasOwn(qat, name), `./gemma4-qat-mobile has no ${name}`);
   }
   for (const name of ["GemmaPipeline", "admitGemma4Qat"]) {
-    assertEquals(Object.hasOwn(qat, name), false, `./gemma4-qat exports ${name}`);
+    assertEquals(Object.hasOwn(qat, name), false, `./gemma4-qat-mobile exports ${name}`);
   }
   // By identity, not by name: Gemma's bare names (`Pipeline`, `SOURCES`, `ropeInputs`) are names
   // the QAT surface spells (or may spell) for its own values.
@@ -332,8 +331,11 @@ test("gemma4-qat: exports its own entry points and not Gemma's pipeline", async 
   const exported: Readonly<Record<string, unknown>> = qat;
   const regular = await import("../gemma.ts");
   for (const [name, value] of Object.entries(exported)) {
-    assert(value !== regular.Pipeline, `./gemma4-qat exports Gemma's Pipeline as ${name}`);
-    assert(value !== regular.SOURCES, `./gemma4-qat exports Gemma's SOURCES as ${name}`);
-    assert(value !== regular.ropeInputs, `./gemma4-qat exports Gemma's ropeInputs as ${name}`);
+    assert(value !== regular.Pipeline, `./gemma4-qat-mobile exports Gemma's Pipeline as ${name}`);
+    assert(value !== regular.SOURCES, `./gemma4-qat-mobile exports Gemma's SOURCES as ${name}`);
+    assert(
+      value !== regular.ropeInputs,
+      `./gemma4-qat-mobile exports Gemma's ropeInputs as ${name}`,
+    );
   }
 });

@@ -94,9 +94,12 @@ export type { DefaultSampler, PipelineConfig } from "./src/gemma/config.ts";
 /**
  * **The table of sources verified with this package version** (one table per family; keys are the
  * Hugging Face repository name without `karume-`, values are pinned commit SHAs — ADR 0073 / 0092).
- * One family = one repository, so one entry for now; a future E4B / 12B will live here too:
+ * One entry per repository, several models in each (choose a non-default one with `{ model }`):
  *
- * - `SOURCES["gemma4"]` = `hdae/karume-gemma4`
+ * - `SOURCES["gemma4"]` = `hdae/karume-gemma4` — the regular line (E2B / E4B)
+ *
+ * The q4_0 QAT line (`hdae/karume-gemma4-qat` — E2B / E4B / 12B), which this pipeline reads too,
+ * gets its entry `SOURCES["gemma4-qat"]` when that distribution is published.
  *
  * **An opt-in for callers who want to follow the package version automatically** — pass an entry as
  * is as the first argument of {@link Pipeline.fromPretrained}. To pin reproducibility

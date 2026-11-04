@@ -11,8 +11,14 @@ from transformers import AutoTokenizer
 
 
 def profiles(root: Path) -> dict:
-    """Evaluable models → the official checkpoint and the **distribution** (`karume.json` of
-    `karume/5`).
+    """Evaluable models → the official checkpoint, the **distribution** (`karume.json` of
+    `karume/5`) and the **quant** whose stored `model` weights `--weights stored` measures.
+
+    MUST: the quant is named, never taken from the manifest's `defaultQuant` — a distribution's
+    default can move to another storage (the regular Gemma 4 line's became the original-weights
+    `bf16` preset on 2026-11-04, whose PLE index this tool does not read), and the measurement would
+    then silently be of other weights. The int4 presets of a line (`i4` / `i4-gemvpar` /
+    `i4-fast`) load the same container, so `i4` names it.
 
     Only containers (`krm`) are read. The `-probe` series still kept in the old shard form
     (the 2026-09 experiments with gemma4 E4B / MiniCPM5-2B / Qwen3-0.6B) **have no entry in this
@@ -26,18 +32,21 @@ def profiles(root: Path) -> dict:
             "checkpoint": root / "inputs/gemma4/gemma-4-E2B-it",
             "distribution": root / "models/karume-gemma4",
             "model": "e2b",
+            "quant": "i4",
         },
         "gemma4-qat-e2b": {
             "family": "gemma4-qat",
             "checkpoint": root / "inputs/gemma4-qat/gemma-4-E2B-it-qat-mobile-transformers",
-            "distribution": root / "models/karume-gemma4-qat",
+            "distribution": root / "models/karume-gemma4-qat-mobile",
             "model": "e2b",
+            "quant": "i4",
         },
         "gemma4-qat-e4b": {
             "family": "gemma4-qat",
             "checkpoint": root / "inputs/gemma4-qat/gemma-4-E4B-it-qat-mobile-transformers",
-            "distribution": root / "models/karume-gemma4-qat",
+            "distribution": root / "models/karume-gemma4-qat-mobile",
             "model": "e4b",
+            "quant": "i4",
         },
     }
 

@@ -2,8 +2,10 @@
  * gemma4 の **quant 席ごとの sha 参照行**（ADR 0106 / ADR 0110 決定 7）— 固定プロンプト 1 本の
  * greedy の token id 列が、この機の参照値と 1 token も違わないこと。
  *
- * 走行・実物・決着の中身は `helpers/gemma-reference.ts` の 1 本（gemma4-qat と共有）。ここが
- * 持つのは置き場（fixture / 結果の席）だけである。
+ * The run, the artifact and the settlement are `helpers/gemma-reference.ts`'s (shared with the q4_0
+ * QAT line's `e2e_gemma4_qat_reference_test.ts` and the mobile QAT line's
+ * `e2e_gemma4_qat_mobile_reference_test.ts`); this file holds only the places (its fixture and its
+ * results folder).
  *
  * 席は固定表で持たず、ミラーの manifest から**全 quant 席**を列挙する（`mirrorSeats`）。行の
  * クラスも席の `session` から導く: `session` が空の席（`i4`）は参照行、非空の席（`i4-gemvpar` /

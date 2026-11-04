@@ -13,7 +13,7 @@ import {
 } from "../src/models/gemma4-bench/run.ts";
 
 const arm = (model: string, tap = true): RunArm => ({
-  mount: model.startsWith("qat-") ? "gemma4-qat" : "gemma4",
+  mount: model.startsWith("qat-") ? "gemma4-qat-mobile" : "gemma4",
   model,
   quant: "i4-fast",
   quantLabel: "int4 fast",

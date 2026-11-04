@@ -65,6 +65,13 @@ import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+/**
+ * The seat these cases were written against: `i4-fast`, the regular distribution's default until
+ * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
+ * reading the int4 container (and its session options) their goldens and floors were taken on —
+ * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ */
+const INT4_SEAT = { quant: "i4-fast" } as const;
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -150,7 +157,7 @@ if (!AVAILABLE) {
 const openPipeline = async (options: PipelineOptions = {}): Promise<Pipeline> =>
   await Pipeline.fromAssets(
     {
-      ...(await gemma4MirrorAssets(MIRROR_DIR)),
+      ...(await gemma4MirrorAssets(MIRROR_DIR, INT4_SEAT)),
       // 宣言は配布形のものではなく**この門が固定した値**を使う（chunk 長・容量・rope の既定が
       // ミラー側で動いても、golden を採ったときと同じ形で回す）。
       config: {
@@ -164,7 +171,7 @@ const openPipeline = async (options: PipelineOptions = {}): Promise<Pipeline> =>
     {
       // 予算は索引から導く（= PLE 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で書くと
       // 資産世代で block 幅が変われば別の本数を意味してしまう — helper の doc。
-      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR),
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
       ...options,
     },
   );

@@ -30,6 +30,13 @@ import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budg
 import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+/**
+ * The seat these cases were written against: `i4-fast`, the regular distribution's default until
+ * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
+ * reading the int4 container (and its session options) their goldens and floors were taken on —
+ * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ */
+const INT4_SEAT = { quant: "i4-fast" } as const;
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -118,12 +125,13 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
     const runs: Run[][] = [];
 
     beforeAll(async () => {
-      maxResidentPleBytes = await allResidentPleBytesOfMirror(MIRROR_DIR);
+      maxResidentPleBytes = await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT);
     });
 
     for (const reduce of REDUCERS) {
       it(`stateAttentionReduce = ${reduce}`, async () => {
         const pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
+          ...INT4_SEAT,
           maxResidentPleBytes,
           stateAttentionReduce: reduce,
         });

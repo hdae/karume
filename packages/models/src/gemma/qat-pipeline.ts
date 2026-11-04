@@ -1,5 +1,5 @@
 /**
- * The QAT pipeline of `@karume/models/gemma4-qat`.
+ * The mobile QAT pipeline of `@karume/models/gemma4-qat-mobile`.
  *
  * It has its own module so that the class is declared under its public name `Pipeline` and its
  * signatures reference the QAT option types by the names users import (`./qat.ts`), with no import
@@ -22,7 +22,7 @@ export class Pipeline extends GemmaPipeline {
     super(state);
   }
   /**
-   * Builds E2B/E4B from a QAT distribution — the published `SOURCES["gemma4-qat"]`, any
+   * Builds E2B/E4B from a mobile QAT distribution (`karume-gemma4-qat-mobile`) — any
    * `{ repo, revision }`, or a local one as a source handle. When model is omitted, the manifest's
    * default is used.
    */
