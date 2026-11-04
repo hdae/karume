@@ -17,6 +17,13 @@ measurements in `docs/research/`.
 
 ### Added
 
+- `@karume/models/gemma` (also `@karume/models/gemma4-qat`): the PLE index schema 4, the form of
+  the q4_0 QAT line of Gemma 4 E2B / E4B. It adds a required `groupSize`: one f32 scale per
+  `groupSize` consecutive values of a (token, layer) row instead of one per row, so a table on the
+  checkpoint's own 4-bit grid (one step per 32 values) is read exactly. The host gather and the
+  GPU-resident PLE (`pleResidency: "gpu"`, storage `i4`) both apply each group's scale; schema 3
+  is read as before. A schema 4 index without a valid `groupSize`, a schema 3 index that spells
+  one, and a grouped `i8` / `i2` index under `pleResidency: "gpu"` fail loudly.
 - `@karume/models/gemma`: Gemma 4 12B (text only) as model `12b` of the gemma4 distribution. Its
   weights are Google's q4_0 quantization-aware-trained checkpoint
   (`gemma-4-12B-it-qat-q4_0-unquantized`) with that checkpoint's own 4-bit grid stored as is,

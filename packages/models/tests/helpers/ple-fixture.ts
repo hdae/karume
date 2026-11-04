@@ -17,10 +17,12 @@ import {
   type Gemma4PleAssetSource,
   type Gemma4PleIndex,
   type Gemma4PleStorage,
+  GROUPED_SCHEMA,
   packFactor,
   parseGemma4PleIndex,
   PLE_INDEX_ASSET,
   SCALE_BYTES,
+  SCHEMA,
 } from "../../src/gemma/ple-index.ts";
 
 /** 合成索引の寸法。 */
@@ -35,6 +37,11 @@ export type PleFixtureSpec = {
   readonly valueRows?: number;
   /** `scales` の block 1 本が持つ token 行数（既定 = `valueRows`）。 */
   readonly scaleRows?: number;
+  /**
+   * Values per scale of a (token, layer) row: set = a schema 4 index (`groupSize` spelled, a scales
+   * row of `layers × dim / groupSize` f32 in (layer, group) order); absent = schema 3.
+   */
+  readonly groupSize?: number;
 };
 
 /** 読み口が受けた区間 1 本。 */
@@ -70,7 +77,19 @@ export const quantized = (id: number, layer: number, column: number): number =>
  * どれも無感になる（scale がずれると形も dtype も合ったまま別 token で逆量子化する沈黙誤値）。
  * 分子は整数・分母は 2 冪なので f32 で厳密（逆量子化の期待値がテスト側で閉じる条件）。
  */
-export const scaleOf = (id: number, layer: number): number => (id + 1) / 2 ** (layer + 1);
+export const scaleOf = (id: number, layer: number, group = 0): number =>
+  // Group 0 is the schema 3 value as is; a later group adds group / 64 to the numerator, so every
+  // (token, group) pair below 64 groups has its own step (a scale read from the wrong group or the
+  // row's first group is visible) and the value stays exact in f32.
+  (id + 1 + group / 64) / 2 ** (layer + 1);
+
+/** The scale group of value `column` (always 0 for a schema 3 fixture). */
+export const groupOf = (spec: PleFixtureSpec, column: number): number =>
+  spec.groupSize === undefined ? 0 : Math.floor(column / spec.groupSize);
+
+/** Scales of one layer of a row (1 for schema 3). */
+const groupsOf = (spec: PleFixtureSpec): number =>
+  spec.groupSize === undefined ? 1 : spec.dim / spec.groupSize;
 
 /** 格納 dtype で切り詰めた後の量子化値（packed は符号付き範囲へ折り返す）。 */
 export const storedValue = (
@@ -92,8 +111,10 @@ export const expectedValue = (
   layer: number,
   column: number,
 ): number =>
-  Math.fround(storedValue(spec.storage ?? "i8", id, layer, column) * scaleOf(id, layer)) *
-  spec.embedScale;
+  Math.fround(
+    storedValue(spec.storage ?? "i8", id, layer, column) *
+      scaleOf(id, layer, groupOf(spec, column)),
+  ) * spec.embedScale;
 
 /** 表 1 本ぶんの block 分割（`[start, stop)` の昇順・隙間なし）。 */
 const partition = (tokens: number, rows: number, prefix: string) => {
@@ -140,10 +161,14 @@ const scalesBlockBytes = (
   start: number,
   stop: number,
 ): Uint8Array<ArrayBuffer> => {
-  const scales = new Float32Array((stop - start) * spec.layers);
+  const groups = groupsOf(spec);
+  const scales = new Float32Array((stop - start) * spec.layers * groups);
   for (let row = 0; row < stop - start; row += 1) {
     for (let layer = 0; layer < spec.layers; layer += 1) {
-      scales[row * spec.layers + layer] = scaleOf(start + row, layer);
+      for (let group = 0; group < groups; group += 1) {
+        // (layer, group) order within the row (the writer's layout — `karume/ple.py`).
+        scales[(row * spec.layers + layer) * groups + group] = scaleOf(start + row, layer, group);
+      }
     }
   }
   return new Uint8Array(scales.buffer);
@@ -162,18 +187,19 @@ export const pleFixture = (spec: PleFixtureSpec, options: PleFixtureOptions = {}
   const valueRows = spec.valueRows ?? spec.tokens;
   const scaleRows = spec.scaleRows ?? valueRows;
   const document: Record<string, unknown> = {
-    schema: 3,
+    schema: spec.groupSize === undefined ? SCHEMA : GROUPED_SCHEMA,
     storage,
     tokens: spec.tokens,
     layers: spec.layers,
     dim: spec.dim,
+    ...(spec.groupSize === undefined ? {} : { groupSize: spec.groupSize }),
     embedScale: spec.embedScale,
     values: {
       rowBytes: (spec.layers * spec.dim) / factor,
       blocks: partition(spec.tokens, valueRows, "ple.values"),
     },
     scales: {
-      rowBytes: spec.layers * SCALE_BYTES,
+      rowBytes: spec.layers * groupsOf(spec) * SCALE_BYTES,
       blocks: partition(spec.tokens, scaleRows, "ple.scales"),
     },
   };

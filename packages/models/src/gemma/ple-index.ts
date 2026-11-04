@@ -4,7 +4,7 @@
  * [0109](../../../../docs/decisions/0109-manifest-v5-container.md) decision 4).
  *
  * The index is the model container's asset `ple_index` (role `ple-index`, canonical JSON of schema
- * 3), and points at `values` and `scales` as **separate block lists** (roles `ple-values` /
+ * 3 or 4), and points at `values` and `scales` as **separate block lists** (roles `ple-values` /
  * `ple-scales`). One block is "a raw matrix of the rows of the token range `[start, stop)` laid out
  * without gaps", with neither a safetensors header nor metadata — all a reader does is translate
  * token → (block, row offset).
@@ -76,7 +76,7 @@ export type Gemma4PleTable = {
   readonly blocks: readonly Gemma4PleBlock[];
 };
 
-/** The accepted form of `ple_index` (schema 3). */
+/** The accepted form of `ple_index` (schema 3 or 4). */
 export type Gemma4PleIndex = {
   /** Storage dtype. */
   readonly storage: Gemma4PleStorage;
@@ -86,6 +86,13 @@ export type Gemma4PleIndex = {
   readonly layers: number;
   /** Dimension per layer (256 for E2B). */
   readonly dim: number;
+  /**
+   * Consecutive values of one (token, layer) row that share one f32 scale. Schema 4 spells it
+   * (`groupSize`); schema 3 has one scale per row, which is the group `dim` — the accepted form
+   * carries that value, so every reader decodes both schemas through one formula
+   * ({@link scalesPerLayer}).
+   */
+  readonly groupSize: number;
   /** The embed scale applied after the lookup (`hidden_size_per_layer_input ** 0.5`). */
   readonly embedScale: number;
   readonly values: Gemma4PleTable;
@@ -93,14 +100,23 @@ export type Gemma4PleIndex = {
 };
 
 /**
- * Index version.
+ * Index version with one scale per (token, layer) row.
  *
- * MUST: read **schema 3 only**. The old sidecar (schema 1 / 2 — the form pointing at file names and
- * safetensors tables) was retired together with its distribution, and implementing both would let
- * the combination "old index × new container" pass on shape alone (the same approach as ADR 0109
- * decision 1's major-bump rule).
+ * MUST: read **schema 3 and {@link GROUPED_SCHEMA} only**. The old sidecar (schema 1 / 2 — the form
+ * pointing at file names and safetensors tables) was retired together with its distribution, and
+ * implementing both would let the combination "old index × new container" pass on shape alone (the
+ * same approach as ADR 0109 decision 1's major-bump rule).
  */
 export const SCHEMA = 3;
+
+/**
+ * Index version with one scale per group of `groupSize` consecutive values of a (token, layer) row
+ * (the writer's source of truth: `PLE_GROUPED_INDEX_SCHEMA` of the exporter's `karume/ple.py`).
+ * A `scales` row is `layers × dim / groupSize` f32 in (layer, group) order. It is the form of
+ * Gemma 4's q4_0 QAT checkpoints, whose 4-bit table has one step per 32 values — schema 3 cannot
+ * hold those values exactly.
+ */
+export const GROUPED_SCHEMA = 4;
 
 /** Bytes of one per-row scale (`scales` is f32). */
 export const SCALE_BYTES = 4;
@@ -111,6 +127,13 @@ export const SCALE_BYTES = 4;
 export const packFactor = (index: Pick<Gemma4PleIndex, "storage">): number =>
   index.storage === "i2" ? 4 : index.storage === "i4" ? 2 : 1;
 
+/**
+ * Scales of one layer of a row (1 for schema 3). A `scales` row holds `layers ×` this many f32, and
+ * the scale of value `column` of `layer` is element `layer × scalesPerLayer + column / groupSize`.
+ */
+export const scalesPerLayer = (index: Pick<Gemma4PleIndex, "dim" | "groupSize">): number =>
+  index.dim / index.groupSize;
+
 const INDEX_KEYS: readonly string[] = [
   "schema",
   "storage",
@@ -120,6 +143,8 @@ const INDEX_KEYS: readonly string[] = [
   "embedScale",
   ...TABLE_NAMES,
 ];
+/** Schema 4 spells exactly one key more than schema 3. */
+const GROUPED_INDEX_KEYS: readonly string[] = [...INDEX_KEYS, "groupSize"];
 const TABLE_KEYS: readonly string[] = ["rowBytes", "blocks"];
 const BLOCK_KEYS: readonly string[] = ["asset", "start", "stop"];
 
@@ -207,13 +232,16 @@ const readTable = (
  */
 export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemma4PleIndex => {
   const root = readRecord(raw, where);
-  assertAllowedKeys(root, INDEX_KEYS, where);
-  if (root.schema !== SCHEMA) {
+  if (root.schema !== SCHEMA && root.schema !== GROUPED_SCHEMA) {
     throw new Error(
-      `${where}.schema ${String(root.schema)} is not ${SCHEMA}` +
+      `${where}.schema ${String(root.schema)} is not ${SCHEMA} / ${GROUPED_SCHEMA}` +
         ` (the old sidecar index is not read — the distribution moved to container assets)`,
     );
   }
+  const grouped = root.schema === GROUPED_SCHEMA;
+  // MUST: `groupSize` is an unknown key of schema 3 — a schema 3 reader would apply one group's
+  // scale to the whole row, so a document that mixes the two forms is refused, not read as either.
+  assertAllowedKeys(root, grouped ? GROUPED_INDEX_KEYS : INDEX_KEYS, where);
   // MUST: do not read a missing field as i8 — a schema 3 writer always spells it. Falling back to a
   // default would make an index that dropped the field show up not as "storage is missing" but as a
   // rowBytes mismatch (or pass silently for an i8 block).
@@ -230,6 +258,15 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
       `${where}.dim ${dim} is not divisible by the packing factor of storage '${storage}', ${factor}`,
     );
   }
+  // MUST: schema 4 without `groupSize` fails — defaulting it to `dim` would read a grouped table
+  // with one scale per row (another group's step for all but the first group of every row).
+  const groupSize = grouped ? readCount(root, "groupSize", where) : dim;
+  if (dim % groupSize !== 0) {
+    throw new Error(
+      `${where}.groupSize ${groupSize} does not divide dim ${dim} (a group never crosses a` +
+        ` (token, layer) row)`,
+    );
+  }
   const embedScale = root.embedScale;
   if (typeof embedScale !== "number" || !Number.isFinite(embedScale) || embedScale <= 0) {
     throw new Error(`${where}.embedScale ${String(embedScale)} is not a positive finite number`);
@@ -239,9 +276,16 @@ export const parseGemma4PleIndex = (raw: unknown, where = PLE_INDEX_ASSET): Gemm
     tokens,
     layers,
     dim,
+    groupSize,
     embedScale,
     values: readTable(root, "values", (layers * dim) / factor, tokens, where),
-    scales: readTable(root, "scales", layers * SCALE_BYTES, tokens, where),
+    scales: readTable(
+      root,
+      "scales",
+      layers * scalesPerLayer({ dim, groupSize }) * SCALE_BYTES,
+      tokens,
+      where,
+    ),
   };
 };
 

@@ -21,8 +21,9 @@
  *
  * ## Distribution (assets of the model container — ADR 0109 decision 4)
  *
- * `values` (**token-major** `[tokens, layers, dim]`) and `scales` (`[tokens, layers]` f32) are each
- * cut into a list of blocks at or below the block limit and **in whole rows**, and stored in the
+ * `values` (**token-major** `[tokens, layers, dim]`) and `scales` (`[tokens, layers]` f32 — schema 4:
+ * `[tokens, layers, dim / groupSize]`, one per group of a layer's values) are each cut into a list
+ * of blocks at or below the block limit and **in whole rows**, and stored in the
  * container as assets with the roles `ple-values` / `ple-scales`. A block that needs range reads
  * sits alone in its own part (container-v1 §4.2), so reading one row does not drag in the
  * neighbouring weights. The block boundaries of the two tables are **independent** (one row =
@@ -99,6 +100,7 @@ import {
   type Gemma4PleTable,
   largestBlockBytes,
   packFactor,
+  scalesPerLayer,
 } from "./ple-index.ts";
 
 /**
@@ -345,8 +347,10 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   const stride = index.layers * index.dim;
   const factor = packFactor(index);
   const rowValueBytes = index.values.rowBytes;
-  /** **Element count** of one row of `scales` (f32 × layers). */
-  const scaleStride = index.layers;
+  /** Scales of one layer of a row (1 = one per row — schema 3). */
+  const groups = scalesPerLayer(index);
+  /** **Element count** of one row of `scales` (f32 × layers × groups). */
+  const scaleStride = index.layers * groups;
   /**
    * Rows are kept as quantized bytes too, so the dequantization order does not change. Insertion
    * order = LRU.
@@ -435,11 +439,14 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
     scalesFrom: number,
   ): void => {
     let cursor = target;
+    const { groupSize } = index;
     for (let layer = 0; layer < index.layers; layer += 1) {
-      const scale = scales[scalesFrom + layer];
+      // One scale per group of `groupSize` values (schema 3: one group = the whole layer).
+      const scaleBase = scalesFrom + layer * groups;
       const base = valuesFrom + (layer * index.dim) / factor;
       if (factor === 1) {
         for (let column = 0; column < index.dim; column += 1) {
+          const scale = scales[scaleBase + Math.floor(column / groupSize)];
           data[cursor + column] = Math.fround(values[base + column] * scale) * index.embedScale;
         }
       } else {
@@ -447,6 +454,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
         const mask = (1 << bits) - 1;
         const offset = 1 << (bits - 1);
         for (let column = 0; column < index.dim; column += 1) {
+          const scale = scales[scaleBase + Math.floor(column / groupSize)];
           const value =
             ((values[base + Math.floor(column / factor)] >>> (bits * (column % factor))) & mask) -
             offset;
@@ -581,7 +589,7 @@ export const createGemma4Ple = (options: Gemma4PleOptions): Gemma4Ple => {
   /**
    * Looks up an id's row in one table (the row-read result → otherwise a view of the whole block).
    *
-   * `rowUnits` is the **element count** of one row (bytes for `values`, the layer count for
+   * `rowUnits` is the **element count** of one row (bytes for `values`, the f32 count for
    * `scales`).
    */
   const supplyOf = <T>(

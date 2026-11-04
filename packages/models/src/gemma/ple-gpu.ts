@@ -25,10 +25,13 @@
  * The weight is held as `[tokens×layers, dim]` with index `id×layers + layer`. In this layout **one
  * row = the dim elements of one layer**, so whatever the storage dtype, `scales`' `[tokens,
  * layers]` is the per-row scale sequence as is (i8 / i2 use row scales, i4 uses group scales with
- * `group_size = dim`; both share the flat index `id×layers + layer`). Dequantization is one f32
- * multiplication `f32(q) × scale` in `embedding`, and `embed_scale` is applied **afterwards** in a
- * separate node — the same two steps and the same rounding points as the host's `Math.fround(q ×
- * scale) × embedScale`.
+ * `group_size = dim`; both share the flat index `id×layers + layer`). A schema 4 index (i4 with
+ * `groupSize` below `dim`) holds `[tokens, layers, dim / groupSize]`, which is the group scale
+ * matrix `[tokens×layers, dim / groupSize]` of the same weight as is — the `embedding` kernel reads
+ * the i4 group scale per element, so the same graph applies each group's own step. Dequantization
+ * is one f32 multiplication `f32(q) × scale` in `embedding`, and `embed_scale` is applied
+ * **afterwards** in a separate node — the same two steps and the same rounding points as the host's
+ * `Math.fround(q × scale) × embedScale`.
  *
  * ## MUST: single binding (the maintainer's ruling of 2026-09-19, option A)
  *
@@ -437,15 +440,27 @@ export const buildGemma4PleGatherContainer = async (
         ` ${rowBytes} bytes, not 4-aligned (the container's block end alignment cannot be met)`,
     );
   }
+  // MUST: only i4 has a group codec (`int4-sym-g`); i8 / i2 are per-channel, so a grouped index of
+  // those storages cannot be bound as one weight. Fail before a single block byte is read instead
+  // of letting the container merge refuse it after the scale table was collected.
+  if (index.groupSize !== index.dim && index.storage !== "i4") {
+    throw new Error(
+      `${entry}: pleResidency: "gpu" needs storage i4 for a PLE with one scale per ` +
+        `${index.groupSize} values (storage ${index.storage} has one scale per row only) — read it` +
+        ` with the default pleResidency: "host"`,
+    );
+  }
   const bytes = gemma4PleGpuBytes(index);
   const scale = await readScaleTable(index.scales, openBlock, bytes.scales);
-  // i4 has group = row length (meeting ADR 0069 decision 2's "power of two ≥ 16"); i8 / i2 are
-  // per-channel with groupSize = row length. Either way there is one group, so the scale is exactly
-  // the f32 column `[tokens × layers, 1]` (= the order `readScaleTable` laid out).
+  // Schema 3: i4 has group = row length (meeting ADR 0069 decision 2's "power of two ≥ 16"); i8 / i2
+  // are per-channel with groupSize = row length. Either way there is one group, so the scale is
+  // exactly the f32 column `[tokens × layers, 1]` (= the order `readScaleTable` laid out). Schema 4
+  // (i4): the scale rows are (layer, group) order, so the same bytes are the group scale matrix
+  // `[tokens × layers, dim / groupSize]`.
   const encoding: MemoryEncoding = {
     codec: pleCodec(index),
     rowAxis: 0,
-    groupSize: index.dim,
+    groupSize: index.groupSize,
     scale,
   };
   const table = index.values;
