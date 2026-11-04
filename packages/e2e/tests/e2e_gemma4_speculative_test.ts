@@ -683,11 +683,19 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
       // verify 形（M=k+1 / R=k+1）の計画は 2 本目以降 LRU に居続ける（毎 cycle 導出へ落ちると
       // 例外は出ないまま decode のホットパスに計画導出が戻る）。
-      const missed = verifies.slice(1).filter((record) => record.preparedHit !== true).length;
+      // MUST: like the rebind check below, only the verifies on the k+1-row bucket are held to it.
+      // A `k' = 0` cycle at the end of the budget is a decode-form run (M = 1), a plan this context
+      // derives the first time it meets it, and whether the turn ends there depends on the
+      // acceptance series (GPU / driver / target). The q4_0 E2B's turn of 2026-11-04 did: verify
+      // rows [4 × 24, 3, 2, 1], hit on every one but the first and the closing M = 1 run.
+      const bucketedAfterFirst = verifies
+        .slice(1)
+        .filter((record) => record.phase.kind === "verify" && record.phase.rows > 1);
+      const missed = bucketedAfterFirst.filter((record) => record.preparedHit !== true).length;
       assertEquals(
         missed,
         0,
-        `2 本目以降の verify ${verifies.length - 1} 本のうち ${missed} 本が PreparedPlan を` +
+        `2 本目以降の M=k+1 の verify ${bucketedAfterFirst.length} 本のうち ${missed} 本が PreparedPlan を` +
           `外した（hit: [${verifies.map((record) => String(record.preparedHit)).join(",")}]）`,
       );
       // state bind group の焼き直しは **cycle 数に比例しない**。焼き直しが起きるのは
