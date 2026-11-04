@@ -7,18 +7,16 @@
 > [perf-ledger](perf-ledger.md); this file only refers to them as waves ④ the source of truth for by-design constraints is
 > [limitations](limitations.md) — a constraint appears here only when a ruling turns it into work.
 
-## now — after the 0.15.1 release (released 2026-11-01)
+## now — after the 0.16.0 release (released 2026-11-04)
 
-0.15.1 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.15.1 — Gemma 4 QAT decode speed (perf-ledger
-K-97, K-48 step 1b, K-99), the ops `gated_delta_scan` and `group_norm`, `@karume/models/moss`; HF first publications of
-`hdae/karume-moss-image` and `hdae/karume-gemma4-qat` (the mobile QAT line, `karume-gemma4-qat-mobile` since
-2026-11-04; the name `karume-gemma4-qat` now designates the q4_0 QAT line — ADR 0097 addendum 10), the other
-repositories unchanged; published-smoke green on Node and Deno). The next release is the Gemma 4 expansion (*later*); what remains of the QAT decode-speed item stays below.
-Done since, unreleased (2026-11-04): the regular `karume-gemma4` ships `bf16` alone — its int4 presets were measured
-against the q4_0 QAT line and removed (ADR 0128, the addenda of 2026-11-04; the int4 kernel tests run on the q4_0 E2B) —
-and the q4_0 QAT `i4` presets passed the human quality review (ADR 0110 addendum 2026-11-04). At the release (0.16.0)
-the HF `hdae/karume-gemma4-qat` moves to `hdae/karume-gemma4-qat-mobile`, the q4_0 line is uploaded under the freed
-name, the `SOURCES` pins move, and 0.15.1 is yanked.
+0.16.0 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.16.0 — Gemma 4 in three lines: the regular
+`karume-gemma4` ships E2B / E4B as `bf16` alone (its int4 presets removed after the KL measurement — ADR 0128, the
+addenda of 2026-11-04), the q4_0 QAT line `hdae/karume-gemma4-qat` (E2B / E4B / 12B with their QAT drafters; its
+`i4` presets passed the human quality review — ADR 0110 addendum 2026-11-04) and the mobile QAT line, renamed
+`hdae/karume-gemma4-qat-mobile` (`@karume/models/gemma4-qat-mobile` — ADR 0097 addendum 10); the opt-in decode options
+`integerGemv` / `linearGemvPlanes` / `decodeAhead` (ADRs 0140–0142); published-smoke green on Node and Deno).
+0.15.1 is yanked: the revision its `gemma4Qat.SOURCES["gemma4-qat"]` pins is no longer under that name. The other
+repositories are unchanged.
 
 ## later
 
