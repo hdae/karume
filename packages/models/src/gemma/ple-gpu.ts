@@ -137,6 +137,16 @@ const GATHER_GRAPH = "ple";
  * Symbol of the physical row count (token rows) — bound only from the shape of {@link INDEX_INPUT}.
  */
 const ROW_SYMBOL = "M";
+/**
+ * Names in the index-expansion IR of the resident-id form ({@link gemma4PleExpandGraph} — its own
+ * container and Session, so a separate namespace from the gather's).
+ */
+const EXPAND_GRAPH = "ple_expand";
+const TOKEN_INPUT = "ple_token";
+const LAYERS_TENSOR = "ple_layers";
+const NEGATED_LAYER_TENSOR = "ple_negated_layer";
+const TOKEN_BASE_VALUE = "ple_token_base";
+const EXPANDED_OUTPUT = "ple_rows";
 
 /**
  * Storage dtype → registered name in the codec ledger (how `values` is packed — container-v1 §6.3).
@@ -216,6 +226,72 @@ export const gemma4PleGatherGraph = (index: Gemma4PleIndex): IrDeclaration => {
 };
 
 /**
+ * The index expansion of the resident-id form: one token id on the GPU `[1,1,1]` → the gather's
+ * row indices `[1,1,layers]` = `id × layers + layer` (the layout of {@link gemma4PleGatherGraph}'s
+ * weight, computed on the GPU instead of by the host loop in `enqueue`).
+ *
+ * The vocabulary has `mul` / `sub` for i32 but no i32 `add`, so the layer offset is subtracted in
+ * its negated form: `id × layers − (−layer)` — exact in i32 (the largest index, `tokens × layers − 1`,
+ * is far below 2^31 for every distribution: E2B 9,175,039).
+ *
+ * MUST: one token per run — the form exists for the decode run-ahead, which feeds one id per step
+ * (`Gemma4PleResidentIds`). A fixed shape needs no symbol, so a resident input (which binds none)
+ * can drive it alone.
+ * MUST: pass the declaration through `parseIrDeclarationValue` (the same reason as the gather
+ * graph), and do not add the optional `states` to the literal.
+ */
+export const gemma4PleExpandGraph = (index: Gemma4PleIndex): IrDeclaration =>
+  parseIrDeclarationValue({
+    format: "karume-ir",
+    version: 2,
+    requires: { ops: ["mul", "sub"] },
+    symbols: [],
+    initializers: { [LAYERS_TENSOR]: {}, [NEGATED_LAYER_TENSOR]: {} },
+    inputs: [{ name: TOKEN_INPUT, dtype: "i32", shape: [1, 1, 1] }],
+    outputs: [EXPANDED_OUTPUT],
+    values: {
+      [LAYERS_TENSOR]: { dtype: "i32", shape: [1] },
+      [NEGATED_LAYER_TENSOR]: { dtype: "i32", shape: [index.layers] },
+      [TOKEN_BASE_VALUE]: { dtype: "i32", shape: [1, 1, 1] },
+      [EXPANDED_OUTPUT]: { dtype: "i32", shape: [1, 1, index.layers] },
+    },
+    nodes: [
+      { op: "mul", ins: [TOKEN_INPUT, LAYERS_TENSOR], outs: [TOKEN_BASE_VALUE], attrs: {} },
+      {
+        op: "sub",
+        ins: [TOKEN_BASE_VALUE, NEGATED_LAYER_TENSOR],
+        outs: [EXPANDED_OUTPUT],
+        attrs: {},
+      },
+    ],
+  });
+
+/**
+ * The in-memory container of the expansion IR (its two i32 constants — `layers` and
+ * `0, −1, …, −(layers−1)`).
+ *
+ * NOTE: `export` is there to pin the constants without a GPU (not exposed on `mod.ts` / the
+ * subpath surface).
+ */
+export const buildGemma4PleExpandContainer = (index: Gemma4PleIndex): BoundContainer => {
+  const i32 = (values: Int32Array<ArrayBuffer>): MemoryTensor => ({
+    encoding: { codec: "i32" },
+    bytes: new Uint8Array(values.buffer),
+  });
+  return openMemoryContainer({
+    graphs: { [EXPAND_GRAPH]: gemma4PleExpandGraph(index) },
+    tensors: {
+      [EXPAND_GRAPH]: {
+        [LAYERS_TENSOR]: i32(Int32Array.of(index.layers)),
+        [NEGATED_LAYER_TENSOR]: i32(
+          Int32Array.from({ length: index.layers }, (_, layer) => -layer),
+        ),
+      },
+    },
+  });
+};
+
+/**
  * Reads a range of one block (the reader lives only for **this one read** — the MUST in the module
  * doc).
  */
@@ -270,7 +346,42 @@ export type Gemma4PleResident = {
   readonly extraBytes: number;
   /** The resident quantized bytes themselves (values + scales). */
   readonly residentBytes: number;
+  /**
+   * The resident-id form (present only when built with
+   * {@link Gemma4PleResidentOptions.residentIds}).
+   */
+  readonly residentIds?: Gemma4PleResidentIds;
   dispose(): Promise<void>;
+};
+
+/**
+ * The **resident-id form** of the on-GPU gather: the token id lives on the GPU, so a step can be
+ * gathered for a token the host has not read back yet (the decode run-ahead —
+ * `GemmaGreedyOutput.ahead`).
+ *
+ * MUST: {@link Gemma4PleResidentIds.ids} is owned here, not by its writers. The target Session bakes
+ * it as its `input_ids` resident input (and the expansion Session as its token input), so it can be
+ * released only after the target Session — the order {@link Gemma4PleResident.dispose} already
+ * keeps for the gather's outputs (the pipeline disposes PLE after the target).
+ */
+export type Gemma4PleResidentIds = {
+  /**
+   * One i32: the token id the next decode step feeds — the target's `input_ids` and the source of
+   * {@link Gemma4PleResidentIds.enqueue}. Its writers are the host (`write`, before a batch opens)
+   * and the selection graph (`copyOutputs`, inside the batch).
+   */
+  readonly ids: ResidentTensor;
+  /**
+   * Adds to `batch` the gather of the PLE of the id in {@link Gemma4PleResidentIds.ids} (expansion
+   * → gather) and returns the decode-shape resident output — the same object
+   * {@link Gemma4PleResident.enqueue} returns for one host id, so the target's binding does not
+   * change between the two forms.
+   *
+   * NOTE: the id is not range-checked on the host (it never reaches the host). An out-of-range id
+   * gathers NaN rows (the `embedding` kernel's out-of-range contract), never another token's row; the
+   * caller's own check of the id it reads back afterwards is where that surfaces.
+   */
+  enqueue(batch: BatchScope): Promise<ResidentTensor>;
 };
 
 export type Gemma4PleResidentOptions = {
@@ -291,6 +402,11 @@ export type Gemma4PleResidentOptions = {
   readonly rows: readonly number[];
   /** The subject of diagnostics (`gemma.Pipeline` / `gemma4Qat.Pipeline`). */
   readonly entry: string;
+  /**
+   * Also build the resident-id form ({@link Gemma4PleResident.residentIds} — the decode run-ahead).
+   * Default `false`: nothing of it is allocated, and the estimate does not count it.
+   */
+  readonly residentIds?: boolean;
 };
 
 /**
@@ -427,7 +543,11 @@ export const createGemma4PleResident = async (
   // shape's backing is two buffers, "gather intermediate + output", so pass a value that can hold
   // every shape explicitly (with the default 256 MiB, this small graph's report would be the budget
   // figure itself).
-  const backingBudget = outputBytes * 2;
+  // The resident-id form runs the decode shape with a resident index, which is a backing of its own
+  // (a resident input changes the backing signature) — one more decode-shape pair, so the two decode
+  // backings do not evict each other or the prefill shapes.
+  const residentIds = options.residentIds === true;
+  const backingBudget = outputBytes * 2 + (residentIds ? 2 * index.layers * index.dim * 4 : 0);
   const maxRows = options.rows.reduce((largest, rows) => Math.max(largest, rows), 1);
   const estimate = prepared.estimate({
     bindings: { [ROW_SYMBOL]: maxRows },
@@ -455,11 +575,52 @@ export const createGemma4PleResident = async (
     return resident;
   };
 
+  let parts: ResidentIdParts | undefined;
+  try {
+    parts = residentIds ? await createResidentIdParts(gpu, index) : undefined;
+  } catch (error) {
+    try {
+      await session.dispose();
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        `${entry}: building the resident-id form of the PLE and the clean-up both failed`,
+      );
+    }
+    throw error;
+  }
+
   return {
     inputName: options.inputName,
     idsName: options.idsName,
-    extraBytes: estimate.peakAccountedBytes + outputBytes,
+    extraBytes: estimate.peakAccountedBytes + outputBytes + (parts?.extraBytes ?? 0),
     residentBytes: bytes.total,
+    ...(parts === undefined
+      ? {}
+      : {
+          residentIds: {
+            ids: parts.ids,
+            async enqueue(batch: BatchScope): Promise<ResidentTensor> {
+              if (disposal !== undefined) {
+                throw new Error(`${entry}: a disposed PLE cannot be looked up`);
+              }
+              const { expand, ids, rows } = parts;
+              // Expansion → gather, both in `batch` and awaited in order: the gather's backing reads
+              // `rows` only after the expansion's copy into it is on the queue.
+              await expand.enqueue(
+                { [TOKEN_INPUT]: ids },
+                { batch, copyOutputs: { [EXPANDED_OUTPUT]: rows } },
+              );
+              const output = await outputFor(1);
+              await session.enqueue(
+                { [INDEX_INPUT]: rows },
+                // A resident input binds no symbol, so the one row is given explicitly.
+                { batch, bindings: { [ROW_SYMBOL]: 1 }, copyOutputs: { [GATHER_OUTPUT]: output } },
+              );
+              return output;
+            },
+          },
+        }),
     async enqueue(batch: BatchScope, ids: Int32Array<ArrayBuffer>): Promise<ResidentTensor> {
       if (disposal !== undefined) throw new Error(`${entry}: a disposed PLE cannot be looked up`);
       const rows = ids.length;
@@ -497,11 +658,15 @@ export const createGemma4PleResident = async (
       return output;
     },
     dispose(): Promise<void> {
-      // Order: Session → resident tensors (return the baked references before releasing —
-      // ADR 0004).
+      // Order: Sessions → resident tensors (return the baked references before releasing —
+      // ADR 0004). The gather bakes `rows`, the expansion bakes `ids`; the target Session that bakes
+      // `ids` and the outputs is disposed by the pipeline before this.
       disposal ??= disposeSteps([
         () => session.dispose(),
+        () => parts?.expand.dispose(),
         ...[...outputs.values()].map((resident) => () => resident.dispose()),
+        () => parts?.ids.dispose(),
+        () => parts?.rows.dispose(),
       ]).then(() => {
         outputs.clear();
         indices.clear();
@@ -509,6 +674,58 @@ export const createGemma4PleResident = async (
       return disposal;
     },
   };
+};
+
+/** What the resident-id form adds (the expansion Session and its two small residents). */
+type ResidentIdParts = {
+  readonly expand: Session;
+  /** One i32 — {@link Gemma4PleResidentIds.ids}. */
+  readonly ids: ResidentTensor;
+  /** The expanded row indices `[1,1,layers]` i32 (the gather's resident index input). */
+  readonly rows: ResidentTensor;
+  /** The expansion Session's estimate + the two residents. */
+  readonly extraBytes: number;
+};
+
+/**
+ * Allocates the resident-id form (returns what it allocated before failing — nothing leaks out of a
+ * partial failure).
+ */
+const createResidentIdParts = async (
+  gpu: GpuContext,
+  index: Gemma4PleIndex,
+): Promise<ResidentIdParts> => {
+  const prepared = prepareContainer(buildGemma4PleExpandContainer(index), EXPAND_GRAPH);
+  let expand: Session | undefined;
+  const residents: ResidentTensor[] = [];
+  try {
+    // A single fixed shape, so no budget for keeping several backings (the same as the selection
+    // graph of `./greedy-output.ts`).
+    expand = await prepared.createContainerSession(gpu, { planBackingBudgetBytes: 0 });
+    const ids = await gpu.createResident(4, "ple-ids");
+    residents.push(ids);
+    const rows = await gpu.createResident(index.layers * 4, "ple-rows");
+    residents.push(rows);
+    return {
+      expand,
+      ids,
+      rows,
+      extraBytes:
+        prepared.estimate({ planBackingBudgetBytes: 0 }).peakAccountedBytes +
+        ids.byteLength +
+        rows.byteLength,
+    };
+  } catch (error) {
+    try {
+      await disposeSteps([() => expand?.dispose(), ...residents.map((r) => () => r.dispose())]);
+    } catch (cleanup) {
+      throw new AggregateError(
+        [error, cleanup],
+        "Allocating the resident-id form of the PLE and the clean-up both failed",
+      );
+    }
+    throw error;
+  }
 };
 
 /**

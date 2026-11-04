@@ -2,7 +2,9 @@
  * The Gemma 4 decode bench: A/B arms of regular Gemma 4 (`gemma.Pipeline`) and the mobile QAT
  * distribution (`gemma4Qat.Pipeline`) — model × preset, with the GPU tap on or off — run over a
  * fixed prompt set in interleaved rounds, with decode rates from the stream timings and the tap's GPU
- * busy time, dispatches, passes and submits per token, and a record of every chat.
+ * busy time, dispatches, passes and submits per token, and a record of every chat. A split arm runs
+ * every dispatch in its own timed pass and breaks decode GPU time down per op family and pipeline
+ * key.
  *
  * The page's GPU is acquired through the tap (`tap.ts`), so karume's timing mode stays off and the
  * product's own pass structure is what is timed. One pipeline is resident at a time: each visit
@@ -62,6 +64,7 @@ import {
   type BenchPromptId,
   type BenchSettings,
   benchPrompt,
+  DECODE_AHEAD_CHOICES,
   defaultArmDrafts,
   INITIAL_BENCH_FORM,
   parseBenchForm,
@@ -70,6 +73,7 @@ import {
   SAMPLER_CHOICES,
   samplerOf,
 } from "./plan";
+import { OP_FAMILY_LABELS } from "./family";
 import { type ArmDistribution, buildBenchRecord, chromeEnvironmentKey } from "./record";
 import {
   type BenchPipeline,
@@ -79,7 +83,13 @@ import {
   runDecodeBench,
   type VisitRecord,
 } from "./run";
-import { type ArmPromptSummary, summarizeRuns } from "./summary";
+import {
+  type ArmPromptSummary,
+  shareText,
+  type SplitSummary,
+  splitSummaryText,
+  summarizeRuns,
+} from "./summary";
 import { createGpuTap, type DeviceProbe, type GpuTap } from "./tap";
 
 /**
@@ -261,6 +271,8 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                   speculative: false,
                 },
                 signal: buildSignal,
+                ...(arm.session === undefined ? {} : { sessionOptions: arm.session }),
+                ...(arm.pipeline === undefined ? {} : { pipelineOptions: arm.pipeline }),
               }),
             ),
           probe,
@@ -418,6 +430,55 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                       />
                       <Label htmlFor={`bench-arm-${draft.id}-tap`}>GPU tap</Label>
                     </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`bench-arm-${draft.id}-split`}
+                        checked={draft.tap && draft.split === true}
+                        onCheckedChange={(checked) => updateDraft(draft.id, { split: checked })}
+                        disabled={running || !draft.tap}
+                      />
+                      <Label htmlFor={`bench-arm-${draft.id}-split`}>Split dispatches</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`bench-arm-${draft.id}-integer`}
+                        checked={draft.integerGemv === true}
+                        onCheckedChange={(checked) =>
+                          updateDraft(draft.id, { integerGemv: checked })
+                        }
+                        disabled={running}
+                      />
+                      <Label htmlFor={`bench-arm-${draft.id}-integer`}>Integer GEMV</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`bench-arm-${draft.id}-planes`}
+                        checked={draft.linearGemvPlanes === true}
+                        onCheckedChange={(checked) =>
+                          updateDraft(draft.id, { linearGemvPlanes: checked })
+                        }
+                        disabled={running}
+                      />
+                      <Label htmlFor={`bench-arm-${draft.id}-planes`}>Planes GEMV</Label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`bench-arm-${draft.id}-ple-gpu`}
+                        checked={draft.pleOnGpu === true}
+                        onCheckedChange={(checked) => updateDraft(draft.id, { pleOnGpu: checked })}
+                        disabled={running}
+                      />
+                      <Label htmlFor={`bench-arm-${draft.id}-ple-gpu`}>PLE on GPU</Label>
+                    </div>
+                    <Field id={`bench-arm-${draft.id}-ahead`} label="Decode ahead">
+                      <ChoiceSelect
+                        id={`bench-arm-${draft.id}-ahead`}
+                        value={draft.decodeAhead ?? "1"}
+                        choices={DECODE_AHEAD_CHOICES}
+                        onChange={(decodeAhead) => updateDraft(draft.id, { decodeAhead })}
+                        disabled={running}
+                      />
+                    </Field>
                     {resolution?.ok === false ? (
                       <p className="text-xs text-destructive">{resolution.error}</p>
                     ) : null}
@@ -442,6 +503,27 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                 about 4 µs per dispatch, which biases QAT&apos;s extra dispatches). Off: a
                 wall-clock control on the same device, with the tap only passing calls through.
                 Compare a tap-off arm with a tap-on arm of the same model to see what the tap costs.
+                Split dispatches (tap on): every dispatch runs in its own timed pass, labelled with
+                its pipeline key, so decode GPU time breaks down per op family and kernel; the extra
+                pass boundaries inflate the arm&apos;s absolute GPU and wall times, so read its
+                shares, not its totals. Integer GEMV: the arm passes the Session option{" "}
+                <code>integerGemv: true</code> (with <code>packedStaticQuantize: true</code> and{" "}
+                <code>linearGemvReduce: &quot;parallel&quot;</code> where the preset does not
+                declare them), so the decode linears of QAT E2B at the measured shapes (i2 gate / up
+                and down, i4 o and down) run on the integer GEMV; the label shows
+                &quot;(integer)&quot;. Other models have no linear at those shapes. Planes GEMV: the
+                arm passes the Session option <code>linearGemvPlanes: true</code> (it needs no other
+                option), so the QAT E2B lm_head (i2 262144 × 1536) runs on the byte-plane GEMV
+                instead of the sequential GEMV; the label shows &quot;(planes)&quot;. Other models
+                have no i2 linear at that shape. PLE on GPU: the arm passes the pipeline option{" "}
+                <code>pleResidency: &quot;gpu&quot;</code>, so the per-layer embeddings are uploaded
+                once at load and gathered on the GPU (QAT E2B: 1.09 GiB in one binding, which the
+                device must allow); the label shows &quot;(PLE GPU)&quot;. Decode ahead: the arm
+                passes <code>decodeAhead</code>, so a greedy chat runs that many decode steps per
+                GPU batch, each fed the token the previous step selected on the GPU, with one fence
+                and one readback per batch instead of per token; it needs PLE on GPU, and the label
+                shows &quot;(ahead N)&quot;. The token ids stay those of depth 1; each chat records
+                the batches it ran in its stop (<code>decodeAhead</code>).
               </p>
             </CardContent>
           </Card>
@@ -572,11 +654,48 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                   this machine shows transient 5–45× slow kernels, which move a median less than a
                   mean and a min not at all. Decode excludes the prefill and the first token. Chrome
                   rounds GPU timestamps to 100 µs unless
-                  chrome://flags/#enable-webgpu-developer-features is on.
+                  chrome://flags/#enable-webgpu-developer-features is on. A split arm&apos;s GPU
+                  ms/token, wall − GPU and decode rates include the cost of its extra pass
+                  boundaries (one per dispatch).
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <SummaryTable summary={summary} arms={result.arms} />
+              </CardContent>
+            </Card>
+          )}
+
+          {result === undefined || !summary.some(({ split }) => split !== undefined) ? null : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Split attribution</CardTitle>
+                <CardDescription>
+                  Split arms only: decode GPU time per token by op family and pipeline key, each the
+                  median over the warm chats of every round (a family or key median, so rows do not
+                  add up to the total exactly). Every dispatch ran in its own timed pass, and each
+                  extra pass boundary adds GPU time, inflating small kernels most: read the shares,
+                  and compare them across arms split alike.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-6">
+                {summary.map((entry) =>
+                  entry.split === undefined ? null : (
+                    <div key={`${entry.arm}-${entry.prompt}`} className="flex flex-col gap-2">
+                      <p className="text-sm font-medium">
+                        Arm {entry.arm + 1} · {armLabel(result.arms[entry.arm])} ·{" "}
+                        {benchPrompt(entry.prompt).label} · {entry.split.chats} warm chats · GPU{" "}
+                        {fixed(entry.split.totalGpuMs, 3)} ms/token
+                      </p>
+                      <SplitTable split={entry.split} />
+                    </div>
+                  ),
+                )}
+                <pre
+                  id="split-summary"
+                  className="overflow-x-auto rounded-md border p-3 font-mono text-xs"
+                >
+                  {splitSummaryText(summary, result.arms)}
+                </pre>
               </CardContent>
             </Card>
           )}
@@ -588,7 +707,8 @@ const BenchBody = ({ tap }: { tap: GpuTap }) => {
                 <CardDescription>
                   {record.complete ? "Complete" : "Incomplete (running, failed or cancelled)"}:{" "}
                   {record.visits.length} visits, {record.chats.length} chats (cold ones included),
-                  the arms with their distributions, the settings and the summary.
+                  the arms with their distributions, the settings and the summary (split arms: with
+                  the per-key breakdown of every chat and its medians).
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-4">
@@ -686,6 +806,46 @@ const SummaryTable = memo(
   ),
 );
 SummaryTable.displayName = "SummaryTable";
+
+/** The families (bold), then every key, each GPU ms descending. Memoized like the other tables. */
+const SplitTable = memo(({ split }: { split: SplitSummary }) => (
+  <Table>
+    <TableHeader>
+      <TableRow>
+        <TableHead>Family</TableHead>
+        <TableHead>Pipeline key</TableHead>
+        <TableHead className="text-right">GPU ms/token</TableHead>
+        <TableHead className="text-right">Share</TableHead>
+        <TableHead className="text-right">Dispatches/token</TableHead>
+      </TableRow>
+    </TableHeader>
+    <TableBody>
+      {split.families.map((row) => (
+        <TableRow key={`family-${row.family}`} className="font-medium">
+          <TableCell className="text-xs">{OP_FAMILY_LABELS[row.family]}</TableCell>
+          <TableCell className="text-xs text-muted-foreground">(all keys)</TableCell>
+          <TableCell className="text-right font-mono text-xs">{fixed(row.gpuMs, 3)}</TableCell>
+          <TableCell className="text-right font-mono text-xs">
+            {shareText(row.gpuMs, split.totalGpuMs)}
+          </TableCell>
+          <TableCell className="text-right font-mono text-xs">{fixed(row.dispatches, 1)}</TableCell>
+        </TableRow>
+      ))}
+      {split.keys.map((row) => (
+        <TableRow key={`key-${row.key}`}>
+          <TableCell className="text-xs">{OP_FAMILY_LABELS[row.family]}</TableCell>
+          <TableCell className="font-mono text-xs break-all whitespace-normal">{row.key}</TableCell>
+          <TableCell className="text-right font-mono text-xs">{fixed(row.gpuMs, 3)}</TableCell>
+          <TableCell className="text-right font-mono text-xs">
+            {shareText(row.gpuMs, split.totalGpuMs)}
+          </TableCell>
+          <TableCell className="text-right font-mono text-xs">{fixed(row.dispatches, 1)}</TableCell>
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
+));
+SplitTable.displayName = "SplitTable";
 
 const ChatTable = memo(
   ({ chats, arms }: { chats: readonly ChatRecord[]; arms: readonly RunArm[] }) => (

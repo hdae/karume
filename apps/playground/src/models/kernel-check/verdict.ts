@@ -26,6 +26,8 @@ export const KERNEL_CHECK_IDS = [
   "gemv-subgroup32",
   "rms-subgroup32",
   "state-attention-rewrites",
+  "gemv-integer",
+  "gemv-planes",
 ] as const;
 export type KernelCheckId = (typeof KERNEL_CHECK_IDS)[number];
 

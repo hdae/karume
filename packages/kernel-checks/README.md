@@ -4,7 +4,8 @@ Private workspace package (not published): the kernel identity checks that must 
 backend a kernel rewrite relies on, in one implementation shared by
 
 - the runtime's node GPU tests (`packages/runtime/tests/gpu_linear_gemv_subgroup_test.ts`,
-  `gpu_rms_norm_subgroup_test.ts`, `gpu_state_attention_fold_test.ts` — Dawn on the development
+  `gpu_rms_norm_subgroup_test.ts`, `gpu_state_attention_fold_test.ts`,
+  `gpu_linear_gemv_integer_test.ts`, `gpu_linear_gemv_planes_test.ts` — Dawn on the development
   machine), and
 - the playground's `/kernel-check` page (`apps/playground` — the browser's own backend: D3D12 in
   Chrome on Windows, Metal on macOS).
@@ -16,6 +17,8 @@ So the page runs exactly the cases and criteria the tests run; there is no copy 
 | Parallel GEMV `linearGemvReduce: "parallel-subgroup32"` vs parallel, u32 identity (ADR 0101) | `checkGemvSubgroup` | `subgroups` + `subgroup-size-control` + WGSL `subgroup_id` (`subgroup32Available`) |
 | RMS `rmsNormReduce: "subgroup32"`: CPU-reference tolerance, row identity across M, fused vs unfused identity, grid-stride (ADR 0100) | `checkRmsSubgroup` | the same |
 | States attention rewrites (perf-ledger K-55 / K-91): folded ①' vs ①', unrolled ③' and fused stats + PV vs their v1 WGSL, u32 identity, plus order-only mutants that must mismatch | `checkStateQkFold`, `checkStatePvUnroll`, `checkStateStatsPvUnroll`, `checkStateAttentionMutants`, and `checkStateAttentionMutantMatrix` (each mutant on every case of its shape — the page runs it, the node test does not; all five: `checkStateAttentionRewrites`) | nothing optional |
+| Integer GEMV `integerGemv`: every output word equals the CPU reference, rows past M unwritten (mirror class E — ADR 0140) | `checkIntegerGemv` (and `benchIntegerGemv`, a single-kernel timing, not a check) | nothing optional |
+| Byte-plane GEMV `linearGemvPlanes`: the f64 band, the A/B band against the sequential GEMV, two dispatches identical, nothing written past the outputs, NaN propagation (class R — ADR 0141; the fault injection runs in the node test only, through `PlanesGemvCheckOptions.mutate`) | `checkPlanesGemv` (and `benchPlanesGemv`, a single-kernel timing, not a check) | nothing optional |
 
 A check does not assert. It returns structured results — per case, per criterion, the number of
 failing words and the first (identity) or worst (tolerance band) failing word as u32 — and the
@@ -25,7 +28,8 @@ internal error scopes and also fails on an uncaptured WebGPU error or a lost dev
 (`scopedGpuWork`), since an invalid shader or a failed backend compile does not throw and would
 otherwise read back the buffers' initial contents for both runs of a case; a mutation anchor that
 no longer matches throws as well. Each check exports the number of cases each of its parts returns
-(`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`) and the mutant count
+(`GEMV_SUBGROUP_CASES`, `RMS_SUBGROUP_CASES`, `STATE_ATTENTION_CASES`, `GEMV_INTEGER_CASES`,
+`GEMV_PLANES_CASES`) and the mutant count
 (`STATE_ATTENTION_MUTANTS`); the tests and the page hold a run to them, so a part that ran no
 cases cannot pass.
 

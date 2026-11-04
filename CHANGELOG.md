@@ -41,6 +41,38 @@ measurements in `docs/research/`.
   acceptance — as HF `generate()` does in greedy and sampling. A request cannot lift it. When
   declared, the GPU-side greedy selection is not used (it reads the raw maximum) and decode reads
   the logits on the host. E2B / E4B declare none; their manifests and outputs are unchanged.
+- `PipelineOptions.decodeAhead` (`@karume/models`, the Gemma pipelines; default `1` = off): the decode run-ahead. With
+  a depth `d ≥ 2`, a greedy turn (temperature 0, no repetition penalty or logit bias) runs up to `d` decode steps in one
+  GPU batch, each step fed the token the previous step selected on the GPU, and reads the `d` selections back at one
+  fence. Generated token ids are identical to `d = 1`; a batch that meets a stop token has already computed the steps
+  after it, which are discarded. It needs `pleResidency: "gpu"` and a model with PLE whose distribution suppresses no
+  token (Gemma 4 12B has neither), and cannot be combined with `speculative` — each refused as an input error before
+  any weight part is fetched — and `d` must not exceed the KV ring's sliding slack (8 for the published
+  Gemma 4 graphs; checked when the first conversation is opened). Turns that do not decode greedily, and pipelines built
+  with `onRunDiagnostics`, decode one step per batch as before. Each turn's `GenerationStop.decodeAhead` (also on a
+  `ChatStop` closed by a stop string) records the depth, the batches it ran (`0` = the run-ahead was not taken) and the
+  steps they computed; its type `GenerationDecodeAhead` is exported from `@karume/models/gemma`. On an Apple M2 under
+  Chrome, QAT E2B at depth 4 decoded about 22.8 → 20.65 ms per token (ADR 0142).
+- `GenerationRun.chain` (`@karume/runtime`, default `false`): a run with `commit: "deferred"` may be chained onto the
+  rows already awaiting commit on its context instead of being refused. It is placed at the end of the uncommitted range
+  (reserved when it is issued); several chained runs may be unsettled together only inside one `BatchScope`; the whole
+  uncommitted range is bounded like one deferred run of that many rows (`≤ slidingSlack` with sliding slots,
+  `≤ chunkLength`); and one `context.commit(rows)` folds the whole chain. `chain` without `commit: "deferred"` fails
+  at issue, and every refusal for runs that do not pass `chain` is unchanged (ADR 0142 decision 1).
+- `SessionOptions.integerGemv` (`@karume/runtime`, default `false`; requires `packedStaticQuantize: true`, rejected
+  without it): the QAT decode linears at the measured QAT Gemma 4 E2B shapes (i2 gate / up and down of the KV-shared
+  layers, i4 o and the own-KV layers' down) run on an integer GEMV that sums the products of the weight codes and the
+  packed int8 activation codes exactly per group and applies the scales once in a fixed order. Outputs change relative
+  to the parallel GEMV (exact against its TS mirror). The manifest vocabulary `SessionSpec` (`@karume/hub`) gains the
+  same optional boolean, and the Gemma pipelines (`@karume/models`) take it from a quant's `session` or as an explicit
+  option; no preset declares it, and a reader without the key rejects a manifest that declares it. On an Apple M2 under
+  Chrome, QAT E2B `i4-fast` decoded about 27.8 → 22.8 ms per token (ADR 0140).
+- `SessionOptions.linearGemvPlanes` (`@karume/runtime`, default `false`; needs no other option): an i2 linear with f32
+  activations at a measured shape — today only the QAT Gemma 4 E2B lm_head (262144 × 1536) — runs on a byte-plane GEMV
+  (an exact decode of the i2 codes; only the addition order and the channel scale applied once after the sum differ from
+  the reference op). Outputs may change relative to the sequential GEMV. `SessionSpec` (`@karume/hub`) and the Gemma
+  pipelines carry the key as for `integerGemv`; no preset declares it. On an Apple M2 the kernel ran about 2987 →
+  2393 µs (median); the end-to-end decode did not change measurably (ADR 0141).
 
 ## [0.15.1] - 2026-11-01
 

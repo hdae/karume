@@ -1,18 +1,23 @@
 /**
- * **Route decision** of linear's integer dot-product path (w8a8 / w4a8) — the single source of truth
- * for "does this linear take the i8a8 path".
+ * **Route decisions** of linear that the fusion pass and recipe derivation must agree on — the single
+ * source of truth for "does this linear take the i8a8 path", "is this linear an integer GEMV
+ * linear" and "is this linear a byte-plane GEMV linear".
  *
  * Recipe derivation (`buildLinear` in recipe-builders/linear.ts) and the fusion pass (the linear
- * prologue in fusion.ts — perf-ledger F-4) call the **same function**: the fusion pass folds a
- * producer into the linear's step ① only when that step ① exists, so writing the decision twice
- * would let one copy move alone, and a linear that runs on the f32 path would silently receive a
- * quantized input.
+ * prologue and the packed pairing in fusion.ts, the linear→SRQ rule) call the **same functions**:
+ * the fusion pass folds a producer into the linear's step ① only when that step ① exists, and packs a
+ * producer SRQ only for consumers that read packed words, so writing a decision twice would let one
+ * copy move alone, and a linear would silently receive an input in a form it does not read.
  *
  * NOTE: the `export` is for recipe derivation and the fusion pass (not part of the public surface of
  * mod.ts — ADR 0008). It imports no GPU module, so the estimate and the GPU-less tests can call it.
  */
 
+import { type IntegerGemvVariant, integerGemvVariantFor } from "../kernels/linear-gemv-integer.ts";
+import { type PlanesGemvVariant, planesGemvVariantFor } from "../kernels/linear-gemv-planes.ts";
 import type { WeightStorage } from "../kernels/weight-storage.ts";
+import { LINEAR_OP, numel } from "../ops.ts";
+import type { NodePlan } from "./plan.ts";
 
 /**
  * Whether a linear with this resident weight storage and reduction length `k` takes the i8a8 path.
@@ -42,3 +47,63 @@ export const linearTakesI8a8 = (
   (weightStorage === "i8" || weightStorage === "i4") &&
   k > 0 &&
   k % 4 === 0;
+
+/**
+ * The **only pure function** that decides whether a linear is an **integer GEMV linear**
+ * (`SessionOptions.integerGemv`) and with which variant: the option is on, the weight is i2-, i4- or
+ * i8-resident, M = numel(input shape without its last dimension) is 1..8, and
+ * {@link integerGemvVariantFor} names a measured variant for (storage, group, M, n, k).
+ *
+ * MUST: the packed pairing (`readsPackedActivation` in fusion.ts), the linear→SRQ rule and the recipe
+ * builder's guard read this same function. The integer kernel binds the activation as `vec4<u32>`
+ * packed codes only, so if one side were wider than the other, f32 words would flow into that
+ * binding — a silent wrong value with no exception. The kernel runs only when the activation does
+ * arrive packed; a linear this function accepts whose producer was not packed keeps its existing
+ * path.
+ *
+ * @param weightStorage The resident storage of the linear's weight slot (`undefined` = not resident,
+ * read as f32).
+ * @param groupSize The i4 group length of the slot (`undefined` for any other storage).
+ */
+export const linearIntegerGemvVariant = (
+  integerGemv: boolean | undefined,
+  plan: NodePlan,
+  weightStorage: WeightStorage | undefined,
+  groupSize: number | undefined,
+): IntegerGemvVariant | undefined => {
+  if (integerGemv !== true || plan.node.op !== LINEAR_OP || weightStorage === undefined) {
+    return undefined;
+  }
+  const [x, weight] = plan.inputShapes;
+  const [n, k] = weight;
+  return integerGemvVariantFor(weightStorage, groupSize, numel(x.slice(0, -1)), n, k);
+};
+
+/**
+ * The **only pure function** that decides whether a linear is a **byte-plane GEMV linear**
+ * (`SessionOptions.linearGemvPlanes`) and with which variant: the option is on, the weight is
+ * i2-resident, M = numel(input shape without its last dimension) is 1..8, and
+ * {@link planesGemvVariantFor} names a measured variant for (M, n, k).
+ *
+ * MUST: the recipe builder (the branch and its guard against packed activations), the packed
+ * pairing (`readsPackedActivation` in fusion.ts) and the linear→SRQ rule read this same function.
+ * The kernel binds the activation as f32 quads, so a linear it accepts must never be paired with
+ * packed int8 words (they would be read as f32 — a silent wrong value), and a fusion rule must not
+ * take the linear's window and build another kernel in its place (the option would do nothing,
+ * silently).
+ *
+ * @param weightStorage The resident storage of the linear's weight slot (`undefined` = not resident,
+ * read as f32).
+ */
+export const linearPlanesGemvVariant = (
+  linearGemvPlanes: boolean | undefined,
+  plan: NodePlan,
+  weightStorage: WeightStorage | undefined,
+): PlanesGemvVariant | undefined => {
+  if (linearGemvPlanes !== true || plan.node.op !== LINEAR_OP || weightStorage === undefined) {
+    return undefined;
+  }
+  const [x, weight] = plan.inputShapes;
+  const [n, k] = weight;
+  return planesGemvVariantFor(weightStorage, numel(x.slice(0, -1)), n, k);
+};

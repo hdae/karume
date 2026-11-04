@@ -23,6 +23,8 @@ import {
   linearGemvStaticQuantizePackedKey,
   linearGemvSubgroupKey,
 } from "../src/kernels/linear-gemv.ts";
+import { integerGemvKey } from "../src/kernels/linear-gemv-integer.ts";
+import { planesGemvKey } from "../src/kernels/linear-gemv-planes.ts";
 import { conv3dI8a8Key } from "../src/kernels/conv3d-i8a8.ts";
 import { geluMulStaticQuantizeKey } from "../src/kernels/gelu-mul-static-quantize.ts";
 import { DEFAULT_GEOMETRY_PROFILE } from "../src/kernels/geometry-profile.ts";
@@ -132,6 +134,20 @@ const REPRESENTATIVES: {
   packedStaticQuantize: {
     true: [STATIC_QUANTIZE_PACKED_KEY, linearGemvParallelPackedKey("i4", 32, 8)],
   },
+  integerGemv: {
+    true: [
+      integerGemvKey({ weight: { storage: "i2" }, lanes: 8, rows: 4 }, false),
+      integerGemvKey({ weight: { storage: "i2" }, lanes: 16, rows: 4 }, true),
+      integerGemvKey(
+        { weight: { storage: "i4", groupSize: 2048, groups: 3 }, lanes: 8, rows: 2 },
+        true,
+      ),
+      integerGemvKey({ weight: { storage: "i8" }, lanes: 4, rows: 1 }, false),
+    ],
+  },
+  linearGemvPlanes: {
+    true: [planesGemvKey({ lanes: 8, rows: 4 }), planesGemvKey({ lanes: 32, rows: 8 })],
+  },
   rmsNormReduce: {
     subgroup32: [rmsNormSubgroupKey(), rmsNormSubgroupKey("residual-norm")],
   },
@@ -144,6 +160,8 @@ const REFERENCE_KEYS: readonly string[] = [
   linearKey("i4", false, "f32", undefined, 32),
   linearGemvKey("i8"),
   linearGemvKey("i4", 64),
+  // The sequential GEMV the byte-plane GEMV replaces (the QAT lm_head with the option off).
+  linearGemvKey("i2"),
   attentionQkKey(true),
   attentionQkKey(false, "f32", "f32", true, true, true),
   attentionPvKey(true),

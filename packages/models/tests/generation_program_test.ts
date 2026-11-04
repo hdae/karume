@@ -497,3 +497,30 @@ test("generationProgramFace: 凍結コピーを返す（消費者の書き換え
   assertEquals(Object.isFrozen(wiring.stopTokens), false, "配線側まで凍らせている");
   assertEquals([...wiring.stopTokens], [1, 7], "配線側の停止集合は無傷");
 });
+
+test("createGenerationProgram: derivedInputs.positionsOnly is a declaration, so only a boolean passes", () => {
+  const derive = (): Promise<Record<string, never>> => Promise.resolve({});
+  for (const positionsOnly of [true, false, undefined]) {
+    const program = createGenerationProgram(
+      specOf({
+        derivedInputs: {
+          names: [DERIVED],
+          derive,
+          ...(positionsOnly === undefined ? {} : { positionsOnly }),
+        },
+      }),
+    );
+    assertEquals(program.derivedInputs?.positionsOnly, positionsOnly);
+  }
+  // A truthy value from outside the type would otherwise admit the run-ahead on a slot that reads ids.
+  assertThrows(
+    () =>
+      createGenerationProgram(
+        specOf({
+          derivedInputs: { names: [DERIVED], derive, positionsOnly: "yes" as unknown as boolean },
+        }),
+      ),
+    Error,
+    "positionsOnly",
+  );
+});

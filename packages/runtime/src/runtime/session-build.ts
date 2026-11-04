@@ -536,6 +536,13 @@ export type SessionState = {
   readonly fuseGeluMulStaticQuantize: boolean;
   /** Passes the activations of fixed SRQ to the parallel GEMV as packed int8 (ADR 0105). */
   readonly packedStaticQuantize: boolean;
+  /**
+   * Runs the eligible decode linears on the integer GEMV (`SessionOptions.integerGemv`; true only
+   * together with {@link packedStaticQuantize} — the entry check).
+   */
+  readonly integerGemv: boolean;
+  /** Runs the eligible i2 linears on the byte-plane GEMV (`SessionOptions.linearGemvPlanes`). */
+  readonly linearGemvPlanes: boolean;
   readonly useCounts: ReadonlyMap<string, number>;
   readonly dtypes: ReadonlyMap<string, IrDtype>;
   readonly outputNames: ReadonlySet<string>;
@@ -568,6 +575,8 @@ const snapshotSessionOptions = (
   fuseLinearStaticQuantize: requested.fuseLinearStaticQuantize,
   fuseGeluMulStaticQuantize: requested.fuseGeluMulStaticQuantize,
   packedStaticQuantize: requested.packedStaticQuantize,
+  integerGemv: requested.integerGemv,
+  linearGemvPlanes: requested.linearGemvPlanes,
   rmsNormReduce: requested.rmsNormReduce,
   linearGemvRowsThreadTarget: requested.linearGemvRowsThreadTarget,
   planBackingBudgetBytes: requested.planBackingBudgetBytes,
@@ -1192,6 +1201,8 @@ export const buildSessionState = async (
     fuseLinearStaticQuantize: options.fuseLinearStaticQuantize ?? false,
     fuseGeluMulStaticQuantize: options.fuseGeluMulStaticQuantize ?? false,
     packedStaticQuantize: options.packedStaticQuantize ?? false,
+    integerGemv: options.integerGemv ?? false,
+    linearGemvPlanes: options.linearGemvPlanes ?? false,
     rmsNormReduce,
     useCounts: countUses(graph),
     dtypes: declaredDtypes(graph),

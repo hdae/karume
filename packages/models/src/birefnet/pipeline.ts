@@ -329,6 +329,8 @@ export const BIREFNET_SESSION_POLICY: FamilySessionPolicy = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
+  linearGemvPlanes: false,
 };
 
 /** What the family admission ({@link admitBirefnet}) settles. */

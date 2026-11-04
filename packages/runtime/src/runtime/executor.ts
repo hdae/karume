@@ -59,7 +59,11 @@ import {
   type FusionWeightLayout,
   planFusions,
 } from "./fusion.ts";
-import { GenerationContext, type GenerationContextHost } from "./generation-context.ts";
+import {
+  type ChainedRun,
+  GenerationContext,
+  type GenerationContextHost,
+} from "./generation-context.ts";
 /**
  * Owner of one generation's mutable state (ADR 0066 decision 1). Public **as a type only** — the
  * entry points are {@link Session.createGenerationContext} and {@link GenerationContext.fork}
@@ -444,6 +448,58 @@ const assertGenerationCommit = (capturedGeneration: GenerationRun | undefined): 
       );
     }
   }
+  // MUST: `chain` is checked in the same synchronous section, with the same discipline as `commit`
+  // (a misspelt or truthy non-boolean silently read as "not chained" would be refused for the
+  // pending commit with a message that names the wrong cause, and one read as "chained" would place
+  // the run where its caller did not build positions for). The whole-range bound of a chain is the
+  // context's (`acquireChainedRun`), which knows the rows already uncommitted.
+  if (
+    capturedGeneration?.chain !== undefined &&
+    capturedGeneration.chain !== true &&
+    capturedGeneration.chain !== false
+  ) {
+    throw new ExecutionError(
+      `run: generation.chain ${describeInputValue(capturedGeneration.chain)} must be a boolean`,
+    );
+  }
+  if (capturedGeneration?.chain === true && capturedGeneration.commit !== "deferred") {
+    throw new ExecutionError(
+      "run: generation.chain needs commit 'deferred' (a chained run's rows are committed by" +
+        " context.commit(rows) together with the range it extends)",
+    );
+  }
+};
+
+/**
+ * A generation run as the body executes it: the copy taken at issue plus, for a chained run, the
+ * reservation the context made for it (`GenerationContextInternals.acquireChainedRun`). The
+ * reservation is handed back on every internal call of the run (`pastLength` / `writeLengths` /
+ * `defer`), so those calls check against the run's own placement.
+ */
+type IssuedGeneration = GenerationRun & { readonly chained?: ChainedRun };
+
+/** The enqueue options as the body executes them (the issued form of `generation`). */
+type CapturedEnqueue = Omit<EnqueueOptions, "generation"> & {
+  readonly generation?: IssuedGeneration;
+};
+
+/**
+ * Takes the context lease of one issued run (the one place that picks the plain or the chained
+ * lease — `run` and `enqueue` share it, so both admit chains under one rule).
+ *
+ * @param scope the BatchScope of an enqueue (`undefined` for `run`)
+ * @returns the run as its body executes it (with the reservation of a chained run)
+ */
+const acquireGenerationLease = (
+  generation: GenerationRun,
+  scope: object | undefined,
+): IssuedGeneration => {
+  const lease = generation.context[RUNTIME_INTERNAL];
+  if (generation.chain !== true) {
+    lease.acquireRun(scope === undefined ? undefined : "batch");
+    return generation;
+  }
+  return { ...generation, chained: lease.acquireChainedRun(generation.queryLength, scope) };
 };
 
 /**
@@ -892,6 +948,7 @@ export class Session {
               context: generation.context,
               queryLength: generation.queryLength,
               commit: generation.commit,
+              chain: generation.chain,
             };
       assertGenerationCommit(capturedGeneration);
       lease = capturedGeneration?.context[RUNTIME_INTERNAL];
@@ -928,8 +985,12 @@ export class Session {
     } catch (cause) {
       return Promise.reject(cause);
     }
+    let issued: IssuedGeneration | undefined;
     try {
-      lease?.acquireRun();
+      issued =
+        capturedGeneration === undefined
+          ? undefined
+          : acquireGenerationLease(capturedGeneration, undefined);
     } catch (cause) {
       // Return the use reservations already taken before failing (the body will not run = nobody
       // would return them).
@@ -941,14 +1002,14 @@ export class Session {
     this.#pendingRuns += 1;
     return this.#serialize(async () => {
       try {
-        return await this.#runOnce(captured, capturedBindings, capturedGeneration);
+        return await this.#runOnce(captured, capturedBindings, issued);
       } finally {
         // MUST: always return them on success and failure alike (a missed return rejects every
         // later rewind forever / leaves that resident tensor undisposable). At this point every GPU
         // operation has been submitted, so a later `dispose()` is safe in WebGPU terms (the same
         // basis as `releaseBoundResidents`).
         releaseUsedResidents(used);
-        lease?.releaseRun();
+        lease?.releaseRun(issued?.chained);
         this.#pendingRuns -= 1;
       }
     });
@@ -1124,6 +1185,7 @@ export class Session {
                 context: generation.context,
                 queryLength: generation.queryLength,
                 commit: generation.commit,
+                chain: generation.chain,
               },
             }),
         bindings: { ...options.bindings },
@@ -1157,17 +1219,25 @@ export class Session {
       return Promise.reject(cause);
     }
     let acquired = false;
+    let issued: IssuedGeneration | undefined;
     try {
-      lease?.acquireRun("batch");
-      acquired = lease !== undefined;
+      issued =
+        capturedOptions.generation === undefined
+          ? undefined
+          : acquireGenerationLease(capturedOptions.generation, scope);
+      acquired = issued !== undefined;
       batch.enter(this.#state.gpu);
     } catch (cause) {
-      if (acquired) lease?.releaseRun();
+      if (acquired) lease?.releaseRun(issued?.chained);
       // Return the use reservations already taken before failing (this enqueue does not enter the
       // span).
       releaseUsedResidents(used);
       return Promise.reject(cause);
     }
+    // The body executes the run with the reservation of a chained run (`IssuedGeneration`).
+    const body: CapturedEnqueue =
+      issued === undefined ? capturedOptions : { ...capturedOptions, generation: issued };
+    const chained = issued?.chained;
     // Separates the completion of the enqueue's encoding from the success of the span. Fixing the
     // length and returning the reservation both happen before finish settles.
     // DECIDED: docs/decisions/0066-generation-context-state-slots.md#addendum-2026-09-12--generationcontext-in-batched-execution
@@ -1176,7 +1246,7 @@ export class Session {
       batch.onSettled({
         complete: () => finalize?.complete(),
         fail: (cause) => finalize?.fail(cause),
-        release: () => lease.releaseRun(),
+        release: () => lease.releaseRun(chained),
       });
     }
     // The params, plans and backings this enqueue added (filled in by the body). A GPU-side failure
@@ -1215,7 +1285,7 @@ export class Session {
       // wrapper tells "no failure" apart from "undefined was thrown".
       let failure: { readonly cause: unknown } | undefined;
       try {
-        finalize = await this.#enqueueOnce(captured, capturedOptions, read, additions);
+        finalize = await this.#enqueueOnce(captured, body, read, additions);
       } catch (cause) {
         failure = { cause };
         throw cause;
@@ -1527,7 +1597,7 @@ export class Session {
    * contexts) → binding resolution → plan key → derivation.
    */
   #prepareInvocation(
-    generation: GenerationRun | undefined,
+    generation: IssuedGeneration | undefined,
     captured: CapturedInputs,
     bindings: SymbolBindings,
   ): PreparedInvocation {
@@ -1552,8 +1622,12 @@ export class Session {
     // MUST: read the **internal face** (not the user-facing `pastLength`). Dispose has two steps,
     // and the contract is that this accepted execution runs to completion even after the first step
     // (acceptance closed).
+    // A chained run reads the provisional position the context reserved for it at issue (the same
+    // usability checks — `GenerationRun.chain`).
     const pastLength =
-      generation === undefined ? 0 : generation.context[RUNTIME_INTERNAL].pastLength();
+      generation === undefined
+        ? 0
+        : generation.context[RUNTIME_INTERNAL].pastLength(generation.chained);
     const face =
       generation === undefined
         ? undefined
@@ -1614,7 +1688,7 @@ export class Session {
   async #runOnce(
     captured: CapturedInputs,
     bindings: SymbolBindings,
-    generation: GenerationRun | undefined,
+    generation: IssuedGeneration | undefined,
   ): Promise<RunOutputs> {
     const { gpu, graph, scheduler } = this.#state;
 
@@ -1800,7 +1874,11 @@ export class Session {
                 pastLength,
                 generation.queryLength,
               );
-              generation.context[RUNTIME_INTERNAL].writeLengths(pastLength, generation.queryLength);
+              generation.context[RUNTIME_INTERNAL].writeLengths(
+                pastLength,
+                generation.queryLength,
+                generation.chained,
+              );
             }
             // MUST: the snapshot is taken **before queuing** the writing dispatch
             // (`SubmitScheduler.dispatch` auto-submits mid-run on the chunk limit and the time
@@ -1997,7 +2075,7 @@ export class Session {
         if (internals.borrowing) {
           // no-op (the right to advance belongs to the lender)
         } else if (generation.commit === "deferred") {
-          internals.defer(pastLength, generation.queryLength);
+          internals.defer(pastLength, generation.queryLength, generation.chained);
         } else {
           internals.advance(pastLength, generation.queryLength);
         }
@@ -2081,7 +2159,7 @@ export class Session {
    */
   async #enqueueOnce(
     captured: CapturedInputs,
-    options: EnqueueOptions,
+    options: CapturedEnqueue,
     read: PromiseWithResolvers<RunOutputs> | undefined,
     additions: CacheAdditions,
   ): Promise<{ complete(): void; fail(cause: unknown): void } | undefined> {
@@ -2155,7 +2233,11 @@ export class Session {
           pastLength,
           generation.queryLength,
         );
-        generation.context[RUNTIME_INTERNAL].writeLengths(pastLength, generation.queryLength);
+        generation.context[RUNTIME_INTERNAL].writeLengths(
+          pastLength,
+          generation.queryLength,
+          generation.chained,
+        );
       }
       executeBakedPlan(
         recipes,
@@ -2237,8 +2319,9 @@ export class Session {
       complete: (): void => {
         const internals = generation.context[RUNTIME_INTERNAL];
         if (!internals.borrowing) {
-          if (generation.commit === "deferred") internals.defer(pastLength, generation.queryLength);
-          else internals.advance(pastLength, generation.queryLength);
+          if (generation.commit === "deferred") {
+            internals.defer(pastLength, generation.queryLength, generation.chained);
+          } else internals.advance(pastLength, generation.queryLength);
         }
       },
       fail: (cause): void => this.#poisonOnStateWrite(generation, stateWriteSubmits, cause),
@@ -2357,6 +2440,8 @@ export class Session {
       fuseLinearStaticQuantize: this.#state.fuseLinearStaticQuantize,
       fuseGeluMulStaticQuantize: this.#state.fuseGeluMulStaticQuantize,
       packedStaticQuantize: this.#state.packedStaticQuantize,
+      integerGemv: this.#state.integerGemv,
+      linearGemvPlanes: this.#state.linearGemvPlanes,
       linearGemvReduce: this.#state.linearGemvReduce,
       linearCompute: this.#state.linearCompute,
       attentionCompute: this.#state.attentionCompute,

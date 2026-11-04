@@ -155,6 +155,18 @@ export type RecipeBuilderContext = {
   /** The reduction form of states-form attention ③PV (the executor's {@link SessionState} decides the default). */
   readonly stateAttentionReduce: StateAttentionReduce;
   readonly linearGemvReduce: LinearGemvReduce;
+  /**
+   * Whether the eligible decode linears run on the integer GEMV (`SessionOptions.integerGemv`;
+   * the linear's guard reads it through `linearIntegerGemvVariant`, the same function as the
+   * packed pairing).
+   */
+  readonly integerGemv: boolean;
+  /**
+   * Whether the eligible i2 linears run on the byte-plane GEMV (`SessionOptions.linearGemvPlanes`;
+   * the linear reads it through `linearPlanesGemvVariant`, the same function as the packed pairing
+   * and the linear→SRQ rule).
+   */
+  readonly linearGemvPlanes: boolean;
   readonly rmsNormReduce: RmsNormReduce;
   /**
    * The parallelism target of the row-block GEMV (`SessionOptions.linearGemvRowsThreadTarget` — a
@@ -237,6 +249,8 @@ export type RecipeBuildFace = {
     | "attentionDevice"
     | "stateAttentionReduce"
     | "linearGemvReduce"
+    | "integerGemv"
+    | "linearGemvPlanes"
     | "rmsNormReduce"
     | "linearGemvRowsThreadTarget"
     | "linearI8a8Dot"

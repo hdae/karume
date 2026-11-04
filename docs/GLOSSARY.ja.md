@@ -43,6 +43,8 @@
 | channel-major quantiser (per-pixel quantiser of conv3d w8a8) △ | conv3d w8a8 の画素ごとの量子化（チャネル順の形） | conv3d の入力 `x[Cin, P]` を格納の並びのまま 1 dispatch で読み、画素ごとにチャネル方向の amax を取って `quantize_rows` と同じ語と scale を書く量子化（ビット同一・2026-10-26 に転置コピー + `quantize_rows` から置き換え） | — | ADR 0133 追記 2026-10-26（channel-major quantiser の節） |
 | w4a8 | w4a8 | 重み i4 × 活性 per-token i8 の整数内積の経路 | — | ADR 0076 |
 | integer dot product | 整数内積 | 量子化した整数どうしを int32 累算で掛け合わせる実行形 | — | ADR 0025 / 0076 |
+| integer GEMV (`integerGemv`) △ | 整数 GEMV | packed 活性の SRQ コードと重みの整数コードの積をグループごとに厳密な整数で足し、scale は最後に決まった順で 1 回だけ掛ける decode 用 GEMV（opt-in・QAT E2B の計測した形だけ） | — | ADR 0140 |
+| byte-plane GEMV (`linearGemvPlanes`) △ | バイトプレーン GEMV | i2 の重みの語をバイトプレーンに分け、`unpack4x8unorm` と厳密な変換で −2..1 の値にして f32 の活性と掛けて足す decode 用 GEMV。参照との違いは足す順と、チャネルの scale を和の後で 1 回掛けることだけ（契約クラス R・opt-in・QAT E2B の lm_head の形だけ） | — | ADR 0141 |
 | packed int8 activations | packed 活性 | 固定 SRQ の int8 コード 4 個を u32 1 語に詰めて並列 GEMV へ渡す形 | — | ADR 0105 |
 | fake-quant | fake-quant | 重みを量子化格子へ丸めて f32 のまま持つ処理 | — | `tools/exporter/src/karume/quantize.py` |
 | quality measurement (`quality.json`) | 品質計測 | export 時に torch CPU で測る量子化誤差の記録 | — | ADR 0113 決定 4・5 |
@@ -199,7 +201,8 @@
 | rounding-error bound (E of the measurement check) | 丸め誤差の上界 / 計測のチェック | E ≤ 1% の観測だけを比の材料にする計測の検査 | 計測の門 | ADR 0117 決定 3 |
 | matching (`geometryProfileMismatch`) | 照合（表の） | 保存した表を今の adapter と runtime に当ててよいかを見る純関数 | — | ADR 0117 決定 5 |
 | row-count bucket (gemmRows bucket) | 行数バケット（「バケット」でもよい） | GEMM の行数 M で幾何を切り替える区切り | 段 | ADR 0116 |
-| run-ahead (decode) | 先行投入 | 次 token を GPU 内で決め、読み戻しを待たずに次の run を先に発行する実行形 | — | research 2026-09-19 §9 |
+| decode run-ahead (`decodeAhead`) △ | 先行投入 | greedy の decode を GPU の batch 1 本に最大 d step まとめ、各 step は前の step が GPU 上で選んだ token をそのまま入力にし、d 個の選択を batch の最後のフェンス 1 回で読み戻す実行形（opt-in・Gemma で PLE を GPU に置くときだけ）。token の列は 1 step ずつの decode と同じ | — | ADR 0142・perf-ledger H-27 |
+| chained deferred run (`GenerationRun.chain`) △ | 確定待ち run の連結 | 確定待ちの行が残る context に、その後ろへ続けて置く commit: "deferred" の run。位置は発行時に予約し、未決着のまま並べてよいのは同じ `BatchScope` の中だけ。範囲全体は同じ行数の deferred run 1 本と同じ上限（`slidingSlack`・`chunkLength`）に従い、`commit(rows)` 1 回でまとめて確定する | — | ADR 0142 決定 1 |
 | fence floor (Deno) | Deno のフェンス床 | Deno の WebGPU 実装がフェンス 1 本ごとに 10 ms 寝る定数 | — | research 2026-09-19 §3.2 |
 | in-flight submit bound | 送り込みの先行の上限 | ホストが GPU の完了より先に積んでよい `queue.submit` の本数の上限 | — | ADR 0123 |
 | completion marker (in-flight) | 完了印 | 送り込みの先行の上限が置く `queue.onSubmittedWorkDone()` の 1 本（フェンスではない） | — | ADR 0123 決定 1・5 |

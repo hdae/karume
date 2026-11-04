@@ -5,9 +5,13 @@
 
 import {
   checkGemvSubgroup,
+  checkIntegerGemv,
   type CheckOptions,
+  checkPlanesGemv,
   checkRmsSubgroup,
   checkStateAttentionRewrites,
+  GEMV_INTEGER_CASES,
+  GEMV_PLANES_CASES,
   GEMV_SUBGROUP_CASES,
   RMS_SUBGROUP_CASES,
   STATE_ATTENTION_CASES,
@@ -59,6 +63,28 @@ export const KERNEL_CHECKS: readonly KernelCheck[] = [
       ...(await checkStateAttentionRewrites(gpu, options)),
       expectedCases: STATE_ATTENTION_CASES,
       expectedMutants: STATE_ATTENTION_MUTANTS,
+    }),
+  },
+  {
+    id: "gemv-integer",
+    title: "Integer GEMV",
+    summary:
+      "The integer GEMV against its CPU reference, u32 identity (i2 / i4 / i8, up to 15 variants per form, M = 1 / 8, with and without the SRQ epilogue), plus saturated fixtures.",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkIntegerGemv(gpu, options)],
+      expectedCases: GEMV_INTEGER_CASES,
+    }),
+  },
+  {
+    id: "gemv-planes",
+    title: "Byte-plane GEMV",
+    summary:
+      "The byte-plane GEMV (linearGemvPlanes) within the GEMM band of an FP64 reference and within twice that band of the sequential GEMV (15 variants, K = 16 / 80 / 1536, 37 and 1029 columns, M = 1 / 8, plus a saturated fixture); two runs identical, nothing written past the outputs, a NaN reaches its whole row (ADR 0110 class R).",
+    needsSubgroups: false,
+    run: async (gpu, options) => ({
+      parts: [await checkPlanesGemv(gpu, options)],
+      expectedCases: GEMV_PLANES_CASES,
     }),
   },
 ];

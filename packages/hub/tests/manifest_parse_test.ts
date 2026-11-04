@@ -1252,6 +1252,8 @@ describe("parseManifest: 融合の真偽値を保持し、未指定・不正値�
     "fuseLinearStaticQuantize",
     "fuseGeluMulStaticQuantize",
     "packedStaticQuantize",
+    "integerGemv",
+    "linearGemvPlanes",
   ]) {
     for (const value of [false, true]) {
       it(`${key}=${value}`, () => {
@@ -1287,6 +1289,20 @@ describe("parseManifest: 融合の真偽値を保持し、未指定・不正値�
       fuseLinearStaticQuantize: true,
       fuseGeluMulStaticQuantize: true,
       packedStaticQuantize: true,
+    } as const;
+    const manifest = parseManifest(
+      withModel({
+        quants: { q: { weights: { net: "f16" }, session } },
+      }),
+    );
+    assertEquals(manifest.models.m.quants.q.session, session);
+  });
+  it("keeps integerGemv declared next to the packed activations it requires", () => {
+    const session = {
+      linearGemvReduce: "parallel",
+      fuseLinearStaticQuantize: true,
+      packedStaticQuantize: true,
+      integerGemv: true,
     } as const;
     const manifest = parseManifest(
       withModel({

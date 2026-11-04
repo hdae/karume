@@ -160,7 +160,11 @@ import {
   windowIsSingleOutput,
   windowTouchesState,
 } from "./fusion-rule.ts";
-import { linearTakesI8a8 } from "./linear-route.ts";
+import {
+  linearIntegerGemvVariant,
+  linearPlanesGemvVariant,
+  linearTakesI8a8,
+} from "./linear-route.ts";
 import { ExecutionError, type NodePlan } from "./plan.ts";
 
 /**
@@ -652,6 +656,12 @@ const consumersByValue = (nodes: readonly NodePlan[]): ReadonlyMap<string, reado
  * recipe-builder's check). Landing on the parallel GEMV is not enough; it is limited to **the rows
  * where packed was measured to help** (ADR 0105 addendum 1) — making forms packed where it does not
  * help is a pure loss, producer SRQ included.
+ * Under `integerGemv`, an integer GEMV linear ({@link linearIntegerGemvVariant} — again the one
+ * function the recipe builder's guard reads) also reads packed: the integer kernel takes nothing
+ * else.
+ * Under `linearGemvPlanes`, a byte-plane GEMV linear ({@link linearPlanesGemvVariant} — the function
+ * the recipe builder's guard reads) never reads packed, whatever the tables below say: its kernel
+ * binds f32 quads only. Checked first, so the option decides the linear's route on its own.
  */
 const readsPackedActivation = (plan: NodePlan, name: string, context: FusionContext): boolean => {
   if (plan.node.op !== "linear" || plan.node.ins.length !== 3) return false;
@@ -661,9 +671,15 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
   if (!allF32([plan])) return false;
   const weight = context.weightLayouts?.get(plan.node.ins[1]);
   if (weight === undefined || weight.storage === "f16" || weight.storage === "bf16") return false;
+  if (linearPlanesGemvVariant(context.linearGemvPlanes, plan, weight.storage) !== undefined) {
+    return false;
+  }
+  const group = weight.storage === "i4" ? weight.groupSize : undefined;
+  if (linearIntegerGemvVariant(context.integerGemv, plan, weight.storage, group) !== undefined) {
+    return true;
+  }
   const m = numel(plan.inputShapes[0].slice(0, -1));
   const [n, k] = plan.inputShapes[1];
-  const group = weight.storage === "i4" ? weight.groupSize : undefined;
   return linearGemvPackedEligible(weight.storage, m, n, k, group) !== undefined;
 };
 
@@ -674,7 +690,8 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
  * Five conditions for acceptance:
  *
  * 1. The option (`packedStaticQuantize`) is set, with `linearGemvReduce: parallel` /
- *    `linearCompute: f32` (only the parallel GEMV family has packed variants).
+ *    `linearCompute: f32` (only the parallel GEMV family has packed variants; the integer GEMV,
+ *    which reads nothing else, is admitted only on top of these settings).
  * 2. A `static_quantize` **left as a plain node**. An SRQ swallowed by the linear→SRQ fusion
  *    (ADR 0103) is an output-side epilogue, and packed output is out of scope here, so it does not
  *    qualify — which is why this decision takes the result of the first scan (`steps`) as input.
@@ -682,9 +699,9 @@ const readsPackedActivation = (plan: NodePlan, name: string, context: FusionCont
  *    `vec4<u32>` = units of 16 elements), and the scale is positive and finite (scale 0 is an
  *    identity SRQ and cannot be lowered to int8 codes).
  * 4. There is at least one consumer, and **every one of them** is the activation slot of a
- *    parallel-GEMV linear of a form where packed was measured to help
- *    ({@link readsPackedActivation}). If even one GEMM / sequential GEMV / other op / form measured
- *    not to help is mixed in, it stays f32.
+ *    parallel-GEMV linear of a form where packed was measured to help, or (under `integerGemv`) of
+ *    an integer GEMV linear ({@link readsPackedActivation}). If even one GEMM / sequential GEMV /
+ *    other op / form measured not to help is mixed in, it stays f32.
  * 5. No fused step other than {@link LINEAR_STATIC_QUANTIZE_RULE} consumes the value.
  *
  * MUST: 5 is an invariant for **future rules**. Only the linearStaticQuantize fusion has a

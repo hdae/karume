@@ -15,6 +15,7 @@
 import type {
   GenerationEvent,
   GenerationRunPhase,
+  GenerationDecodeAhead,
   GenerationSpeculation,
   GenerationStop,
   GenerationStream,
@@ -75,6 +76,11 @@ export type ChatStop =
        * "only turns closed by a stop string lose the accounting" (a loss that raises no exception).
        */
       readonly speculation?: GenerationSpeculation;
+      /**
+       * The run-ahead counters (`GenerationStop.decodeAhead` copied as is — present only for turns
+       * of a sequence built with the run-ahead). MUST: copy it, for the same reason as `speculation`.
+       */
+      readonly decodeAhead?: GenerationDecodeAhead;
     };
 
 /**
@@ -254,8 +260,8 @@ export const runDiagnosticsHook = <D>(state: {
  * The stop reason of a turn closed by a stop string (the one builder shared by `chat` and
  * `ChatSession.send`).
  *
- * The reason and its spelling are this layer's decision, but `tokens` and `speculation` **copy the
- * inner values as is** (this layer does not recount). The construction is kept on one path so that,
+ * The reason and its spelling are this layer's decision, but `tokens`, `speculation` and
+ * `decodeAhead` **copy the inner values as is** (this layer does not recount). The construction is kept on one path so that,
  * when a copied field is added, one entry point does not stay stale.
  */
 export const stopStringOf = (stopString: string, inner: GenerationStop): ChatStop => ({
@@ -263,6 +269,7 @@ export const stopStringOf = (stopString: string, inner: GenerationStop): ChatSto
   stopString,
   tokens: inner.tokens,
   ...(inner.speculation === undefined ? {} : { speculation: inner.speculation }),
+  ...(inner.decodeAhead === undefined ? {} : { decodeAhead: inner.decodeAhead }),
 });
 
 /**

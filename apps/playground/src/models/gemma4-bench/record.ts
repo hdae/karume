@@ -11,6 +11,8 @@ import type { SourceRecord } from "@/lib/record";
 import type { GemmaMount } from "@/models/gemma4/settings";
 
 import {
+  type ArmPipelineOptions,
+  type ArmSessionOptions,
   type BenchPromptId,
   benchPrompt,
   type BenchSettings,
@@ -57,6 +59,20 @@ export type ArmRecord = {
   readonly model: string;
   readonly preset: { readonly quant: string; readonly label: string; readonly isDefault: boolean };
   readonly tap: boolean;
+  /** Whether the tap ran split (one timed pass per dispatch; the chats carry `tap.perKey`). */
+  readonly split: boolean;
+  /** Whether the arm ran the integer GEMV (`integerGemv: true` passed explicitly). */
+  readonly integerGemv: boolean;
+  /**
+   * The Session options passed to `fromPretrained` explicitly, on top of the preset's declaration
+   * (`{}` = none).
+   */
+  readonly sessionOptions: ArmSessionOptions;
+  /**
+   * The pipeline options passed to `fromPretrained` explicitly — `pleResidency` and `decodeAhead`
+   * (`{}` = none: the PLE on the host, one decode step per batch).
+   */
+  readonly pipelineOptions: ArmPipelineOptions;
   readonly sampler: SamplerSpec;
 };
 
@@ -136,6 +152,10 @@ export const buildBenchRecord = (input: {
         model: arm.model,
         preset: { quant: arm.quant, label: arm.quantLabel, isDefault: arm.isDefaultQuant },
         tap: arm.tap,
+        split: arm.split === true,
+        integerGemv: arm.session?.integerGemv === true,
+        sessionOptions: arm.session ?? {},
+        pipelineOptions: arm.pipeline ?? {},
         sampler: arm.sampler,
       };
     }),

@@ -242,6 +242,8 @@ describe("overallVerdict", () => {
         "gemv-subgroup32": passed,
         "rms-subgroup32": passed,
         "state-attention-rewrites": passed,
+        "gemv-integer": passed,
+        "gemv-planes": passed,
       }),
     ).toBe("pass");
     expect(overallVerdict({})).toBe("none");
@@ -252,6 +254,8 @@ describe("overallVerdict", () => {
     expect(notRunChecks({ "state-attention-rewrites": passed })).toEqual([
       "gemv-subgroup32",
       "rms-subgroup32",
+      "gemv-integer",
+      "gemv-planes",
     ]);
   });
 
@@ -261,6 +265,8 @@ describe("overallVerdict", () => {
         "gemv-subgroup32": { kind: "not-available", reason: "no subgroups" },
         "rms-subgroup32": passed,
         "state-attention-rewrites": passed,
+        "gemv-integer": passed,
+        "gemv-planes": passed,
       }),
     ).toBe("incomplete");
   });
@@ -283,6 +289,8 @@ describe("withoutOutcomes", () => {
     "gemv-subgroup32": passed,
     "rms-subgroup32": passed,
     "state-attention-rewrites": passed,
+    "gemv-integer": passed,
+    "gemv-planes": passed,
   };
 
   it("makes a check about to re-run read as not run, so cancelling it leaves INCOMPLETE, not its earlier PASS", () => {
@@ -298,6 +306,8 @@ describe("withoutOutcomes", () => {
     ).toEqual({
       "gemv-subgroup32": failed,
       "state-attention-rewrites": passed,
+      "gemv-integer": passed,
+      "gemv-planes": passed,
     });
   });
 });

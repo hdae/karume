@@ -190,6 +190,12 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
   ) {
     return "options.packedStaticQuantize must be a boolean";
   }
+  if (options.integerGemv !== undefined && typeof options.integerGemv !== "boolean") {
+    return "options.integerGemv must be a boolean";
+  }
+  if (options.linearGemvPlanes !== undefined && typeof options.linearGemvPlanes !== "boolean") {
+    return "options.linearGemvPlanes must be a boolean";
+  }
   const {
     rmsNormReduce,
     linearCompute,
@@ -233,6 +239,12 @@ export const sessionOptionsViolation = (options: SessionOptions): string | undef
     (linearGemvReduce !== "parallel" || linearCompute !== "f32")
   ) {
     return "packedStaticQuantize supports only linearGemvReduce: parallel / linearCompute: f32";
+  }
+  // The integer GEMV reads only packed int8 activations (src/kernels/linear-gemv-integer.ts), so
+  // without the packed pairing it could never run: rejected rather than accepted as a no-op. The
+  // packed check above already holds packedStaticQuantize to parallel / f32.
+  if (options.integerGemv === true && options.packedStaticQuantize !== true) {
+    return "integerGemv requires packedStaticQuantize: true (with linearGemvReduce: parallel / linearCompute: f32)";
   }
   if (linearGemvReduce !== "sequential" && linearCompute !== "f32") {
     return `linearGemvReduce: ${linearGemvReduce} supports only linearCompute: f32`;

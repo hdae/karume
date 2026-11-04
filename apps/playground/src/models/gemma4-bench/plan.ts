@@ -1,11 +1,13 @@
 /**
  * What the decode bench runs: the prompt set, the arms (a model of one of the two Gemma 4
- * distributions × a preset × the tap on or off), the workload form (chats, new tokens, rounds,
- * sampler) and the order the arms are visited in. Pure, so `vp test` covers it.
+ * distributions × a preset × the tap on, on and split per dispatch, or off × the integer GEMV on or
+ * off × the byte-plane GEMV on or off × the PLE on the host or the GPU × the decode run-ahead
+ * depth), the workload form (chats, new tokens, rounds, sampler) and the order the arms are visited
+ * in. Pure, so `vp test` covers it.
  */
 
-import type { Manifest } from "@karume/hub";
-import type { DefaultSampler, SamplerSpec } from "@karume/models/gemma";
+import type { Manifest, SessionSpec } from "@karume/hub";
+import type { DefaultSampler, FromPretrainedOptions, SamplerSpec } from "@karume/models/gemma";
 
 import type { Choice } from "@/components/choice-select";
 import { manifestPresets } from "@/lib/presets";
@@ -74,7 +76,54 @@ export type ArmDraft = {
   readonly key: ModelKey;
   readonly quant?: string;
   readonly tap: boolean;
+  /** Split the tap per dispatch (applies only with the tap on). */
+  readonly split?: boolean;
+  /** Run the eligible decode linears on the integer GEMV (the Session option `integerGemv`). */
+  readonly integerGemv?: boolean;
+  /** Run the QAT lm_head on the byte-plane GEMV (the Session option `linearGemvPlanes`). */
+  readonly linearGemvPlanes?: boolean;
+  /** Keep the PLE on the GPU and gather it there (the pipeline option `pleResidency: "gpu"`). */
+  readonly pleOnGpu?: boolean;
+  /** Greedy decode steps per GPU batch (the pipeline option `decodeAhead`; absent = 1). */
+  readonly decodeAhead?: DecodeAhead;
 };
+
+/** The run-ahead depths the bench offers (1 = off — one step per batch). */
+export type DecodeAhead = "1" | "2" | "4" | "8";
+
+export const DECODE_AHEAD_CHOICES: readonly Choice<DecodeAhead>[] = [
+  { value: "1", label: "1 (off)" },
+  { value: "2", label: "2" },
+  { value: "4", label: "4" },
+  { value: "8", label: "8" },
+];
+
+/**
+ * The pipeline options an arm passes to `fromPretrained` (absent = the default: the PLE on the
+ * host, one decode step per batch).
+ */
+export type ArmPipelineOptions = Pick<FromPretrainedOptions, "pleResidency" | "decodeAhead">;
+
+/**
+ * The Session options an arm passes to `fromPretrained` explicitly. The pipeline resolves each one
+ * as explicit > the preset's declaration > the runtime default, so only what the arm changes is
+ * passed (absent = the preset alone).
+ */
+export type ArmSessionOptions = Pick<
+  FromPretrainedOptions,
+  "integerGemv" | "packedStaticQuantize" | "linearGemvReduce" | "linearGemvPlanes"
+>;
+
+/**
+ * The explicit options of the integer GEMV switch: `integerGemv: true`, plus what it requires —
+ * packed activations, which need the parallel GEMV — where the preset does not declare it already
+ * (QAT `i4-fast` declares both, so it passes `integerGemv` alone).
+ */
+export const integerGemvSession = (declared: SessionSpec): ArmSessionOptions => ({
+  integerGemv: true,
+  ...(declared.packedStaticQuantize === true ? {} : { packedStaticQuantize: true }),
+  ...(declared.linearGemvReduce === "parallel" ? {} : { linearGemvReduce: "parallel" }),
+});
 
 /** One arm, checked against the manifests. */
 export type BenchArm = {
@@ -85,6 +134,15 @@ export type BenchArm = {
   readonly isDefaultQuant: boolean;
   /** Whether the tap records and times this arm's chats (off = a wall-clock control). */
   readonly tap: boolean;
+  /**
+   * Whether the tap runs split — one timed pass per dispatch, labelled with its pipeline key — for
+   * the per-kernel attribution (only with the tap on; absent = the product's own passes).
+   */
+  readonly split?: boolean;
+  /** The Session options passed explicitly (absent = none: the preset's declaration alone). */
+  readonly session?: ArmSessionOptions;
+  /** The pipeline options passed explicitly (absent = none — {@link ArmPipelineOptions}). */
+  readonly pipeline?: ArmPipelineOptions;
   /** The distribution's declared sampler (for the "distribution's sampler" choice). */
   readonly declaredSampler?: DefaultSampler;
 };
@@ -94,8 +152,16 @@ export const MOUNT_SHORT_LABELS: Readonly<Record<GemmaMount, string>> = {
   "gemma4-qat": "QAT",
 };
 
-export const armLabel = (arm: Pick<BenchArm, "mount" | "model" | "quant" | "tap">): string =>
-  `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${arm.tap ? "" : " (tap off)"}`;
+export const armLabel = (
+  arm: Pick<BenchArm, "mount" | "model" | "quant" | "tap" | "split" | "session" | "pipeline">,
+): string =>
+  `${MOUNT_SHORT_LABELS[arm.mount]} ${arm.model} ${arm.quant}${
+    arm.session?.integerGemv === true ? " (integer)" : ""
+  }${arm.session?.linearGemvPlanes === true ? " (planes)" : ""}${
+    arm.pipeline?.pleResidency === "gpu" ? " (PLE GPU)" : ""
+  }${(arm.pipeline?.decodeAhead ?? 1) >= 2 ? ` (ahead ${arm.pipeline?.decodeAhead})` : ""}${
+    arm.tap ? (arm.split === true ? " (split)" : "") : " (tap off)"
+  }`;
 
 /**
  * The arms the page starts with: the default model of each loaded distribution at its default
@@ -112,7 +178,11 @@ export type ArmResolution =
   | { readonly ok: true; readonly arm: BenchArm }
   | { readonly ok: false; readonly error: string };
 
-/** A draft → its arm, or why it cannot run (a missing manifest or model, or a QAT model the entry point refuses). */
+/**
+ * A draft → its arm, or why it cannot run (a missing manifest or model, a QAT model the entry point
+ * refuses, or a run-ahead depth without the PLE on the GPU — the pipeline refuses that pair too, but
+ * only after the arm was started).
+ */
 export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResolution => {
   const { mount, model } = draft.key;
   const manifest: Manifest | undefined = manifests[mount];
@@ -131,6 +201,25 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
     return { ok: false, error: `The ${mount} model '${model}' has no preset '${defaultQuant}'.` };
   }
   const declaredSampler = modelConfig(manifest, model).sampler;
+  const decodeAhead = Number(draft.decodeAhead ?? "1");
+  if (decodeAhead >= 2 && draft.pleOnGpu !== true) {
+    return {
+      ok: false,
+      error:
+        "Decode ahead needs PLE on GPU (each step's token stays on the GPU, so its PLE gather must run there).",
+    };
+  }
+  const pipeline: ArmPipelineOptions = {
+    ...(draft.pleOnGpu === true ? { pleResidency: "gpu" } : {}),
+    ...(decodeAhead >= 2 ? { decodeAhead } : {}),
+  };
+  // The byte-plane GEMV needs no other option, so it joins whatever the integer switch passes.
+  const session: ArmSessionOptions = {
+    ...(draft.integerGemv === true
+      ? integerGemvSession(manifest.models[model].quants[preset.name].session)
+      : {}),
+    ...(draft.linearGemvPlanes === true ? { linearGemvPlanes: true } : {}),
+  };
   return {
     ok: true,
     arm: {
@@ -140,6 +229,9 @@ export const resolveArm = (draft: ArmDraft, manifests: GemmaManifests): ArmResol
       quantLabel: preset.label,
       isDefaultQuant: preset.name === defaultQuant,
       tap: draft.tap,
+      ...(draft.tap && draft.split === true ? { split: true } : {}),
+      ...(Object.keys(session).length === 0 ? {} : { session }),
+      ...(Object.keys(pipeline).length === 0 ? {} : { pipeline }),
       ...(declaredSampler === undefined ? {} : { declaredSampler }),
     },
   };

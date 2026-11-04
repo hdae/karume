@@ -116,6 +116,19 @@
  * cycle whose shape the caller's budget decided, not a matter of how well speculation does). For
  * those two, `SpeculationGate.skip()` is called instead of an observation (only the exploration
  * period advances — even a cycle that is not mixed in runs one piece of GPU work).
+ *
+ * ## The decode run-ahead (`options.greedyAhead` — where the per-step greedy selection would run)
+ *
+ * One call runs `n = min(depth, remaining)` decode steps in one GPU batch (step k at position
+ * `pastLength + k`, fed step k−1's on-GPU selection) and leaves the `n` rows pending, like a verify.
+ * The tokens are then handed out one by one with **the per-step loop's bookkeeping** (`pendingToken`
+ * / `generated` / `history` updated before each yield, the stop check, the yield position), and
+ * `settleCommit()` commits the rows the per-step loop would have committed by then: up to the first
+ * stop token, the token at which a consumer closed, or the draw that threw. The rows after it were
+ * computed but are never committed (the next run overwrites them — the deferred contract). The
+ * abort boundary is the batch; a token of a batch already run is checked synchronously before it is
+ * handed out. A failed batch commits nothing (the frontier stays `pendingToken`, as for a failed
+ * per-step run).
  */
 
 import { closeableGenerator } from "../concurrency/closeable-generator.ts";
@@ -283,6 +296,11 @@ export type GenerationStop = {
    * altogether on a non-speculative sequence).
    */
   readonly speculation?: GenerationSpeculation;
+  /**
+   * Decode run-ahead counters (present only on turns of a sequence with `options.greedyAhead` —
+   * absent altogether otherwise).
+   */
+  readonly decodeAhead?: GenerationDecodeAhead;
 } & (
   | { readonly reason: "eos"; readonly token: number }
   | { readonly reason: "stop-token"; readonly token: number }
@@ -290,6 +308,31 @@ export type GenerationStop = {
   | { readonly reason: "aborted" }
   | { readonly reason: "closed" }
 );
+
+/**
+ * Decode run-ahead counters ({@link GenerationStop.decodeAhead}) — which decode path the turn took.
+ *
+ * Per-token observation (`onRun`) is not part of it: the run-ahead runs only where the per-step
+ * greedy selection would, and that selection already requires a sequence without `onRun` (the
+ * diagnostics of one run cannot be read from a batch of several), so these counters are the only
+ * place the path shows.
+ */
+export type GenerationDecodeAhead = {
+  /** The depth the sequence was built with (the most decode steps one batch runs). */
+  readonly depth: number;
+  /**
+   * Batches the turn ran (each pays one fence and one readback for up to `depth` tokens). `0` = the
+   * turn's decode did not take the run-ahead: its sampler was not plain greedy (temperature > 0,
+   * repetition penalty, logit bias), or the turn ended at the token the prefill produced.
+   */
+  readonly batches: number;
+  /**
+   * Decode steps the batches ran. It can exceed the decode tokens the turn delivered: a batch that
+   * stops at a stop token has already computed the steps after it (their rows are left uncommitted
+   * and overwritten by the next run).
+   */
+  readonly steps: number;
+};
 
 /**
  * Speculation counters ({@link GenerationStop.speculation}).
@@ -724,6 +767,36 @@ export type GenerationGreedyRun<C extends GenerationContextFace> = (
   generation: { readonly context: C; readonly queryLength: number },
 ) => Promise<GreedyRunResult>;
 
+/** One call of {@link GenerationGreedyAhead.run}. */
+export type GenerationGreedyAheadRequest<C extends GenerationContextFace> = {
+  /** The token step 0 feeds (the frontier). Step `k > 0` feeds step `k − 1`'s selection. */
+  readonly token: number;
+  /**
+   * Per step, every run input **except the token ids** (the last-row selector and the derived
+   * inputs of the step's position `context.pastLength + k`). The length is the step count.
+   */
+  readonly steps: readonly RunInputs[];
+  readonly context: C;
+};
+
+/**
+ * The decode run-ahead (internal capability — {@link GenerationSequenceOptions.greedyAhead}):
+ * several greedy decode steps in **one GPU batch**, each step fed the previous step's on-GPU
+ * selection, the selections read back together at the batch's single fence. It removes the host
+ * round trip between tokens (the fence, the readback, the host writing the next token) from all but
+ * one step in `depth`.
+ *
+ * MUST: the steps are **deferred** runs chained on the context (`GenerationRun.chain` of the
+ * runtime) — on return `context.pendingCommit` holds exactly `steps.length` rows starting at the
+ * `pastLength` of the call, and the caller commits the rows it keeps with `context.commit(rows)`.
+ * MUST: `1 ≤ steps.length ≤ depth`; the results are the steps' selections in order.
+ */
+export type GenerationGreedyAhead<C extends GenerationContextFace> = {
+  /** The most steps one batch runs (`≥ 2`). */
+  readonly depth: number;
+  run(request: GenerationGreedyAheadRequest<C>): Promise<readonly GreedyRunResult[]>;
+};
+
 export type GenerationSequenceOptions<C extends GenerationContextFace> = {
   /**
    * Internal capability that returns the maximum of the raw logits. Used only for decode at
@@ -731,6 +804,20 @@ export type GenerationSequenceOptions<C extends GenerationContextFace> = {
    * {@link GenerationWiring.suppressTokens} (the raw maximum can be a suppressed id).
    */
   readonly greedy?: GenerationGreedyRun<C>;
+  /**
+   * The decode run-ahead (internal capability). It replaces the per-step decode exactly where
+   * {@link GenerationSequenceOptions.greedy} would be used — temperature 0 without processing,
+   * non-speculative, without observation — and the token ids it yields are **identical** to the
+   * per-step decode's (the same kernels on the same inputs; only the batching changes). A turn that
+   * does not meet the condition decodes per step as before ({@link GenerationStop.decodeAhead}
+   * tells which path ran).
+   *
+   * MUST (checked at sequence creation, failing loudly): `depth` is an integer ≥ 2 within the
+   * context's sliding slack and `chunkLength` (one batch's rows stay uncommitted until the host
+   * reads them back); no `speculative` (a verify is not a greedy step); the derived inputs are
+   * absent or declared `positionsOnly` (a step is derived before its token exists).
+   */
+  readonly greedyAhead?: GenerationGreedyAhead<C>;
   readonly session: GenerationSession<C>;
   /** The verified static wiring (the return value of `createGenerationProgram`). */
   readonly program: GenerationWiring;
@@ -989,6 +1076,52 @@ const assertSpeculativeSetup = (
 };
 
 /**
+ * The setup check of the decode run-ahead ({@link GenerationSequenceOptions.greedyAhead}) — at
+ * sequence creation, once the context (and with it the sliding slack) exists.
+ *
+ * - `depth ≤ slidingSlack` and `≤ chunkLength`: one batch leaves up to `depth` rows uncommitted
+ *   until the host reads the batch back, and the runtime bounds a chain of deferred runs by the
+ *   same two values. Failing here names the knob; the runtime would refuse the first batch with
+ *   the generic bound.
+ * - No speculation: a speculative turn verifies drafts, it does not take greedy steps, and the two
+ *   would contend for the one pending commit.
+ * - `positionsOnly` derived inputs: a step's inputs are derived before its token exists (the token
+ *   is still on the GPU), so a slot that reads ids would be fed a stand-in.
+ */
+const assertGreedyAheadSetup = (
+  depth: number,
+  speculative: boolean,
+  slidingSlack: number | undefined,
+  program: GenerationWiring,
+): void => {
+  if (!Number.isSafeInteger(depth) || depth < 2) {
+    throw new Error(
+      `greedyAhead.depth ${depth} is not an integer ≥ 2 (1 step per batch is the per-step decode)`,
+    );
+  }
+  if (speculative) {
+    throw new Error(
+      "greedyAhead and speculative cannot be combined (a verify is not a greedy step, and both hold the context's one pending commit)",
+    );
+  }
+  if (slidingSlack !== undefined && depth > slidingSlack) {
+    throw new Error(
+      `greedyAhead.depth ${depth} exceeds the sliding ring's slack ${slidingSlack}` +
+        " (a batch's rows stay uncommitted until it is read back, and rejected rows must not overwrite live past KV)",
+    );
+  }
+  if (depth > program.chunkLength) {
+    throw new Error(`greedyAhead.depth ${depth} exceeds chunkLength ${program.chunkLength}`);
+  }
+  if (program.derivedInputs !== undefined && program.derivedInputs.positionsOnly !== true) {
+    throw new Error(
+      "greedyAhead needs derived inputs declared positionsOnly (a step's inputs are derived before its" +
+        " token exists — it is still on the GPU)",
+    );
+  }
+};
+
+/**
  * A copy of an output row (a readback subarray lasts until the next run — the hidden kept for the
  * next cycle is copied).
  */
@@ -1095,6 +1228,29 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
    * `performance.now`).
    */
   const now = options.speculative?.now ?? ((): number => performance.now());
+  const ahead = options.greedyAhead;
+  if (ahead !== undefined) {
+    try {
+      assertGreedyAheadSetup(
+        ahead.depth,
+        options.speculative !== undefined,
+        context.slidingSlack,
+        program,
+      );
+    } catch (error) {
+      // The context of a failed assembly is unreachable from the caller — close it first (the same
+      // rule as the speculative block below; it runs first, so no drafter is open yet).
+      try {
+        await context.dispose();
+      } catch (cleanup) {
+        throw new AggregateError(
+          [error, cleanup],
+          "greedyAhead was refused, and closing the context failed too",
+        );
+      }
+      throw error;
+    }
+  }
   if (options.speculative !== undefined) {
     try {
       // The knob check runs **before** the borrower is opened (an invalid knob must not wait until
@@ -1138,7 +1294,8 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
   let pendingToken: number | undefined = inherited?.pendingToken;
   /**
    * The rows of the pending verify made frontier (= rows the target consumed; non-zero only during
-   * speculative delivery). {@link settleCommit} commits the pending verify up to here.
+   * speculative delivery and during the hand-out of a run-ahead batch, whose rows are pending the
+   * same way). {@link settleCommit} commits the pending verify up to here.
    *
    * MUST: kept in sequence scope (the `used` getter reads it). During delivery `context.pastLength`
    * stays at the start of the cycle, so without adding this **delivered tokens would not appear in
@@ -1247,6 +1404,17 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
       face === undefined && options.onRun === undefined && sampler.greedy !== undefined
         ? options.greedy
         : undefined;
+    /**
+     * The run-ahead takes the decode exactly where the per-step greedy selection would run (the same
+     * three conditions — {@link GenerationSequenceOptions.greedyAhead}).
+     */
+    const runAhead =
+      face === undefined && options.onRun === undefined && sampler.greedy !== undefined
+        ? ahead
+        : undefined;
+    /** This turn's run-ahead counters (only on a sequence built with `greedyAhead`). */
+    const aheadTally =
+      ahead === undefined ? undefined : { depth: ahead.depth, batches: 0, steps: 0 };
     const pickGreedy = (result: GreedyRunResult): number => {
       if (
         !Number.isSafeInteger(result.index) ||
@@ -1293,6 +1461,11 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
                 : { plainSteps, switches: gate.switches - switchesAtStart }),
             },
           };
+    /** The turn's stop with every counter the sequence keeps (speculation, run-ahead). */
+    const withCounters = (stopped: GenerationStop): GenerationStop =>
+      aheadTally === undefined
+        ? withSpeculation(stopped)
+        : { ...withSpeculation(stopped), decodeAhead: { ...aheadTally } };
     /** Confirms the pending verify up to the frontier (does nothing if nothing is pending). */
     const settleCommit = (): void => {
       if (context.pendingCommit === undefined) return;
@@ -1600,6 +1773,71 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
           return;
         }
 
+        if (runAhead !== undefined && aheadTally !== undefined) {
+          // ---- The run-ahead path: the per-step decode below, `n` steps per batch. A batch feeds
+          // `token` to step 0 and each later step the previous step's selection on the GPU, leaves
+          // the `n` rows pending, and the walk below hands the tokens out exactly as the per-step
+          // loop would — then commits the rows that loop would have committed (`settleCommit`, up to
+          // `frontierRows`). Its decode runs `maxNewTokens - 1` steps too, so the last token stays
+          // uncommitted in `pendingToken` (decision 4).
+          let step = 0;
+          while (step + 1 < maxNewTokens) {
+            // The stage boundary is the batch (one fence per batch); a token of a batch already run
+            // is checked synchronously before it is handed out (below).
+            await settleAbort(signal);
+            const count = Math.min(runAhead.depth, maxNewTokens - 1 - step);
+            const base = context.pastLength;
+            const steps: RunInputs[] = [];
+            for (let k = 0; k < count; k += 1) {
+              // The derived inputs are positions-only (checked at creation): step k > 0's token is
+              // still on the GPU, so the pad value 0 stands in for it and is never read.
+              const extra = await deriveInputs(
+                Int32Array.of(k === 0 ? token : 0),
+                Int32Array.of(base + k),
+                signal,
+              );
+              steps.push({ [program.lastRow]: lastRowInput([0]), ...extra });
+            }
+            signal?.throwIfAborted();
+            const selected = await runAhead.run({ token, steps, context });
+            aheadTally.batches += 1;
+            aheadTally.steps += count;
+            if (selected.length !== count) {
+              throw new Error(
+                `greedyAhead returned ${selected.length} selections for a batch of ${count} steps`,
+              );
+            }
+            // ---- From here every exit commits through `settleCommit` (here, at a stop, or in
+            // `finally` for a throw / an interruption).
+            frontierRows = 0;
+            for (let k = 0; k < count; k += 1) {
+              // An interruption that arrived while the previous token was handed out closes here,
+              // where the per-step loop would have closed before its next run (rows 0..k−1 kept).
+              if (k > 0) signal?.throwIfAborted();
+              // MUST: row k is consumed (the frontier went into the KV) **before** the draw — the
+              // same point at which the per-step loop's run had committed it, so a throwing draw
+              // (NaN logits) keeps the row, and the old frontier is not fed twice.
+              frontierRows = k + 1;
+              pendingToken = undefined;
+              token = pickGreedy(selected[k]);
+              generated += 1;
+              history.push(token);
+              pendingToken = token;
+              step += 1;
+              const stopped = stopFor(token, generated);
+              if (stopped !== undefined) {
+                stop = stopped;
+                settleCommit();
+                return;
+              }
+              yield { kind: "token", id: token, position: context.pastLength + frontierRows };
+            }
+            settleCommit();
+          }
+          stop = { reason: "max-tokens", tokens: generated };
+          return;
+        }
+
         // Decode has the shape "placing `g_i` at position P yields `g_{i+1}`". It runs
         // `maxNewTokens - 1` times, and the last token stays uncommitted in `pendingToken`
         // (decision 4).
@@ -1679,7 +1917,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
         } finally {
           if (failure !== undefined) fail(failure.error);
           // `stop` is still empty in `finally` only via `break` / `return()`.
-          else settle(withSpeculation(stop ?? { reason: "closed", tokens: generated }));
+          else settle(withCounters(stop ?? { reason: "closed", tokens: generated }));
           release?.();
         }
       }
@@ -1687,7 +1925,7 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
 
     const iterable = closeableGenerator(events(), (failure) => {
       if (failure !== undefined) fail(failure.error);
-      else settle(withSpeculation({ reason: "closed", tokens: 0 }));
+      else settle(withCounters({ reason: "closed", tokens: 0 }));
     });
     return { [Symbol.asyncIterator]: () => iterable, done };
   };
@@ -1696,7 +1934,8 @@ const assembleSequence = async <C extends ForkableContextFace<C>>(
     capacity,
     // MUST: derive it in the getter every time (`context.pastLength`, `frontierRows` and
     // `pendingToken` are the only sources). During speculative delivery the verify stays pending
-    // (`pastLength` stays at the start of the cycle), so the uncommitted rows up to the frontier
+    // (`pastLength` stays at the start of the cycle — and a run-ahead batch likewise until its
+    // tokens are handed out), so the uncommitted rows up to the frontier
     // are added — this makes **`used === the delivered token's position + 1` hold even during
     // delivery**, speculative or not (without it, delivered tokens would be missing mid-cycle and
     // the next turn's budget calculation would be lax by up to k).

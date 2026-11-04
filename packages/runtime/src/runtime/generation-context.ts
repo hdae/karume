@@ -121,6 +121,21 @@ export type GenerationContextHost = {
 };
 
 /**
+ * One accepted **chained** deferred run (`GenerationRun.chain` — the position the context reserved
+ * for it at issue).
+ *
+ * The execution integration hands the same object back on every internal call of that run
+ * (`pastLength` / `writeLengths` / `defer` / `releaseRun`), so each call is checked against the
+ * reservation itself rather than against the committed logical length (which a chained run is, by
+ * construction, ahead of).
+ */
+export type ChainedRun = {
+  /** The run's provisional logical length (= the position of its first row). */
+  readonly pastLength: number;
+  readonly queryLength: number;
+};
+
+/**
  * The runtime-internal surface of {@link GenerationContext} (backing and progress that do not map
  * to a user story).
  *
@@ -197,12 +212,28 @@ type GenerationContextInternals = {
    * {@link GenerationContext.rewind} happens by issuing the second run itself).
    */
   acquireRun(kind?: "batch"): void;
+  /**
+   * Accepts one **chained** deferred run (`GenerationRun.chain`) and reserves its position — the
+   * end of the uncommitted range (the pending commit, then the chained runs accepted before it and
+   * not settled yet). Taken in the synchronous section of issue, like {@link acquireRun}, and
+   * returned with {@link releaseRun} given the same object.
+   *
+   * `scope` is the BatchScope of an enqueue (`undefined` for `Session.run`). Several unsettled
+   * chained runs are admitted only when every one of them was issued into the same scope; anything
+   * else in flight refuses it with the same reason as {@link acquireRun}.
+   *
+   * MUST: refuse a range beyond the bound of one deferred run of the same total rows (`≤
+   * slidingSlack` with sliding slots, `≤ chunkLength` always) **here**, before a dispatch exists —
+   * the rows of a chain are rejected rows until the host commits them, so the slack argument of a
+   * single deferred run (`assertGenerationCommit` in the executor) applies to the whole range.
+   */
+  acquireChainedRun(queryLength: number, scope: object | undefined): ChainedRun;
   assertCanDispose(): void;
   /**
    * Returns the in-flight generation run (always exactly once, on both the success and the failure
-   * path).
+   * path). A chained run passes the object {@link acquireChainedRun} returned.
    */
-  releaseRun(): void;
+  releaseRun(chained?: ChainedRun): void;
   /**
    * The internal read of the logical length (once, at the head of a run — it is cut off **after
    * the disposal body runs**).
@@ -211,8 +242,11 @@ type GenerationContextInternals = {
    * admission → the chained disposal body), and an accepted run executes between the first and the
    * second, so a user-facing check would let "`run(); dispose()` issued without await" kill the
    * accepted run.
+   *
+   * A chained run passes its reservation and reads **its provisional position** (the same
+   * usability checks; the reservation must still be held).
    */
-  pastLength(): number;
+  pastLength(chained?: ChainedRun): number;
   /**
    * The context-side bind groups baked for the backing of `token` (undefined if none = bake again).
    *
@@ -233,9 +267,9 @@ type GenerationContextInternals = {
   /**
    * Writes the logical lengths (before every run's encode — the doc of {@link GenerationContext}).
    * `pastLength` is **the value the caller captured at the head of the run** (checked against the
-   * current internal value).
+   * current internal value, or against the reservation of a chained run).
    */
-  writeLengths(pastLength: number, queryLength: number): void;
+  writeLengths(pastLength: number, queryLength: number, chained?: ChainedRun): void;
   /**
    * Advances the logical length (**only on a successful run** — decision 6). The captured P is
    * checked as in `writeLengths`.
@@ -250,8 +284,11 @@ type GenerationContextInternals = {
    * which "the logical length the GPU saw" and "the basis of progress" diverge (the ban on double
    * bookkeeping of ADR 0066 decision 6 holds in this form too — there is still only one path that
    * can move the logical length). The captured P is checked as in `advance`.
+   *
+   * A chained run (passing its reservation) **extends** the pending commit instead — its rows must
+   * continue the uncommitted range exactly (`pastLength` = the pending range's end).
    */
-  defer(pastLength: number, queryLength: number): void;
+  defer(pastLength: number, queryLength: number, chained?: ChainedRun): void;
   /** Poisons the context (failure of a run containing a state-changing dispatch — addendum 3). */
   poison(reason: string): void;
 };
@@ -574,9 +611,25 @@ export class GenerationContext {
    *
    * MUST: while it is set, run leases and `rewind` are refused. The physical ring already holds
    * `queryLength` written rows while only the logical length is stopped; letting the next run or a
-   * rewind through would have two places decide separately "how far the KV is committed".
+   * rewind through would have two places decide separately "how far the KV is committed". The one
+   * exception is a **chained** run (`GenerationRun.chain`), which is placed after these rows and
+   * extends this same range, so the commit still decides once for all of them.
    */
   #pending: { readonly pastLength: number; readonly queryLength: number } | undefined;
+  /**
+   * The chained deferred runs accepted and not settled yet (`GenerationRun.chain` — undefined when
+   * none). `scope` is the BatchScope they were issued into (undefined for one `Session.run`), and
+   * `end` the provisional end of the uncommitted range (the next chained run's position).
+   *
+   * MUST: while it is set, `#runKind` is set too (the same refusals as any run in flight —
+   * `commit` / `rewind` / `fork` / `dispose` during a batch, and every unchained run), and every
+   * run in flight is one of `runs` (`acquireChainedRun` admits a chained run next to another one
+   * only in the same scope, and `acquireRun` refuses while `#runKind` is set). So `releaseRun`
+   * can tell a chained release from an ordinary one by the argument alone.
+   */
+  #chain:
+    | { readonly scope: object | undefined; readonly runs: Set<ChainedRun>; end: number }
+    | undefined;
   /**
    * Context-side baked bind group bundles (backing generation id → bundle — ADR 0066 decision 5).
    * The Session keeps several backings (perf-ledger H-15), so there is one bundle per kept backing,
@@ -704,18 +757,28 @@ export class GenerationContext {
         this.#borrow?.lender[RUNTIME_INTERNAL].acquireRun(kind);
         this.#runKind = kind ?? "run";
       },
+      acquireChainedRun: (queryLength: number, scope: object | undefined): ChainedRun =>
+        this.#acquireChainedRun(queryLength, scope),
       assertCanDispose: (): void => this.#assertCanDispose(),
-      releaseRun: (): void => {
+      releaseRun: (chained?: ChainedRun): void => {
         if (this.#runKind === undefined) {
           throw new ExecutionError(
             "releaseRun: a lease was returned with no generation run in progress (broken bookkeeping)",
           );
         }
+        if (chained !== undefined || this.#chain !== undefined) {
+          this.#releaseChainedRun(chained);
+          return;
+        }
         this.#runKind = undefined;
         this.#borrow?.lender[RUNTIME_INTERNAL].releaseRun();
       },
-      pastLength: (): number => {
+      pastLength: (chained?: ChainedRun): number => {
         this.#assertInternalUsable("pastLength");
+        if (chained !== undefined) {
+          this.#assertChainedHeld(chained, "pastLength");
+          return chained.pastLength;
+        }
         // A borrower's logical length is **a copy of the lender's P** (ADR 0096, addendum of
         // 2026-09-08 on stage 2). It is copied only at this one point, the head of the run, and the
         // later `writeLengths` checks agreement with this value (while the lease is held the
@@ -732,12 +795,12 @@ export class GenerationContext {
       dropBakedGroups: (token: number): void => {
         this.#baked.delete(token);
       },
-      writeLengths: (pastLength: number, queryLength: number): void =>
-        this.#writeLengths(pastLength, queryLength),
+      writeLengths: (pastLength: number, queryLength: number, chained?: ChainedRun): void =>
+        this.#writeLengths(pastLength, queryLength, chained),
       advance: (pastLength: number, queryLength: number): void =>
         this.#advance(pastLength, queryLength),
-      defer: (pastLength: number, queryLength: number): void =>
-        this.#defer(pastLength, queryLength),
+      defer: (pastLength: number, queryLength: number, chained?: ChainedRun): void =>
+        this.#defer(pastLength, queryLength, chained),
       poison: (reason: string): void => this.#poison(reason),
     };
   }
@@ -1091,7 +1154,9 @@ export class GenerationContext {
    *
    * `pastLength` is the logical length the run captured and `queryLength` the number of rows written
    * to the physical ring; the upper bound of the `rows` {@link GenerationContext.commit} accepts is
-   * exactly `queryLength`.
+   * exactly `queryLength`. Settled **chained** runs (`GenerationRun.chain`) extend this one range,
+   * so `pastLength + queryLength` is also the position the next chained run takes (the rows of
+   * chained runs still in flight are not in it — they join it when their run or batch settles).
    *
    * The returned object is **frozen** (`Object.freeze`) — the bound check trusts these values, so a
    * write throws `TypeError` in strict mode (modules are always strict).
@@ -1386,11 +1451,20 @@ export class GenerationContext {
    * MUST: call it **before every run's encode** (`queue.writeBuffer` enters the queue timeline in
    * issue order, so it does not overtake submitted dispatches — ADR 0004 invariant ④).
    */
-  #writeLengths(pastLength: number, queryLength: number): void {
+  #writeLengths(pastLength: number, queryLength: number, chained?: ChainedRun): void {
     this.#assertInternalUsable("writeLengths");
-    this.#assertCapturedPast(pastLength, "writeLengths");
+    if (chained === undefined) this.#assertCapturedPast(pastLength, "writeLengths");
+    else this.#assertChainedRun(chained, pastLength, queryLength, "writeLengths");
     this.#assertQueryLength(queryLength, "writeLengths");
-    this.#lengthValues[0] = this.#pastLength;
+    // One buffer serves every run of the context, chained runs included. A run's dispatches read
+    // the value written **for that run** because of three orderings, none of them new here: ① the
+    // runs of one Session execute their bodies one after another (`Session.#serialize`), ② each
+    // body writes the lengths before encoding its first dispatch and submits everything it encoded
+    // before it returns (`SubmitScheduler.submitPending` at the end of run / enqueue), and ③
+    // `queue.writeBuffer` takes effect at its place on the queue timeline (it does not overtake a
+    // submit issued before it — ADR 0004 invariant ④). So the next chained run's write lands after
+    // the previous run's dispatches on the queue, never before them.
+    this.#lengthValues[0] = pastLength;
     this.#lengthValues[1] = queryLength;
     this.#host.gpu.device.queue.writeBuffer(this.#lengths, 0, this.#lengthValues);
   }
@@ -1434,13 +1508,18 @@ export class GenerationContext {
    * "deferred"` run — the pair of {@link #advance}).
    *
    * MUST: at most one pending commit (while a commit is pending, `acquireRun` refuses the next run,
-   * so no path reaches a second `defer`). Reaching it means a broken runtime-internal invariant, so
-   * fail immediately instead of overwriting — overwriting would make the rows written by the first
-   * unreachable from anywhere.
+   * so no unchained path reaches a second `defer`). Reaching it means a broken runtime-internal
+   * invariant, so fail immediately instead of overwriting — overwriting would make the rows written
+   * by the first unreachable from anywhere. A chained run does not overwrite either: it extends the
+   * one pending range ({@link #extendPending}).
    */
-  #defer(pastLength: number, queryLength: number): void {
+  #defer(pastLength: number, queryLength: number, chained?: ChainedRun): void {
     this.#assertInternalUsable("defer");
     this.#assertNotBorrowing("defer");
+    if (chained !== undefined) {
+      this.#extendPending(chained, pastLength, queryLength);
+      return;
+    }
     this.#assertCapturedPast(pastLength, "defer");
     this.#assertQueryLength(queryLength, "defer");
     if (this.#pending !== undefined) {
@@ -1453,6 +1532,153 @@ export class GenerationContext {
     // `queryLength` as the bound on accepted rows, so an outside write would let "committing rows
     // that were never written" slip past the bound check).
     this.#pending = Object.freeze({ pastLength, queryLength });
+  }
+
+  /**
+   * The body of {@link GenerationContextInternals.acquireChainedRun} (the rules are the doc of
+   * `GenerationRun.chain`).
+   *
+   * MUST: every check comes **before** the reservation is recorded (failing after it would leave
+   * a reservation with nobody to release it, refusing every later commit / rewind forever — the
+   * same discipline as `acquireRun`).
+   * MUST: the position is decided **here, at issue**, not in the run's body. The bodies of one
+   * Session run in issue order, but the pending commit grows only when a batch settles, so a body
+   * reading "the end of the pending range" would place every chained run of one batch on the same
+   * row. The caller builds its position inputs at issue too, so both read the same value.
+   */
+  #acquireChainedRun(queryLength: number, scope: object | undefined): ChainedRun {
+    this.#assertUsable("run");
+    // A borrower has no logical length and no pending commit to chain onto (deferred runs are
+    // refused for it before the lease — this keeps the internal surface closed on its own).
+    this.#assertNotBorrowing("run (chain)");
+    this.#assertQueryLength(queryLength, "run (chain)");
+    const chain = this.#chain;
+    if (
+      this.#runKind !== undefined &&
+      (chain === undefined || scope === undefined || chain.scope !== scope)
+    ) {
+      // MUST: the same refusal as an unchained run (a second unsettled run outside the one batch
+      // whose chain it would extend). Two scopes cannot interleave on one device anyway (a second
+      // `beginBatch` waits for the first to finish), and a `Session.run` captures its own lease, so
+      // admitting either next to an unsettled chain would only open the "position inputs built at
+      // issue vs. the length the GPU reads" split the rule exists to prevent.
+      throw new ExecutionError(
+        "run: a chained run was issued to a GenerationContext with a generation run in progress" +
+          " outside its BatchScope (only the chained runs of one batch may be unsettled together)." +
+          " Await the settlement of the previous run before issuing",
+      );
+    }
+    const pending = this.#pending;
+    const start =
+      chain?.end ??
+      (pending === undefined ? this.#pastLength : pending.pastLength + pending.queryLength);
+    const rows = start + queryLength - this.#pastLength;
+    const slack = this.slidingSlack;
+    if (slack !== undefined && rows > slack) {
+      throw new ExecutionError(
+        `run: the chained run would leave ${rows} rows uncommitted (pastLength ${this.#pastLength}, ` +
+          `this run at ${start} + queryLength ${queryLength}), more than the sliding ring's slack ${slack}` +
+          " (rejected rows would overwrite live past KV). Commit before chaining further",
+      );
+    }
+    if (rows > this.chunkLength) {
+      throw new ExecutionError(
+        `run: the chained run would leave ${rows} rows uncommitted, more than chunkLength ${this.chunkLength}` +
+          " (a chain is bounded like one deferred run of its total rows — ADR 0066 decision 4)",
+      );
+    }
+    // MUST: the provisional end fits u32 too (`writeLengths` carries the position in a u32 and would
+    // truncate it silently — {@link MAX_LOGICAL_LENGTH}).
+    if (start + queryLength > MAX_LOGICAL_LENGTH) {
+      throw new ExecutionError(
+        `run: the chained run ends at ${start + queryLength}, beyond the u32 limit ${MAX_LOGICAL_LENGTH}` +
+          " (the logical length is carried in a u32 — ADR 0066 addendum 4)",
+      );
+    }
+    // Frozen: the later checks trust these two values as the run's placement.
+    const run: ChainedRun = Object.freeze({ pastLength: start, queryLength });
+    if (chain === undefined)
+      this.#chain = { scope, runs: new Set([run]), end: start + queryLength };
+    else {
+      chain.runs.add(run);
+      chain.end = start + queryLength;
+    }
+    this.#runKind = scope === undefined ? "run" : "batch";
+    return run;
+  }
+
+  /**
+   * Returns one chained run's lease. The chain's bookkeeping is cleared when its last run returns.
+   *
+   * A run returned while it is still **the last** reservation hands its rows back (`end` moves to
+   * its start): that is an acceptance that failed right after reserving (the batch refused the
+   * enqueue), and the next chained run of the batch must take the same position. A batch returns
+   * every lease only at its settlement, after which no further run joins it, so a return from the
+   * middle of the range never meets a later reservation.
+   */
+  #releaseChainedRun(chained: ChainedRun | undefined): void {
+    const chain = this.#chain;
+    if (chained === undefined || chain === undefined || !chain.runs.delete(chained)) {
+      throw new ExecutionError(
+        "releaseRun: a chained run's lease does not match the runs in flight (broken bookkeeping)",
+      );
+    }
+    if (chain.end === chained.pastLength + chained.queryLength) chain.end = chained.pastLength;
+    if (chain.runs.size > 0) return;
+    this.#chain = undefined;
+    this.#runKind = undefined;
+  }
+
+  /** The reservation is one of the chained runs in flight (an internal invariant). */
+  #assertChainedHeld(chained: ChainedRun, where: string): void {
+    if (this.#chain?.runs.has(chained) !== true) {
+      throw new ExecutionError(
+        `${where}: the chained run (pastLength ${chained.pastLength}) is not in flight on this context` +
+          " — internal invariant violated",
+      );
+    }
+  }
+
+  /** The run's captured placement is its reservation (an internal invariant). */
+  #assertChainedRun(
+    chained: ChainedRun,
+    pastLength: number,
+    queryLength: number,
+    where: string,
+  ): void {
+    this.#assertChainedHeld(chained, where);
+    if (chained.pastLength !== pastLength || chained.queryLength !== queryLength) {
+      throw new ExecutionError(
+        `${where}: the run captured pastLength ${pastLength} / queryLength ${queryLength}, but its` +
+          ` reservation is ${chained.pastLength} / ${chained.queryLength} — internal invariant violated`,
+      );
+    }
+  }
+
+  /**
+   * Folds a successful chained run into the pending commit (the chained form of {@link #defer}).
+   *
+   * MUST: the run continues the uncommitted range **exactly** (`pastLength` = the end of the pending
+   * range, or the logical length when nothing is pending). The runs of a batch settle in the order
+   * they were accepted (`BatchScope` completes its finalizers in registration order), so a gap or an
+   * overlap means broken bookkeeping — fail instead of folding rows that were written elsewhere.
+   * MUST: set it frozen, as `#defer` does (`commit` trusts `queryLength` as the bound).
+   */
+  #extendPending(chained: ChainedRun, pastLength: number, queryLength: number): void {
+    this.#assertChainedRun(chained, pastLength, queryLength, "defer");
+    this.#assertQueryLength(queryLength, "defer");
+    const pending = this.#pending;
+    const end = pending === undefined ? this.#pastLength : pending.pastLength + pending.queryLength;
+    if (pastLength !== end) {
+      throw new ExecutionError(
+        `defer: the chained run at pastLength ${pastLength} does not continue the uncommitted range` +
+          ` ending at ${end} — internal invariant violated`,
+      );
+    }
+    this.#pending = Object.freeze({
+      pastLength: pending?.pastLength ?? pastLength,
+      queryLength: (pending?.queryLength ?? 0) + queryLength,
+    });
   }
 
   /**

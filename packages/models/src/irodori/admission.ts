@@ -270,6 +270,8 @@ export const IRODORI_SESSION_POLICY: FamilySessionPolicy = {
   fuseLinearStaticQuantize: false,
   fuseGeluMulStaticQuantize: false,
   packedStaticQuantize: false,
+  integerGemv: false,
+  linearGemvPlanes: false,
 };
 
 /**
