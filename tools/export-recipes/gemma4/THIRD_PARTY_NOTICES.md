@@ -51,10 +51,10 @@ questions it has to answer.
   repository's own text. E2B's and E4B's tokenizer files are `google/gemma-4-E2B-it` at
   `4adf15748de9e1a0097b6274cee9c15836c41c37` and `google/gemma-4-E4B-it` at
   `4ecc2ba63bcac23ba4a767fc87025b1450f84c9c` (fetched 2026-11-04 into `inputs/gemma4/`; also the
-  q4_0 QAT line's tokenizer pins, `sources.QAT_PINS`): Google's glitch-token fixes of 2026-11-03,
-  which change `tokenizer.json` alone (E2B drops 267 BPE merges and renames id 249788, E4B drops
-  253). The README front matter at both commits is unchanged (`license: apache-2.0`, not gated —
-  HF API, 2026-11-04).
+  tokenizer pins of the q4_0 and mobile QAT lines, `sources.REGULAR_TOKENIZER_PINS`): Google's
+  glitch-token fixes of 2026-11-03, which change `tokenizer.json` alone (E2B drops 267 BPE merges
+  and renames id 249788, E4B drops 253). The README front matter at both commits is unchanged
+  (`license: apache-2.0`, not gated — HF API, 2026-11-04).
 
 NOTE: this recipe **does** have two distribution seats (`distribution.py` / `card.py` →
 `models/karume-gemma4`, the regular line, and `models/karume-gemma4-qat`, the q4_0 QAT line). The

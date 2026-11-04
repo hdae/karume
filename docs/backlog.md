@@ -55,9 +55,6 @@ repositories unchanged; published-smoke green on Node and Deno). The next releas
     follows `karume-gemma4`'s `defaultQuant`, now `bf16` (schema 5): `--weights stored` fails there and would measure
     the unrounded weights anyway. The regular `i4` measurement above needs the tool to read schemas 4 / 5 and to take the
     preset explicitly.
-  - The mobile QAT line (`karume-gemma4-qat-mobile`) still ships the tokenizer of its checkpoints, Google's `tokenizer.json`
-    from before the glitch-token fixes of 2026-11-03 (SHA-256 `cc8d3a0c…`), while the regular and q4_0 QAT lines moved to
-    the fixed E2B / E4B files. Whether the mobile line follows is the maintainer's decision.
 - **One wording for "unofficial converted / quantized model" on every card (maintainer 2026-11-01)**: today only anima
   (its licence §3(d)) and MOSS-Image (the FLUX marks clause of Black Forest Labs' cards) carry a non-endorsement
   sentence, each in its own words. Settle one house phrasing in the generic card renderer and decide where it is

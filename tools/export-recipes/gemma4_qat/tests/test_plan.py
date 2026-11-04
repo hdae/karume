@@ -116,12 +116,15 @@ class TestQatPlanGate:
     def test_it_refuses_a_series_exported_from_another_upstream_commit(
         self, tmp_path: Path, file: str
     ) -> None:
-        """The card names the pinned commit; a series from other bytes must not be published
-        under that name."""
+        """The card names the pinned commits; a series from other bytes must not be published
+        under their names (the tokenizer's included — the mobile repositories ship another
+        `tokenizer.json`)."""
         broken = fixture.reference_record("e2b")
         broken["checkpoint"]["files"][file]["sha256"] = "0" * 64
 
-        with pytest.raises(DistError, match=f"not exported from .* at {SOURCES['e2b'].revision}"):
+        with pytest.raises(
+            DistError, match=f"not exported from .*@{SOURCES['e2b'].pins.weights.revision}"
+        ):
             qat_plan(_series(tmp_path, reference=broken), "e2b")
 
     def test_it_refuses_a_record_without_the_checkpoint_fingerprint(self, tmp_path: Path) -> None:

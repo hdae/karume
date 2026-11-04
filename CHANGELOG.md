@@ -99,9 +99,11 @@ measurements in `docs/research/`.
 - The E2B / E4B tokenizers move to Google's glitch-token fixes of 2026-11-03
   (`google/gemma-4-E2B-it@4adf1574`, `google/gemma-4-E4B-it@4ecc2ba6`; `tokenizer.json` only —
   E2B drops 267 BPE merges and renames id 249788 to `<glitch_pruned_249788>`, E4B drops 253).
-  E2B and E4B no longer share one tokenizer file: each model of `karume-gemma4` and
-  `karume-gemma4-qat` ships its own `<model>/tokenizer/tokenizer.json`. The mobile QAT line keeps
-  the tokenizer its upstream repositories ship, which have not received the fix.
+  E2B and E4B no longer share one tokenizer file: each model of `karume-gemma4`,
+  `karume-gemma4-qat` and `karume-gemma4-qat-mobile` ships its own
+  `<model>/tokenizer/tokenizer.json`. The mobile QAT line, whose upstream repositories have not
+  received the fix, now takes its tokenizer from the regular `-it` repositories at the same
+  commits; its weights and configuration still come from the mobile repositories, unchanged.
 
 ### Fixed
 

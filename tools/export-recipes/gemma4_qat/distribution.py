@@ -211,27 +211,29 @@ def assert_reference_generation(reference: Mapping[str, Any], where: Path) -> No
 
 
 def assert_pinned_source(reference: Mapping[str, Any], model: str, where: Path) -> None:
-    """The series was exported from the pinned upstream commit ({@link SOURCES}).
+    """The series was exported from the pinned upstream commits ({@link SOURCES} — the weights'
+    and the tokenizer's).
 
-    MUST: compare the checkpoint fingerprint `export.py` recorded with the pin. The card names the
-    pinned commit as the source; without this check, a re-export from a newer upstream commit
-    would be published under the old commit's name and licence review.
+    MUST: compare the checkpoint fingerprint `export.py` recorded with both pins. The card names
+    the pinned commits as the sources; without this check, a re-export from a newer upstream
+    commit (or a tokenizer from another repository) would be published under the old commit's
+    name and licence review.
     """
-    pin = SOURCES[model]
+    pins = SOURCES[model].pins
     checkpoint = reference.get("checkpoint")
     files = checkpoint.get("files") if isinstance(checkpoint, Mapping) else None
     recorded = files if isinstance(files, Mapping) else {}
     differing = sorted(
         name
+        for pin in pins.by_role().values()
         for name, sha256 in pin.sha256.items()
         if not isinstance(recorded.get(name), Mapping) or recorded[name].get("sha256") != sha256
     )
     if differing:
         raise DistError(
-            f"{where}: the series was not exported from {checkpoint_repo(model)} at"
-            f" {pin.revision} (checkpoint SHA-256 differs for {', '.join(differing)}) — re-export"
-            " from the pinned revision, or move the pin in `gemma4_qat/config.py` after a new"
-            " licence review"
+            f"{where}: the series was not exported from {pins.label} (checkpoint SHA-256 differs"
+            f" for {', '.join(differing)}) — re-export from the pinned revisions, or move the pin"
+            " in `gemma4_qat/config.py` after a new licence review"
         )
 
 
@@ -320,12 +322,14 @@ def repo_name(model: str) -> str:
     return "karume-gemma4-qat-mobile"
 
 
-#: The SPDX identifier of every pinned upstream ({@link SOURCES}) and how the card spells it. A pin
-#: with another licence fails the render: the card's attribution sentence would no longer be true.
+#: The SPDX identifier of every pinned upstream ({@link SOURCES} — the weights' and the tokenizer's
+#: repositories) and how the card spells it. A pin with another licence fails the render: the
+#: card's attribution sentence would no longer be true.
 QAT_LICENSE = "apache-2.0"
 QAT_LICENSE_NAME = "Apache 2.0"
-#: The `license_link` of both upstream cards at the pinned commits (an Apache 2.0 page on
-#: ai.google.dev, checked 2026-11-01), and the canonical text that `LICENSE.md` copies verbatim.
+#: The `license_link` of the upstream cards at the pinned commits (an Apache 2.0 page on
+#: ai.google.dev — the mobile repositories checked 2026-11-01, the regular `-it` ones 2026-11-04),
+#: and the canonical text that `LICENSE.md` copies verbatim.
 QAT_LICENSE_LINK = "https://ai.google.dev/gemma/docs/gemma_4_license"
 QAT_LICENSE_TEXT_LINK = "https://www.apache.org/licenses/LICENSE-2.0"
 #: The technical report the upstream cards link at the pinned commits.
@@ -333,8 +337,9 @@ QAT_TECHNICAL_REPORT = "https://arxiv.org/abs/2607.02770"
 
 
 def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
-    """The attribution section: each model's upstream at its pinned commit, the changes made, and
-    a pointer to the upstream cards for what the model can and cannot do."""
+    """The attribution section: each model's upstreams at their pinned commits (the weights' and
+    the tokenizer's), the changes made, and a pointer to the upstream cards for what the model can
+    and cannot do."""
     lines = [
         "## Base weights and attribution",
         "",
@@ -343,12 +348,16 @@ def _qat_attribution(manifest: Mapping[str, Any]) -> list[str]:
         "",
     ]
     for name in manifest["models"]:
-        upstream, pin = checkpoint_repo(name), SOURCES[name]
+        pins = SOURCES[name].pins
+        weights, tokenizer = pins.weights, pins.tokenizer
         lines.append(
-            f"- **`{name}`**: [{upstream}](https://huggingface.co/{upstream}) at commit"
-            f" `{pin.revision}`, licensed **{QAT_LICENSE_NAME}** at that commit"
-            f" ([license]({QAT_LICENSE_LINK}) / [full text]({QAT_LICENSE_TEXT_LINK});"
-            " a verbatim copy is in `LICENSE.md`)."
+            f"- **`{name}`**: the weights are [{weights.repo}](https://huggingface.co/{weights.repo})"
+            f" at commit `{weights.revision}`; the tokenizer is that of its base model"
+            f" [{tokenizer.repo}](https://huggingface.co/{tokenizer.repo}) at commit"
+            f" `{tokenizer.revision}` (Google's glitch-token fixes of 2026-11-03, which the mobile"
+            " repository has not received); both are licensed"
+            f" **{QAT_LICENSE_NAME}** at those commits ([license]({QAT_LICENSE_LINK}) /"
+            f" [full text]({QAT_LICENSE_TEXT_LINK}); a verbatim copy is in `LICENSE.md`)."
         )
     lines += [
         "- **Authors**: Gemma 4 and its mobile QAT checkpoints are released by Google DeepMind"
@@ -420,13 +429,17 @@ def render_card(
 NOTICE = (
     """# NOTICE
 
-This repository redistributes modified forms of the Google Gemma 4 mobile QAT checkpoints listed
-below (Google DeepMind), which are licensed under the Apache License, Version 2.0 (see
-`LICENSE.md`). The models actually included are identified in `README.md` and `karume.json`;
-`README.md` names the upstream commit each one was converted from.
+This repository redistributes modified forms of the Google Gemma 4 mobile QAT checkpoints and of
+the tokenizers of their base models listed below (Google DeepMind), which are licensed under the
+Apache License, Version 2.0 (see `LICENSE.md`). The models actually included are identified in
+`README.md` and `karume.json`; `README.md` names the upstream commits each one was converted from.
 
 """
-    + "\n".join(f"- `{checkpoint_repo(model)}`" for model in CHECKPOINTS)
+    + "\n".join(
+        f"- `{checkpoint_repo(model)}` and the tokenizer of its base model"
+        f" `{SOURCES[model].pins.tokenizer.repo}`"
+        for model in CHECKPOINTS
+    )
     + """
 
 The following changes were made:

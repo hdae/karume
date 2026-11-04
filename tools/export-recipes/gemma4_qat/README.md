@@ -6,9 +6,16 @@ integers and scales, including static range quantization (SRQ) around quantized 
 It does not requantize the checkpoint. The text decoder, tokenizer, and packed per-layer embeddings
 (PLE) are exported; vision, audio, and the MTP drafter are not included.
 
-The upstream weights are Apache 2.0. Distribution assembly includes the license text and a
-modification notice. The upstream revisions are pinned in `config.py` (`SOURCES`), and assembly
-refuses a series whose `reference.json` fingerprint differs from the pin; the licence review is
+The tokenizer is not the mobile repositories' own: they ship the `tokenizer.json` from before
+Google's glitch-token fixes of 2026-11-03, so the export reads `tokenizer.json` from the regular
+`google/gemma-4-E2B-it` / `google/gemma-4-E4B-it` at the fixed commits — the same pins as the q4_0
+QAT line (`gemma4.sources.REGULAR_TOKENIZER_PINS`). The weights, `config.json` and
+`generation_config.json` still come from the mobile repositories.
+
+The upstream weights and tokenizers are Apache 2.0. Distribution assembly includes the license text
+and a modification notice. Both sources' revisions are pinned in `config.py` (`SOURCES`); the export
+checks both snapshots against their pins, and assembly refuses a series whose `reference.json`
+fingerprint differs from either pin; the licence review is
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This recipe imports the installed Transformers implementation and does not
 copy its source. Use the repository's pinned Transformers dependency (`5.14.1`), declared as the
 `gemma4-qat` dependency group; without that group the export cannot run and the tests that build
@@ -24,8 +31,10 @@ uv run python dist.py --pipeline gemma4-qat-mobile --model e2b --model e4b \
   --out ../../models/karume-gemma4-qat-mobile
 ```
 
-Place original checkpoints in `inputs/gemma4-qat/<checkpoint-name>/`, or pass `--input`. Exports go
-to `outputs/series/gemma4-qat-<model>-product/`, or `--out`. The export verifies every fixed packed
+Place original checkpoints in `inputs/gemma4-qat/<checkpoint-name>/`, or pass `--input` (for
+example the Hugging Face cache snapshot at the pinned commit). The tokenizer is read from the cache
+snapshot of its pin (`hf download google/gemma-4-E2B-it tokenizer.json --revision <pin>`), or
+`--tokenizer-input`. Exports go to `outputs/series/gemma4-qat-<model>-product/`, or `--out`. The export verifies every fixed packed
 payload and scale after writing the container, reads the PLE assets back from it, and publishes all
 files together only after checks pass. `reference.json` records checkpoint fingerprints, trace
 bounds, how many fixed weights and PLE blocks were verified, and how many upstream tensors this

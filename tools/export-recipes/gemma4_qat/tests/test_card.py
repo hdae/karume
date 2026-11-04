@@ -146,7 +146,11 @@ class TestQatCardAttribution:
                 f"[{checkpoint_repo(model)}](https://huggingface.co/{checkpoint_repo(model)})"
                 in (bullet)
             )
-            assert f"at commit `{SOURCES[model].revision}`" in bullet
+            pins = SOURCES[model].pins
+            assert f"at commit `{pins.weights.revision}`" in bullet
+            tokenizer = pins.tokenizer.repo
+            assert f"[{tokenizer}](https://huggingface.co/{tokenizer}) at commit" in bullet
+            assert f"at commit `{pins.tokenizer.revision}`" in bullet
             assert "licensed **Apache 2.0**" in bullet
             assert "a verbatim copy is in `LICENSE.md`" in bullet
 
@@ -155,7 +159,8 @@ class TestQatCardAttribution:
         card = render_card(_qat_manifest("e4b"), REPO)
 
         assert checkpoint_repo("e2b") not in card
-        assert SOURCES["e2b"].revision not in card
+        for pin in SOURCES["e2b"].pins.by_role().values():
+            assert pin.revision not in card
 
     def test_the_front_matter_points_to_the_licence_the_upstream_names(self) -> None:
         front_matter = render_card(_two_model_manifest(), REPO).split("---")[1]
@@ -193,6 +198,7 @@ class TestQatNotice:
     def test_it_names_every_upstream_checkpoint_and_the_licence(self) -> None:
         for model in CHECKPOINTS:
             assert f"`{checkpoint_repo(model)}`" in NOTICE
+            assert f"`{SOURCES[model].pins.tokenizer.repo}`" in NOTICE
         assert "Apache License, Version 2.0" in NOTICE
         assert "`LICENSE.md`" in NOTICE
 

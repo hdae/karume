@@ -13,10 +13,12 @@ from safetensors import safe_open
 
 from _shared.gemma_tokenizer import asset_payload, compile_tokenizer
 from _shared.paths import INPUTS_ROOT, SERIES_ROOT
+from _shared.upstream import hub_snapshot_dir
 from gemma4.distribution import GEMMA4_ROLE
 from gemma4.export import MODEL_FILE, PROVENANCE
 from gemma4.export_product import PLE_PROBE_FILE, PROBE_INPUTS_KEY, assert_ple_assets
-from gemma4.provenance import checkpoint_fingerprint
+from gemma4.provenance import assert_pinned_fingerprint, checkpoint_fingerprint
+from gemma4.sources import assert_model_pins
 from karume import publish_model
 from karume.artifacts import staged_publication
 from karume.container import container_parts
@@ -29,6 +31,7 @@ from .config import (
     MAX_CHUNK_LENGTH,
     MAX_SELECTED_ROWS,
     REFERENCE_SCHEMA,
+    SOURCES,
     series_name,
 )
 from .ple import build_ple
@@ -63,11 +66,24 @@ def _upstream_tensor_names(path: Path) -> list[str]:
         return list(handle.keys())
 
 
-def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]:
-    """参照・全 bytes の検査も含めて1回の据え替えにする。"""
-    checkpoint = checkpoint_fingerprint(model_dir)
+def export_qat(
+    model_dir: Path, destination: Path, model: str, *, tokenizer_dir: Path
+) -> dict[str, Any]:
+    """参照・全 bytes の検査も含めて1回の据え替えにする。
+
+    `model_dir` holds the mobile QAT weights, `config.json` and `generation_config.json`;
+    `tokenizer_dir` the `tokenizer.json` (the regular `-it` repository — `config.SOURCES`). Both
+    are checked against their pins before the load, and the fingerprint the record names once more
+    on every byte read (the q4_0 QAT line's rule — `gemma4.export_product_qat`).
+    """
+    pins = SOURCES[model].pins
+    assert_model_pins(model_dir, tokenizer_dir, pins)
+    checkpoint = checkpoint_fingerprint(
+        model_dir, pins.label, tokenizer_dir=tokenizer_dir, pins=pins
+    )
+    assert_pinned_fingerprint(checkpoint, pins)
     loaded = load_qat(model_dir, model)
-    raw = json.loads((model_dir / "tokenizer.json").read_text())
+    raw = json.loads((tokenizer_dir / "tokenizer.json").read_text())
     compiled = compile_tokenizer(raw)
     with staged_publication(destination) as staged:
         staged.mkdir(parents=True)
@@ -101,7 +117,8 @@ def export_qat(model_dir: Path, destination: Path, model: str) -> dict[str, Any]
         with safe_open(str(staged / PLE_PROBE_FILE), framework="pt") as handle:
             reference = handle.get_tensor(PROBE_INPUTS_KEY)
         assert_ple_assets(target, index, ple.probe, reference)
-        source = {"repo": f"google/{CHECKPOINTS[model]}", "checkpoint": checkpoint}
+        # The tokenizer's own repository: the asset is compiled from its `tokenizer.json`.
+        source = {"repo": pins.tokenizer.repo, "checkpoint": checkpoint}
         (staged / "tokenizer.json").write_text(
             json.dumps(asset_payload(compiled, source=source), ensure_ascii=False) + "\n"
         )
@@ -134,12 +151,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=tuple(CHECKPOINTS), default="e2b")
     parser.add_argument("--input", type=Path)
+    parser.add_argument(
+        "--tokenizer-input",
+        type=Path,
+        help="the directory holding tokenizer.json (default: the hub snapshot of the model's"
+        " pinned tokenizer source)",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
     torch.set_num_threads(4)
     source = args.input or INPUTS_ROOT / "gemma4-qat" / CHECKPOINTS[args.model]
+    tokenizer_pin = SOURCES[args.model].pins.tokenizer
+    tokenizer = args.tokenizer_input or hub_snapshot_dir(tokenizer_pin.repo, tokenizer_pin.revision)
     target = args.out or SERIES_ROOT / series_name(args.model)
-    print(json.dumps(export_qat(source, target, args.model), indent=2), flush=True)
+    record = export_qat(source, target, args.model, tokenizer_dir=tokenizer)
+    print(json.dumps(record, indent=2), flush=True)
 
 
 if __name__ == "__main__":

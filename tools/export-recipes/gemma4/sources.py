@@ -139,6 +139,34 @@ HUB_PINS: Mapping[str, ModelPins] = {
     "12b": ModelPins(weights=_TWELVE_B_WEIGHTS, tokenizer=_TWELVE_B_TOKENIZER),
 }
 
+#: Model → the regular `-it` repository's tokenizer at the commit the hand-placed checkpoint was
+#: fetched at (the `.metadata` record of `inputs/gemma4/gemma-4-E{2,4}B-it/`) — the LFS blob name
+#: of `tokenizer.json`, in the hub cache on 2026-11-03. Both are Google's commits of 2026-11-03 that
+#: changed `tokenizer.json` alone ("Remediate 233 / 219 glitch tokens" — E2B drops 267 BPE merges
+#: and renames id 249788 to `<glitch_pruned_249788>`, E4B drops 253 merges), so E2B's and E4B's
+#: `tokenizer.json` are no longer the same bytes. The lines whose weights come from another
+#: repository read their tokenizer here: the q4_0 QAT line ({@link QAT_PINS}) and the mobile QAT
+#: line (`gemma4_qat.config.SOURCES`) — one spelling, so the lines cannot drift apart.
+#:
+#: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` (and of
+#: `gemma4_qat/THIRD_PARTY_NOTICES.md`) again.
+REGULAR_TOKENIZER_PINS: Mapping[str, HubPin] = {
+    "e2b": HubPin(
+        repo=GEMMA4_UPSTREAM["e2b"],
+        revision="4adf15748de9e1a0097b6274cee9c15836c41c37",
+        sha256={
+            "tokenizer.json": "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2"
+        },
+    ),
+    "e4b": HubPin(
+        repo=GEMMA4_UPSTREAM["e4b"],
+        revision="4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
+        sha256={
+            "tokenizer.json": "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc"
+        },
+    ),
+}
+
 #: Model → the pinned sources of its q4_0 QAT line, all four in the hub cache on 2026-11-03:
 #:
 #: - weights: `main` of `gemma4.card.GEMMA4_QAT_WEIGHTS_UPSTREAM` — the LFS blob name of
@@ -146,15 +174,10 @@ HUB_PINS: Mapping[str, ModelPins] = {
 #:   `config.json`'s bytes.
 #:   Against the regular `-it` config the text config differs in no field the export reads (the
 #:   `transformers_version` and two null MoE fields).
-#: - tokenizer: the regular `-it` repository at the commit the hand-placed checkpoint was fetched
-#:   at (the `.metadata` record of `inputs/gemma4/gemma-4-E{2,4}B-it/`) — the LFS blob name of
-#:   `tokenizer.json`. Both are Google's commits of 2026-11-03 that changed `tokenizer.json` alone
-#:   ("Remediate 233 / 219 glitch tokens" — E2B drops 267 BPE merges and renames id 249788 to
-#:   `<glitch_pruned_249788>`, E4B drops 253 merges), so E2B's and E4B's `tokenizer.json` are no
-#:   longer the same bytes. The QAT repositories still ship the tokenizer from before that fix
-#:   (SHA-256 `cc8d3a0c…`), and their `tokenizer_config.json` and `generation_config.json` are other
-#:   bytes; reading the tokenizer files from the regular repository keeps the line's tokenizer the
-#:   regular product's.
+#: - tokenizer: {@link REGULAR_TOKENIZER_PINS}. The QAT repositories still ship the tokenizer
+#:   from before Google's glitch-token fixes (SHA-256 `cc8d3a0c…`), and their
+#:   `tokenizer_config.json` and `generation_config.json` are other bytes; reading the tokenizer
+#:   files from the regular repository keeps the line's tokenizer the regular product's.
 #:
 #: Moving a pin needs the licence review of `THIRD_PARTY_NOTICES.md` again.
 QAT_PINS: Mapping[str, ModelPins] = {
@@ -169,15 +192,7 @@ QAT_PINS: Mapping[str, ModelPins] = {
                 "config.json": "bbeff1e2fd3fe282536e7ace02309d43e0dbd9b6ac4b6a149b97e3ab6942a878",
             },
         ),
-        tokenizer=HubPin(
-            repo=GEMMA4_UPSTREAM["e2b"],
-            revision="4adf15748de9e1a0097b6274cee9c15836c41c37",
-            sha256={
-                "tokenizer.json": (
-                    "ab26b2add729e6f645bd869f228f14190a06615538f3be6f7786f33d13d78ad2"
-                )
-            },
-        ),
+        tokenizer=REGULAR_TOKENIZER_PINS["e2b"],
     ),
     "e4b": ModelPins(
         weights=HubPin(
@@ -190,15 +205,7 @@ QAT_PINS: Mapping[str, ModelPins] = {
                 "config.json": "f2db6d6e24cb4b695308897d82c8424fae946e95272a27de68b6e908c77b0f95",
             },
         ),
-        tokenizer=HubPin(
-            repo=GEMMA4_UPSTREAM["e4b"],
-            revision="4ecc2ba63bcac23ba4a767fc87025b1450f84c9c",
-            sha256={
-                "tokenizer.json": (
-                    "91d9cf86906f78e197021fda88214d448e5c120665d0243a8e776e046986c6bc"
-                )
-            },
-        ),
+        tokenizer=REGULAR_TOKENIZER_PINS["e4b"],
     ),
 }
 

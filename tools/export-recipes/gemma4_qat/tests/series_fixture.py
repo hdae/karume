@@ -43,7 +43,6 @@ from gemma4_qat.config import (
     MAX_SELECTED_ROWS,
     REFERENCE_SCHEMA,
     SOURCES,
-    checkpoint_name,
 )
 from gemma4_qat.ple import build_ple
 from karume.container import AssetInput, Provenance
@@ -305,12 +304,20 @@ def qat_container(
 
 
 def pinned_checkpoint(model: str) -> dict[str, Any]:
-    """The checkpoint fingerprint `export.py` records for an export from the pinned commit
-    (`gemma4_qat.config.SOURCES`; the byte counts are not compared, so they are fake)."""
+    """The checkpoint fingerprint `export.py` records for an export from the pinned commits
+    (`gemma4_qat.config.SOURCES` — the weights' and the tokenizer's; the byte counts are not
+    compared, so they are fake)."""
+    pins = SOURCES[model].pins
     return {
-        "dir": checkpoint_name(model),
+        "dir": pins.label,
         "files": {
-            name: {"bytes": 1, "sha256": sha256} for name, sha256 in SOURCES[model].sha256.items()
+            name: {"bytes": 1, "sha256": sha256}
+            for pin in pins.by_role().values()
+            for name, sha256 in pin.sha256.items()
+        },
+        "sources": {
+            role: {"repo": pin.repo, "revision": pin.revision, "files": list(pin.sha256)}
+            for role, pin in pins.by_role().items()
         },
     }
 

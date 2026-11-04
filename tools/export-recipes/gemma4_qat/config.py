@@ -3,6 +3,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from gemma4.sources import REGULAR_TOKENIZER_PINS, HubPin, ModelPins
+
 CHECKPOINTS: Mapping[str, str] = {
     "e2b": "gemma-4-E2B-it-qat-mobile-transformers",
     "e4b": "gemma-4-E4B-it-qat-mobile-transformers",
@@ -11,42 +13,70 @@ CHECKPOINTS: Mapping[str, str] = {
 
 @dataclass(frozen=True)
 class QatSource:
-    """The upstream commit one model was exported from (repository: {@link checkpoint_repo})."""
+    """The pinned upstream commits one model was exported from: the mobile QAT repository for the
+    weights and their configuration, the regular `-it` repository for the tokenizer."""
 
-    #: The HF commit SHA (40 lower-case hex digits). Never a branch name or a tag.
-    revision: str
-    #: `license:` of the upstream `README.md` front matter at {@link revision}.
+    #: The weights pin (`model.safetensors`, `config.json` — `generation_config.json` is read from
+    #: the same snapshot) and the tokenizer pin (`tokenizer.json`). Each names the SHA-256 of the
+    #: files `reference.json` fingerprints from that source (`gemma4.provenance.FILES_BY_ROLE`):
+    #: the LFS oid the HF API reports for `model.safetensors` and `tokenizer.json`, and the digest
+    #: of `config.json` as served raw at that commit. The export and the distribution check the
+    #: series' record against them, so the card's "at commit" lines name the bytes actually
+    #: converted.
+    pins: ModelPins
+    #: `license:` of the upstream `README.md` front matter at both pinned commits (one value: the
+    #: card attributes both sources under one licence).
     license: str
-    #: SHA-256 of the files `reference.json` fingerprints (`gemma4.provenance.FINGERPRINT_FILES`)
-    #: at {@link revision}: the LFS oid the HF API reports for `model.safetensors` and
-    #: `tokenizer.json`, and the digest of `config.json` as served raw at that commit. The
-    #: distribution checks the series' record against them, so the card's "at commit" line names
-    #: the bytes actually converted.
-    sha256: Mapping[str, str]
 
 
-#: Model → the pinned upstream source. The revisions are the ones the local inputs were fetched at
-#: on 2026-09-11 (`inputs/gemma4-qat/<checkpoint>/.cache/huggingface/download/*.metadata`), still
-#: `main` of both repositories on 2026-11-01 (HF API; last modified 2026-07-20; not gated). The
-#: licence review is `THIRD_PARTY_NOTICES.md`; moving a pin needs that review again.
+#: Model → the pinned upstream sources.
+#:
+#: - weights: the revisions the local inputs were fetched at on 2026-09-11
+#:   (`inputs/gemma4-qat/<checkpoint>/.cache/huggingface/download/*.metadata`), still `main` of
+#:   both repositories on 2026-11-01 (HF API; last modified 2026-07-20; not gated).
+#: - tokenizer: the regular `-it` repository at Google's glitch-token fixes of 2026-11-03
+#:   (`gemma4.sources.REGULAR_TOKENIZER_PINS` — the q4_0 QAT line's pins, one spelling). The
+#:   mobile repositories still ship the `tokenizer.json` from before those fixes (SHA-256
+#:   `cc8d3a0c…`, the same in both), and the maintainer approved shipping the fixed tokenizer
+#:   (2026-11-04).
+#:
+#: The licence review is `THIRD_PARTY_NOTICES.md`; moving a pin needs that review again.
 SOURCES: Mapping[str, QatSource] = {
     "e2b": QatSource(
-        revision="dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+        pins=ModelPins(
+            weights=HubPin(
+                repo=f"google/{CHECKPOINTS['e2b']}",
+                revision="dd693ff40353f057ca5f07e945ad867f4afbf2ec",
+                sha256={
+                    "model.safetensors": (
+                        "efab429012b97ab986c4d4838a46ff3ad95d618b42ce514771ca40fadc76a9a4"
+                    ),
+                    "config.json": (
+                        "cf6d7dc22738b5e6beb364bac833d78b869f5a6ffd57dfc96c6be3f2abc80424"
+                    ),
+                },
+            ),
+            tokenizer=REGULAR_TOKENIZER_PINS["e2b"],
+        ),
         license="apache-2.0",
-        sha256={
-            "model.safetensors": "efab429012b97ab986c4d4838a46ff3ad95d618b42ce514771ca40fadc76a9a4",
-            "config.json": "cf6d7dc22738b5e6beb364bac833d78b869f5a6ffd57dfc96c6be3f2abc80424",
-            "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
-        },
     ),
     "e4b": QatSource(
-        revision="8e3ac78f1a4a97c19f5f194ab362a2206f71d961",
+        pins=ModelPins(
+            weights=HubPin(
+                repo=f"google/{CHECKPOINTS['e4b']}",
+                revision="8e3ac78f1a4a97c19f5f194ab362a2206f71d961",
+                sha256={
+                    "model.safetensors": (
+                        "391946da2e0bec22288e9fe50a4d31d2401c9570ba3baaf0ba43d644dadeb1d4"
+                    ),
+                    "config.json": (
+                        "c4847fd621d80f160945b62f4a2d9413fc82b81f17955b49ae32ea9feb00c5c6"
+                    ),
+                },
+            ),
+            tokenizer=REGULAR_TOKENIZER_PINS["e4b"],
+        ),
         license="apache-2.0",
-        sha256={
-            "model.safetensors": "391946da2e0bec22288e9fe50a4d31d2401c9570ba3baaf0ba43d644dadeb1d4",
-            "config.json": "c4847fd621d80f160945b62f4a2d9413fc82b81f17955b49ae32ea9feb00c5c6",
-            "tokenizer.json": "cc8d3a0ce36466ccc1278bf987df5f71db1719b9ca6b4118264f45cb627bfe0f",
-        },
     ),
 }
 
