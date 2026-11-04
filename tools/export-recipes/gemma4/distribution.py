@@ -4,32 +4,25 @@
 `karume.dist` が持つ。ここが持つのは **gemma4 固有の事実**だけ: どの系列ディレクトリから何を
 拾い、配布形のどの path へ、どの dtype ラベルで並べ、どの quant を既定にするか。
 
-Per model the regular line ships the product graph in two containers (the int4 one below and the
-original-weights one — next paragraph), the borrowing drafter for a model with an upstream drafter,
-and one asset kind (ADR 0084 decision 5 / 0096 step 2 / 0109 decision 4): E2B ships three graphs,
-E4B two, as it has no drafter ({@link gemma4_has_drafter}):
+Per model the regular line ships the product graph, the borrowing drafter for a model with an
+upstream drafter, and one asset kind (ADR 0084 decision 5 / 0096 step 2 / 0109 decision 4): E2B
+ships two graphs, E4B one, as it has no drafter ({@link gemma4_has_drafter}):
 
-- `model` — 製品グラフのコンテナ（`gemma4/export_product.py` が書く `.krm` の part 列。PLE を
-  グラフから外し、出口を最終行 logits にした 1 系列）。格納は**混成**で、埋め込みが i8・
-  linear が packed i4。**PLE はこの容器の資産**として同梱される（ADR 0109 決定 4）— 索引
-  `ple_index`（schema 3）と `ple.values.<k>` / `ple.scales.<k>` の block 列で、weights では
-  ない（ホストが `per_layer_inputs` を組むための表）。読み手は
-  `packages/models/src/gemma/ple-index.ts`。
-- `drafter` — MTP drafter のコンテナ（`gemma4/export_drafter.py`・ADR 0096 段 2）。格納は
-  **i8 単一**で、linear まで i8（i4 g32 に落とすと受理率が 1 〜 3 割落ちる — 台本の実測）。
-  役割ごとに dtype ラベルが違うので、quant 表の `weights` 写像は 2 席とも埋まる。
+- `model` — the product graph's container (the `.krm` part sequence `gemma4/export_product.py`
+  writes: the PLE out of the graph, the exit the selected rows' logits and hidden states). Every
+  weight is the checkpoint's own bf16 bits, its one preset `bf16` (ADR 0128 addendum 2026-11-04).
+  **The PLE is an asset of this container** (ADR 0109 decision 4), not weights — the index
+  `ple_index` (schema 5: a bf16 `values` table and no `scales`) and the `ple.values.<k>` block
+  sequence, the table the host builds `per_layer_inputs` from. The reader is
+  `packages/models/src/gemma/ple-index.ts`.
+- `drafter` — the MTP drafter's container (`gemma4/export_drafter.py` — ADR 0096 step 2), int8
+  throughout, linears included (int4 group 32 cuts the acceptance rate by 15–33 % — the script's
+  measurement). It borrows `model.lm_head.weight` from the bf16 target. Each role has one dtype
+  label, so {@link complete_quant_weights} fills both seats of the quant's `weights` mapping.
 - `tokenizer` — the compiled tokenizer asset (`gemma4/tokenizer.py` — ADR 0084 decision 1). Each
   model reads its own series today; models whose upstream `tokenizer.json` files are the same bytes
   may share one ({@link GEMMA4_TOKENIZER_SERIES}), and every model's asset is held to the upstream
   file it was compiled from ({@link assert_gemma4_tokenizer_source})
-
-The regular line's `model` role has two storages, one container each: the int4 container above
-(the `i4` presets) and the **original-weights** container `model_bf16`
-(`gemma4/export_product.py --storage bf16` — {@link GEMMA4_ORIGINAL_ROLE}): every weight is the
-checkpoint's own bf16 bits, the PLE table included (index schema 5 — a bf16 `values` table and no
-`scales`). Its preset `bf16` is the default (ADR 0128 addendum 2026-11-04 — the maintainer's
-ruling of 2026-11-04). The drafter is the same int8 container for both: it borrows
-`model.lm_head.weight` from whichever target is loaded, so the plan pairs it with each of them.
 
 The regular line ships E2B and E4B ({@link GEMMA4_REGULAR_MODELS}). 12B ships only in the q4_0
 QAT line below — its one line, whose weights are already Google's QAT checkpoint. The plan handles
@@ -52,12 +45,11 @@ tokenizer and configuration checks are the regular line's; what differs is read 
   `gemma4-12b-product` (its one line, already the QAT checkpoint), every drafter
   `gemma4-<model>-qat-drafter` (`gemma4/export_drafter_qat.py`) — {@link gemma4_qat_q4_0_sources};
 - the storage: both roles int4 alone, int8 forbidden in both (the drafters are on their grid too,
-  so the regular drafter's int8 requirement does not apply —
-  {@link gemma4_qat_q4_0_storage_tables});
+  so the regular drafter's int8 requirement does not apply — {@link GEMMA4_QAT_Q4_0_STORAGE});
 - the PLE index: schema 4, int4 values with one f32 step per group of
   {@link GEMMA4_QAT_PLE_GROUP_SIZE} ({@link gemma4_ple_index});
 - the quants: `i4` (the default — the reference summation order) for every model, and for E2B /
-  E4B the regular line's parallel and fused seats `i4-gemvpar` / `i4-fast` over the same storage
+  E4B the parallel and fused seats `i4-gemvpar` / `i4-fast` over the same storage
   ({@link gemma4_qat_q4_0_quants});
 - the pins: every product container names its QAT weights' revision and every drafter container
   its QAT drafter's (`gemma4.sources.QAT_TARGET_PINS` / `QAT_DRAFTER_PINS`).
@@ -126,7 +118,6 @@ from karume.verify import ContainerError
 from .card import (
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_DRAFTER_UPSTREAM,
-    GEMMA4_EMBEDDING_STORAGE,
     GEMMA4_LICENSE,
     GEMMA4_MODEL_ROLE,
     GEMMA4_PLE_MODELS,
@@ -178,11 +169,11 @@ GEMMA4_PREFIX = "gemma4"
 #: is one repository, whichever of its models is assembled.
 GEMMA4_REPO_NAME = "karume-gemma4"
 
-#: 系列の接尾（`gemma4/export_product.py` の `DEFAULT_OUT_DIR` と `gemma4/tokenizer.py` の
-#: `ASSET_PATH` — 書き手と読み手が同じ 1 語から組む）。
+#: Series suffixes — the writers (`gemma4/export_unified.py`, `gemma4/tokenizer.py`'s `ASSET_PATH`)
+#: and this module build the series names from the same words. `product` is 12B's product series.
 GEMMA4_PRODUCT_SUFFIX = "product"
-#: The original-weights product series' suffix (`outputs/series/gemma4-<model>-product-bf16/` —
-#: `gemma4/export_product.py --storage bf16` writes under it, this module reads it).
+#: The regular line's product series suffix (`outputs/series/gemma4-<model>-product-bf16/` —
+#: `gemma4/export_product.py` writes under it, this module reads it).
 GEMMA4_PRODUCT_BF16_SUFFIX = f"{GEMMA4_PRODUCT_SUFFIX}-bf16"
 GEMMA4_TOKENIZER_SUFFIX = "tokenizer"
 #: MTP drafter の系列接尾（`gemma4/export_drafter.py` の `DEFAULT_OUT_DIR`）。
@@ -211,9 +202,6 @@ GEMMA4_HIDDEN_SIZE_KEY = "hidden_size"
 
 #: 役割名（manifest の weights / assets が指す内部キー）。
 GEMMA4_ROLE = GEMMA4_MODEL_ROLE
-#: The original-weights container's placement role: the second dtype of the `model` weights (the
-#: manifest's component name stays `model` — the container's graph name).
-GEMMA4_ORIGINAL_ROLE = "model_bf16"
 GEMMA4_TOKENIZER_ROLE = "tokenizer"
 # MTP drafter の役割名 `GEMMA4_DRAFTER_ROLE`（weights の 2 本目 — 貸し手 `model` が居ないと
 # 単独では実行できない）は `gemma4.card` から import する — カードが manifest の weights から
@@ -289,89 +277,61 @@ GEMMA4_DRAFT_STEPS = 3
 #: ファイル名に出すのは他 family と同じ形（系列が 2 本並んでも取り違えようがない綴り）。
 #: PLE は `model` 容器の資産なので、この表に席を持たない（ADR 0109 決定 4）。
 GEMMA4_OUTPUT_PATHS: Mapping[str, str] = {
-    GEMMA4_ROLE: f"{GEMMA4_ROLE}/model.i4.krm",
-    GEMMA4_ORIGINAL_ROLE: f"{GEMMA4_ROLE}/model.bf16.krm",
+    GEMMA4_ROLE: f"{GEMMA4_ROLE}/model.bf16.krm",
     GEMMA4_DRAFTER_ROLE: f"{GEMMA4_DRAFTER_ROLE}/model.i8.krm",
     GEMMA4_TOKENIZER_ROLE: f"{GEMMA4_TOKENIZER_SUFFIX}/{GEMMA4_TOKENIZER_FILE}",
 }
 
-#: 容器の束縛表に**必ず在る**格納の語彙。製品グラフは混成なので 2 つとも要求する（他
-#: family の {@link assert_storage} は 1 つずつしか見ないので、表を 2 枚持って 2 度掛ける）。
-#: i8 は埋め込み（i4 は runtime 上は適格〈ADR 0069 追記 6〉だが、この recipe は i8 に留める
-#: 選択をしている）・i4 は linear の重み。
-#: 片方だけを要求すると「埋め込みまで i4 に落ちた系列」「linear が i8 のままの系列」が
-#: それぞれ素通りする — どちらも shape も manifest も正しいまま、品質と速度だけが変わる。
-#: drafter は**単一格納**（linear まで i8 — `gemma4/export_drafter.py` の実測）なので、要求は
-#: i8 の 1 枚だけで、2 枚目の表に行を持たない。
-#: The embedding's storage is per model (`gemma4.card.GEMMA4_EMBEDDING_STORAGE`): E2B / E4B
-#: require the int8 one on top of the int4 linears ({@link gemma4_storage_tables}).
-#: The original-weights container holds bf16 (and f32 for the parameters bf16 does not apply to).
+#: The storage each role's binding table **must** hold ({@link assert_storage}): the product
+#: container is the checkpoint's bf16 values (and f32 for the parameters bf16 does not apply to),
+#: the drafter int8 throughout (linears included — `gemma4/export_drafter.py`'s measurement).
 GEMMA4_STORAGE_REQUIREMENTS: Mapping[str, str] = {
-    GEMMA4_ROLE: "i4",
-    GEMMA4_ORIGINAL_ROLE: "bf16",
+    GEMMA4_ROLE: "bf16",
     GEMMA4_DRAFTER_ROLE: "i8",
 }
 
 #: The storage vocabulary each role's binding table **must not** hold
-#: ({@link assert_storage_absent}). The scripts write two storage forms, each placed under its own
-#: role: the int4 series (i8 + i4 + f32 — `model` and the int8 drafter) and the original-weights
-#: series (bf16 + f32 — `model_bf16`). So f16 in any role, or a storage of the other form in a
-#: role, can only mean a series root of another family or of the other role (a mixed-up series
-#: root cannot be told apart by the numeric gates — ADR 0027 / 0029). As in the other families,
-#: every compressed storage the writer can write that must not be there is named.
+#: ({@link assert_storage_absent}). The scripts write one storage form per role: the product series
+#: (bf16 + f32 — `model`) and the int8 drafter (i8 + f32). So f16 in any role, or a storage of the
+#: other role's form, can only mean a series root of another family, of another line or of the
+#: other role (a mixed-up series root cannot be told apart by the numeric gates — ADR 0027 / 0029).
+#: As in the other families, every compressed storage the writer can write that must not be there
+#: is named: the product forbids every rounded storage — an int4 product series (the q4_0 QAT
+#: line's) has the same graph contract, so the storage is what tells it apart first.
 #: drafter は i4 も禁止側 — 存在検査（i8 が在る）は「linear だけ i4 に落ちた drafter」を
 #: 素通りさせる（出力ヘッドの i8 で要求が満たされる）。受理率が 1 〜 3 割落ちるだけの資産は
 #: 形も manifest も正しいままなので、ここが唯一の検出器になる。
-#: The two `model` containers are held apart both ways: the int4 role forbids bf16, and the
-#: original-weights role forbids every rounded storage — an int4 series placed as the `bf16` preset
-#: (or the reverse) has the right graph and PLE shape, so only the storage tells it apart.
 GEMMA4_STORAGE_FORBIDDEN: Mapping[str, tuple[str, ...]] = {
-    GEMMA4_ROLE: ("f16", "bf16"),
-    GEMMA4_ORIGINAL_ROLE: ("f16", "i8", "i4", "i2"),
+    GEMMA4_ROLE: ("f16", "i8", "i4", "i2"),
     GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i4"),
 }
 
 
 @dataclass(frozen=True)
 class Gemma4StorageTables:
-    """One model's storage gates: what each role must hold (two tables, applied in turn — the
-    product of E2B / E4B is mixed) and what it must not."""
+    """A line's storage gates: what each role must hold and what it must not."""
 
     required: Mapping[str, str]
-    also_required: Mapping[str, str]
     forbidden: Mapping[str, tuple[str, ...]]
 
 
-def gemma4_storage_tables(model: str) -> Gemma4StorageTables:
-    """The storage gates of `model` in the regular line, from its embedding storage
-    (`GEMMA4_EMBEDDING_STORAGE`): its int8 embedding is required next to the int4 linears."""
-    embedding = GEMMA4_EMBEDDING_STORAGE[model]
-    return Gemma4StorageTables(
-        required=GEMMA4_STORAGE_REQUIREMENTS,
-        also_required={GEMMA4_ROLE: embedding},
-        forbidden=GEMMA4_STORAGE_FORBIDDEN,
-    )
+#: The regular line's storage gates (the same for both of its models).
+GEMMA4_STORAGE = Gemma4StorageTables(
+    required=GEMMA4_STORAGE_REQUIREMENTS, forbidden=GEMMA4_STORAGE_FORBIDDEN
+)
 
 
-#: The storage dtype labels (also the spelling of the quant seats). The drafter role has one
-#: storage, so {@link complete_quant_weights} fills its seat in every preset (`drafter: "i8"`); the
-#: `model` role has two, so each preset names its own (below).
-GEMMA4_DTYPE = "i4"
+#: The storage dtype labels (also the spelling of the quant seat). Each role has one storage, so
+#: {@link complete_quant_weights} fills both seats of the preset (`{model: "bf16", drafter: "i8"}`).
+GEMMA4_DTYPE = "bf16"
 GEMMA4_DRAFTER_DTYPE = "i8"
-#: The original-weights container's dtype label, and the name of its preset.
-GEMMA4_ORIGINAL_DTYPE = "bf16"
 
 #: weights の宣言（dtype ラベル → 役割名）。分割は現物が決めるので、ここが指すのは代表 1 役。
 #: MUST: drafter を **weights の 2 本目**として宣言する（assets ではない）— IR コンテナで
 #: グラフを持ち、`createSession` が食う側の資産だからで、hub の `ResolveOptions.weights` が
 #: 「既定では取らない」を表せる軸もここ 1 本しかない。
-#: `model` has two dtypes (the int4 and the original-weights containers), so every preset names
-#: the one it loads ({@link gemma4_quants} — `complete_quant_weights` refuses to pick one).
 GEMMA4_WEIGHTS: Mapping[str, Mapping[str, WeightFiles]] = {
-    GEMMA4_ROLE: {
-        GEMMA4_DTYPE: WeightFiles(GEMMA4_ROLE),
-        GEMMA4_ORIGINAL_DTYPE: WeightFiles(GEMMA4_ORIGINAL_ROLE),
-    },
+    GEMMA4_ROLE: {GEMMA4_DTYPE: WeightFiles(GEMMA4_ROLE)},
     GEMMA4_DRAFTER_ROLE: {GEMMA4_DRAFTER_DTYPE: WeightFiles(GEMMA4_DRAFTER_ROLE)},
 }
 
@@ -393,50 +353,17 @@ def gemma4_weights(model: str) -> Mapping[str, Mapping[str, WeightFiles]]:
     return {GEMMA4_ROLE: GEMMA4_WEIGHTS[GEMMA4_ROLE]}
 
 
-#: `i4` の説明のうち drafter に触れる 1 文（drafter を配るモデルの席にだけ付ける — 配って
-#: いない drafter の格納を名乗らない）。
+#: The sentence of the preset's description on the drafter (only for a model that ships one — a
+#: drafter not distributed does not have its storage stated).
 GEMMA4_DRAFTER_QUANT_NOTE = " The drafter head is int8 throughout."
 
-#: 同じ格納系列に参照加算・並列加算・融合を用意する（ADR 0098 / 0104）。
-#: `i4` は `session` を空に保つ = GEMV も attention も runtime の参照経路（ADR 0104 追記
-#: 2026-09-26 — attention の縮約形も manifest の宣言になり、家族のコード既定は無い）。
-#: `i4-gemvpar` は従来の実効（GEMV 並列 + attention 並列）を宣言で保存する席、`i4-fast` は
-#: E2B の実測（2026-09-26・B570）で全フラグが速度低下なしだった束。
-#: `i4` の説明の drafter の 1 文と、速度の実測の有無の 1 文は {@link gemma4_quants} が
-#: モデルごとに足す。
-#: `bf16` is the original-weights preset (ADR 0128 decision 4; the default by ADR 0128 addendum
-#: 2026-11-04): the checkpoint's own bf16 values with f32 compute, in the reference summation
-#: order (`session` empty).
+#: The one preset, `bf16`: the original weights (ADR 0128 decision 4; the default by ADR 0128
+#: addendum 2026-11-04) — the checkpoint's own bf16 values with f32 compute, in the reference
+#: summation order (`session` empty — ADR 0104). {@link gemma4_quants} adds the drafter sentence
+#: per model.
 GEMMA4_QUANTS: Mapping[str, Any] = {
     GEMMA4_DTYPE: {
-        "weights": {GEMMA4_ROLE: GEMMA4_DTYPE},
-        "session": {},
-        "label": "Packed int4 linear, int8 embeddings",
-        "description": "Packed int4 (group 32) linear weights and int8 embedding tables (a recipe"
-        " choice); GEMV and attention use the reference summation order.",
-    },
-    "i4-gemvpar": {
-        "weights": {GEMMA4_ROLE: GEMMA4_DTYPE},
-        "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
-        "label": "Packed int4 with parallel GEMV and attention",
-        "description": "The same packed weights as i4, with parallel GEMV and attention "
-        "summation. Rounding and generated tokens can differ. "
-        "Select i4 for the reference order.",
-    },
-    "i4-fast": {
-        "weights": {GEMMA4_ROLE: GEMMA4_DTYPE},
-        "session": {
-            "linearGemvReduce": "parallel",
-            "fuseRmsNormAdd": True,
-            "stateAttentionReduce": "parallel-fused",
-        },
-        "label": "Packed int4 with parallel GEMV, RMS fusion and fused attention",
-        "description": "Same weights as i4; parallel GEMV, RMS-add fusion, fused parallel "
-        "attention. Use i4 for reference summation, i4-gemvpar without fusion. "
-        "Requires fusion-option support.",
-    },
-    GEMMA4_ORIGINAL_DTYPE: {
-        "weights": {GEMMA4_ROLE: GEMMA4_ORIGINAL_DTYPE},
+        "weights": {},
         "session": {},
         "label": "Original weights (bf16)",
         "description": "The checkpoint's own bf16 weights, the per-layer embeddings included, with"
@@ -444,41 +371,20 @@ GEMMA4_QUANTS: Mapping[str, Any] = {
     },
 }
 
-#: 並列・融合の席（`i4-gemvpar` / `i4-fast`）の説明に足す、速度の実測の有無の 1 文。
-#: MUST: キー集合は the regular line's models ({@link GEMMA4_REGULAR_MODELS}) と一致する（tests が
-#: 固定する）— 計っていないモデルの席に「速い」と書かない（E4B の束は E4B のベンチ後に決める）。
-GEMMA4_SPEED_NOTE: Mapping[str, str] = {
-    "e2b": " Faster on tested E2B devices.",
-    "e4b": " Speed not yet measured on E4B.",
-}
-
 
 def gemma4_quants(model: str) -> dict[str, Any]:
-    """モデルの quant 表（席は全モデル共通の 4 つ・drafter を配るモデルだけ `i4` と `bf16` に 1 文
-    足す — the two reference-order seats, one per `model` storage).
-
-    並列・融合の 2 席には速度の実測の有無を 1 文足す（{@link GEMMA4_SPEED_NOTE}）。
-
-    NOTE: E4B も E2B と同じ int4 の 3 席・同じ宣言を当面そのまま持つ — 束の中身は E4B の実測で
-    決める。
-    """
-    note = GEMMA4_SPEED_NOTE[model]
+    """The model's quant table ({@link GEMMA4_QUANTS}), the drafter sentence added to the
+    description for a model that ships a drafter ({@link GEMMA4_DRAFTER_QUANT_NOTE})."""
     quants = {name: dict(quant) for name, quant in GEMMA4_QUANTS.items()}
     if gemma4_has_drafter(model):
-        for name in (GEMMA4_DTYPE, GEMMA4_ORIGINAL_DTYPE):
-            quants[name]["description"] += GEMMA4_DRAFTER_QUANT_NOTE
-    for name in ("i4-gemvpar", "i4-fast"):
-        quants[name]["description"] += note
+        quants[GEMMA4_DTYPE]["description"] += GEMMA4_DRAFTER_QUANT_NOTE
     return quants
 
 
 #: モデルごとの既定 quant。キー集合は the regular line's models ({@link GEMMA4_REGULAR_MODELS})
-#: と一致する MUST（tests が固定する）。Both default to the original weights, `bf16` (the
-#: maintainer's ruling of 2026-11-04 — ADR 0128 addendum 2026-11-04); the int4 seats stay, chosen
-#: by name.
-GEMMA4_DEFAULT_QUANT: Mapping[str, str] = dict.fromkeys(
-    GEMMA4_REGULAR_MODELS, GEMMA4_ORIGINAL_DTYPE
-)
+#: と一致する MUST（tests が固定する）。Both default to the line's one preset, `bf16` (the
+#: maintainer's ruling of 2026-11-04 — ADR 0128 addendum 2026-11-04).
+GEMMA4_DEFAULT_QUANT: Mapping[str, str] = dict.fromkeys(GEMMA4_REGULAR_MODELS, GEMMA4_DTYPE)
 
 #: 固定長 prefill chunk の行数（ADR 0066 決定 4 — context の計画時定数）。**実行時ノブ**なので
 #: 資産からは導出できない。上限は記号 `M` の trace 時の上限（{@link GEMMA4_MAX_CHUNK_LENGTH}）。
@@ -609,9 +515,6 @@ class Gemma4Sources:
     repository shipped before Google's glitch-token fixes (the QAT repositories have not received
     them), so the tokenizer and the generation defaults are read from the regular `-it` repository
     (`gemma4.sources.QAT_TARGET_PINS`).
-
-    `original` is the original-weights product series (the regular line's `bf16` preset —
-    {@link GEMMA4_ORIGINAL_ROLE}); `None` for a line without that preset (the q4_0 QAT line).
     """
 
     product: Path
@@ -619,7 +522,6 @@ class Gemma4Sources:
     tokenizer: Path
     model: Path
     upstream_tokenizer: Path
-    original: Path | None = None
 
 
 def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma4Sources:
@@ -636,7 +538,7 @@ def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma
             f" (known: {' / '.join(GEMMA4_REGULAR_MODELS)}; 12B ships in --pipeline gemma4-qat)"
         )
     return Gemma4Sources(
-        product=series_dir / gemma4_series_name(model, GEMMA4_PRODUCT_SUFFIX),
+        product=series_dir / gemma4_series_name(model, GEMMA4_PRODUCT_BF16_SUFFIX),
         drafter=(
             series_dir / gemma4_series_name(model, GEMMA4_DRAFTER_SUFFIX)
             if gemma4_has_drafter(model)
@@ -646,7 +548,6 @@ def gemma4_sources(series_dir: Path, model: str = GEMMA4_DEFAULT_MODEL) -> Gemma
         / gemma4_series_name(GEMMA4_TOKENIZER_SERIES[model], GEMMA4_TOKENIZER_SUFFIX),
         model=checkpoint_dir(model),
         upstream_tokenizer=tokenizer_dir(model),
-        original=series_dir / gemma4_series_name(model, GEMMA4_PRODUCT_BF16_SUFFIX),
     )
 
 
@@ -730,7 +631,7 @@ def gemma4_ple_table(
 
 
 def gemma4_ple_index(
-    container: Path, *, storage: str = "i8", group_size: int | None = None
+    container: Path, *, storage: str, group_size: int | None = None
 ) -> Mapping[str, Any]:
     """`model` 容器の資産 `ple_index` を読んで**形まで**落とす。
 
@@ -848,8 +749,6 @@ def gemma4_placements(sources: Gemma4Sources) -> dict[str, Path]:
     drafter を配らないモデル（`sources.drafter is None`）は drafter の席も持たない。
     """
     placements = {GEMMA4_ROLE: sources.product / GEMMA4_MODEL_FILE}
-    if sources.original is not None:
-        placements[GEMMA4_ORIGINAL_ROLE] = sources.original / GEMMA4_MODEL_FILE
     if sources.drafter is not None:
         placements[GEMMA4_DRAFTER_ROLE] = sources.drafter / GEMMA4_MODEL_FILE
     placements[GEMMA4_TOKENIZER_ROLE] = sources.tokenizer / GEMMA4_TOKENIZER_FILE
@@ -1513,9 +1412,10 @@ def gemma4_pipeline_config(
 class Gemma4PleForm:
     """The PLE index a line's product container must carry ({@link gemma4_ple_index})."""
 
-    #: The values' storage (`i8` / `i4` / `i2`).
+    #: The values' storage: `bf16` (schema 5 — the floats, no scales) or `i8` / `i4` / `i2`.
     storage: str
-    #: `None` = schema 3 (one f32 scale per (token, layer) row); a group size = schema 4.
+    #: `None` = schema 5 for a float storage, else schema 3 (one f32 scale per (token, layer)
+    #: row); a group size = schema 4.
     group_size: int | None = None
 
 
@@ -1534,8 +1434,8 @@ class Gemma4Line:
     models: tuple[str, ...]
     #: Whether the model ships an MTP drafter (a weights role of its own).
     has_drafter: Callable[[str], bool]
-    #: The model's storage gates.
-    storage: Callable[[str], Gemma4StorageTables]
+    #: The storage gates (the same for every model of the line).
+    storage: Gemma4StorageTables
     #: The PLE index form (for the models with per-layer embeddings).
     ple: Gemma4PleForm
     #: Role → output path within the model subtree.
@@ -1552,9 +1452,6 @@ class Gemma4Line:
     #: Model → the pin of its drafter, whose revision the drafter container must name (absent =
     #: the drafter container is not held to a revision — the regular E2B drafter records none).
     drafter_pins: Mapping[str, HubPin]
-    #: The PLE index form of the original-weights container ({@link GEMMA4_ORIGINAL_ROLE}); `None`
-    #: = the line ships no original-weights container.
-    original_ple: Gemma4PleForm | None = None
 
 
 #: The regular line (`karume-gemma4` — {@link PIPELINE}): the tables above. Its checkpoints are
@@ -1562,46 +1459,15 @@ class Gemma4Line:
 GEMMA4_REGULAR_LINE = Gemma4Line(
     models=GEMMA4_REGULAR_MODELS,
     has_drafter=gemma4_has_drafter,
-    storage=gemma4_storage_tables,
-    ple=Gemma4PleForm(storage="i8"),
+    storage=GEMMA4_STORAGE,
+    ple=Gemma4PleForm(storage=GEMMA4_DTYPE),
     output_paths=GEMMA4_OUTPUT_PATHS,
     weights=gemma4_weights,
     quants=gemma4_quants,
     default_quant=GEMMA4_DEFAULT_QUANT,
     pins={},
     drafter_pins={},
-    original_ple=Gemma4PleForm(storage=GEMMA4_ORIGINAL_DTYPE),
 )
-
-
-def _gemma4_target(
-    container: Path,
-    form: Gemma4PleForm,
-    ple_dim: int,
-    rope: Mapping[str, Any],
-    hidden_size: int,
-) -> tuple[Mapping[str, Any], Mapping[str, Any] | None, int]:
-    """Check one product container (its graph, its PLE index of `form` and the PLE assets against
-    it) and return its graph, its PLE index (`None` for a model without per-layer embeddings) and
-    its vocabulary — the same checks for each `model` container of a line."""
-    index = (
-        gemma4_ple_index(container, storage=form.storage, group_size=form.group_size)
-        if ple_dim
-        else None
-    )
-    graph = ir_graph(container)
-    vocab_size = gemma4_vocab_size(graph, container)
-    assert_gemma4_graph(graph, container, index, rope, hidden_size)
-    if index is None:
-        assert_gemma4_no_ple_assets(container)
-    else:
-        if index["tokens"] != vocab_size:
-            raise DistError(
-                f"{container} の資産 '{PLE_INDEX_ASSET}': tokens {index['tokens']} が製品グラフの"
-                f"語彙数 {vocab_size} と違う — 別の語彙で焼かれた組み合わせ"
-            )
-        assert_gemma4_ple_assets(container, index)
-    return graph, index, vocab_size
 
 
 def gemma4_plan(
@@ -1630,19 +1496,10 @@ def gemma4_plan(
             f" {'無い' if sources.drafter is None else f'指定されている（{sources.drafter}）'}"
             f" — this line ships {'a' if line.has_drafter(model) else 'no'} drafter for it"
         )
-    if (sources.original is not None) != (line.original_ple is not None):
-        raise DistError(
-            f"model '{model}': the original-weights series is"
-            f" {'missing' if sources.original is None else f'given ({sources.original})'}"
-            f" — this line ships {'an' if line.original_ple is not None else 'no'}"
-            " original-weights container"
-        )
     placements = gemma4_placements(sources)
-    storage = line.storage(model)
     for role, source in placements.items():
-        assert_storage(role, source, storage.required)
-        assert_storage(role, source, storage.also_required)
-        assert_storage_absent(role, source, storage.forbidden)
+        assert_storage(role, source, line.storage.required)
+        assert_storage_absent(role, source, line.storage.forbidden)
     text_config = gemma4_text_config(sources.model)
     where = str(sources.model / GEMMA4_CONFIG_FILE)
     rope = gemma4_rope(text_config, where)
@@ -1657,39 +1514,29 @@ def gemma4_plan(
             " embeddings (gemma4.card.GEMMA4_PLE_MODELS)"
         )
     container = placements[GEMMA4_ROLE]
+    index = (
+        gemma4_ple_index(container, storage=line.ple.storage, group_size=line.ple.group_size)
+        if ple_dim
+        else None
+    )
+    graph = ir_graph(container)
+    vocab_size = gemma4_vocab_size(graph, container)
     hidden_size = gemma4_hidden_size(text_config, where)
-    graph, index, vocab_size = _gemma4_target(container, line.ple, ple_dim, rope, hidden_size)
-    # The targets the drafter is paired with: the int4 container and, when the line ships one, the
-    # original-weights container (the drafter borrows the loaded target's table and slots).
-    targets = [(container, graph)]
-    original = placements.get(GEMMA4_ORIGINAL_ROLE)
-    if original is not None:
-        assert line.original_ple is not None  # checked against `sources.original` above
-        original_graph, original_index, original_vocab = _gemma4_target(
-            original, line.original_ple, ple_dim, rope, hidden_size
-        )
-        # MUST: both containers are the same model — one vocabulary, one PLE shape — or a preset
-        # switch would load another model under the same entry (its `pipelineConfig` is shared).
-        if original_vocab != vocab_size:
+    assert_gemma4_graph(graph, container, index, rope, hidden_size)
+    if index is None:
+        assert_gemma4_no_ple_assets(container)
+    else:
+        if index["tokens"] != vocab_size:
             raise DistError(
-                f"{original}: vocabulary {original_vocab}, but {container} has {vocab_size}"
-                " — the two presets' containers are not one model"
+                f"{container} の資産 '{PLE_INDEX_ASSET}': tokens {index['tokens']} が製品グラフの"
+                f"語彙数 {vocab_size} と違う — 別の語彙で焼かれた組み合わせ"
             )
-        if index is not None and original_index is not None:
-            for field in ("layers", "dim"):
-                if original_index[field] != index[field]:
-                    raise DistError(
-                        f"{original}: PLE {field} {original_index[field]}, but {container} has"
-                        f" {index[field]} — the two presets' containers are not one model"
-                    )
-        targets.append((original, original_graph))
+        assert_gemma4_ple_assets(container, index)
     drafter_container = placements.get(GEMMA4_DRAFTER_ROLE)
     if drafter_container is not None:
-        drafter_graph = ir_graph(drafter_container)
-        for target, target_graph in targets:
-            assert_gemma4_drafter_graph(
-                drafter_graph, drafter_container, target_graph, target, rope, hidden_size
-            )
+        assert_gemma4_drafter_graph(
+            ir_graph(drafter_container), drafter_container, graph, container, rope, hidden_size
+        )
     assert_gemma4_tokenizer(placements[GEMMA4_TOKENIZER_ROLE], vocab_size)
     # MUST: every model's asset is held to the upstream `tokenizer.json` this plan reads for it,
     # in every line. A borrowed series whose upstream is other bytes, a model's own series compiled
@@ -1704,10 +1551,9 @@ def gemma4_plan(
     if pins is not None:
         # The container names the weights' commit it was exported from
         # (`gemma4/export_unified.py` bakes it); one from another revision fails here.
-        for target, _ in targets:
-            assert_upstream_provenance(
-                target, license=GEMMA4_LICENSE, revision=pins.weights.revision
-            )
+        assert_upstream_provenance(
+            container, license=GEMMA4_LICENSE, revision=pins.weights.revision
+        )
     drafter_pin = line.drafter_pins.get(model)
     if drafter_container is not None and drafter_pin is not None:
         # The drafter container names its drafter's commit (`gemma4/export_drafter_qat.py` bakes
@@ -1783,11 +1629,9 @@ The following changes were made:
 - The graph was re-expressed in the Karume container format (a `.krm` part sequence whose
   first part carries the graph and model descriptors) in a states form suited to chunked prefill
   and decode.
-- **The weights ship in two storages.** One container per model keeps the checkpoints' BF16
-  weight values unchanged, the per-layer embedding tables included (the parameters it keeps in
-  float32, the norms among others, hold the same values widened). In the other, **linear
-  weights were quantized** to packed int4 (group 32), and the embedding tables to int8; its
-  values are therefore not bit-identical to the source checkpoints.
+- **The weights keep the checkpoints' BF16 values unchanged**, the per-layer embedding tables
+  included (the parameters stored in float32, the norms among others, hold the same values
+  widened).
 - The exit was narrowed to the selected rows' logits and final hidden states, and the
   **per-layer embedding tables were moved out of the graph** into container assets that the host
   gathers.
@@ -1797,13 +1641,11 @@ The following changes were made:
 For the `e2b` model only, this repository also redistributes a modified form of
 `google/gemma-4-E2B-it-assistant` (the multi-token-prediction drafter head), which is licensed
 under the same Apache License, Version 2.0.
-The same changes apply — text decoder re-expressed in the Karume container format, weights
-quantized — with two more: the drafter's clustered sparse output head was replaced by a dense
-projection over the full vocabulary, and the drafter reads the key/value states and the embedding
-table of the main model instead of carrying its own. **The drafter's weights are quantized to
-int8 throughout**, linear layers included, rather than to packed int4 as the main model's linear
-weights are in its quantized storage; the drafter is the same int8 container whichever of the main
-model's two storages it runs with.
+Its graph was re-expressed in the Karume container format as well, with these further changes: the
+drafter's clustered sparse output head was replaced by a dense projection over the full
+vocabulary, and the drafter reads the key/value states and the embedding table of the main model
+instead of carrying its own. **The drafter's weights were quantized to int8 throughout**, linear
+layers included; its values are therefore not bit-identical to the source checkpoint.
 
 No retraining and no fine-tuning were performed. The original checkpoints are not distributed here.
 """
@@ -1867,20 +1709,15 @@ GEMMA4_QAT_Q4_0_OUTPUT_PATHS: Mapping[str, str] = {
 #: compressed storages the writer can write. MUST: int8 is forbidden in the drafter too — the
 #: regular drafter is int8 throughout, and a regular drafter series placed here has the right
 #: graph and manifest (it borrows a table of the same name), so only the storage tells it apart;
-#: an int8 embedding (the regular E2B / E4B series) is caught the same way on the `model` role.
+#: an int8 embedding is caught the same way on the `model` role, and the regular line's product by
+#: its bf16.
 GEMMA4_QAT_Q4_0_STORAGE = Gemma4StorageTables(
     required={GEMMA4_ROLE: GEMMA4_QAT_Q4_0_DTYPE, GEMMA4_DRAFTER_ROLE: GEMMA4_QAT_Q4_0_DTYPE},
-    also_required={},
     forbidden={
         GEMMA4_ROLE: ("f16", "bf16", "i8", "i2"),
         GEMMA4_DRAFTER_ROLE: ("f16", "bf16", "i8", "i2"),
     },
 )
-
-
-def gemma4_qat_q4_0_storage_tables(_model: str) -> Gemma4StorageTables:
-    """The line's storage gates (the same for every model — {@link GEMMA4_QAT_Q4_0_STORAGE})."""
-    return GEMMA4_QAT_Q4_0_STORAGE
 
 
 def gemma4_qat_q4_0_has_drafter(model: str) -> bool:
@@ -1910,28 +1747,32 @@ GEMMA4_QAT_Q4_0_QUANTS: Mapping[str, Any] = {
 }
 
 
-#: The line's parallel and fused seats: the regular line's `i4-gemvpar` / `i4-fast` session flags
-#: ({@link GEMMA4_QUANTS} — one source for both lines) over the line's one int4 storage, the same
-#: g32 grid the regular int4 container stores. What applies (the plan of the mirror's graphs —
-#: `linearGemvParallelEligible` / `planFusions`, 2026-11-04): every linear of the E2B / E4B product
-#: but the int4 output head (`[262144, H]` — the regular line's head is int8) is on the parallel
-#: GEMV's table (the regular line's rows at the same shapes and group: E2B's measured ones and E4B's
-#: unmeasured copies of them — ADR 0098 addendum 2026-09-26), the RMS→add fusion takes the regular
-#: line's 106 / 127 pairs, and the drafter has the regular int8 drafter's two eligible linears (of
-#: 68). 12B gets no such seat: none of its linears is on the table and its width (3840) is not one
-#: the fusion takes, so the seats would change only the attention summation under names that claim
-#: a parallel GEMV and an RMS fusion.
+#: The line's parallel and fused seats over its one int4 storage (ADR 0098 / 0104): `i4-gemvpar`
+#: sums the GEMV and the attention in parallel, `i4-fast` adds the RMS→add fusion and the fused
+#: attention. What applies (the plan of the mirror's graphs — `linearGemvParallelEligible` /
+#: `planFusions`, 2026-11-04): every linear of the E2B / E4B product but the int4 output head
+#: (`[262144, H]` — the parallel GEMV's table has no int4 row of that shape) is on the parallel
+#: GEMV's table (the int4 group-32 rows at the same shapes: E2B's measured ones and E4B's
+#: unmeasured copies of them — ADR 0098 addendum 2026-09-26), the RMS→add fusion takes 106 / 127
+#: pairs, and the drafter has two eligible linears (of 68, as the regular int8 drafter). 12B gets
+#: no such seat: none of its linears is on the table and its width (3840) is not one the fusion
+#: takes, so the seats would change only the attention summation under names that claim a parallel
+#: GEMV and an RMS fusion.
 GEMMA4_QAT_Q4_0_PARALLEL_QUANTS: Mapping[str, Any] = {
     "i4-gemvpar": {
         "weights": {},
-        "session": GEMMA4_QUANTS["i4-gemvpar"]["session"],
+        "session": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
         "label": "QAT int4 grid with parallel GEMV and attention",
         "description": "Same weights as i4; parallel GEMV (not the int4 output head) and attention."
         " Rounding and generated tokens can differ. Select i4 for the reference order.",
     },
     "i4-fast": {
         "weights": {},
-        "session": GEMMA4_QUANTS["i4-fast"]["session"],
+        "session": {
+            "linearGemvReduce": "parallel",
+            "fuseRmsNormAdd": True,
+            "stateAttentionReduce": "parallel-fused",
+        },
         "label": "QAT int4 grid with parallel GEMV, RMS fusion and fused attention",
         "description": "Same weights as i4; parallel GEMV (not the int4 output head), RMS-add"
         " fusion, fused attention. Use i4 for reference summation. Requires fusion-option support.",
@@ -1976,7 +1817,7 @@ GEMMA4_QAT_Q4_0_DEFAULT_QUANT: Mapping[str, str] = dict.fromkeys(
 GEMMA4_QAT_Q4_0_LINE = Gemma4Line(
     models=tuple(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM),
     has_drafter=gemma4_qat_q4_0_has_drafter,
-    storage=gemma4_qat_q4_0_storage_tables,
+    storage=GEMMA4_QAT_Q4_0_STORAGE,
     ple=Gemma4PleForm(storage=GEMMA4_QAT_Q4_0_DTYPE, group_size=GEMMA4_QAT_PLE_GROUP_SIZE),
     output_paths=GEMMA4_QAT_Q4_0_OUTPUT_PATHS,
     weights=gemma4_qat_q4_0_weights,

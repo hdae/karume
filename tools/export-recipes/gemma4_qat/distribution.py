@@ -381,7 +381,13 @@ def render_card(
 ) -> str:
     """数値・モデル一覧・量子化表を manifest から描く。固定値保持を再量子化と呼ばない。"""
     require_pipeline(manifest, "gemma4-qat/1")
-    upstream = tuple(checkpoint_repo(model) for model in manifest["models"])
+    # Every redistributed upstream: per model its base model (the regular `-it` repository its
+    # tokenizer comes from) and then its mobile QAT checkpoint, the order the q4_0 QAT line's card
+    # lists them in (`gemma4.card`). `checkpoint_repo` refuses a model the line does not know.
+    upstream: list[str] = []
+    for model in manifest["models"]:
+        checkpoint = checkpoint_repo(model)
+        upstream += [SOURCES[model].pins.tokenizer.repo, checkpoint]
     for model in manifest["models"]:
         if SOURCES[model].license != QAT_LICENSE:
             raise ValueError(
@@ -390,9 +396,11 @@ def render_card(
             )
     metadata = CardMetadata(
         pipeline_tag="text-generation",
-        base_model=upstream,
-        # NOTE: no `base_model_relation` — the integers and scales are the checkpoint's own, so
-        # none of the Hub's four relations is a fact (`karume.modelcard.CardMetadata`).
+        base_model=tuple(upstream),
+        # Against the listed `-it` base models the stored integers and scales are a quantized form
+        # (the checkpoint's own QAT values, kept as they are) — the relation the q4_0 QAT line's
+        # card declares too, and the upstream mobile cards declare against the same base models.
+        base_model_relation="quantized",
         license=QAT_LICENSE,
         # The same spelling as the upstream cards (and the regular Gemma 4 card), so a reader
         # reaches the one licence page the upstream names.

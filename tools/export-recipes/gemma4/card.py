@@ -105,13 +105,10 @@ GEMMA4_QAT_DRAFTER_UPSTREAM: Mapping[str, str] = {
 #: checks it against the upstream config of every model it assembles, so the two cannot drift.
 GEMMA4_PLE_MODELS: frozenset[str] = frozenset({"e2b", "e4b"})
 
-#: Model → the storage of its embedding table (the tied output head) in the regular line: E2B / E4B
-#: round it to int8 per row (a recipe choice). Another fact the manifest does not carry;
-#: `gemma4.distribution.gemma4_plan` holds every container to it (the storage gates), so the card
-#: cannot state another storage. Key set = the regular line's models
-#: (`gemma4.distribution.GEMMA4_REGULAR_MODELS` — tests); the q4_0 QAT line stores every embedding
-#: as int4 on the checkpoint's grid (`gemma4.distribution.GEMMA4_QAT_Q4_0_STORAGE`).
-GEMMA4_EMBEDDING_STORAGE: Mapping[str, str] = {"e2b": "i8", "e4b": "i8"}
+#: The storage of the upstream checkpoints' weights (BF16). A manifest `weights` dtype label other
+#: than this one is a weight re-encoded in another storage form ({@link _gemma4_relation}); the
+#: regular line's main model stores exactly this one ({@link _gemma4_storage_lines}).
+GEMMA4_CHECKPOINT_DTYPE = "bf16"
 
 #: Model → what the upstream checkpoint carries besides the text decoder (never read here, never
 #: shipped). E2B / E4B hold vision and audio encoder towers; 12B is encoder-free and projects image
@@ -128,7 +125,7 @@ GEMMA4_FRONT_ENDS: Mapping[str, str] = {
 #: `gemma4.distribution` が import する（distribution → card の一方向を保つため）。
 GEMMA4_DRAFTER_ROLE = "drafter"
 #: The main model's weights role (the spelling `gemma4.distribution.GEMMA4_ROLE` imports — the card
-#: reads which storages the presets load from it, {@link _gemma4_storage_phrase}).
+#: reads the storage of the main model from it, {@link _gemma4_storage_lines}).
 GEMMA4_MODEL_ROLE = "model"
 
 #: モデル名 → MTP drafter の上流（ADR 0096 段 2）。帰属表（モデル名 → 上流）とは別の席で
@@ -166,9 +163,7 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
     return CardMetadata(
         pipeline_tag=GEMMA4_PIPELINE_TAG,
         base_model=tuple(upstream),
-        # 格納形を int4 / int8 へ落とし直しているので `quantized` が事実として当たる（the int4
-        # presets; the original-weights preset beside them keeps the bf16 values).
-        base_model_relation="quantized",
+        base_model_relation=_gemma4_relation(manifest),
         license=GEMMA4_LICENSE,
         # NOTE: `license_link` は HF が `license: other` のときに読む席だが、**上流カード自身が
         # SPDX 識別子と併記している**綴りへ揃える（読み手が上流と同じ 1 本のライセンス URL へ
@@ -176,6 +171,19 @@ def _gemma4_metadata(manifest: Mapping[str, Any]) -> CardMetadata:
         license_link=GEMMA4_LICENSE_LINK,
         tags=(GEMMA4_PIPELINE_TAG, "webgpu", "gemma", "llm"),
     )
+
+
+def _gemma4_relation(manifest: Mapping[str, Any]) -> str | None:
+    """`base_model_relation`: `quantized` when the manifest stores some weight in another storage
+    than the checkpoints' own bf16 (E2B's int8 drafter), else none — a distribution that keeps the
+    storage form is none of the Hub's relations (`karume.modelcard.CardMetadata`)."""
+    stored = {
+        dtype
+        for model in manifest["models"].values()
+        for dtypes in model["weights"].values()
+        for dtype in dtypes
+    }
+    return "quantized" if stored - {GEMMA4_CHECKPOINT_DTYPE} else None
 
 
 def _gemma4_drafter_upstreams(manifest: Mapping[str, Any]) -> list[str]:
@@ -311,24 +319,22 @@ def _gemma4_overview(
 
 
 def _gemma4_storage_lines(manifest: Mapping[str, Any]) -> list[str]:
-    """The attribution's opening sentence: how the manifest ships the main model's weights, from
-    the dtypes of its `model` role (`bf16` = the checkpoint's values unchanged, any other storage
-    a quantized form)."""
+    """The attribution's opening sentence: the main model's weights ship as the checkpoint's own
+    bf16 values. MUST: a manifest whose `model` role stores anything else is not drawn — the
+    sentence would state a storage the distribution does not carry."""
     dtypes = {
         dtype
         for model in manifest["models"].values()
         for dtype in model["weights"][GEMMA4_MODEL_ROLE]
     }
-    unchanged = "bf16" in dtypes
-    quantized = bool(dtypes - {"bf16"})
-    if unchanged and quantized:
-        return [
-            "Converted from the upstream checkpoint, its weights shipped both unchanged (bf16) and",
-            "quantized — the original checkpoint files are not distributed here.",
-        ]
-    form = "unchanged (bf16)" if unchanged else "quantized"
+    if dtypes != {GEMMA4_CHECKPOINT_DTYPE}:
+        raise ValueError(
+            f"the main model's weights are stored as {sorted(dtypes)} — this card states the"
+            f" checkpoint's {GEMMA4_CHECKPOINT_DTYPE} values unchanged"
+        )
     return [
-        f"Converted from the upstream checkpoint, its weights shipped {form} — the original",
+        "Converted from the upstream checkpoint, its weights shipped unchanged (bf16) — the"
+        " original",
         "checkpoint files are not distributed here.",
     ]
 
@@ -356,8 +362,7 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
             " It is redistributed here with its clustered sparse output head replaced by a dense"
             " projection over the full vocabulary, and it reads the key/value states and embedding"
             " table of the main model rather than carrying its own. Its own weights are quantized"
-            " to int8 throughout, linear layers included, rather than to the packed int4 of the"
-            " main model's int4 presets, whichever preset of the main model it runs with."
+            " to int8 throughout, linear layers included."
         )
     lines += [
         *_GEMMA4_CHANGES,
@@ -373,12 +378,10 @@ def _gemma4_base_weights(manifest: Mapping[str, Any]) -> list[str]:
 #: The "Changes made here" item (the regular line's models all carry per-layer embeddings).
 _GEMMA4_CHANGES: tuple[str, ...] = (
     "- **Changes made here** (also listed in `NOTICE.md`, per Apache 2.0 §4(b)): the text",
-    "  decoder was extracted and re-expressed in the Karume container format; the weights ship",
-    "  in two storages, the checkpoint's bf16 values unchanged and a form whose linear weights",
-    "  were quantized to packed int4 (group 32) and embedding tables to int8; the",
-    "  per-layer embeddings were moved out of the graph into container assets that the host",
-    "  gathers; the exit was narrowed to the selected rows' logits and hidden states; rotary",
-    "  cos/sin arrive as host-generated inputs.",
+    "  decoder was extracted and re-expressed in the Karume container format; the weights keep",
+    "  the checkpoint's bf16 values unchanged; the per-layer embeddings were moved out of the",
+    "  graph into container assets that the host gathers; the exit was narrowed to the selected",
+    "  rows' logits and hidden states; rotary cos/sin arrive as host-generated inputs.",
 )
 
 

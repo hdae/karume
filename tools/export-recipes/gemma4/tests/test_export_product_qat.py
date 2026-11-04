@@ -418,7 +418,9 @@ class TestRegularPathUnchanged:
 
         assert bytes(assets[PLE_INDEX_ASSET].payload).decode() == SCHEMA_3_INDEX
 
-    def test_the_regular_assets_stay_i8_with_one_scale_per_row(self, tmp_path) -> None:
+    def test_int8_assets_without_a_group_size_stay_schema_3(self, tmp_path) -> None:
+        """The group size is the q4_0 line's own argument: without it the shared writer builds the
+        schema-3 index, one scale per row."""
         layers, dim = 2, 8
         built = product.ple_container_assets(
             [torch.zeros(VOCAB, dim, dtype=torch.int8) for _ in range(layers)],
@@ -428,13 +430,14 @@ class TestRegularPathUnchanged:
             dim=dim,
             embed_scale=2.0,
             spill_dir=tmp_path,
+            storage="i8",
         )
         index = json.loads(bytes(built.assets[PLE_INDEX_ASSET].payload))
         built.discard()
 
         assert index["schema"] == PLE_INDEX_SCHEMA == 3
         assert "groupSize" not in index
-        assert index["storage"] == product.PLE_STORAGE == "i8"
+        assert index["storage"] == "i8"
         assert index["scales"]["rowBytes"] == layers * 4
 
     def test_the_regular_loader_still_expects_the_residues(self, tmp_path, monkeypatch) -> None:

@@ -39,7 +39,6 @@ from gemma4.distribution import (
     GEMMA4_DEFAULT_MODEL,
     GEMMA4_DRAFTER_ROLE,
     GEMMA4_MAX_CHUNK_LENGTH,
-    GEMMA4_ORIGINAL_ROLE,
     GEMMA4_OUTPUT_PATHS,
     GEMMA4_REGULAR_MODELS,
     GEMMA4_ROLE,
@@ -65,19 +64,17 @@ from karume.dist import (
 from karume.ple import PLE_INDEX_ASSET, PLE_INDEX_ROLE
 
 #: 役割名 → part 本数（PLE の資産は専用 part を取るので `model` だけ多い）。
-_PART_TOTALS: Mapping[str, int] = {
-    GEMMA4_ROLE: len(fixture.product_container()),
-    GEMMA4_ORIGINAL_ROLE: len(fixture.product_container(original=True)),
-}
+_PART_TOTALS: Mapping[str, int] = {GEMMA4_ROLE: len(fixture.product_container())}
 
 #: PLE の寸法（索引を曲げるときの元値）。
 _PLE_DIMS: Mapping[str, int] = {"layers": fixture.LAYERS, "dim": fixture.DIM}
 
 
 def _shift_first_block(index: dict[str, Any]) -> None:
-    """先頭 block の末尾を 1 行縮める（範囲が連続しない索引）。"""
+    """先頭 block の末尾を 1 行縮める（範囲が連続しない索引）— in every table the index has."""
     for key in ("values", "scales"):
-        index[key]["blocks"][0]["stop"] -= 1
+        if key in index:
+            index[key]["blocks"][0]["stop"] -= 1
 
 
 def _rename_first_block(index: dict[str, Any]) -> None:
@@ -110,8 +107,9 @@ def _container_with_ple(
     return fixture.product_container(assets=assets)
 
 
-#: tiny な PLE を 2 block 以上へ割る block 上限（block 跨ぎを 1 度は踏む）。
-_PLE_BLOCK_BYTES = fixture.LAYERS * fixture.DIM * (fixture.VOCAB // 2)
+#: tiny な PLE を 2 block 以上へ割る block 上限（block 跨ぎを 1 度は踏む）— half the vocabulary of
+#: the bf16 table's rows.
+_PLE_BLOCK_BYTES = fixture.LAYERS * fixture.DIM * 2 * (fixture.VOCAB // 2)
 
 #: 帰属表に**無い**モデル名とその上流の綴り（未知のモデルを落とす門の入力）。E4B が帰属表へ
 #: 入ったので、門の入力は実在しない綴りにしてある。
@@ -136,23 +134,17 @@ def _small_runtime_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _sources(root: Path) -> Gemma4Sources:
     return Gemma4Sources(
-        product=root / "series" / "gemma4-e2b-product",
+        product=root / "series" / "gemma4-e2b-product-bf16",
         drafter=root / "series" / "gemma4-e2b-drafter",
         tokenizer=root / "series" / "gemma4-e2b-tokenizer",
         model=root / "inputs" / "gemma-4-E2B-it",
         upstream_tokenizer=root / "inputs" / "gemma-4-E2B-it",
-        original=root / "series" / "gemma4-e2b-product-bf16",
     )
 
 
 def _build(root: Path, **overrides: Any) -> Gemma4Sources:
     sources = _sources(root)
-    fixture.write_series(
-        sources.product,
-        sources.tokenizer,
-        sources.model,
-        **{"original": sources.original, **overrides},
-    )
+    fixture.write_series(sources.product, sources.tokenizer, sources.model, **overrides)
     return sources
 
 
@@ -208,9 +200,11 @@ class TestGemma4Layout:
         )
 
     def test_it_never_carries_the_acceptance_only_files(self, gemma4_assembled) -> None:
-        """`ple.probe.safetensors` / `reference.json` は系列に同居するが配布へは入らない。"""
+        """`ple.probe.safetensors` / the greedy goldens / `reference.json` は系列に同居するが
+        配布へは入らない。"""
         out_dir, _ = gemma4_assembled
         assert list(out_dir.rglob("ple.probe.*")) == []
+        assert list(out_dir.rglob("greedy.*")) == []
         assert list(out_dir.rglob("reference.json")) == []
 
     def test_it_declares_two_graphs_and_the_sidecar_as_assets(self, gemma4_assembled) -> None:
@@ -224,30 +218,17 @@ class TestGemma4Layout:
         model = _model(manifest)
         assert model["pipeline"] == "gemma4/1"
         assert list(model["weights"]) == [GEMMA4_ROLE, GEMMA4_DRAFTER_ROLE]
-        assert list(model["weights"][GEMMA4_ROLE]) == ["i4", "bf16"]
-        assert list(model["quants"]) == ["i4", "i4-gemvpar", "i4-fast", "bf16"]
-        # The original weights are the default (the maintainer's ruling of 2026-11-04).
+        # The one storage of the main model: the checkpoint's bf16 values.
+        assert list(model["weights"][GEMMA4_ROLE]) == ["bf16"]
+        assert list(model["weights"][GEMMA4_DRAFTER_ROLE]) == ["i8"]
+        assert list(model["quants"]) == ["bf16"]
         assert model["defaultQuant"] == "bf16"
-        assert model["quants"]["i4-gemvpar"]["weights"] == model["quants"]["i4"]["weights"]
-        assert model["quants"]["i4-gemvpar"]["session"] == {
-            "linearGemvReduce": "parallel",
-            "stateAttentionReduce": "parallel",
-        }
-        assert model["quants"]["i4-fast"]["weights"] == model["quants"]["i4"]["weights"]
-        assert model["quants"]["i4-fast"]["session"] == {
-            "linearGemvReduce": "parallel",
-            "fuseRmsNormAdd": True,
-            "stateAttentionReduce": "parallel-fused",
-        }
         # 役割ごとに基底格納が違う（drafter は linear まで i8）ので、自動補完が 2 席とも
-        # それぞれの唯一の dtype ラベルで埋める。
-        assert model["quants"]["i4"]["weights"] == {GEMMA4_ROLE: "i4", GEMMA4_DRAFTER_ROLE: "i8"}
-        assert model["quants"]["i4"]["session"] == {}
-        # The original-weights preset keeps the one drafter (int8), paired with the bf16 target.
-        assert model["quants"]["bf16"]["weights"] == {
-            GEMMA4_ROLE: "bf16",
-            GEMMA4_DRAFTER_ROLE: "i8",
-        }
+        # それぞれの唯一の dtype ラベルで埋める（in the declaration order of the weights）。
+        assert list(model["quants"]["bf16"]["weights"].items()) == [
+            (GEMMA4_ROLE, "bf16"),
+            (GEMMA4_DRAFTER_ROLE, "i8"),
+        ]
         assert model["quants"]["bf16"]["session"] == {}
 
     def test_it_never_carries_the_drafter_goldens(self, gemma4_assembled) -> None:
@@ -261,7 +242,7 @@ class TestGemma4Layout:
         model = _model(manifest)
         assert list(model["assets"]) == [GEMMA4_TOKENIZER_ROLE]
 
-        placed = out_dir / model["weights"][GEMMA4_ROLE]["i4"]["container"]["parts"][0]["path"]
+        placed = out_dir / model["weights"][GEMMA4_ROLE]["bf16"]["container"]["parts"][0]["path"]
         index = json.loads(read_asset(placed, PLE_INDEX_ASSET))
         declared = read_asset_declarations(placed)
         blocks = [block["asset"] for block in index["values"]["blocks"]]
@@ -439,7 +420,7 @@ class TestGemma4Graph:
         # 入力の綴りが違うコンテナ（`export_decode.py` の token-only 形などの取り違え）。
         wrong = ir_container(
             mark="other",
-            storage="i4",
+            storage="bf16",
             inputs=(("input_ids", [1, "M"]), ("last_row", [fixture.ROW_SYMBOL])),
             outputs=(
                 [1, fixture.ROW_SYMBOL, fixture.VOCAB],
@@ -466,7 +447,7 @@ class TestGemma4Graph:
             sources.product / "model.krm",
             ir_container(
                 mark="rows",
-                storage="i4",
+                storage="bf16",
                 inputs=(("input_ids", [1, "M"]),),
                 outputs=([1, 4, fixture.VOCAB], [1, 4, fixture.HIDDEN]),
                 assets=fixture.ple_container_assets(block_bytes=_PLE_BLOCK_BYTES),
@@ -762,8 +743,10 @@ class TestGemma4Sampler:
 class TestGemma4Storage:
     """系列 root の取り違え — 数値の門では原理的に検出できないので、ここが唯一の検出器。"""
 
-    @pytest.mark.parametrize(("storage", "message"), [("f32", "has no i4"), ("f16", "has no i4")])
-    def test_it_refuses_a_container_without_the_packed_int4_weights(
+    @pytest.mark.parametrize(
+        ("storage", "message"), [("f32", "has no bf16"), ("f16", "has no bf16")]
+    )
+    def test_it_refuses_a_container_without_the_bf16_weights(
         self, tmp_path: Path, storage: str, message: str
     ) -> None:
         sources = _build(tmp_path)
@@ -773,11 +756,25 @@ class TestGemma4Storage:
         with pytest.raises(DistError, match=message):
             gemma4_plan(sources)
 
-    def test_it_refuses_an_e2b_container_whose_embedding_is_not_int8(self, tmp_path: Path) -> None:
-        """E2B / E4B keep the int8 embedding: an all-int4 container (12B's storage) is refused."""
-        sources = _build(tmp_path, container=fixture.product_container(embedding_storage="i4"))
+    def test_it_refuses_an_int4_product_series(self, tmp_path: Path) -> None:
+        """An int4 product series (the q4_0 QAT line's storage) has the same graph contract and PLE
+        input, so only the storage tells it apart."""
+        sources = _build(
+            tmp_path, container=fixture.product_container(storage="i4", embedding_storage="i4")
+        )
 
-        with pytest.raises(DistError, match="has no i8"):
+        with pytest.raises(DistError, match=f"{GEMMA4_ROLE}: storage .* has no bf16"):
+            gemma4_plan(sources)
+
+    @pytest.mark.parametrize("rounded", ["i8", "i4"])
+    def test_it_refuses_a_rounded_weight_next_to_the_bf16_ones(
+        self, tmp_path: Path, rounded: str
+    ) -> None:
+        """The presence check (bf16 is there) lets a container with one rounded table through;
+        the product forbids every rounded storage."""
+        sources = _build(tmp_path, container=fixture.product_container(embedding_storage=rounded))
+
+        with pytest.raises(DistError, match=f"{GEMMA4_ROLE}: storage .* has {rounded}"):
             gemma4_plan(sources)
 
     def test_it_refuses_a_container_carrying_half_precision(self, tmp_path: Path) -> None:
@@ -809,7 +806,8 @@ class TestGemma4Naming:
 
     def test_the_sources_follow_the_repo_topology(self, tmp_path: Path) -> None:
         sources = gemma4_sources(tmp_path, GEMMA4_DEFAULT_MODEL)
-        assert sources.product == tmp_path / "gemma4-e2b-product"
+        # The product series is the bf16 one (`gemma4/export_product.py` writes it).
+        assert sources.product == tmp_path / "gemma4-e2b-product-bf16"
         assert sources.tokenizer == tmp_path / "gemma4-e2b-tokenizer"
         # チェックポイントは帰属表から導く（2 つ目の表を持たない）。
         assert sources.model.name == GEMMA4_UPSTREAM[GEMMA4_DEFAULT_MODEL].split("/", 1)[1]
@@ -888,11 +886,32 @@ class TestGemma4Card:
         # 数は manifest から導出する（推奨サンプラも位置上限も本文に出る）。
         assert str(fixture.MAX_POSITION) in card
         assert str(fixture.GENERATION_CONFIG["top_k"]) in card
-        # session の boolean は manifest と同じ JSON 表記で綴る — Python の `True` が出ると
-        # 読み手がそのまま貼った TypeScript と綴りが食い違う。
-        fast = next(line for line in card.splitlines() if line.startswith("| `i4-fast`"))
-        assert "`fuseRmsNormAdd` = `true`" in fast
-        assert "True" not in fast
+
+    def test_the_relation_is_quantized_while_a_weight_is_stored_rounded(
+        self, gemma4_assembled, tmp_path: Path
+    ) -> None:
+        """`base_model_relation` comes from the manifest: E2B's int8 drafter is a quantized form,
+        while an E4B-only manifest stores nothing but the checkpoint's bf16 values — none of the
+        Hub's relations, so the field is left out."""
+        _, e2b = gemma4_assembled
+        _, e4b = _assemble_e4b(tmp_path)
+
+        def front_matter(manifest: Mapping[str, Any]) -> str:
+            return render_gemma4_model_card(manifest, "hdae/karume-gemma4").split("---")[1]
+
+        assert "base_model_relation: quantized\n" in front_matter(e2b)
+        assert "base_model_relation" not in front_matter(e4b)
+
+    def test_it_refuses_a_manifest_whose_main_model_is_not_bf16(self, gemma4_assembled) -> None:
+        """The attribution states the checkpoint's bf16 values unchanged; a manifest whose `model`
+        role stores something else is not drawn."""
+        _, manifest = gemma4_assembled
+        other = json.loads(json.dumps(manifest))
+        weights = other["models"][GEMMA4_DEFAULT_MODEL]["weights"][GEMMA4_ROLE]
+        weights["i4"] = weights.pop("bf16")
+
+        with pytest.raises(ValueError, match=r"stored as \['i4'\]"):
+            render_gemma4_model_card(other, "hdae/karume-gemma4")
 
     def test_it_refuses_to_describe_another_pipeline(self, gemma4_assembled) -> None:
         _, manifest = gemma4_assembled
@@ -932,7 +951,7 @@ class TestGemma4Card:
         """
         _, manifest = gemma4_assembled
         other = json.loads(json.dumps(manifest))
-        other["models"][GEMMA4_DEFAULT_MODEL]["quants"]["i4"]["requiredLimits"] = {
+        other["models"][GEMMA4_DEFAULT_MODEL]["quants"]["bf16"]["requiredLimits"] = {
             "maxStorageBufferBindingSize": 134_217_728,
         }
         card = render_gemma4_model_card(other, "hdae/karume-gemma4")
@@ -941,10 +960,16 @@ class TestGemma4Card:
         assert "maxStorageBufferBindingSize" in card
         assert "134,217,728" in card
 
-    @staticmethod
-    def _device_limits_line(manifest: Mapping[str, Any], limits_by_quant: Callable) -> str:
+    #: A second seat beside the line's one (`bf16`), so the folding across seats has two to fold —
+    #: the q4_0 QAT line's card renders the same section over three.
+    _TWIN = "bf16-twin"
+
+    @classmethod
+    def _device_limits_line(cls, manifest: Mapping[str, Any], limits_by_quant: Callable) -> str:
         other = json.loads(json.dumps(manifest))
         quants = other["models"][GEMMA4_DEFAULT_MODEL]["quants"]
+        quants[cls._TWIN] = json.loads(json.dumps(quants["bf16"]))
+        assert len(quants) >= 2
         for quant_name, quant in quants.items():
             quant["requiredLimits"] = limits_by_quant(quant_name)
         card = render_gemma4_model_card(other, "hdae/karume-gemma4")
@@ -953,7 +978,6 @@ class TestGemma4Card:
     def test_a_limit_every_quant_shares_is_named_once(self, gemma4_assembled) -> None:
         """同じ重みの席が同じ上限を持つとき、上限名は 1 回ずつ（quant ごとに繰り返さない）。"""
         _, manifest = gemma4_assembled
-        assert len(_model(manifest)["quants"]) >= 2
         line = self._device_limits_line(
             manifest,
             lambda _quant: {
@@ -972,20 +996,19 @@ class TestGemma4Card:
         _, manifest = gemma4_assembled
         line = self._device_limits_line(
             manifest,
-            lambda quant: {"maxBufferSize": 536_870_912 if quant == "i4" else 402_653_184},
+            lambda quant: {"maxBufferSize": 536_870_912 if quant == "bf16" else 402_653_184},
         )
-        others = [name for name in _model(manifest)["quants"] if name != "i4"]
 
         assert line.count("`maxBufferSize`") == 1
-        assert "≥ 536,870,912 B for `i4`" in line
-        assert f"≥ 402,653,184 B for {', '.join(f'`{name}`' for name in others)}" in line
+        assert "≥ 536,870,912 B for `bf16`" in line
+        assert f"≥ 402,653,184 B for `{self._TWIN}`" in line
 
     def test_it_omits_the_device_limits_line_when_no_quant_declares_one(
         self, gemma4_assembled
     ) -> None:
         """逆枝 — 欄が無いときは節ごと消える（情報が黙って落ちる形の記録）。"""
         _, manifest = gemma4_assembled
-        assert not _model(manifest)["quants"]["i4"].get("requiredLimits")
+        assert not _model(manifest)["quants"]["bf16"].get("requiredLimits")
 
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
 
@@ -1007,7 +1030,10 @@ class TestGemma4LegalText:
         out_dir, _ = gemma4_assembled
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
         assert "gemma-4-E2B-it" in notice
-        assert "int4" in notice
+        assert "keep the checkpoints' BF16 values unchanged" in notice
+        # The drafter is the one rounded form; no int4 form of the main model ships.
+        assert "int8 throughout" in notice
+        assert "int4" not in notice
 
     def test_the_notice_names_no_model_outside_the_line(self) -> None:
         """12B ships in the q4_0 QAT line only (`karume-gemma4-qat`): a notice naming its
@@ -1063,12 +1089,11 @@ _UPSTREAM_TOKENIZER = b'{"model": "upstream tokenizer stand-in"}'
 def _e4b_sources(root: Path) -> Gemma4Sources:
     """E4B's inputs — no drafter, its own tokenizer series (`GEMMA4_TOKENIZER_SERIES`)."""
     return Gemma4Sources(
-        product=root / "series" / "gemma4-e4b-product",
+        product=root / "series" / "gemma4-e4b-product-bf16",
         drafter=None,
         tokenizer=root / "series" / "gemma4-e4b-tokenizer",
         model=root / "inputs" / "gemma-4-E4B-it",
         upstream_tokenizer=root / "inputs" / "gemma-4-E4B-it",
-        original=root / "series" / "gemma4-e4b-product-bf16",
     )
 
 
@@ -1094,7 +1119,6 @@ def _build_e4b(
         sources.tokenizer,
         sources.model,
         # 借り手 drafter 系列は fixture が既定で product の隣へ書く（E4B の計画は読まない）。
-        original=sources.original,
         tokenizer={
             **fixture.tokenizer_asset(),
             "source": {"sha256": hashlib.sha256(source_bytes).hexdigest()},
@@ -1117,13 +1141,13 @@ def _assemble_e4b(root: Path) -> tuple[Path, dict[str, Any]]:
 
 
 class TestGemma4E4B:
-    """E4B の model entry — drafter 無し・quant は E2B と同じ 4 席・既定は `bf16`。"""
+    """E4B の model entry — drafter 無し・quant は E2B と同じ 1 席 `bf16`（既定）。"""
 
     def test_the_upstream_and_the_series_names_follow_the_model(self, tmp_path: Path) -> None:
         assert GEMMA4_UPSTREAM["e4b"] == "google/gemma-4-E4B-it"
         sources = gemma4_sources(tmp_path, "e4b")
 
-        assert sources.product == tmp_path / "gemma4-e4b-product"
+        assert sources.product == tmp_path / "gemma4-e4b-product-bf16"
         assert sources.model.name == "gemma-4-E4B-it"
         # No drafter; its own tokenizer series (E2B's and E4B's upstream tokenizers differ since
         # Google's fixes of 2026-11-03).
@@ -1135,8 +1159,6 @@ class TestGemma4E4B:
         落ちる。"""
         assert set(gemma4_distribution.GEMMA4_DEFAULT_QUANT) == set(GEMMA4_REGULAR_MODELS)
         assert set(gemma4_distribution.GEMMA4_TOKENIZER_SERIES) == set(GEMMA4_UPSTREAM)
-        assert set(gemma4_distribution.GEMMA4_SPEED_NOTE) == set(GEMMA4_REGULAR_MODELS)
-        assert set(gemma4_card.GEMMA4_EMBEDDING_STORAGE) == set(GEMMA4_REGULAR_MODELS)
         assert set(GEMMA4_REGULAR_MODELS) == {"e2b", "e4b"}
         for model, quant in gemma4_distribution.GEMMA4_DEFAULT_QUANT.items():
             assert quant in gemma4_distribution.gemma4_quants(model)
@@ -1152,36 +1174,19 @@ class TestGemma4E4B:
         assert list(entry["weights"]) == [GEMMA4_ROLE]
         assert not (out_dir / "e4b" / GEMMA4_DRAFTER_ROLE).exists()
         for name, quant in entry["quants"].items():
-            # Each preset loads the one storage it names: the original weights for `bf16`, the
-            # int4 container for the others.
-            assert quant["weights"] == {GEMMA4_ROLE: "bf16" if name == "bf16" else "i4"}, name
+            # The preset loads the one storage of the main model alone.
+            assert quant["weights"] == {GEMMA4_ROLE: "bf16"}, name
             assert "drafter" not in quant["description"].lower()
 
-    def test_the_entry_carries_the_four_quants_with_bf16_as_the_default(
-        self, tmp_path: Path
-    ) -> None:
+    def test_the_entry_carries_the_one_quant_bf16_as_the_default(self, tmp_path: Path) -> None:
         _, manifest = _assemble_e4b(tmp_path)
         entry = manifest["models"]["e4b"]
 
-        assert sorted(entry["quants"]) == ["bf16", "i4", "i4-fast", "i4-gemvpar"]
+        assert list(entry["quants"]) == ["bf16"]
         assert entry["defaultQuant"] == "bf16"
-        assert entry["quants"]["bf16"]["weights"] == {GEMMA4_ROLE: "bf16"}
+        assert list(entry["weights"][GEMMA4_ROLE]) == ["bf16"]
         # Both models default to the original weights (the maintainer's ruling of 2026-11-04).
         assert gemma4_distribution.GEMMA4_DEFAULT_QUANT == {"e2b": "bf16", "e4b": "bf16"}
-
-    def test_the_unmeasured_seats_carry_the_e2b_declarations_without_a_speed_claim(
-        self, tmp_path: Path
-    ) -> None:
-        """E4B の並列・融合の席は E2B と同じ宣言のまま、速いとは名乗らない（E4B は未計測）。"""
-        _, manifest = _assemble_e4b(tmp_path)
-        entry = manifest["models"]["e4b"]
-        e2b = gemma4_distribution.gemma4_quants("e2b")
-
-        for name in ("i4-gemvpar", "i4-fast"):
-            description = entry["quants"][name]["description"]
-            assert entry["quants"][name]["session"] == e2b[name]["session"]
-            assert "not yet measured" in description.lower()
-            assert "faster" not in description.lower()
 
     def test_the_card_names_no_drafter_for_an_e4b_only_manifest(self, tmp_path: Path) -> None:
         """配っていない drafter の上流を出所に書かない（base_model は manifest から導く）。"""
@@ -1324,33 +1329,29 @@ class TestGemma4RegularModels:
         assert f"{fixture.MAX_POSITION} (the model's declared position limit)" in card
         assert "also carries vision and audio towers;\n  this distribution contains neither" in card
         assert (
-            "  in two storages, the checkpoint's bf16 values unchanged and a form whose linear"
-            " weights\n"
-            "  were quantized to packed int4 (group 32) and embedding tables to int8; the\n" in card
+            "  decoder was extracted and re-expressed in the Karume container format; the weights"
+            " keep\n  the checkpoint's bf16 values unchanged; the per-layer embeddings were moved"
+            " out of the\n" in card
         )
+        assert "int4" not in card
 
 
-class TestGemma4Original:
-    """The original-weights preset `bf16` (the regular line's default — the maintainer's ruling of
-    2026-11-04): a second `model` container of the checkpoint's bf16 weights, the PLE included
-    (index schema 5), next to the int4 one, with the one int8 drafter paired to both."""
+class TestGemma4Bf16Product:
+    """The line's one `model` container, the preset `bf16` (the default — the maintainer's ruling
+    of 2026-11-04): the checkpoint's bf16 weights, the PLE included (index schema 5), with the int8
+    drafter borrowing its table."""
 
-    def test_the_sources_name_the_bf16_series_next_to_the_product(self, tmp_path: Path) -> None:
+    def test_the_sources_name_the_bf16_series(self, tmp_path: Path) -> None:
         for model in GEMMA4_REGULAR_MODELS:
             sources = gemma4_sources(tmp_path, model)
 
-            assert sources.original == tmp_path / f"gemma4-{model}-product-bf16"
+            assert sources.product == tmp_path / f"gemma4-{model}-product-bf16"
 
-    def test_it_places_the_bf16_container_beside_the_int4_one(self, gemma4_assembled) -> None:
+    def test_it_places_the_bf16_container_under_the_model_path(self, gemma4_assembled) -> None:
         out_dir, manifest = gemma4_assembled
-        model = _model(manifest)
-        container = model["weights"][GEMMA4_ROLE]["bf16"]["container"]
+        container = _model(manifest)["weights"][GEMMA4_ROLE]["bf16"]["container"]
 
-        assert container["parts"][0]["path"].startswith("e2b/model/model.bf16")
-        assert (
-            container["parts"][0]["path"]
-            != (model["weights"][GEMMA4_ROLE]["i4"]["container"]["parts"][0]["path"])
-        )
+        assert all(part["path"].startswith("e2b/model/model.bf16") for part in container["parts"])
         assert all((out_dir / part["path"]).is_file() for part in container["parts"])
 
     def test_the_bf16_container_carries_a_schema_5_ple(self, gemma4_assembled) -> None:
@@ -1366,55 +1367,18 @@ class TestGemma4Original:
         assert "scales" not in read
         assert read["values"]["rowBytes"] == fixture.LAYERS * fixture.DIM * 2
 
-    def test_it_refuses_a_plan_without_the_bf16_series(self, tmp_path: Path) -> None:
-        sources = replace(_build(tmp_path), original=None)
-
-        with pytest.raises(DistError, match="original-weights series is missing"):
-            gemma4_plan(sources, "e2b")
-
-    def test_the_q4_0_qat_line_refuses_a_bf16_series(self, tmp_path: Path) -> None:
-        """The other line ships no original-weights container — a series given to it is a
-        caller's mix-up, not a fourth preset."""
+    def test_the_q4_0_qat_line_refuses_the_bf16_series(self, tmp_path: Path) -> None:
+        """The other line's `model` role holds int4 alone — the regular bf16 series given to it is a
+        caller's mix-up."""
         sources = _build(tmp_path)
 
-        with pytest.raises(DistError, match="ships no original-weights container"):
+        with pytest.raises(DistError, match=f"{GEMMA4_ROLE}: storage .* has no i4"):
             gemma4_plan(sources, "e2b", gemma4_distribution.GEMMA4_QAT_Q4_0_LINE)
 
-    def test_it_refuses_an_int4_series_placed_as_the_original_weights(self, tmp_path: Path) -> None:
-        sources = _build(tmp_path, original_bytes=fixture.product_container())
-
-        with pytest.raises(DistError, match=f"{GEMMA4_ORIGINAL_ROLE}: storage"):
-            gemma4_plan(sources, "e2b")
-
-    def test_it_refuses_the_bf16_series_placed_as_the_int4_one(self, tmp_path: Path) -> None:
-        sources = _build(tmp_path, container=fixture.product_container(original=True))
-
-        with pytest.raises(DistError, match=f"{GEMMA4_ROLE}: storage"):
-            gemma4_plan(sources, "e2b")
-
-    def test_it_refuses_a_bf16_container_of_another_vocabulary(self, tmp_path: Path) -> None:
-        sources = _build(tmp_path, original_bytes=fixture.product_container(original=True, vocab=7))
-
-        with pytest.raises(DistError, match="not one model"):
-            gemma4_plan(sources, "e2b")
-
-    def test_it_refuses_a_bf16_container_of_another_ple_shape(self, tmp_path: Path) -> None:
+    def test_it_refuses_a_drafter_that_cannot_borrow_from_the_product(self, tmp_path: Path) -> None:
+        """The drafter borrows the product's table: one naming another key fails."""
         sources = _build(
-            tmp_path,
-            original_bytes=fixture.product_container(original=True, layers=2 * fixture.LAYERS),
-        )
-
-        with pytest.raises(DistError, match=r"PLE layers .* not one model"):
-            gemma4_plan(sources, "e2b")
-
-    def test_it_refuses_a_drafter_that_cannot_borrow_from_the_bf16_container(
-        self, tmp_path: Path
-    ) -> None:
-        """The drafter borrows the loaded target's table: a bf16 container without the table it
-        names (another embedding key) fails, though the int4 pair is valid."""
-        sources = _build(
-            tmp_path,
-            original_bytes=fixture.product_container(original=True, embedding_storage="other"),
+            tmp_path, drafter_bytes=fixture.drafter_container(shared_tensor="gemma4.embed_other")
         )
 
         with pytest.raises(DistError, match=r"指し先.*product-bf16"):
@@ -1426,9 +1390,7 @@ class TestGemma4Original:
         index["scales"] = index["values"]
         payload = json.dumps(index).encode("utf-8")
         assets[PLE_INDEX_ASSET] = AssetInput(PLE_INDEX_ROLE, len(payload), payload)
-        sources = _build(
-            tmp_path, original_bytes=fixture.product_container(original=True, assets=assets)
-        )
+        sources = _build(tmp_path, container=fixture.product_container(assets=assets))
 
         with pytest.raises(DistError, match=r"未知キー \['scales'\]"):
             gemma4_plan(sources, "e2b")
@@ -1436,21 +1398,22 @@ class TestGemma4Original:
     def test_it_refuses_an_int8_index_in_the_bf16_container(self, tmp_path: Path) -> None:
         sources = _build(
             tmp_path,
-            original_bytes=fixture.product_container(
-                original=True, assets=fixture.ple_container_assets()
-            ),
+            container=fixture.product_container(assets=fixture.ple_container_assets(storage="i8")),
         )
 
         # The schema 3 index carries a `scales` table, which a bf16 index does not have.
         with pytest.raises(DistError, match=r"product-bf16.*未知キー \['scales'\]"):
             gemma4_plan(sources, "e2b")
 
-    def test_the_card_and_the_notice_name_both_storages(self, gemma4_assembled) -> None:
+    def test_the_card_and_the_notice_state_the_bf16_values_unchanged(
+        self, gemma4_assembled
+    ) -> None:
         out_dir, manifest = gemma4_assembled
 
         card = render_gemma4_model_card(manifest, "hdae/karume-gemma4")
         notice = (out_dir / "NOTICE.md").read_text(encoding="utf-8")
 
+        assert "its weights shipped unchanged (bf16)" in card
         assert "the checkpoint's bf16 values unchanged" in card
         assert "Original weights (bf16)" in card
-        assert "keeps the checkpoints' BF16\n  weight values unchanged" in notice
+        assert "keep the checkpoints' BF16 values unchanged" in notice

@@ -59,7 +59,7 @@ ENTRIES: tuple[tuple[str, str, str, str], ...] = (
         "GEMMA4_DRAFTER_ROLE",
         "GEMMA4_DRAFTER_ROLE",
     ),
-    ("gemma4/export_product.py", "_export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
+    ("gemma4/export_product.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_product_qat.py", "export_series", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4/export_unified.py", "write_container", "GEMMA4_ROLE", "GEMMA4_ROLE"),
     ("gemma4_qat/export.py", "export_qat", "GEMMA4_ROLE", "GEMMA4_ROLE"),

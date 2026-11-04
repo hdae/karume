@@ -97,6 +97,7 @@ def _product(
     ple = model != "12b"
     return fixture.product_container(
         **{
+            "storage": "i4",
             "dim": QAT_DIM,
             "ple": ple,
             "assets": (
@@ -258,19 +259,30 @@ class TestQatLayout:
         assert entry["pipelineConfig"]["suppressTokens"] == sorted(SUPPRESSED)
 
 
+#: The session flags of the parallel and fused seats (ADR 0098 / 0104).
+PARALLEL_SESSIONS: Mapping[str, Mapping[str, Any]] = {
+    "i4-gemvpar": {"linearGemvReduce": "parallel", "stateAttentionReduce": "parallel"},
+    "i4-fast": {
+        "linearGemvReduce": "parallel",
+        "fuseRmsNormAdd": True,
+        "stateAttentionReduce": "parallel-fused",
+    },
+}
+
+
 class TestQatParallelSeats:
-    """E2B / E4B carry the regular line's parallel and fused seats over the line's int4 storage;
-    12B keeps the reference seat alone (none of its linears is on the parallel GEMV's table)."""
+    """E2B / E4B carry the parallel and fused seats over the line's int4 storage; 12B keeps the
+    reference seat alone (none of its linears is on the parallel GEMV's table)."""
 
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
-    def test_the_seats_are_the_regular_lines_session_flags(self, model: str) -> None:
+    def test_the_seats_declare_the_parallel_and_fused_session_flags(self, model: str) -> None:
         quants = gemma4_distribution.gemma4_qat_q4_0_quants(model)
-        regular = gemma4_distribution.GEMMA4_QUANTS
 
         assert list(quants) == ["i4", "i4-gemvpar", "i4-fast"]
         assert quants["i4"]["session"] == {}
-        for name in ("i4-gemvpar", "i4-fast"):
-            assert quants[name]["session"] == regular[name]["session"], name
+        for name, session in PARALLEL_SESSIONS.items():
+            # The order too: the manifest serialises the table as it is.
+            assert list(quants[name]["session"].items()) == list(session.items()), name
             assert quants[name]["weights"] == {}, name  # filled with the one storage per role
             # The speed sentence is the model's measured one, never another model's.
             assert quants[name]["description"].endswith(
@@ -290,13 +302,16 @@ class TestQatParallelSeats:
             GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM
         )
 
-    def test_the_seats_do_not_share_session_tables_with_the_regular_line(self) -> None:
-        """A manifest built for one line cannot alter the other's declaration (each table is a
+    def test_the_seats_do_not_share_session_tables_with_the_declaration(self) -> None:
+        """A manifest built for one model cannot alter the line's declaration (each table is a
         copy)."""
         quants = gemma4_distribution.gemma4_qat_q4_0_quants("e2b")
         quants["i4-fast"]["session"]["fuseRmsNormAdd"] = False
 
-        assert gemma4_distribution.GEMMA4_QUANTS["i4-fast"]["session"]["fuseRmsNormAdd"] is True
+        declared = gemma4_distribution.GEMMA4_QAT_Q4_0_PARALLEL_QUANTS["i4-fast"]["session"]
+        assert declared["fuseRmsNormAdd"] is True
+        again = gemma4_distribution.gemma4_qat_q4_0_quants("e4b")
+        assert again["i4-fast"]["session"] == PARALLEL_SESSIONS["i4-fast"]
 
     def test_every_model_of_the_line_has_a_default_quant_pins_and_a_drafter(self) -> None:
         line = set(GEMMA4_QAT_Q4_0_WEIGHTS_UPSTREAM)
@@ -463,10 +478,19 @@ class TestQatStorage:
             gemma4_qat_q4_0_plan(sources, "e2b")
 
     def test_it_refuses_a_product_whose_embedding_is_int8(self, tmp_path: Path) -> None:
-        """The regular E2B series (int8 embedding) has the line's graph and PLE inputs."""
+        """A product with an int8 embedding has the line's graph and PLE inputs; only the int8 ban
+        sees it."""
         sources = _build(tmp_path, product=_product("e2b", embedding_storage="i8"))
 
         with pytest.raises(DistError, match="i8"):
+            gemma4_qat_q4_0_plan(sources, "e2b")
+
+    def test_it_refuses_the_regular_bf16_product(self, tmp_path: Path) -> None:
+        """The regular line's product series (the checkpoint's bf16 values) has the same graph
+        contract; the storage tells it apart first."""
+        sources = _build(tmp_path, product=fixture.product_container())
+
+        with pytest.raises(DistError, match=f"{GEMMA4_ROLE}: storage .* has no i4"):
             gemma4_qat_q4_0_plan(sources, "e2b")
 
 
@@ -591,6 +615,16 @@ class TestQatCard:
 
         assert "The linear weights and the embedding table (also the output head) are" in card
         assert "per-layer embeddings of" not in card
+
+    def test_a_session_boolean_is_spelled_as_the_manifest_spells_it(self, tmp_path: Path) -> None:
+        """session の boolean は manifest と同じ JSON 表記で綴る — Python の `True` が出ると
+        読み手がそのまま貼った TypeScript と綴りが食い違う。"""
+        out_dir, _ = _assemble(tmp_path)
+        card = (out_dir / "README.md").read_text(encoding="utf-8")
+
+        fast = next(line for line in card.splitlines() if line.startswith("| `i4-fast`"))
+        assert "`fuseRmsNormAdd` = `true`" in fast
+        assert "True" not in fast
 
     def test_it_refuses_a_model_outside_the_line(self, tmp_path: Path) -> None:
         _, manifest = _assemble(tmp_path)

@@ -721,17 +721,35 @@ class TestModelAxis:
 
     @pytest.mark.parametrize(
         ("script", "suffix"),
-        [(decode, "decode"), (token, "decode-token"), (product, "product")],
+        [(decode, "decode"), (token, "decode-token"), (product, "product-bf16")],
     )
     def test_the_chunk_series_names_follow_the_model(self, script, suffix):
         """chunk 系列は `gemma4-<model>-<接尾>`（配布 recipe の `gemma4_series_name` と同綴り）。"""
         assert script.DEFAULT_OUT_DIR.name == gemma4_series_name("e2b", suffix)
         assert gx.series_dir("e4b", suffix).name == gemma4_series_name("e4b", suffix)
 
-    @pytest.mark.parametrize(
-        ("script", "series"),
-        [(token, "gemma4-e4b-decode-token"), (product, "gemma4-e4b-product")],
-    )
+    def test_the_product_series_follows_the_model_and_takes_its_own_goldens(
+        self, monkeypatch, capsys
+    ):
+        """`--model e4b` reads E4B's checkpoint, writes E4B's bf16 product series and takes E4B's
+        greedy steps — the series borrows no goldens, so no `reference` reaches the export."""
+        captured: dict[str, object] = {}
+
+        def run(*args, **options):
+            captured.update(options, args=args)
+            return {}
+
+        monkeypatch.setattr(product, "export_series", run)
+        product.main(["--model", "e4b"])
+        capsys.readouterr()
+
+        *_, model_dir, out = captured["args"]
+        assert model_dir.name == "gemma-4-E4B-it"
+        assert out.name == "gemma4-e4b-product-bf16"
+        assert captured["steps"] == decode.GREEDY_STEPS["e4b"]
+        assert "reference" not in captured
+
+    @pytest.mark.parametrize(("script", "series"), [(token, "gemma4-e4b-decode-token")])
     def test_the_borrowed_goldens_default_to_the_same_models_decode_series(
         self, monkeypatch, capsys, script, series
     ):

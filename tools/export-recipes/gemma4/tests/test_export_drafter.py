@@ -3,8 +3,8 @@
 実重みの emit は手動（chunk 系列 3 本のテストと同じ規律）。ここで固定するのは、壊れると
 **偽 PASS** になる側の規律だけ:
 
-- 量子化の席が **i8 の 1 周だけ**で、`nn.Linear` 全部 + 共有主表ちょうどに掛かること
-  （i4 が混ざっても tied 実体が二重に丸まっても、壊れるのは値だけ）
+- 量子化の席が **i8 の 1 周だけ**で、`nn.Linear` 全部ちょうどに掛かり、the shared table stays
+  unrounded（i4 が混ざっても tied 実体が二重に丸まっても、壊れるのは値だけ）
 - golden ケースの素材がリポ内の文書で、**段落境界**で切れること（token 途中で切ると継続が
   数語ループへ退化して golden が痩せる）
 - 貸し手（製品コンテナ）から**構造で**引く 2 つ — external スロットの実形と共有テンソルキー
@@ -82,7 +82,7 @@ def _toy_wrapper() -> torch.nn.Module:
     """{@link drafter.quantize_wrapper} が見る**モジュール構成だけ**を模した器。
 
     実物のラッパを組むには transformers と HF チェックポイントが要るので、席の規律
-    （`nn.Linear` 全部 + 共有主表を丸め、norm は触らない）はこの器で固定する。FQN の綴りは
+    （`nn.Linear` 全部を丸め、共有主表と norm は触らない）はこの器で固定する。FQN の綴りは
     実物と同じ形（`target_embed` / `drafter.<何か>`）にする。
     """
     torch.manual_seed(0)
@@ -99,23 +99,27 @@ def _toy_wrapper() -> torch.nn.Module:
 class TestTheQuantizationSeats:
     """丸めるのは **i8 の 1 周だけ**（drafter に i4 席は無い — 2026-09-08 の受理率実測）。"""
 
-    def test_every_linear_and_the_shared_table_are_the_seats(self):
+    def test_every_linear_is_a_seat_and_the_shared_table_is_not(self):
+        """The shared table is the lender's bf16 values, so it is no int8 seat."""
         assert drafter.int8_seats(_toy_wrapper()) == {
-            f"{drafter.TARGET_EMBED_MODULE}.weight",
             "drafter.lm_head.weight",
             "drafter.pre_projection.weight",
         }
 
-    def test_it_rounds_exactly_those_seats_and_leaves_the_norm_alone(self):
-        """norm は `fake_quant_int8` の対象型に無いので 1 ビットも動かない（f32 席）。"""
+    def test_it_rounds_exactly_those_seats_and_leaves_the_norm_and_the_table_alone(self):
+        """norm は `fake_quant_int8` の対象型に無いので 1 ビットも動かない（f32 席）。The shared
+        table has a weight slot of an eligible type, so it is left alone by name — its values are
+        what the goldens see of the lender's bf16 table."""
         wrapper = _toy_wrapper()
-        before = wrapper.drafter.norm.weight.detach().clone()
+        norm = wrapper.drafter.norm.weight.detach().clone()
+        table = wrapper.target_embed.weight.detach().clone()
 
         report, scales = drafter.quantize_wrapper(wrapper)
 
         assert set(scales) == drafter.int8_seats(wrapper)
-        assert report.modules == 3
-        assert torch.equal(wrapper.drafter.norm.weight, before)
+        assert report.modules == 2
+        assert torch.equal(wrapper.drafter.norm.weight, norm)
+        assert torch.equal(wrapper.target_embed.weight, table)
 
     def test_a_resurrected_tied_embedding_is_rejected(self):
         """`drafter.model.embed_tokens` が生き返った世代 — 同じ実体が 1 周で 2 度丸まる。
@@ -247,8 +251,9 @@ def _lender_document() -> dict[str, Any]:
 
 
 def _lender_layouts() -> dict[str, str]:
-    """貸し手の束縛表（テンソルキー → 格納の layout）。主表は i8 常駐。"""
-    return {TINY_SHARED_TENSOR: "i8"}
+    """The lender's binding table (tensor key → storage layout): the regular product holds its
+    table as bf16."""
+    return {TINY_SHARED_TENSOR: "bf16"}
 
 
 class TestTheCommandLine:
@@ -320,6 +325,23 @@ class TestReadingTheLender:
             drafter.lender_slots(
                 graph,
                 _lender_layouts(),
+                SimpleNamespace(),
+                SimpleNamespace(
+                    vocab_size=TINY_VOCAB,
+                    hidden_size=TINY_BACKBONE,
+                    num_hidden_layers=2,
+                    layer_types=list(TINY_LAYER_TYPES),
+                    num_kv_shared_layers=0,
+                ),
+            )
+
+    def test_a_lender_whose_table_is_not_bf16_is_rejected(self):
+        """The shared declaration follows the regular product's bf16 table: a lender holding the
+        table as int8 (a rounded product series) is another lender than the one declared."""
+        with pytest.raises(AssertionError, match="'i8'"):
+            drafter.lender_slots(
+                _lender_document(),
+                {TINY_SHARED_TENSOR: "i8"},
                 SimpleNamespace(),
                 SimpleNamespace(
                     vocab_size=TINY_VOCAB,

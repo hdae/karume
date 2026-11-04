@@ -157,18 +157,33 @@ class TestQatCardAttribution:
     def test_it_attributes_only_the_models_it_carries(self) -> None:
         """A model not in the manifest is not redistributed, so it is not named as a source."""
         card = render_card(_qat_manifest("e4b"), REPO)
+        front_matter = card.split("---")[1]
 
         assert checkpoint_repo("e2b") not in card
         for pin in SOURCES["e2b"].pins.by_role().values():
             assert pin.revision not in card
+        assert f"  - {SOURCES['e2b'].pins.tokenizer.repo}\n" not in front_matter
 
     def test_the_front_matter_points_to_the_licence_the_upstream_names(self) -> None:
         front_matter = render_card(_two_model_manifest(), REPO).split("---")[1]
 
         assert "license: apache-2.0" in front_matter
         assert f"license_link: {QAT_LICENSE_LINK}" in front_matter
-        assert "base_model_relation" not in front_matter
-        assert f"  - {checkpoint_repo('e2b')}\n  - {checkpoint_repo('e4b')}" in front_matter
+        assert "base_model_relation: quantized" in front_matter
+
+    def test_the_front_matter_lists_each_base_model_before_its_mobile_checkpoint(self) -> None:
+        """Every redistributed upstream is a `base_model`: per model the regular `-it` repository
+        (the tokenizer's source, and the model the mobile checkpoint is a QAT form of), then the
+        mobile checkpoint — the q4_0 QAT line's card lists them in the same order."""
+        front_matter = render_card(_two_model_manifest(), REPO).split("---")[1]
+
+        listed = "".join(
+            f"  - {SOURCES[model].pins.tokenizer.repo}\n  - {checkpoint_repo(model)}\n"
+            for model in ("e2b", "e4b")
+        )
+        assert f"base_model:\n{listed}" in front_matter
+        assert SOURCES["e2b"].pins.tokenizer.repo == "google/gemma-4-E2B-it"
+        assert SOURCES["e4b"].pins.tokenizer.repo == "google/gemma-4-E4B-it"
 
     def test_it_states_the_changes(self) -> None:
         attribution = _attribution(render_card(_qat_manifest(), REPO))

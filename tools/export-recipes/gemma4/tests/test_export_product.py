@@ -60,11 +60,16 @@ from karume.ple import (
 from karume.quantize import quantize_to_int8, round_weights_to_bf16
 from karume.states import to_states_form
 
+#: The schema-3 int8 storage: the generic PLE asset path (`ple_container_assets` /
+#: `assert_ple_assets`) these tests cut, write and read back with per-row scales. The series itself
+#: stores bf16 (`product.BF16_STORAGE`).
+INT8 = "i8"
+
 #: tiny 系列で **2 本以上**の block を作らせる block 上限（実物は既定の 32 MiB で 9 本 —
 #: 1 本しか出ない上限で driver を回すと、block 列・索引・probe の block 跨ぎが 1 度も踏まれない）。
-TINY_PLE_BLOCK = ple_row_bytes(product.PLE_STORAGE, len(DECODE_LAYER_TYPES), PLE_DIM)[
-    product.PLE_VALUES_KEY
-] * (VOCAB // 2)
+TINY_PLE_BLOCK = ple_row_bytes(INT8, len(DECODE_LAYER_TYPES), PLE_DIM)[product.PLE_VALUES_KEY] * (
+    VOCAB // 2
+)
 
 #: 系列の要約の欄（順序込み）。ここが変わると実走の記録の形が変わる。
 PRODUCT_SUMMARY_KEYS = [
@@ -83,6 +88,10 @@ PRODUCT_SUMMARY_KEYS = [
     "form",
     "reference",
     "sanity",
+    "greedy",
+    "greedy_steps",
+    "margin_min",
+    "continuation",
 ]
 
 
@@ -91,14 +100,11 @@ PRODUCT_SUMMARY_KEYS = [
 
 class TestPleTokenBytes:
     def test_it_counts_the_int8_values_and_the_per_row_scales(self):
-        assert product.ple_token_bytes(35, 256) == 35 * 256 + 35 * 4
+        assert product.ple_token_bytes(35, 256, INT8) == 35 * 256 + 35 * 4
 
-    def test_the_real_model_lands_on_the_recorded_figure(self):
-        """実物（35 層 × 256）の 9,100 バイト/token — ADR 0085 の連続 1 読みの長さ。"""
-        assert product.ple_token_bytes(35, 256) == 9100
-
-    def test_a_bf16_table_has_two_bytes_per_value_and_no_scales(self):
-        assert product.ple_token_bytes(35, 256, product.BF16_STORAGE) == 35 * 256 * 2
+    def test_the_real_bf16_table_has_two_bytes_per_value_and_no_scales(self):
+        """実物（35 層 × 256）の 17,920 バイト/token — ADR 0085 の連続 1 読みの長さ。"""
+        assert product.ple_token_bytes(35, 256, product.BF16_STORAGE) == 35 * 256 * 2 == 17_920
 
 
 class TestPleBlockRanges:
@@ -107,7 +113,7 @@ class TestPleBlockRanges:
     @staticmethod
     def _values(tokens: int, layers: int, dim: int, block_bytes: int):
         return ple_block_ranges(
-            storage=product.PLE_STORAGE,
+            storage=INT8,
             tokens=tokens,
             layers=layers,
             dim=dim,
@@ -129,7 +135,7 @@ class TestPleBlockRanges:
         assert rows == [500, 500]
 
     def test_every_block_stays_under_the_limit(self):
-        row = ple_row_bytes(product.PLE_STORAGE, 35, 256)[product.PLE_VALUES_KEY]
+        row = ple_row_bytes(INT8, 35, 256)[product.PLE_VALUES_KEY]
         for start, stop in self._values(262144, 35, 256, 32 * 1024 * 1024):
             assert (stop - start) * row <= 32 * 1024 * 1024
 
@@ -163,9 +169,9 @@ class TestPleTableRows:
 class TestPleProbeTokens:
     @staticmethod
     def _ranges():
-        return ple_block_ranges(
-            storage=product.PLE_STORAGE, tokens=1000, layers=1, dim=8, block_bytes=4000
-        )[product.PLE_VALUES_KEY]
+        return ple_block_ranges(storage=INT8, tokens=1000, layers=1, dim=8, block_bytes=4000)[
+            product.PLE_VALUES_KEY
+        ]
 
     def test_it_touches_both_sides_of_every_block_boundary(self):
         ranges = self._ranges()
@@ -209,39 +215,29 @@ def _quantize_tables(tables: nn.ModuleList) -> dict[str, torch.Tensor]:
     return dict(fake_quant_int8(holder, include=gx.is_int8_module).scales)
 
 
-class TestQuantizedPleTables:
-    def test_the_int8_values_and_scales_reproduce_the_fake_quant_weights(self, tiny_tables):
-        """`f32(i8) * scale` が丸め済みの重みを**厳密に**復元する（ADR 0019 の ±127 論証）。"""
-        scales = _quantize_tables(tiny_tables)
-        rounded = [table.weight.data.clone() for table in tiny_tables]
-
-        values, row_scales = product.quantized_ple_tables(tiny_tables, scales)
-
-        for index, weight in enumerate(rounded):
-            restored = values[index].to(torch.float32) * row_scales[index].unsqueeze(-1)
-            assert torch.equal(restored, weight), f"表 {index}"
-
-    def test_it_releases_the_float32_bodies(self, tiny_tables):
-        """MUST: 1 表ずつ f32 を手放す（ピーク RAM の根拠 — 実物では 9.4GB）。"""
-        scales = _quantize_tables(tiny_tables)
-
-        product.quantized_ple_tables(tiny_tables, scales)
-
-        assert all(table.weight.data.numel() == 0 for table in tiny_tables)
-
-    def test_a_missing_scale_fails_loudly(self, tiny_tables):
-        with pytest.raises(AssertionError, match="scale 台帳キー"):
-            product.quantized_ple_tables(tiny_tables, {})
+def _int8_tables(tables: nn.ModuleList) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """The fake-quantized tables as int8 values `[V, D]` and per-row scales `[V]` — the layered
+    input of an int8 `product.ple_container_assets`. The scales are the fake-quant's own (an amax
+    taken again could move one ulp), so `f32(i8) * scale` restores the rounded weights exactly."""
+    scales = _quantize_tables(tables)
+    values: list[torch.Tensor] = []
+    row_scales: list[torch.Tensor] = []
+    for index, table in enumerate(tables):
+        scale = scales[f"{gx.PER_LAYER_PREFIX}{index}.weight"]
+        values.append(quantize_to_int8(table.weight.data, scale))
+        row_scales.append(scale.reshape(-1).clone())
+    return values, row_scales
 
 
 @pytest.fixture
 def tiny_ple(tiny_tables, tmp_path):
-    """tiny な PLE を 2 block 以上へ割って容器へ据え、`(容器 path, 索引, probe, 参照)` を返す。"""
-    scales = _quantize_tables(tiny_tables)
+    """tiny な int8 PLE を 2 block 以上へ割って容器へ据え、`(容器 path, 索引, probe, 参照)` を
+    返す。"""
+    values, row_scales = _int8_tables(tiny_tables)
     layers = len(DECODE_LAYER_TYPES)
     embed_scale = float(PLE_DIM) ** 0.5
     ranges = ple_block_ranges(
-        storage=product.PLE_STORAGE,
+        storage=INT8,
         tokens=VOCAB,
         layers=layers,
         dim=PLE_DIM,
@@ -253,7 +249,6 @@ def tiny_ple(tiny_tables, tmp_path):
         reference = ple.per_layer_inputs(
             tiny_tables, torch.tensor([list(probe)], dtype=torch.int64), embed_scale
         )
-    values, row_scales = product.quantized_ple_tables(tiny_tables, scales)
     spill_dir = tmp_path / "staging"
     spill_dir.mkdir()
     built = product.ple_container_assets(
@@ -264,6 +259,7 @@ def tiny_ple(tiny_tables, tmp_path):
         dim=PLE_DIM,
         embed_scale=embed_scale,
         spill_dir=spill_dir,
+        storage=INT8,
         block_bytes=TINY_PLE_BLOCK,
     )
     # 実物と同じ順序 — 一時ファイルへ落とした直後に i8 実体を手放す（export 中に持たない）。
@@ -323,7 +319,7 @@ class TestAssertPleAssets:
         container, index, _, _, _ = tiny_ple
         layers = len(DECODE_LAYER_TYPES)
 
-        assert index["storage"] == product.PLE_STORAGE
+        assert index["storage"] == INT8
         assert index[product.PLE_VALUES_KEY]["rowBytes"] == layers * PLE_DIM
         assert index[product.PLE_SCALES_KEY]["rowBytes"] == layers * 4
         declared = read_asset_declarations(container)
@@ -790,8 +786,13 @@ def tiny_product_series(monkeypatch, tmp_path_factory):
 
     差し替えるのは**素材の出どころ**（模型・ケース・トークナイザ）と、tiny な乱数重みでは
     立てられない期待（最終位置の 1 位）と、tiny な vocab では 1 本にしかならない sidecar の
-    上限だけ。量子化 → sidecar → 検査 → export → 手術 → 書き出し → 形検査 → 公開の経路は
-    本物を通す（差し替えの方針は `test_export_decode.tiny_series` と同じ）。
+    上限だけ。sidecar → 検査 → export → 手術 → 書き出し → 形検査 → 公開の経路は本物を通す
+    （差し替えの方針は `test_export_decode.tiny_series` と同じ）。
+
+    The checkpoint is bf16 (the tiny model and tables rounded to bf16 as the loader returns them —
+    the real checkpoint is BF16); the loaded 2-D weights and PLE tables (`ple.<layer>`) are
+    recorded, generation defaults sit in the checkpoint directory and the margin floor is 0.
+    Returns `(cases, checkpoint, weights, seen)`.
     """
     transformers = pytest.importorskip("transformers")
 
@@ -815,7 +816,6 @@ def tiny_product_series(monkeypatch, tmp_path_factory):
 
     monkeypatch.setattr(gx, "load_model_and_tables", materials)
 
-    from _shared import decode_series as shared
     from gemma4 import provenance
     from gemma4.tests.test_export_decode import TINY_CASE_NAMES, _StubSeriesTokenizer
 
@@ -827,14 +827,6 @@ def tiny_product_series(monkeypatch, tmp_path_factory):
     checkpoint = tmp_path_factory.mktemp("checkpoint")
     for name in provenance.FINGERPRINT_FILES:
         (checkpoint / name).write_bytes(name.encode())
-    reference = tmp_path_factory.mktemp("reference-series")
-    from safetensors.torch import save_file
-
-    for name, ids in cases:
-        save_file(
-            {shared.PROMPT_KEY: ids[0].to(torch.int32).contiguous()},
-            str(reference / f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}"),
-        )
     monkeypatch.setattr(gx, "build_cases", lambda model_dir, sym_max, window: cases)
     monkeypatch.setattr(gx, "load_tokenizer", lambda model_dir: _StubSeriesTokenizer())
     # tiny 系列でも PLE を 2 block 以上へ割らせる（block 跨ぎを 1 度は踏む）。
@@ -855,125 +847,11 @@ def tiny_product_series(monkeypatch, tmp_path_factory):
         return {"stub": "ok"}
 
     monkeypatch.setattr(gx, "_sanity", record)
-    return cases, checkpoint, reference, seen
 
-
-class TestExportSeries:
-    def test_it_publishes_the_container_the_probe_and_the_provenance(
-        self, tiny_product_series, tmp_path
-    ):
-        cases, checkpoint, reference, seen = tiny_product_series
-        out_dir = tmp_path / "series"
-
-        summary = product.export_series(
-            checkpoint,
-            out_dir,
-            sym_max=TINY_SYM_MAX,
-            reference=reference,
-        )
-
-        assert summary["ple_blocks"][product.PLE_VALUES_KEY] > 1, "block 跨ぎを踏ませる"
-        # PLE は容器の資産なので、系列には独立したファイルとして現れない。
-        assert sorted(path.name for path in out_dir.iterdir()) == sorted(
-            [
-                product.PLE_PROBE_FILE,
-                provenance_file(),
-                *_container_files(out_dir),
-            ]
-        )
-        assert list(summary) == PRODUCT_SUMMARY_KEYS
-        assert summary["outputs"] == 2
-        assert set(seen["greedy"]) == {name for name, _ in cases}
-        # 作業席も退避席も残らない（据え替えの後片付けは core の原語の担当）。
-        assert list(tmp_path.iterdir()) == [out_dir]
-
-    def test_the_index_describes_every_block_and_the_dequantization(
-        self, tiny_product_series, tmp_path
-    ):
-        _, checkpoint, reference, _ = tiny_product_series
-        out_dir = tmp_path / "series"
-
-        product.export_series(
-            checkpoint,
-            out_dir,
-            sym_max=TINY_SYM_MAX,
-            reference=reference,
-        )
-
-        index = _published_index(out_dir)
-        assert index["storage"] == product.PLE_STORAGE
-        assert index["tokens"] == VOCAB
-        assert index["layers"] == len(DECODE_LAYER_TYPES)
-        assert index["dim"] == PLE_DIM
-        assert index["embedScale"] == pytest.approx(float(PLE_DIM) ** 0.5)
-        blocks = index[product.PLE_VALUES_KEY]["blocks"]
-        assert blocks[0]["start"] == 0
-        assert blocks[-1]["stop"] == VOCAB
-
-    def test_the_probe_reference_matches_the_published_assets(self, tiny_product_series, tmp_path):
-        """据えた資産だけで逆量子化ビット一致が言えること（TS 側の門が読む 2 本の対）。"""
-        _, checkpoint, reference, _ = tiny_product_series
-        out_dir = tmp_path / "series"
-
-        product.export_series(
-            checkpoint,
-            out_dir,
-            sym_max=TINY_SYM_MAX,
-            reference=reference,
-        )
-
-        index = _published_index(out_dir)
-        with safe_open(str(out_dir / product.PLE_PROBE_FILE), framework="pt") as handle:
-            probe = handle.get_tensor(product.PROBE_TOKENS_KEY)
-            expected = handle.get_tensor(product.PROBE_INPUTS_KEY)
-
-        product.assert_ple_assets(
-            out_dir / gx.MODEL_FILE, index, [int(token) for token in probe], expected
-        )
-
-    def test_a_stale_reference_series_is_rejected_before_the_export(
-        self, tiny_product_series, tmp_path
-    ):
-        """流用する golden の検めは席へ入る前（数十分の export を始める前に落とす）。"""
-        _, checkpoint, _unused, _ = tiny_product_series
-        out_dir = tmp_path / "series"
-
-        with pytest.raises(AssertionError, match="参照 golden 系列"):
-            product.export_series(
-                checkpoint,
-                out_dir,
-                sym_max=TINY_SYM_MAX,
-                reference=Path(tmp_path / "missing"),
-            )
-        assert not out_dir.exists()
-
-
-# ---- bf16 storage -----------------------------------------------------------
-
-#: The bf16 series' summary: the i4 series' fields, then the own goldens.
-BF16_SUMMARY_KEYS = [
-    *PRODUCT_SUMMARY_KEYS,
-    "greedy",
-    "greedy_steps",
-    "margin_min",
-    "continuation",
-]
-
-#: The tiny bf16 series' greedy steps.
-BF16_STEPS = 2
-
-
-@pytest.fixture
-def tiny_bf16_series(monkeypatch, tiny_product_series):
-    """{@link tiny_product_series} with a bf16 checkpoint (the tiny model and tables rounded to
-    bf16 as the loader returns them — the real checkpoint is BF16), the loaded 2-D weights and PLE
-    tables (`ple.<layer>`) recorded, generation defaults in the checkpoint directory and the margin
-    floor at 0."""
-    cases, checkpoint, _reference, seen = tiny_product_series
     load = gx.load_model_and_tables
     weights: dict[str, torch.Tensor] = {}
 
-    def materials(model_dir, **options):
+    def bf16_materials(model_dir, **options):
         model, tables = load(model_dir, **options)
         round_weights_to_bf16(model)
         round_weights_to_bf16(tables)
@@ -989,7 +867,7 @@ def tiny_bf16_series(monkeypatch, tiny_product_series):
         )
         return model, tables
 
-    monkeypatch.setattr(gx, "load_model_and_tables", materials)
+    monkeypatch.setattr(gx, "load_model_and_tables", bf16_materials)
     monkeypatch.setattr(decode, "MARGIN_FLOOR", 0.0)
     (checkpoint / "generation_config.json").write_text(
         json.dumps({"temperature": 1.0, "top_k": 64, "top_p": 0.95}), encoding="utf-8"
@@ -997,38 +875,42 @@ def tiny_bf16_series(monkeypatch, tiny_product_series):
     return cases, checkpoint, weights, seen
 
 
-class TestExportSeriesBf16:
+#: The tiny series' greedy steps.
+STEPS = 2
+
+
+class TestExportSeries:
     def test_it_publishes_the_container_the_probe_the_goldens_and_the_record(
-        self, tiny_bf16_series, tmp_path
+        self, tiny_product_series, tmp_path
     ):
-        cases, checkpoint, _weights, seen = tiny_bf16_series
+        cases, checkpoint, _weights, seen = tiny_product_series
         out_dir = tmp_path / "gemma4-e2b-product-bf16"
 
-        summary = product.export_series_bf16(
-            checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS
-        )
+        summary = product.export_series(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=STEPS)
 
+        assert summary["ple_blocks"][product.PLE_VALUES_KEY] > 1, "block 跨ぎを踏ませる"
+        # PLE は容器の資産なので、系列には独立したファイルとして現れない。
         greedy = [f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}" for name, _ in cases]
         assert sorted(path.name for path in out_dir.iterdir()) == sorted(
             [product.PLE_PROBE_FILE, provenance_file(), *greedy, *_container_files(out_dir)]
         )
-        assert list(summary) == BF16_SUMMARY_KEYS
+        assert list(summary) == PRODUCT_SUMMARY_KEYS
+        assert summary["outputs"] == 2
         assert summary["greedy"] == greedy
-        assert summary["greedy_steps"] == BF16_STEPS
+        assert summary["greedy_steps"] == STEPS
         assert set(seen["greedy"]) == {name for name, _ in cases}
+        # 作業席も退避席も残らない（据え替えの後片付けは core の原語の担当）。
         assert list(tmp_path.iterdir()) == [out_dir]
 
     def test_every_linear_and_the_embedding_hold_the_loaded_bits_as_bf16(
-        self, tiny_bf16_series, tmp_path
+        self, tiny_product_series, tmp_path
     ):
         """The checkpoint's values are stored as they are: no i8 / i4 weight, and every bf16
         tensor decodes to the loaded weight bit for bit."""
-        _, checkpoint, weights, _ = tiny_bf16_series
+        _, checkpoint, weights, _ = tiny_product_series
         out_dir = tmp_path / "series"
 
-        summary = product.export_series_bf16(
-            checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS
-        )
+        summary = product.export_series(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=STEPS)
 
         stored = read_stored(out_dir / gx.MODEL_FILE)
         compressed = {key: entry for key, entry in stored.items() if entry.layout != "f32"}
@@ -1050,19 +932,26 @@ class TestExportSeriesBf16:
             assert torch.equal(decoded, weights[source]), key
 
     def test_the_ple_is_schema_5_bf16_and_holds_the_loaded_tables_bit_for_bit(
-        self, tiny_bf16_series, tmp_path
+        self, tiny_product_series, tmp_path
     ):
         """Every token row of the stored table (not only the probe) is the loaded tables' bf16 bits,
         and the probe check passes on the published container."""
-        _, checkpoint, weights, _ = tiny_bf16_series
+        _, checkpoint, weights, _ = tiny_product_series
         out_dir = tmp_path / "series"
 
-        product.export_series_bf16(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS)
+        product.export_series(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=STEPS)
 
         index = _published_index(out_dir)
         assert index["schema"] == PLE_FLOAT_INDEX_SCHEMA == 5
         assert index["storage"] == product.BF16_STORAGE
         assert "scales" not in index
+        assert index["tokens"] == VOCAB
+        assert index["layers"] == len(DECODE_LAYER_TYPES)
+        assert index["dim"] == PLE_DIM
+        assert index["embedScale"] == pytest.approx(float(PLE_DIM) ** 0.5)
+        blocks = index[product.PLE_VALUES_KEY]["blocks"]
+        assert blocks[0]["start"] == 0
+        assert blocks[-1]["stop"] == VOCAB
         roles = {
             role for role, _length in read_asset_declarations(out_dir / gx.MODEL_FILE).values()
         }
@@ -1084,11 +973,11 @@ class TestExportSeriesBf16:
             expected = handle.get_tensor(product.PROBE_INPUTS_KEY)
         product.assert_ple_assets(out_dir / gx.MODEL_FILE, index, probe, expected)
 
-    def test_the_record_names_the_series_own_goldens(self, tiny_bf16_series, tmp_path):
-        cases, checkpoint, _, _ = tiny_bf16_series
+    def test_the_record_names_the_series_own_goldens(self, tiny_product_series, tmp_path):
+        cases, checkpoint, _, _ = tiny_product_series
         out_dir = tmp_path / "gemma4-e4b-product-bf16"
 
-        product.export_series_bf16(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS)
+        product.export_series(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=STEPS)
 
         record = json.loads((out_dir / provenance_file()).read_text(encoding="utf-8"))
         assert record["series"] == out_dir.name
@@ -1098,33 +987,20 @@ class TestExportSeriesBf16:
             f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}" for name, _ in cases
         )
 
-    def test_the_goldens_are_the_stored_model_s(self, tiny_bf16_series, tmp_path):
+    def test_the_goldens_are_the_stored_model_s(self, tiny_product_series, tmp_path):
         """Each golden is the greedy continuation its file records."""
-        cases, checkpoint, _, _ = tiny_bf16_series
+        cases, checkpoint, _, _ = tiny_product_series
         out_dir = tmp_path / "series"
 
-        summary = product.export_series_bf16(
-            checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=BF16_STEPS
-        )
+        summary = product.export_series(checkpoint, out_dir, sym_max=TINY_SYM_MAX, steps=STEPS)
 
         for name, ids in cases:
             path = out_dir / f"{shared.GREEDY_PREFIX}{name}{shared.GREEDY_SUFFIX}"
             with safe_open(str(path), framework="pt") as handle:
                 assert torch.equal(handle.get_tensor(shared.PROMPT_KEY).to(torch.int64), ids[0])
                 expected = handle.get_tensor(shared.EXPECTED_KEY).tolist()
-            assert len(expected) == BF16_STEPS
+            assert len(expected) == STEPS
             assert summary["continuation"][name] == _StubSeriesTokenizer().decode(expected)
-
-    def test_a_knob_of_the_other_storage_fails_before_the_load(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            gx, "load_model_and_tables", lambda *args, **kwargs: pytest.fail("loaded")
-        )
-
-        with pytest.raises(SystemExit):
-            product.main(["--storage", "bf16", "--reference", "elsewhere"])
-        with pytest.raises(SystemExit):
-            product.main(["--steps", "3"])
-        assert "--reference" in capsys.readouterr().err
 
 
 class TestBf16PleTables:
@@ -1167,13 +1043,9 @@ def _published_index(out_dir: Path) -> dict:
 
 def test_the_quantized_values_survive_a_round_trip_through_the_blocks(tiny_tables, tmp_path):
     """全 token・全層の再配置が i8 のバイト列として保たれること（probe の外側も見る）。"""
-    scales = _quantize_tables(tiny_tables)
     layers = len(DECODE_LAYER_TYPES)
-    expected = [
-        quantize_to_int8(table.weight.data, scales[f"{gx.PER_LAYER_PREFIX}{index}.weight"])
-        for index, table in enumerate(tiny_tables)
-    ]
-    values, row_scales = product.quantized_ple_tables(tiny_tables, scales)
+    values, row_scales = _int8_tables(tiny_tables)
+    expected = [value.clone() for value in values]
     spill_dir = tmp_path / "staging"
     spill_dir.mkdir()
     built = product.ple_container_assets(
@@ -1184,6 +1056,7 @@ def test_the_quantized_values_survive_a_round_trip_through_the_blocks(tiny_table
         dim=PLE_DIM,
         embed_scale=float(PLE_DIM) ** 0.5,
         spill_dir=spill_dir,
+        storage=INT8,
         block_bytes=TINY_PLE_BLOCK,
     )
     values.clear()

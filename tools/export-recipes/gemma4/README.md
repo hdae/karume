@@ -242,16 +242,16 @@ series — the existing golden bytes are only read.
 
 ## What `export_product.py` emits
 
-The **product graph**, `outputs/series/gemma4-e2b-product/`: the same states-form chunk graph with
-two changes that ship together in a single re-export (ADR
-[0083](../../../docs/decisions/0083-generation-api-surface.md) consequences, plan α).
+The **product graph**, `outputs/series/gemma4-e2b-product-bf16/` — the regular line's `model`
+container: the same states-form chunk graph with two changes that ship together in a single
+export (ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) consequences, plan α).
 
 - The **per-layer embeddings leave the graph.** They are a pure row lookup over `input_ids` alone,
   so they become an ordinary graph input `per_layer_inputs[1, M, 35, 256]` supplied by the host.
   Nothing in the runtime contract changes — there is no "pageable initializer" (ADR
-  [0085](../../../docs/decisions/0085-ple-host-gather.md) decision 6). The container drops from
-  3,787 MiB to **1,512 MiB** (measured), because every initializer is given a resident GPU slot at
-  session build time and 2,240 MiB of int8 tables plus 35 MiB of per-row scales were exactly that.
+  [0085](../../../docs/decisions/0085-ple-host-gather.md) decision 6). Every initializer is given a
+  resident GPU slot at session build time, so the table's 4,697,620,480 bytes (E2B, bf16) leave the
+  resident set.
 - The **exit is the selected rows' logits and hidden states**, `logits[1, R, 262144]` (output 0)
   and the post-final-norm `hidden[1, R, 1536]` (output 1), i.e. `export_token.py`'s wiring with the
   `argmax` removed and the row select widened. `R` is a symbol bound by the `last_row[R]` input:
@@ -261,36 +261,41 @@ two changes that ship together in a single re-export (ADR
   outputs by slot number. Sampling, temperature, top-k and the RNG stay on the host (ADR 0083
   decision 6); the read-back for a prefill chunk drops from 32 MiB (`[1, M, V]`) to 1 MiB.
 
+Every weight is the **checkpoint's own bf16 bits** (ADR
+[0131](../../../docs/decisions/0131-bf16-weight-execution.md)): the checkpoint is BF16, so nothing is
+rounded, and the writer stores a weight as bf16 only when the round trip is exact. The form check
+counts every linear and the embedding (the tied head reads it) as bf16, and no i8 / i4.
+
 The tables are redistributed as **assets of the product container**, not as weights (ADR
 [0109](../../../docs/decisions/0109-manifest-v5-container.md) decision 4):
 
 ```
-outputs/series/gemma4-e2b-product/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants + the PLE assets
-outputs/series/gemma4-e2b-product/ple.probe.safetensors     the dequantization reference
-outputs/series/gemma4-e2b-product/reference.json            checkpoint fingerprints and borrowed-golden digests
+outputs/series/gemma4-e2b-product-bf16/model-NNNNN-of-NNNNN.krm  the container: graph + weights/constants + the PLE assets
+outputs/series/gemma4-e2b-product-bf16/ple.probe.safetensors     the PLE probe reference
+outputs/series/gemma4-e2b-product-bf16/greedy.<case>.safetensors the greedy goldens
+outputs/series/gemma4-e2b-product-bf16/reference.json            checkpoint fingerprints and the goldens' digests
 ```
 
-The PLE assets are an index, `ple_index` (role `ple-index`, schema 3: 262,144 tokens / 35 / 256 /
-embed scale), and two block sequences: `ple.values.<k>` (role `ple-values`, i8 `[rows,35,256]`) and
-`ple.scales.<k>` (role `ple-scales`, f32 `[rows,35]`). The layout is **token-major and cut by
-vocabulary range** (ADR 0085 decisions 1 and 2), which makes one token's PLE a single contiguous
-9,100-byte read; a table-major layout would need 35 scattered reads per token the moment a host
-wants to read rows instead of whole blocks. Splitting is not an optimization here: the full int8
-table is 2,348,810,240 bytes and a single Chromium `ArrayBuffer` tops out at 2,145,386,496. Each
-block holds a whole number of rows within the container's 32 MiB block ceiling, and because the host
-reads rows by range, every PLE block sits alone in a part of its own (container-v1 §4.2). The block
-count follows the block ceiling rather than this document; today's E2B product container carries
-71 value blocks and 2 scale blocks. The cutting rule and the index spelling are core code
-(`karume.ple`), shared with `karume migrate`, so the recipe and the migration produce the same
-blocks.
+The PLE assets are an index, `ple_index` (role `ple-index`, schema 5: 262,144 tokens / 35 / 256 /
+embed scale / storage `bf16`), and one block sequence, `ple.values.<k>` (role `ple-values`, the
+checkpoint's bf16 bits `[rows,35,256]`; a float table has no scales). The layout is **token-major
+and cut by vocabulary range** (ADR 0085 decisions 1 and 2), which makes one token's PLE a single
+contiguous 17,920-byte read; a table-major layout would need 35 scattered reads per token the moment
+a host wants to read rows instead of whole blocks. Splitting is not an optimization here: the full
+bf16 table is 4,697,620,480 bytes and a single Chromium `ArrayBuffer` tops out at 2,145,386,496.
+Each block holds a whole number of rows within the container's 32 MiB block ceiling, and because
+the host reads rows by range, every PLE block sits alone in a part of its own (container-v1 §4.2).
+The block count follows the block ceiling rather than this document; today's E2B product container
+carries 141 value blocks. The cutting rule and the index spelling are core code (`karume.ple`),
+shared with `karume migrate`, so the recipe and the migration produce the same blocks.
 
 Two properties are checked inside the export, because both fail with the right shape, dtype and
 element count:
 
 - the re-layout is **bit-identical** to the 35-table path. The reference is what
-  `ple.per_layer_inputs` computes from the fake-quantized tables — that is, the value the in-graph
+  `ple.per_layer_inputs` computes from the loaded tables — that is, the value the in-graph
   `embedding` and the `mul` after it used to produce — and the check reads the PLE assets of the
-  written container back rather than comparing in memory. A scale shifted by one layer, or a block
+  written container back rather than comparing in memory. A table shifted by one layer, or a block
   range off by one row, yields a valid row of a _different_ token.
 - the PLE row count comes from the **split tables**, never from
   `config.vocab_size_per_layer_input`: `load_model_and_tables` replaces that field with the 8 probe
@@ -298,11 +303,14 @@ element count:
   consistent. It must also equal the main embedding's vocabulary, which is the writer's half of the
   id-space cross-check (ADR 0085 decision 5).
 
-Like `export_token.py` this series takes no goldens of its own and writes the same `reference.json`
-binding. The acceptance test is `packages/models/tests/e2e_gemma4_product_test.ts`: it dequantizes
-through the host loader (`packages/models/src/gemma/ple.ts`), takes `argmax` on the host, and
-requires the resulting token sequence to match the logits opt-in series' `greedy.<case>` records
-exactly for 3 cases × 16 steps.
+The series takes **its own goldens** (`greedy.<case>.safetensors` — the q4_0 QAT series' rule):
+greedy continuations of `export_decode.GREEDY_CASES` by full re-forward of the stored model,
+`export_decode.GREEDY_STEPS` steps (`--steps`) and the margin floor `export_decode.MARGIN_FLOOR`,
+taken before the trace. Nothing is rounded, so they are the upstream checkpoint's own continuations
+(computed in f32). `reference.json` binds them to the container (fingerprints of the checkpoint
+files read and the goldens' digests). The acceptance tests in `packages/e2e/tests/` gather the PLE
+through the host loader (`packages/models/src/gemma/ple.ts`), take `argmax` on the host, and require
+the resulting token sequence to match the goldens.
 
 ## What `export_unified.py` emits
 
@@ -313,7 +321,7 @@ slots hold 1 KV head of width 512 in the capacity symbol. On the full layers the
 `k_proj` output through the scale-free `v_norm` (not rotated) and the key is `k_norm` then RoPE of
 the same projection; the script checks that wiring in the written graph. The storage is packed
 int4 (group 32) for the linear weights and the embedding (the tied head) alike, with no int8 tensor
-(the regular E2B / E4B series keep an int8 embedding).
+(the regular E2B / E4B series keep the checkpoint's bf16 values).
 
 The int4 values are **the QAT checkpoint's own grid, imported as is** — the tied embedding's too:
 every one of its groups of 32 lies on the grid (measured 2026-11-03). Each group of 32 along a row
@@ -355,8 +363,9 @@ prefill spans two 768-row chunks; the export fails if no golden runs past the wi
 
 The **MTP drafter** series, `outputs/series/gemma4-e2b-drafter/` — a _borrower_ graph that cannot
 run on its own. It is the head from `google/gemma-4-E2B-it-assistant` (4 layers, hidden 256, no key
-or value projections at all), re-expressed so that it reads the _product_ series' state slots and
-embedding table instead of carrying its own. Three declarations in the container say so (ADR
+or value projections at all), re-expressed so that it reads the _product_ series'
+(`gemma4-e2b-product-bf16`) state slots and embedding table instead of carrying its own. Three
+declarations in the container say so (ADR
 [0096](../../../docs/decisions/0096-speculative-decoding.md) stage 2):
 
 - the four state slots are **`external`** — the physical rings belong to the lender's
@@ -376,21 +385,21 @@ the upstream checkpoint is replaced by a dense projection over the full vocabula
 has no `aten` handler in this exporter; `use_ordered_embeddings` is turned off **before** the
 checkpoint is read, since `masked_embedding` is built in `__init__`.
 
-Storage is **int8 throughout** — every `nn.Linear` including the tied output head, plus the shared
-table declaration, all per-channel int8; only the norms and the layer scalars stay f32. This is
-where the drafter departs from the product series, which packs its linear weights into int4. The
-reason is measured (2026-09-08, same target trajectory, N = 200 cycles × 3 cases): rounding the
-drafter's 22 linear layers (10.1M elements) to int4 group-32 drops E[a], the expected number of
-tokens confirmed per speculation cycle at k = 3, by 33% / 21% / 15% against no rounding at all,
-while per-channel int8 costs 2–3%. Rounding the shared table changes E[a] by nothing measurable.
-The int4 → int8 step adds under 4 MB to the distribution, which is not a trade worth a fifth of the
-acceptance rate.
+Storage is **int8 throughout** — every `nn.Linear` including the tied output head, all
+per-channel int8; only the norms and the layer scalars stay f32. The shared table is declared
+`bf16` and is not rounded: it is the lender's table, the checkpoint's bf16 values the product
+series stores. The reason for int8 is measured (2026-09-08, same target trajectory, N = 200
+cycles × 3 cases): rounding the drafter's 22 linear layers (10.1M elements) to int4 group-32 drops
+E[a], the expected number of tokens confirmed per speculation cycle at k = 3, by 33% / 21% / 15%
+against no rounding at all, while per-channel int8 costs 2–3%. The int4 → int8 step adds under
+4 MB to the distribution, which is not a trade worth a fifth of the acceptance rate.
 
 ### Goldens
 
 `drafter-golden.<case>.safetensors` carries `prompt[T]`, `tokens[N + 3]` (the target's greedy
 continuation, teacher-forced) and `draft[N, 3]` for three cases and N = 200 cycles. They are taken
-by running the **product series' own rounding** of the target next to the exported drafter wrapper:
+by running the target **as the product series stores it** (the checkpoint's bf16 values, nothing
+rounded) next to the exported drafter wrapper:
 the target is prefilled in chunks of 768 rows through a `DynamicCache`, and at each cycle — with
 `P` standing for the number of rows the cache holds — the drafter is handed
 
@@ -417,17 +426,17 @@ record — it only changes what a fresh run would produce.
 
 #### What the goldens say about acceptance
 
-Two numbers per case, printed by the export run and stored in `reference.json` (2026-09-08, greedy
-target, k = 3, N = 200 cycles): the per-step hit rate of `d_j` against `tokens[t + j]`, and the
-sequentially accepted tokens per cycle, `1 + mean(a)` where `a` is the length of the leading run of
-hits. The second number is what a speculation cycle actually confirms — the bonus token always
-counts, so it never drops below 1.
+Two numbers per case, printed by the export run and stored in `reference.json` (2026-11-04, greedy
+bf16 target, k = 3, N = 200 cycles): the per-step hit rate of `d_j` against `tokens[t + j]`, and
+the sequentially accepted tokens per cycle, `1 + mean(a)` where `a` is the length of the leading
+run of hits. The second number is what a speculation cycle actually confirms — the bonus token
+always counts, so it never drops below 1.
 
 | case              | prompt | `d₁`  | `d₂`  | `d₃`  | tokens/cycle |
 | ----------------- | ------ | ----- | ----- | ----- | ------------ |
-| `short-en`        | 25     | 36.0% | 17.5% | 11.0% | 1.50         |
-| `readme-recipes`  | 2335   | 56.0% | 39.0% | 26.0% | 2.13         |
-| `readme-exporter` | 4844   | 61.5% | 37.0% | 21.5% | 2.11         |
+| `short-en`        | 25     | 39.0% | 22.0% | 13.5% | 1.595        |
+| `readme-recipes`  | 2451   | 55.0% | 40.0% | 30.0% | 2.090        |
+| `readme-exporter` | 3690   | 63.5% | 46.0% | 29.0% | 2.250        |
 
 These are a property of the drafter against this target, not of the runtime. The acceptance test in
 `packages/models/tests/e2e_gemma4_drafter_test.ts` gates something else: that karume reproduces the
@@ -533,12 +542,11 @@ uv run --with 'transformers==5.14.1' python -m gemma4.chat   # chat parity fixtu
 ```
 
 For E4B, pass `--model e4b` to the four graph scripts; the default input directory and output
-series (`outputs/series/gemma4-e4b-*`) follow the model, and `--reference` defaults to the same
-model's decode series. The product series borrows its greedy records from the decode series, so
-the decode series has to exist first:
+series (`outputs/series/gemma4-e4b-*`) follow the model, and `export_token.py`'s `--reference`
+defaults to the same model's decode series. The drafter borrows from the product series
+(`--product-dir`, default `gemma4-e2b-product-bf16`), so the product series has to exist first:
 
 ```sh
-uv run --with 'transformers==5.14.1' python -m gemma4.export_decode --model e4b
 uv run --with 'transformers==5.14.1' python -m gemma4.export_product --model e4b
 ```
 
@@ -576,8 +584,8 @@ rather than declared as a dependency group.
 
 ```sh
 cd tools/export-recipes
-uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/, E2B alone (~12.4 GiB)
-# both models (~32 GiB: each model's int4 and bf16 containers, E2B's drafter, the tokenizers)
+uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/, E2B alone (~8.7 GiB)
+# both models (~22.6 GiB: each model's bf16 container, E2B's drafter, the tokenizers)
 uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4
 # the q4_0 QAT line (E2B / E4B / 12B with their QAT drafters) → models/karume-gemma4-qat/
 uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b
@@ -597,27 +605,23 @@ presence.
 `--model e4b` alone would also resolve to `models/karume-gemma4/` (the family has one repository),
 so an E4B-only build should name its own `--out`.
 
-The regular distribution folds **four series** per E2B into one HF repository (three per E4B). The
-product container (`gemma4-e2b-product`) holds the int4 weights and the i8 PLE assets in one `krm`,
-split into parts of the default 256 MiB length, with every PLE block in a part of its own. The
-original-weights container (`gemma4-e2b-product-bf16`, the series role `model_bf16`) is the
-`model` role's second dtype, `bf16`, laid out the same way with the bf16 PLE (index schema 5); the
-default preset `bf16` loads it, the `i4` presets the int4 one. The MTP drafter container
-(`gemma4-e2b-drafter`) is the second `weights` role, fetched only when a pipeline asks for
-`speculative`; every E2B preset names it. The last is the compiled tokenizer asset
-(`gemma4-e2b-tokenizer`). The
-acceptance-only files that live beside the containers (`ple.probe.safetensors`, `reference.json`,
-`drafter-golden.*.safetensors`) are not in the placement table and therefore never reach the output.
-An `e4b` entry reads `gemma4-e4b-product`, `gemma4-e4b-product-bf16` and its own `gemma4-e4b-tokenizer`, and declares no
-`drafter` weights: a load that asks for `speculative` fails when the weights are resolved, before
-any part is fetched. Each model's tokenizer file sits under its own directory
+The regular distribution folds **three series** per E2B into one HF repository (two per E4B). The
+product container (`gemma4-e2b-product-bf16`) holds the checkpoint's bf16 weights and the bf16 PLE
+assets (index schema 5) in one `krm`, split into parts of the default 256 MiB length, with every PLE
+block in a part of its own; it is the `model` role's one dtype, `bf16`, the one preset. The MTP
+drafter container (`gemma4-e2b-drafter`) is the second `weights` role, fetched only when a pipeline
+asks for `speculative`; the E2B preset names it. The last is the compiled tokenizer asset
+(`gemma4-e2b-tokenizer`). The acceptance-only files that live beside the containers
+(`ple.probe.safetensors`, `greedy.*.safetensors`, `reference.json`, `drafter-golden.*.safetensors`)
+are not in the placement table and therefore never reach the output. An `e4b` entry reads
+`gemma4-e4b-product-bf16` and its own `gemma4-e4b-tokenizer`, and declares no `drafter` weights: a
+load that asks for `speculative` fails when the weights are resolved, before any part is fetched. Each model's tokenizer file sits under its own directory
 (`<model>/tokenizer/`); the assembly folds a file into `shared/` only when two models' bytes are
 the same.
 Layout inside the repository:
 
 | Manifest seat                  | Path                                      |
 | ------------------------------ | ----------------------------------------- |
-| `weights.model.i4.container`   | `e2b/model/model.i4-NNNNN-of-NNNNN.krm`   |
 | `weights.model.bf16.container` | `e2b/model/model.bf16-NNNNN-of-NNNNN.krm` |
 | `weights.drafter.i8.container` | `e2b/drafter/model.i8-NNNNN-of-NNNNN.krm` |
 | `assets.tokenizer`             | `e2b/tokenizer/tokenizer.json`            |
@@ -652,12 +656,11 @@ full-attention KV slots are the only thing that grows with capacity (12 KiB per 
 Gates that run **before a single byte is placed** (each one covers a mismatch that leaves shape,
 dtype and manifest all correct, and shows up only as wrong values):
 
-- the product container carries both `I4` (linear weights) and `I8` (embeddings) and no `F16` or
-  `BF16`; the original-weights container carries `BF16` (and f32 where bf16 does not apply) and no
-  `F16`, `I8`, `I4` or `I2` — the two hold the same graph and PLE shape, so only the storage tells
-  an int4 series placed as `bf16` (or the reverse) apart; the drafter container carries `I8` only —
-  an `I4`, `BF16` or `F16` tensor in it is refused (int4 group-32 linears cost 15–33 % of E[a], see
-  above). The q4_0 QAT line holds both its roles to `I4` alone (no `I8`)
+- the product container carries `BF16` (and f32 where bf16 does not apply) and no `F16`, `I8`,
+  `I4` or `I2` — an int4 product series (the q4_0 QAT line's) holds the same graph contract, so
+  the storage is what tells it apart; the drafter container carries `I8` only — an `I4`, `BF16` or
+  `F16` tensor in it is refused (int4 group-32 linears cost 15–33 % of E[a], see above). The q4_0
+  QAT line holds both its roles to `I4` alone (no `I8`)
 - graph inputs are exactly `input_ids` / `rope_{sliding,full}_attention_{cos,sin}` /
   `per_layer_inputs` / `last_row`, in that order, the two exits are logits `[1, R, V]` and the
   post-norm hidden `[1, R, H]` (`H` checked against `hidden_size` — the only thing that tells the
@@ -689,28 +692,14 @@ distribution is spelled out by the caller, since `fromPretrained` has no default
 
 ## Quant execution variants
 
-E2B distributions provide `i4` (reference summation for GEMV and attention),
-`i4-gemvpar` (parallel GEMV and parallel attention), and `i4-fast` (parallel GEMV,
-RMS-add fusion, and parallel attention with fused row statistics —
-`stateAttentionReduce: "parallel-fused"`); all three reference the same int4 model and int8
-drafter weight files. The attention form is a quant declaration like the others: `i4` declares
-none, so it runs the runtime's reference path. E4B entries carry the same three quants and the
-same declarations over the model weights alone.
+Both models carry one quant, `bf16`, their default (the maintainer's ruling of 2026-11-04): the
+`model` weights' one container — every weight and the PLE table as the checkpoint's bf16 bits, PLE
+index schema 5 — in the reference summation order (`session` empty: GEMV and attention run the
+runtime's reference path). E2B's `bf16` also names the int8 drafter, which borrows the bf16
+target's `model.lm_head.weight`. The parallel and fused int4 seats (`i4-gemvpar` / `i4-fast`)
+are the q4_0 QAT line's (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line").
 
-The default of both models is `bf16`, the original-weights preset (the maintainer's ruling of
-2026-11-04): the `model` weights' second container, the bf16 series
-(`gemma4.export_product --storage bf16` — every weight and the PLE table as the checkpoint's bf16
-bits, PLE index schema 5), in the reference summation order. E2B's `bf16` names the same int8
-drafter, which borrows the bf16 target's `model.lm_head.weight`. The assembly reads both series of
-a model (`outputs/series/gemma4-<model>-product` and `…-product-bf16`), holds each to its storage
-(the int4 container may not hold bf16, the bf16 one no int8 / int4 / int2), and pairs the drafter
-with both.
-
-Explicit runtime options override each quant setting, including
-`fuseRmsNormAdd: false`. Reassembling into a new output directory updates the
-metadata without requantizing weights. Existing distributions and pinned public
-revisions remain unchanged. A manifest that declares `stateAttentionReduce` needs a
-hub/models reader that knows that key (the release after 0.13.0); older readers
-reject it.
-Submission policy and prefill buckets are separate host options.
+Explicit runtime options override each quant setting. Reassembling into a new output directory
+updates the metadata without requantizing weights. Existing distributions and pinned public
+revisions remain unchanged. Submission policy and prefill buckets are separate host options.
 See [the decision record](../../../docs/decisions/0104-gemma-fast-quant.md).

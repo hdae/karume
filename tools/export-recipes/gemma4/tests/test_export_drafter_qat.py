@@ -729,10 +729,11 @@ class TestTheCommandLine:
 
 
 class TestTheRegularDrafterIsUnchanged:
-    """What the QAT line generalised keeps its old value on the regular path."""
+    """What the QAT line generalised keeps the regular path's own value: the regular drafter
+    borrows the bf16 table of the regular product series (`gemma4.export_product`)."""
 
-    def test_the_regular_shared_declaration_is_still_i8(self) -> None:
-        assert drafter.drafter_shared_storage(None) == IrStorage(dtype="i8")
+    def test_the_regular_shared_declaration_is_bf16(self) -> None:
+        assert drafter.drafter_shared_storage(None) == IrStorage(dtype="bf16")
 
     def test_the_regular_drafter_still_loads_the_regular_e2b_assistant(self) -> None:
         source = inspect.signature(drafter.load_drafter).parameters["source"]
@@ -749,7 +750,7 @@ class TestTheRegularDrafterIsUnchanged:
                 _lender_target_config(),
             )
 
-    def test_the_regular_shared_declaration_defaults_to_i8(self, tmp_path) -> None:
+    def test_the_regular_shared_declaration_defaults_to_bf16(self, tmp_path) -> None:
         wrapper = _tiny_wrapper()
         text = wrapper.drafter.config.get_text_config()
         lender = _tiny_lender()
@@ -764,11 +765,13 @@ class TestTheRegularDrafterIsUnchanged:
             surgical, tensors, lender, _target_config()
         )
 
-        assert shared_graph.initializers[name].storage == IrStorage(dtype="i8")
+        assert shared_graph.initializers[name].storage == IrStorage(dtype="bf16")
 
-    def test_the_regular_goldens_still_run_against_the_regular_product_rounding(
+    def test_the_regular_goldens_run_against_the_regular_product_unrounded(
         self, monkeypatch
     ) -> None:
+        """The regular product stores the checkpoint's bf16 values, so the target the goldens
+        are taken against is the loaded wrapper itself: nothing rounds it in between."""
         calls: list[tuple[str, Any]] = []
         target = object()
         wrapper: Any = object()
@@ -787,7 +790,6 @@ class TestTheRegularDrafterIsUnchanged:
         summary = drafter.write_goldens(wrapper, Path("target"), (), Path("out"), 7, "cpu")
 
         assert summary == {"ok": True}
-        assert [name for name, _ in calls] == ["load", "i8", "goldens"]
+        assert [name for name, _ in calls] == ["load", "goldens"]
         assert calls[0][1] == (Path("target"),)
-        assert calls[1][1] == (target,)
-        assert calls[2][1] == (wrapper, target, (), Path("out"), 7, "cpu")
+        assert calls[1][1] == (wrapper, target, (), Path("out"), 7, "cpu")

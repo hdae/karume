@@ -42,7 +42,7 @@ MUST: `use_ordered_embeddings=False` で読む。配布 checkpoint の centroid 
 | 席 | 格納 | 理由 |
 | --- | --- | --- |
 | `nn.Linear` 全部（`drafter.lm_head` 込み） | i8 per-channel | 下の実測 — i4 は受理率を削る |
-| `target_embed`（共有・バイト無し） | i8 per-channel | 貸し手の宣言と一致 MUST。丸めは golden 用 |
+| `target_embed` (shared, no bytes) | bf16, not rounded | declared as the lender stores it (MUST) |
 | norm / q_norm / layer_scalar | f32 | `fake_quant_int8` は `weight` を持つ 5 型しか見ない |
 
 **drafter に i4 の席は無い**。2026-09-08 の実測（同一 target 軌跡・N = 200 cycle × 3 ケースの
@@ -54,10 +54,11 @@ o_proj・gate/up/down = 22 本・10.1M 要素）を i4 g32 に落とすと E[a] 
 i8 per-channel（1 バイト + 行ごとの f32 scale）へ上げても配布形の増分は 4MB 弱で、受理率
 1 〜 3 割の目減りと釣り合う量ではない（E[a] は投機 1 サイクルあたりの確定 token 数そのもの）。
 
-`target_embed` は **target の product export と同じ丸め**（行ごと per-channel i8）を掛ける。
-バイトは書かないので scale 台帳のキーは emit に引かれないが、golden はこの丸めた表で採る。
-golden は丸めた後の `wrapper` をそのまま回す（{@link export_series} の順序）ので、配布形の
-重みと golden の重みは同一実体 MUST。
+`target_embed` is **not rounded**: the lender (the product series, `gemma4.export_product`) stores
+the checkpoint's bf16 values, which the loaded f32 table already is, so the drafter's goldens see
+the values the lender's resident table decodes to. No bytes are written for it. The goldens run
+the rounded `wrapper` as it is ({@link export_series}'s order), so the distributed weights and the
+goldens' weights are one object (MUST).
 
 ## golden の呼び出し規約（ホストが 1 サイクルで渡す組）
 
@@ -384,13 +385,14 @@ def load_drafter(
     return DrafterWrapper(drafter, load_target_embed(model_dir, target_config), steps).eval()
 
 
-#: 共有する主表のモジュール FQN（{@link DrafterWrapper} の組み立てが決める綴り）。`nn.Linear`
-#: ではないので、i8 の席を構造で引く {@link int8_seats} が名前で足す唯一の 1 本。
+#: 共有する主表のモジュール FQN（{@link DrafterWrapper} の組み立てが決める綴り）— the one module
+#: with a weight slot that {@link quantize_wrapper} leaves unrounded.
 TARGET_EMBED_MODULE = "target_embed"
 
 
 def int8_seats(wrapper: nn.Module) -> set[str]:
-    """i8 で丸まる**べき**重みの FQN — `nn.Linear` 全部 + 共有する主表（他は 1 本も丸めない）。
+    """i8 で丸まる**べき**重みの FQN — `nn.Linear` 全部（他は 1 本も丸めない — the shared table
+    stays the lender's bf16 values).
 
     {@link quantize_wrapper} が実際に丸めた台帳と突き合わせるための、**別の規則で引いた**
     期待集合（丸める側は `quantize.QUANT_CHANNEL_AXES` の 5 型で選ぶ）。2 つの集合が食い違う
@@ -401,24 +403,24 @@ def int8_seats(wrapper: nn.Module) -> set[str]:
       後勝ちの 1 本しか残らないので、宣言した scale で戻らない重みが配布形に載る）
     - drafter の構造が変わって conv や新しい embedding が入った — 黙って i8 に落ちる
     """
-    linears = {
+    return {
         f"{name}.weight"
         for name, module in wrapper.named_modules()
         if isinstance(module, nn.Linear)
     }
-    return linears | {f"{TARGET_EMBED_MODULE}.weight"}
 
 
 def quantize_wrapper(wrapper: nn.Module) -> tuple[Any, dict[str, torch.Tensor]]:
-    """重みスロットを持つモジュールを全部 i8 per-channel で丸め、scale 台帳を返す。
+    """重みスロットを持つモジュールを、共有する主表を除いて全部 i8 per-channel で丸め、scale
+    台帳を返す。
 
     MUST: 丸めは i8 の 1 周だけ（モジュール docstring の実測 — i4 は受理率を削る）。丸め方が
     1 つになっても「同じ実体を指す 2 つの FQN」は 1 周で 2 度丸まるので、実際に丸めた台帳を
     {@link int8_seats} と突き合わせる（`load_drafter` の `del` が落ちた日の検出線）。
-    MUST: 共有する主表の丸めは target の {@link gemma4.export.quantize_wrapper} と 1 ビットも
-    違わないこと（どちらも per-channel axis 0 の i8）— 貸し手の常駐重みをそのまま食える条件。
+    MUST: the shared table is not rounded — the lender stores the checkpoint's bf16 values, which
+    the loaded f32 table already is, so the goldens see what the lender's resident table decodes to.
     """
-    report = fake_quant_int8(wrapper)
+    report = fake_quant_int8(wrapper, include=lambda name: name != TARGET_EMBED_MODULE)
     rounded, expected = set(report.scales), int8_seats(wrapper)
     if rounded != expected:
         raise AssertionError(
@@ -464,7 +466,7 @@ def lender_slots(
     """貸し手のスロット実形と共有テンソルキーを、製品コンテナの宣言から引く。
 
     `shared_storage` is the borrower's declaration of the shared table (default
-    {@link drafter_shared_storage} — the regular product's i8); the lender's layout must match its
+    {@link drafter_shared_storage} — the regular product's bf16); the lender's layout must match its
     dtype.
 
     MUST: 形も名前も**貸し手から読む**（drafter の config からは導かない）。借り手の宣言は
@@ -524,8 +526,9 @@ def lender_slots(
 
 
 def drafter_shared_storage(_config: Any) -> IrStorage:
-    """共有 initializer の格納宣言（貸し手と一致 MUST・scale は書かない）。"""
-    return IrStorage(dtype="i8")
+    """共有 initializer の格納宣言（貸し手と一致 MUST・scale は書かない）— the regular product's
+    bf16 table (`gemma4.export_product.BF16_STORAGE`)."""
+    return IrStorage(dtype=product.BF16_STORAGE)
 
 
 # ---- 手術 -------------------------------------------------------------------
@@ -1005,13 +1008,12 @@ def write_goldens(
 ) -> dict[str, Any]:
     """全ケースの golden を採って書き、要約を返す（貸し手はここでだけ読む）。
 
-    MUST: 貸し手は **製品系列と同じ丸め**（`export_product.load_wrapper` +
-    `export.quantize_wrapper`）。別の丸めで採った期待列は「同じ向きに間違った 2 つ」を
-    突き合わせる形になる。
+    MUST: the lender holds **the product series' values** (`export_product.load_wrapper` alone —
+    the series stores the checkpoint's bf16 values, nothing rounded). Expectations taken against
+    other values compare two things wrong in the same direction.
     """
-    print("[golden] target（製品系列と同じ丸め）を読む", file=sys.stderr, flush=True)
+    print("[golden] the target (the product series' bf16 values)", file=sys.stderr, flush=True)
     wrapper = product.load_wrapper(model_dir)
-    one_shot.quantize_wrapper(wrapper)
     return goldens_against(drafter, wrapper, cases, out_dir, cycles, device)
 
 
@@ -1127,7 +1129,11 @@ def export_series(
     config = wrapper.drafter.config
     text = config.get_text_config()
 
-    print("[quant] i8 per-channel（nn.Linear 全部 + 共有主表）", file=sys.stderr, flush=True)
+    print(
+        "[quant] i8 per-channel (every nn.Linear; the shared table unrounded)",
+        file=sys.stderr,
+        flush=True,
+    )
     int8, scales = quantize_wrapper(wrapper)
 
     lender = lender_slots(

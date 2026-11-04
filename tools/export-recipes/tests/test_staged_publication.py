@@ -70,7 +70,7 @@ EMIT_ENTRIES: tuple[tuple[str, str], ...] = (
     ("irodori/export.py", "export_series"),
     ("gemma4/export.py", "export_series"),
     ("gemma4/export_decode.py", "export_series"),
-    ("gemma4/export_product.py", "_export_series"),
+    ("gemma4/export_product.py", "export_series"),
     ("gemma4/export_product_qat.py", "export_series"),
     ("gemma4/export_unified.py", "export_series"),
     ("gemma4_qat/export.py", "export_qat"),
