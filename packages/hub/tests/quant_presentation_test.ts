@@ -4,10 +4,12 @@ import { describe, it } from "vite-plus/test";
 import { ManifestFormatError, parseManifest } from "../mod.ts";
 import { FETCH_MANIFEST_TEXT } from "./helpers/fixture.ts";
 
-// quant の表示欄（label / description — ADR 0075）の受理集合は hub の parser が正本
-// （2026-10-11 裁定）。表 tests/fixtures/quant-presentation.json は Python の `karume dist`
-// （tools/exporter/tests/test_dist.py）も同じ 1 ファイルで回す — 片側だけ動かすと両方の
-// どちらかが赤になる。ここは表を全件回すだけで、TS 側に第 2 の定義を作らない。
+// The hub's parser is the source of truth for the accepted values of a quant's display fields
+// (label / description — ADR 0075) (ruling of 2026-10-11). The table
+// tests/fixtures/quant-presentation.json is also run by Python's `karume dist`
+// (tools/exporter/tests/test_dist.py) from the same single file — changing only one side turns one
+// of the two red. This file only runs every row of the table and creates no second definition on
+// the TS side.
 
 type PresentationCase = {
   readonly name: string;
@@ -24,7 +26,7 @@ const loadCases = async (): Promise<readonly PresentationCase[]> => {
   const raw: unknown = JSON.parse(
     await readTextFile(new URL("./fixtures/quant-presentation.json", import.meta.url)),
   );
-  if (!isRecord(raw) || !Array.isArray(raw["cases"])) throw new Error("fixture: cases が無い");
+  if (!isRecord(raw) || !Array.isArray(raw["cases"])) throw new Error("fixture: cases missing");
   const cases = raw["cases"].map((entry: unknown): PresentationCase => {
     if (
       !isRecord(entry) ||
@@ -32,7 +34,7 @@ const loadCases = async (): Promise<readonly PresentationCase[]> => {
       typeof entry["field"] !== "string" ||
       typeof entry["accepted"] !== "boolean"
     ) {
-      throw new Error(`fixture: ケースの形が不正 ${JSON.stringify(entry)}`);
+      throw new Error(`fixture: malformed case ${JSON.stringify(entry)}`);
     }
     return {
       name: entry["name"],
@@ -42,40 +44,42 @@ const loadCases = async (): Promise<readonly PresentationCase[]> => {
       accepted: entry["accepted"],
     };
   });
-  if (cases.length === 0) throw new Error("fixture: ケースが空");
+  if (cases.length === 0) throw new Error("fixture: no cases");
   return cases;
 };
 
 const cases = await loadCases();
 
-/** 正当な manifest の、既定モデルの最初の quant 席に表示欄 1 つを書いた（または消した）綴り。 */
+/**
+ * A valid manifest with one display field written (or removed) in the default model's first quant.
+ */
 const manifestWith = (testCase: PresentationCase): string => {
   const manifest: unknown = JSON.parse(FETCH_MANIFEST_TEXT);
-  assert(isRecord(manifest) && isRecord(manifest["models"]), "fixture: manifest の形");
+  assert(isRecord(manifest) && isRecord(manifest["models"]), "fixture: manifest shape");
   const model = manifest["models"][String(manifest["defaultModel"])];
-  assert(isRecord(model) && isRecord(model["quants"]), "fixture: 既定モデルの quants");
+  assert(isRecord(model) && isRecord(model["quants"]), "fixture: quants of the default model");
   const quant = Object.values(model["quants"])[0];
-  assert(isRecord(quant), "fixture: quant 席");
+  assert(isRecord(quant), "fixture: quant entry");
   delete quant[testCase.field];
   if (testCase.hasValue) quant[testCase.field] = testCase.value;
   return JSON.stringify(manifest);
 };
 
-describe("quant の表示欄の受理集合（共有表 quant-presentation.json）", () => {
-  it("表は label と description の両方の欄を覆う", () => {
+describe("accepted values of a quant's display fields (shared table quant-presentation.json)", () => {
+  it("the table covers both the label and the description field", () => {
     assertEquals([...new Set(cases.map((entry) => entry.field))].sort(), ["description", "label"]);
   });
 
   for (const testCase of cases) {
     if (testCase.accepted) {
-      it(`${testCase.name}: 受理し、書いた値をそのまま返す`, () => {
+      it(`${testCase.name}: accepts it and returns the written value unchanged`, () => {
         const manifest = parseManifest(manifestWith(testCase));
         const quant = Object.values(manifest.models[manifest.defaultModel].quants)[0];
         const read = testCase.field === "label" ? quant.label : quant.description;
         assertEquals(read, testCase.hasValue ? testCase.value : undefined);
       });
     } else {
-      it(`${testCase.name}: ManifestFormatError で拒否する`, () => {
+      it(`${testCase.name}: rejects it with ManifestFormatError`, () => {
         assertThrows(() => parseManifest(manifestWith(testCase)), ManifestFormatError);
       });
     }

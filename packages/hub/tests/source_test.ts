@@ -1,9 +1,10 @@
 /**
- * 取得元契約の分岐点（`sourceForRef`）の単体テスト。
+ * Unit tests of the branch point of the source contract (`sourceForRef`).
  *
- * 越境の振り分けは面ごとに書くと片方だけ素通しする形の取り違えを生むため 1 箇所へ集約してある。
- * 公開面からは「越境参照が混ざったときのバイト列」でしか観測できないので、分岐そのものを
- * ここで固定する（将来ここへ「明示 mapping → fail loudly」の解決順が入る）。
+ * The routing of cross-repository references lives in one place, because writing it per surface
+ * invites mix-ups where only one surface lets a reference through. The public surface can observe
+ * it only as "the bytes when a cross-repository reference is mixed in", so the branch itself is
+ * pinned here (a resolution order of "explicit mapping → fail loudly" is to be added here later).
  */
 
 import { assertEquals, assertStrictEquals } from "@std/assert";
@@ -13,17 +14,18 @@ import { type PinnedSource, sourceForRef } from "../src/source.ts";
 
 const SHA = "b".repeat(40);
 
-/** `originFor` の呼び出しだけを記録する取得元（読みの面は呼ばれない）。 */
+/** A source that only records calls to `originFor` (its read methods are never called). */
 const recordingSource = (): { source: PinnedSource; calls: [string, string][] } => {
   const calls: [string, string][] = [];
   const source: PinnedSource = {
     origin: { label: "repo someone/anima @ " + SHA, integrity: "network" },
-    readManifest: () => Promise.reject(new Error("呼ばれてはいけない")),
-    readFile: () => Promise.reject(new Error("呼ばれてはいけない")),
-    prefetchFile: () => Promise.reject(new Error("呼ばれてはいけない")),
+    readManifest: () => Promise.reject(new Error("must not be called")),
+    readFile: () => Promise.reject(new Error("must not be called")),
+    prefetchFile: () => Promise.reject(new Error("must not be called")),
     originFor: (repo, revision) => {
       calls.push([repo, revision]);
-      // 越境先は別の取得元（同一性が見えるように別オブジェクトを返す）。
+      // The referenced repository is a different source (a different object, so identity is
+      // visible).
       return { ...source, originFor: source.originFor };
     },
   };
@@ -37,50 +39,56 @@ const ref = (extra: Partial<FileRef> = {}): FileRef => ({
   ...extra,
 });
 
-test("sourceForRef: 自リポ参照はセッションの取得元をそのまま使う", () => {
+test("sourceForRef: a same-repository reference uses the session's source as is", () => {
   const { source, calls } = recordingSource();
   assertStrictEquals(sourceForRef(source, ref()), source);
-  assertEquals(calls, [], "越境でないのに originFor を引いている");
+  assertEquals(calls, [], "originFor was called for a reference that is not cross-repository");
 });
 
-test("sourceForRef: repo と revision が揃った参照だけが宣言された取得元へ回る", () => {
+test("sourceForRef: only a reference with both repo and revision goes to the declared source", () => {
   const { source, calls } = recordingSource();
   const crossed = sourceForRef(source, ref({ repo: "someone/other", revision: SHA }));
   assertEquals(calls, [["someone/other", SHA]]);
-  assertStrictEquals(crossed === source, false, "越境先がセッションの取得元と同一になっている");
+  assertStrictEquals(
+    crossed === source,
+    false,
+    "the referenced source is the session's own source",
+  );
 });
 
-describe("sourceForRef: 片方だけの宣言では越境しない（対でのみ意味を持つ）", () => {
-  // parse が対を強制するので manifest 経由では現れないが、分岐が片方だけを見ていると
-  // 「越境先の revision を自リポへ効かせる」等の取り違えが黙って成立する。
-  it("repo だけ", () => {
+describe("sourceForRef: declaring only one of the two does not cross repositories (they only mean something as a pair)", () => {
+  // Parsing enforces the pair, so this does not appear through a manifest, but a branch that looks
+  // at only one of them silently allows mix-ups such as "applying the other repository's revision
+  // to this repository".
+  it("repo only", () => {
     const { source, calls } = recordingSource();
     assertStrictEquals(sourceForRef(source, ref({ repo: "someone/other" })), source);
     assertEquals(calls, []);
   });
-  it("revision だけ", () => {
+  it("revision only", () => {
     const { source, calls } = recordingSource();
     assertStrictEquals(sourceForRef(source, ref({ revision: SHA })), source);
     assertEquals(calls, []);
   });
 });
 
-// 一意化キーは取得元の分岐と**同じ述語**（`crossRefOf`）で越境を見なければならない。片方だけの
-// 宣言をキー側だけが越境として数えると、同じ 1 本のファイルが 2 本の別エントリになり（全量面は
-// 同じ URL を 2 回取得し、進捗の total も二重に積む）、しかもバイト列は正しいので黙って通る。
+// The dedupe key must detect cross-repository references with **the same predicate** (`crossRefOf`)
+// as the source branch. If only the key side counted a one-sided declaration as cross-repository,
+// one file would become two separate entries (the whole-file surface fetches the same URL twice and
+// progress totals count it twice), and since the bytes are correct it would pass silently.
 
-test("fileRefKey: 対が揃った越境参照だけが宣言座標つきのキーになる", () => {
+test("fileRefKey: only a cross-repository reference with the full pair becomes a key with the declared coordinates", () => {
   assertEquals(
     fileRefKey(ref({ repo: "someone/other", revision: SHA })),
     `someone/other@${SHA}/transformer/model.safetensors`,
   );
 });
 
-describe("fileRefKey: 片方だけの宣言は自リポの path キーへ畳まれる（sourceForRef と同じ判定）", () => {
-  it("repo だけ", () => {
+describe("fileRefKey: a one-sided declaration folds into a same-repository path key (the same rule as sourceForRef)", () => {
+  it("repo only", () => {
     assertEquals(fileRefKey(ref({ repo: "someone/other" })), ref().path);
   });
-  it("revision だけ", () => {
+  it("revision only", () => {
     assertEquals(fileRefKey(ref({ revision: SHA })), ref().path);
   });
 });

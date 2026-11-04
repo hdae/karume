@@ -1,13 +1,18 @@
-// `resolveSelection` の 2 軸（model / quant）と、そこから平坦な取得列を導く `selectionRefs`。
-// 取得層は通さず、manifest から選択結果を作るところだけを見る。
+// The two axes (model / quant) of `resolveSelection`, and `selectionRefs`, which derives the flat
+// fetch list from them. The fetch layer is not involved; only building a selection from a manifest
+// is looked at.
 //
-// ここで押さえるのは 6 つ:
-//  ① 省略時は `defaultModel` / `defaultQuant` に落ち、実名が返る。
-//  ② 選択は**構造型**（部品名 → 容器 / 資産名 → FileRef）で、取得キーの綴り規約を持たない。
-//  ③ 並びは宣言順（`weights` の順・容器の中は part の添字順・最後に assets）。
-//  ④ `selectionRefs` は**長さ 0 の part を落とし**、同一実体を `fileRefKey` で一意化する。
-//  ⑤ `weights` の部分集合を渡すとその役割だけが選択に出る（assets は常に全数）。
-//  ⑥ 未知の model / quant / weights は**利用可能な一覧**を添えて落ちる（ADR 0041 §8）。
+// Six points are pinned here:
+//  ① When omitted, the selection falls back to `defaultModel` / `defaultQuant` and returns the
+//     real names.
+//  ② A selection is a **structured type** (component name → container / asset name → FileRef) and
+//     has no spelling convention for fetch keys.
+//  ③ The order is declaration order (the order of `weights`, part index order inside a container,
+//     assets last).
+//  ④ `selectionRefs` **drops zero-length parts** and dedupes the same file by `fileRefKey`.
+//  ⑤ Passing a subset of `weights` puts only those roles into the selection (assets are
+//     always all).
+//  ⑥ An unknown model / quant / weights fails with **the list of available ones** (ADR 0041 §8).
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertNotStrictEquals, assertThrows } from "@std/assert";
@@ -33,11 +38,12 @@ import {
 
 const paths = (refs: readonly FileRef[]): string[] => refs.map((ref) => ref.path);
 
-test("resolveSelection: 省略時は defaultModel / defaultQuant の組を実名で返す", () => {
+test("resolveSelection: when omitted, returns the defaultModel / defaultQuant pair by real name", () => {
   const selection = resolveSelection(manifest);
   assertEquals(selection.model, "anima-turbo");
   assertEquals(selection.quant, "w8a8-s16");
-  // 部品は weights の宣言順（取得キーの綴り規約は持たない — 席は部品名そのもの）。
+  // Components in the declaration order of weights (no spelling convention for fetch keys — the
+  // entry is the component name itself).
   assertEquals(Object.keys(selection.containers), [
     "text_encoder",
     "text_conditioner",
@@ -45,45 +51,48 @@ test("resolveSelection: 省略時は defaultModel / defaultQuant の組を実名
     "vae_decoder",
   ]);
   assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors", "style_alias"]);
-  // defaultQuant = w8a8-s16（transformer は i8 の容器）。
+  // defaultQuant = w8a8-s16 (the transformer is the i8 container).
   assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_I8_PARTS]);
 });
 
-test("resolveSelection: quant 指定で dtype の選択が切り替わる", () => {
+test("resolveSelection: specifying a quant switches the dtype selection", () => {
   const selection = resolveSelection(manifest, { quant: "f16" });
   assertEquals(selection.quant, "f16");
   assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_F16_PARTS]);
-  // 切り替わるのは容器だけで、descriptor も一緒に付いてくる（2 文書の期待値は容器の持ち物）。
-  // 期待値は fixture の実値で綴る — 同じ manifest から引き直すと、descriptor を落とす実装でも
-  // 両辺が同時に動いて緑のままになる（i8 の graph は 22 なので dtype の取り違えも落ちる）。
+  // Only the container switches, and its descriptor comes along (the expected values of the 2
+  // documents belong to the container). The expected values are spelled from the fixture's actual
+  // values — looking them up again from the same manifest would move both sides together and stay
+  // green even for an implementation that drops the descriptor (the i8 graph is 22, so a dtype
+  // mix-up fails too).
   assertEquals(selection.containers["transformer"].descriptor.graph.length, 23);
   assertEquals(selection.containers["transformer"].descriptor.model.length, 5);
 });
 
-test("resolveSelection: assets は quant を切り替えても動かない", () => {
+test("resolveSelection: assets do not change when the quant is switched", () => {
   const defaults = resolveSelection(manifest);
   const f16 = resolveSelection(manifest, { quant: "f16" });
   assertEquals(f16.assets, defaults.assets);
-  // 中身は同じでも**表そのものは毎回組み直す** — parse 済み manifest の表を露出すると、返り値の
-  // assets への代入が以後の全選択・在庫勘定・evict を汚染する（containers と寿命の扱いを揃える）。
+  // Same content, but **the table itself is rebuilt every time** — exposing the parsed manifest's
+  // table would let an assignment to the returned assets pollute every later selection, the
+  // inventory accounting and evict (the lifetime is handled the same way as containers).
   assertNotStrictEquals(defaults.assets, manifest.models["anima-turbo"].assets);
   assertNotStrictEquals(f16.assets, defaults.assets);
 });
 
-test("resolveSelection: model 指定でそのモデルの選択に切り替わる", () => {
+test("resolveSelection: specifying a model switches to that model's selection", () => {
   const selection = resolveSelection(manifest, { model: "anima-lite" });
   assertEquals(selection.model, "anima-lite");
   assertEquals(selection.quant, "w8");
   assertEquals(Object.keys(selection.containers), ["text_encoder", "transformer"]);
   assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors"]);
-  // 共有 path はモデルを跨いでも同じ 3 点セット（ADR 0041 §5 の「path の一致で共有」）。
+  // A shared path is the same set of 3 across models (ADR 0041 §5, "shared by matching path").
   assertEquals(
     selection.containers["text_encoder"].parts[0],
     resolveSelection(manifest).containers["text_encoder"].parts[0],
   );
 });
 
-test("selectionRefs: 全容器の全 part + assets を宣言順で並べる", () => {
+test("selectionRefs: lists every part of every container + assets in declaration order", () => {
   const refs = selectionRefs(resolveSelection(manifest));
   assertEquals(paths(refs), [
     ...TEXT_ENCODER_PARTS,
@@ -95,14 +104,15 @@ test("selectionRefs: 全容器の全 part + assets を宣言順で並べる", ()
   ]);
 });
 
-test("selectionRefs: 長さ 0 の part は列に載らない（取りに行く中身が無い）", () => {
+test("selectionRefs: a zero-length part is not listed (there is no content to fetch)", () => {
   const refs = selectionRefs(resolveSelection(manifest));
   assertEquals(
     refs.filter((ref) => ref.path === TRANSFORMER_I8_EMPTY),
     [],
-    "長さ 0 の part が取得列に残っている",
+    "a zero-length part remains in the fetch list",
   );
-  // 宣言そのものには残る（添字が part の id なので、落とすと後続の添字がずれる）。
+  // It stays in the declaration itself (the index is the part id, so dropping it would shift the
+  // following indices).
   assertEquals(resolveSelection(manifest).containers["transformer"].parts.length, 3);
   assertEquals(
     refs.filter((ref) => ref.size === 0),
@@ -110,33 +120,35 @@ test("selectionRefs: 長さ 0 の part は列に載らない（取りに行く�
   );
 });
 
-test("selectionRefs: 同じ実体を指す 2 つの資産名は 1 本に畳まれる", () => {
+test("selectionRefs: two asset names that point at the same file fold into one", () => {
   const selection = resolveSelection(manifest);
-  // 表の席は 3 つ（tokenizer / style_vectors / style_alias）だが、実体は 2 本。
+  // The table has 3 entries (tokenizer / style_vectors / style_alias) but only 2 files.
   assertEquals(Object.keys(selection.assets).length, 3);
   const refs = selectionRefs(selection);
   assertEquals(refs.filter((ref) => ref.path === STYLE_VECTORS).length, 1);
-  assertEquals(new Set(paths(refs)).size, refs.length, "列に重複が残っている");
+  assertEquals(new Set(paths(refs)).size, refs.length, "duplicates remain in the list");
 });
 
-test("selectionRefs: 容器を跨いで同じ part を共有しても 1 本に畳まれる", () => {
-  // anima-lite の 2 容器は anima-turbo と同じ実体を指すので、列は turbo 既定の部分集合になる。
+test("selectionRefs: a part shared across containers also folds into one", () => {
+  // The 2 containers of anima-lite point at the same files as anima-turbo, so the list is a subset
+  // of the turbo default.
   const lite = new Set(paths(selectionRefs(resolveSelection(manifest, { model: "anima-lite" }))));
   const turbo = new Set(paths(selectionRefs(resolveSelection(manifest))));
   for (const path of lite) {
-    assertEquals(turbo.has(path), true, `${path} が既定選択の部分集合になっていない`);
+    assertEquals(turbo.has(path), true, `${path} is not in the subset of the default selection`);
   }
   assertEquals(lite.size, TEXT_ENCODER_PARTS.length + TRANSFORMER_I8_FETCHED.length + 2);
 });
 
-// ---- ⑤ weights の部分集合（`ResolveOptions.weights`）。1 つのモデルが「本体だけでも動き、
-// 追加の役割を足すこともできる」形（gemma4 の model + drafter）を、配布形を割らずに扱う軸。
+// ---- ⑤ A subset of weights (`ResolveOptions.weights`). The axis that handles a model that "runs
+// with the main weights alone and can also add extra roles" (gemma4's model + drafter) without
+// splitting the distribution form.
 
-test("resolveSelection: weights を絞ると指定した役割だけが選択に出る（assets は全数）", () => {
+test("resolveSelection: narrowing weights puts only the named roles into the selection (assets are all)", () => {
   const selection = resolveSelection(manifest, { weights: ["transformer"] });
   assertEquals(Object.keys(selection.containers), ["transformer"]);
   assertEquals(Object.keys(selection.assets), ["tokenizer", "style_vectors", "style_alias"]);
-  // 絞っても dtype の選び方は変わらない（既定 quant の i8）。
+  // Narrowing does not change how the dtype is chosen (i8 of the default quant).
   assertEquals(paths(selection.containers["transformer"].parts), [...TRANSFORMER_I8_PARTS]);
   assertEquals(paths(selectionRefs(selection)), [
     ...TRANSFORMER_I8_FETCHED,
@@ -145,19 +157,20 @@ test("resolveSelection: weights を絞ると指定した役割だけが選択に
   ]);
 });
 
-test("resolveSelection: weights の並びは宣言順（指定した順ではない）", () => {
+test("resolveSelection: the order of weights is declaration order (not the order given)", () => {
   const selection = resolveSelection(manifest, { weights: ["vae_decoder", "text_encoder"] });
-  // 呼び手が逆順に並べても、選択は manifest の宣言順のまま（取得の送出順を呼び手が動かさない）。
+  // Even when the caller lists them in reverse, the selection keeps the manifest's declaration
+  // order (the caller does not move the dispatch order of fetches).
   assertEquals(Object.keys(selection.containers), ["text_encoder", "vae_decoder"]);
 });
 
-test("resolveSelection: weights の空配列は 1 本も取らない（assets だけ）", () => {
+test("resolveSelection: an empty weights array fetches nothing (assets only)", () => {
   const selection = resolveSelection(manifest, { weights: [] });
   assertEquals(Object.keys(selection.containers), []);
   assertEquals(paths(selectionRefs(selection)), [TOKENIZER, STYLE_VECTORS]);
 });
 
-test("resolveSelection: 実在しない weights 名は利用可能一覧つきで拒否する", () => {
+test("resolveSelection: rejects a weights name that does not exist, with the list of available ones", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { weights: ["transformer", "drafter"] }),
     ManifestReferenceError,
@@ -166,7 +179,7 @@ test("resolveSelection: 実在しない weights 名は利用可能一覧つき�
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
 
-test("resolveSelection: weights の重複は拒否する", () => {
+test("resolveSelection: rejects duplicate weights", () => {
   assertThrows(
     () => resolveSelection(manifest, { weights: ["transformer", "transformer"] }),
     ManifestReferenceError,
@@ -174,8 +187,8 @@ test("resolveSelection: weights の重複は拒否する", () => {
   );
 });
 
-test("resolveSelection: weights の実在はモデルごとに見る", () => {
-  // anima-lite に text_conditioner は無い（anima-turbo にはある）。
+test("resolveSelection: whether a weights name exists is checked per model", () => {
+  // anima-lite has no text_conditioner (anima-turbo does).
   assertThrows(
     () => resolveSelection(manifest, { model: "anima-lite", weights: ["text_conditioner"] }),
     ManifestReferenceError,
@@ -183,7 +196,7 @@ test("resolveSelection: weights の実在はモデルごとに見る", () => {
   );
 });
 
-test("resolveSelection: 実在しない model は利用可能一覧つきで拒否する", () => {
+test("resolveSelection: rejects a model that does not exist, with the list of available ones", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { model: "anima-xl" }),
     ManifestReferenceError,
@@ -191,7 +204,7 @@ test("resolveSelection: 実在しない model は利用可能一覧つきで拒�
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
 });
 
-test("resolveSelection: 実在しない quant は利用可能一覧つきで拒否する", () => {
+test("resolveSelection: rejects a quant that does not exist, with the list of available ones", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { quant: "q4" }),
     ManifestReferenceError,
@@ -205,19 +218,20 @@ test("resolveSelection: 実在しない quant は利用可能一覧つきで拒�
   });
 });
 
-test("resolveSelection: quant の一覧は指定したモデルのものになる", () => {
+test("resolveSelection: the list of quants is the one of the specified model", () => {
   const error = assertThrows(
     () => resolveSelection(manifest, { model: "anima-lite", quant: "w8a8-s16" }),
     ManifestReferenceError,
   );
-  // 別モデル（anima-turbo）にしか無い quant を勧めない。
+  // It does not suggest a quant that only another model (anima-turbo) has.
   assertEquals(error.available.quants, ["w8"]);
 });
 
-// ---- 部品名と資産名は**別の欄**に入るので、`karume/4` にあった「取得キーの衝突」という
-// 失敗形はもう存在しない（3 つの名前空間を 1 枚の表へ畳んでいたのがその門の理由だった）。
+// ---- Component names and asset names go into **separate fields**, so the failure shape of
+// `karume/4`, "fetch-key collision", no longer exists (folding the 3 namespaces into one table was
+// the reason for that check).
 
-test("resolveSelection: 部品名と資産名が同名でも衝突しない（欄が別）", () => {
+test("resolveSelection: a component name and an asset name with the same name do not collide (separate fields)", () => {
   const collide = parseManifest(
     JSON.stringify({
       format: "karume/5",

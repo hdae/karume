@@ -1,10 +1,13 @@
 /**
- * 温め面（`prefetchAssets` — `source.ts` ④の相 1）の振る舞い。バイト列を手元に持たない面なので、
- * 観測できるのは「何回 network へ出たか」「進捗がどう出たか」「失敗がどう上がったか」の 3 つだけ
- * で、取れたバイト列の正しさは**後続の全量面**（`fetchAssets`）が読めることで見る。
+ * Behaviour of the warming surface (`prefetchAssets` — phase 1 of `source.ts` ④). This surface does
+ * not hold the bytes, so only three things can be observed: "how many times it went to the
+ * network", "how progress was reported" and "how failures came up"; the correctness of the fetched
+ * bytes is checked by **the whole-file surface that follows** (`fetchAssets`) being able to read
+ * them.
  *
- * 全量面そのものの契約（進捗の数値・律速・self-heal・越境）は `fetch_test.ts` の担当で、ここでは
- * 重複させない。ローカル取得元（相 1 を持たない取得元）側の no-op は `local_test.ts`。
+ * The contract of the whole-file surface itself (progress numbers, rate limiting, self-heal,
+ * cross-repository references) belongs to `fetch_test.ts` and is not duplicated here. The no-op on
+ * the local source side (a source without phase 1) is in `local_test.ts`.
  */
 
 import { test } from "vite-plus/test";
@@ -41,10 +44,13 @@ import {
 
 const MANIFEST_PATH = "karume.json";
 
-/** 越境参照が名乗る世代（自リポの同じ path を別世代から引く形 — ADR 0038 §7）。 */
+/**
+ * The generation a cross-repository reference names (the shape that reads the same path of this
+ * repository from another generation — ADR 0038 §7).
+ */
 const CROSS_REVISION = "89abcdef0123456789abcdef0123456789abcdef";
 
-/** fixture が宣言する全ファイル（長さ 0 の part は中身が無いので配信しない）。 */
+/** Every file the fixture declares (zero-length parts have no content and are not served). */
 const ASSET_PATHS = declaredRefs(fetchManifest).map((ref) => ref.path);
 
 const serveAll = (
@@ -61,7 +67,10 @@ const resolveUrl = (path: string): string => `${HUB_URL}/${REPO}/resolve/${SHA}/
 const countCalls = (calls: readonly string[], url: string): number =>
   calls.filter((call) => call === url).length;
 
-/** 長さは保ったまま中身だけ変える（size ではなく sha256 の門を踏ませる）。 */
+/**
+ * Changes only the content and keeps the length (so that the sha256 check fires, not the size
+ * check).
+ */
 const tamper = (bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
   const copy = new Uint8Array(bytes);
   copy[copy.length - 1] ^= 0xff;
@@ -69,18 +78,25 @@ const tamper = (bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
 };
 
 /**
- * ファイル列（= 温め面の入力）。`selectionRefs` は長さ 0 の part を落とし、同一実体
- * （`style_alias` のような別名）を畳んだ列を宣言順で返すので、そのまま渡せる。
+ * The file list (= the input of the warming surface). `selectionRefs` drops zero-length parts and
+ * returns the list with the same file (an alias such as `style_alias`) folded, in declaration
+ * order, so it can be passed as is.
  */
 const assetRefs = (loaded: LoadedManifest): FileRef[] => [
   ...selectionRefs(resolveSelection(loaded.manifest)),
 ];
 
-/** 温め面の入力をそのまま全量面の表へ（キーは path — 1 対 1 で突き合わせる）。 */
+/**
+ * The warming surface's input as a table for the whole-file surface (the key is the path — matched
+ * one to one).
+ */
 const filesOf = (refs: readonly FileRef[]): Record<string, FileRef> =>
   Object.fromEntries(refs.map((ref) => [ref.path, ref]));
 
-/** manifest は別 mock で読み、温め面の観測用に呼び出し記録が空の mock を渡す。 */
+/**
+ * The manifest is read with a separate mock, and a mock with an empty call record is passed for
+ * observing the warming surface.
+ */
 const prepare = async (
   routes: MockRoutes,
   caches: MemoryCacheStorage,
@@ -101,11 +117,13 @@ const prepare = async (
 };
 
 /**
- * URL 述語に一致する取得の**最初の 1 回だけ**を `429 Too Many Requests`（`retry-after: 0`）へ
- * 差し替え、以後は元の `fetch` へ委譲するラッパ（取得層の再試行を 1 回だけ踏ませる）。
+ * A wrapper that replaces **only the first** fetch matching a URL predicate with
+ * `429 Too Many Requests` (`retry-after: 0`) and delegates to the original `fetch` afterwards (it
+ * makes the fetch layer retry exactly once).
  *
- * 差し替えの前に元の `fetch` を必ず 1 回呼ぶ — こうしないと 429 になった要求が mock の
- * 呼び出し記録に残らず、「取り直したか」を要求回数で見られない。
+ * It always calls the original `fetch` once before replacing — otherwise the request that became a
+ * 429 would not stay in the mock's call record, and "whether it fetched again" could not be seen
+ * from the request count.
  */
 const rateLimitOnce = (
   base: typeof globalThis.fetch,
@@ -126,7 +144,7 @@ const rateLimitOnce = (
   };
 };
 
-test("prefetchAssets: complete をファイル 1 本につき 1 回出し、loaded は合計へ着地する", async () => {
+test("prefetchAssets: emits complete once per file, and loaded lands on the total", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   const events: AssetProgress[] = [];
@@ -140,32 +158,40 @@ test("prefetchAssets: complete をファイル 1 本につき 1 回出し、load
   let total = 0;
   for (const ref of refs) total += ref.size;
   const completes = events.filter((event) => event.phase === "complete");
-  assertEquals(completes.length, refs.length, "complete がファイル数と一致しない");
+  assertEquals(
+    completes.length,
+    refs.length,
+    "the number of complete events does not match the file count",
+  );
   assertEquals(
     new Set(completes.map((event) => event.path)),
     new Set(refs.map((ref) => ref.path)),
-    "complete を出していないファイルがある",
+    "some file never emitted complete",
   );
   for (const event of completes) assertEquals(event.fileLoaded, event.fileTotal);
   assertEquals(new Set(events.map((event) => event.total)), new Set([total]));
-  assertEquals(events[events.length - 1].loaded, total, "最後のイベントが合計に着地していない");
-  // 1 ファイルの phase は downloading* → complete の順で、complete の後は出ない。
+  assertEquals(
+    events[events.length - 1].loaded,
+    total,
+    "the last event does not land on the total",
+  );
+  // The phases of one file are downloading* → complete, and nothing comes after complete.
   const lastPhase = new Map<string, AssetPhase>();
   for (const event of events) {
     if (lastPhase.get(event.path) === "complete") {
-      throw new Error(`complete の後に ${event.phase} が出ている（${event.path}）`);
+      throw new Error(`${event.phase} after complete (${event.path})`);
     }
     lastPhase.set(event.path, event.phase);
   }
 });
 
-test("prefetchAssets: 落とした後の fetchAssets は 1 度も network に出ない", async () => {
+test("prefetchAssets: fetchAssets after the prefetch never goes to the network", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
 
   await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
   const warmed = mock.calls.length;
-  assert(warmed > 0, "prefetch が 1 本も取得していない");
+  assert(warmed > 0, "prefetch fetched nothing");
 
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, filesOf(refs), { fetch: second.fetch, caches });
@@ -175,11 +201,11 @@ test("prefetchAssets: 落とした後の fetchAssets は 1 度も network に出
     refs.map((ref) => ref.path),
   );
   for (const ref of refs) assertEquals(assets[ref.path], payloadFor(ref.path));
-  assertEquals(second.calls, [], "温めた後の全量面が network に出ている");
-  assertEquals(mock.calls.length, warmed, "1 回目の mock も追加で呼ばれている");
+  assertEquals(second.calls, [], "the whole-file surface goes to the network after warming");
+  assertEquals(mock.calls.length, warmed, "the first mock was called again as well");
 });
 
-test("prefetchAssets: キャッシュ済みのファイルは complete 1 点だけを出す", async () => {
+test("prefetchAssets: a cached file emits a single complete", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
@@ -192,19 +218,23 @@ test("prefetchAssets: キャッシュ済みのファイルは complete 1 点だ�
     onProgress: (progress) => events.push(progress),
   });
 
-  assertEquals(second.calls, [], "温まっているのに network へ出ている");
-  assertEquals(events.length, refs.length, "downloading が混ざっている（キャッシュヒットの列）");
+  assertEquals(second.calls, [], "goes to the network although the cache is warm");
+  assertEquals(
+    events.length,
+    refs.length,
+    "downloading events are mixed in (the list of cache hits)",
+  );
   assertEquals(new Set(events.map((event) => event.phase)), new Set<AssetPhase>(["complete"]));
 });
 
-test("prefetchAssets: 全ファイルがキャッシュ済みでも中断は 1 ファイルごとに効く", async () => {
+test("prefetchAssets: an abort takes effect per file even when every file is cached", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
 
   const second = createMockFetch({ files: serveAll() });
   const controller = new AbortController();
-  const reason = new Error("app: ユーザーがロードを取り消した");
+  const reason = new Error("app: the user cancelled the load");
   const completes: string[] = [];
 
   const error = await assertRejects(() =>
@@ -212,8 +242,8 @@ test("prefetchAssets: 全ファイルがキャッシュ済みでも中断は 1 �
       fetch: second.fetch,
       caches,
       signal: controller.signal,
-      // 全ファイルが温まっているので downloading は出ない（complete 1 点だけの列）。最初の
-      // 1 本を終えた直後に取り消す。
+      // Every file is warm, so no downloading appears (a list of single complete events). Cancel
+      // right after the first file finishes.
       onProgress: (progress) => {
         completes.push(progress.path);
         controller.abort(reason);
@@ -221,27 +251,36 @@ test("prefetchAssets: 全ファイルがキャッシュ済みでも中断は 1 �
     }),
   );
 
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
-  assertEquals(second.calls, [], "温まっているのに network へ出ている（中断の穴を隠している）");
-  // 中断確認が下層（network）にしか無いと、残り全 ref をキャッシュから舐め切ってから決着する。
-  // 同時 4 本ぶんは既に飛び込み済みで最後まで進むので、上限ではなく「舐め切らない」を見る。
-  assert(refs.length > 4, `同時本数より多い列で試していない（refs ${refs.length}）`);
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
+  assertEquals(
+    second.calls,
+    [],
+    "goes to the network although the cache is warm (hiding a gap in the abort)",
+  );
+  // If the abort were checked only in the lower layer (network), it would run through every
+  // remaining ref from the cache before settling. The 4 concurrent ones are already in flight and
+  // run to the end, so the test checks "does not run through all", not an upper bound.
+  assert(
+    refs.length > 4,
+    `not tried with a list longer than the concurrency (refs ${refs.length})`,
+  );
   assert(
     completes.length < refs.length,
-    `取り消し後も残りを舐め切っている（complete ${completes.length} / ${refs.length}）`,
+    `runs through the rest after the cancel (complete ${completes.length} / ${refs.length})`,
   );
 });
 
-test("prefetchAssets: 中断の後には complete を 1 つも出さない（全量面と同じ終わり方）", async () => {
-  // 上のテストは「舐め切らない」だけを見るので、中断の前に飛び込み済みのファイル（最大 4 本）が
-  // 中断の後に complete を出す形を通してしまう。全量面 fetchAssets は取得を抜けた直後に中断を
-  // 見るので 0 件 — 2 つの面で通知の終わり方を揃える。
+test("prefetchAssets: emits no complete after an abort (ends the same way as the whole-file surface)", async () => {
+  // The test above only checks "does not run through all", so it lets through the shape where files
+  // already in flight before the abort (up to 4) emit complete after it. The whole-file surface
+  // fetchAssets checks the abort right after leaving the fetch, so 0 — the two surfaces end their
+  // notifications the same way.
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches });
 
   const controller = new AbortController();
-  const reason = new Error("app: ユーザーがロードを取り消した");
+  const reason = new Error("app: the user cancelled the load");
   const afterAbort: string[] = [];
 
   const error = await assertRejects(() =>
@@ -256,40 +295,45 @@ test("prefetchAssets: 中断の後には complete を 1 つも出さない（全
     }),
   );
 
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
-  assert(refs.length > 4, `同時本数より多い列で試していない（refs ${refs.length}）`);
-  assertEquals(afterAbort, [], "中断の後にも通知が届いている");
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
+  assert(
+    refs.length > 4,
+    `not tried with a list longer than the concurrency (refs ${refs.length})`,
+  );
+  assertEquals(afterAbort, [], "notifications still arrive after the abort");
 });
 
-test("prefetchAssets: 取得中の中断は HubFetchError に包まれず素通しする", async () => {
+test("prefetchAssets: an abort during a fetch passes through without being wrapped in HubFetchError", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
-  const reason = new Error("app: ユーザーがロードを取り消した");
+  const reason = new Error("app: the user cancelled the load");
 
   const error = await assertRejects(() =>
     prefetchAssets(loaded, refs, {
       fetch: mock.fetch,
       caches,
       signal: controller.signal,
-      // 受信が始まった最初の 1 本の途中で取り消す（キャッシュヒットの列ではない側の窓）。
+      // Cancel in the middle of the first file whose reception started (the window on the side that
+      // is not the list of cache hits).
       onProgress: (progress) => {
         if (progress.phase === "downloading") controller.abort(reason);
       },
     }),
   );
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
 });
 
-test("prefetchAssets: 1 本の失敗は真因を復元して HubFetchError で上がる", async () => {
+test("prefetchAssets: one failure comes up as HubFetchError with the root cause restored", async () => {
   const caches = new MemoryCacheStorage();
   const served = serveAll();
   const { loaded, refs, mock } = await prepare({ files: served, delayMs: 5 }, caches);
-  // **先頭以外**の 1 本だけを落とす。1 本の失敗は残り全部を abort するので、巻き添え側は生の
-  // AbortError として決着する — ワーカーの配列位置で拾うと、真犯人が worker[0] 以外のときに
-  // 巻き添えが表面化して真因（どのファイルがなぜ落ちたか）が消える。
+  // Fails only one file **other than the first**. One failure aborts all the rest, so the
+  // collateral ones settle as bare AbortErrors — picking the error by worker array position would
+  // surface a collateral one when the real culprit is not worker[0], and the root cause (which file
+  // failed and why) would be lost.
   const victim = refs[1].path;
-  assert(refs[0].path !== victim, "先頭以外が落ちる形になっていない");
+  assert(refs[0].path !== victim, "the failing file is the first one");
   served.delete(victim);
 
   const error = await assertRejects(
@@ -300,13 +344,13 @@ test("prefetchAssets: 1 本の失敗は真因を復元して HubFetchError で�
       }),
     HubFetchError,
   );
-  assertEquals(error.path, victim, "落ちたのとは別のファイルが報告されている");
+  assertEquals(error.path, victim, "a file other than the one that failed is reported");
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, SHA);
-  assert(error.message.includes(victim), `${error.message} が落ちた path を名乗っていない`);
+  assert(error.message.includes(victim), `${error.message} does not name the failed path`);
 });
 
-test("prefetchAssets: 429 は onRetry で届き、温め直したバイト列が後続の全量面で揃う", async () => {
+test("prefetchAssets: a 429 arrives through onRetry, and the re-warmed bytes are correct in the whole-file surface that follows", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
   const target = resolveUrl(refs[0].path);
@@ -318,26 +362,27 @@ test("prefetchAssets: 429 は onRetry で届き、温め直したバイト列が
     onRetry: (diagnostic) => retries.push(diagnostic),
   });
 
-  assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
-  assertEquals(retries[0].url, target, "通知が別のファイルの URL を名乗っている");
+  assertEquals(retries.length, 1, "the retry notification did not arrive exactly once");
+  assertEquals(retries[0].url, target, "the notification names the URL of another file");
   assertEquals(retries[0].status, 429);
-  assertEquals(countCalls(mock.calls, target), 2, "429 の後に温め直していない");
+  assertEquals(countCalls(mock.calls, target), 2, "did not warm again after the 429");
 
-  // 温め直した中身が正しいことは、network に出ない全量面で読めることで見る。
+  // That the re-warmed content is correct is checked by reading it through the whole-file surface
+  // without going to the network.
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, filesOf(refs), { fetch: second.fetch, caches });
-  assertEquals(assets[refs[0].path], payloadFor(refs[0].path), "温め直した中身が違う");
-  assertEquals(second.calls, [], "温めきれていない（全量面が取り直している）");
+  assertEquals(assets[refs[0].path], payloadFor(refs[0].path), "the re-warmed content differs");
+  assertEquals(second.calls, [], "not fully warmed (the whole-file surface fetches again)");
 });
 
-test("prefetchAssets: sha256 不一致は fail loud で、キャッシュにエントリを残さない", async () => {
+test("prefetchAssets: a sha256 mismatch fails loudly and leaves no entry in the cache", async () => {
   const caches = new MemoryCacheStorage();
   const path = TOKENIZER;
   const { loaded, refs, mock } = await prepare(
     { files: serveAll(new Map([[path, tamper(payloadFor(path))]])) },
     caches,
   );
-  // 並行ワーカーの巻き添えを排して「落ちた 1 本」だけを見る。
+  // Rules out collateral failures of parallel workers and looks only at "the one that failed".
   const only = refs.filter((ref) => ref.path === path);
   assertEquals(only.length, 1);
 
@@ -349,19 +394,20 @@ test("prefetchAssets: sha256 不一致は fail loud で、キャッシュにエ�
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, SHA);
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
-  assert(error.cause instanceof Error, "下層の不一致を cause に残す");
+  assert(error.cause instanceof Error, "keeps the lower layer's mismatch as cause");
   assertEquals(
     hasEntry(hubCache(caches), tamper(payloadFor(path))),
     false,
-    "不一致のバイト列がキャッシュに残っている",
+    "the mismatching bytes remain in the cache",
   );
 });
 
-test("prefetchAssets: キャッシュを開けない環境では素 fetch へ縮退せず fail loud", async () => {
+test("prefetchAssets: where the cache cannot be opened, fails loudly instead of degrading to plain fetch", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
-  // この面はバイト列を手元に持たないので、キャッシュが使えないなら「温めたつもりで何も残って
-  // いない」への沈黙縮退はできない（縮退させると後続の読みが黙って network に出る）。
+  // This surface does not hold the bytes, so when the cache is unusable it cannot silently degrade
+  // into "thinks it warmed, but nothing is left" (degrading would make the following reads go to
+  // the network silently).
   const broken = {
     open: () => Promise.reject(new Error("cache storage open failure")),
   } as unknown as CacheStorage;
@@ -370,11 +416,11 @@ test("prefetchAssets: キャッシュを開けない環境では素 fetch へ縮
     () => prefetchAssets(loaded, refs, { fetch: mock.fetch, caches: broken }),
     HubFetchError,
   );
-  assert(error.cause instanceof Error, "下層の失敗を cause に残す");
-  assertEquals(mock.calls, [], "キャッシュを開けないのに本体の DL が走っている");
+  assert(error.cause instanceof Error, "keeps the lower layer's failure as cause");
+  assertEquals(mock.calls, [], "the main download runs although the cache cannot be opened");
 });
 
-test("prefetchAssets: 空・重複は network に出る前に ManifestReferenceError", async () => {
+test("prefetchAssets: empty or duplicate input is a ManifestReferenceError before going to the network", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, refs, mock } = await prepare({ files: serveAll() }, caches);
 
@@ -382,7 +428,7 @@ test("prefetchAssets: 空・重複は network に出る前に ManifestReferenceE
     () => prefetchAssets(loaded, [], { fetch: mock.fetch, caches }),
     ManifestReferenceError,
   );
-  assert(empty.message.includes("prefetchAssets"), `${empty.message} が面の名前を名乗っていない`);
+  assert(empty.message.includes("prefetchAssets"), `${empty.message} does not name the surface`);
   assertEquals(empty.available.models, ["anima-turbo", "anima-lite"]);
 
   const duplicated = await assertRejects(
@@ -391,23 +437,24 @@ test("prefetchAssets: 空・重複は network に出る前に ManifestReferenceE
   );
   assert(
     duplicated.message.includes(refs[0].path),
-    `${duplicated.message} が重複 path を名指ししていない`,
+    `${duplicated.message} does not name the duplicate path`,
   );
-  assertEquals(mock.calls, [], "入力検査より先に network へ出ている");
+  assertEquals(mock.calls, [], "goes to the network before the input check");
 });
 
-test("prefetchAssets: 重複判定は fileRefKey で見る（同じ path でも revision が違えば別の 1 本）", async () => {
+test("prefetchAssets: duplicates are judged by fileRefKey (the same path with a different revision is a separate file)", async () => {
   const caches = new MemoryCacheStorage();
   const path = ASSET_PATHS[0];
-  // 同じ path を別世代からも配る。中身は変えておく — 同一バイト列だと取得層の内容キーで
-  // 片方がキャッシュヒットになり、「2 本取りに行ったか」を要求回数で見られない。
+  // Serves the same path from another generation too. The content is changed — with identical
+  // bytes, one of them would be a cache hit through the fetch layer's content key, and "whether it
+  // fetched both" could not be seen from the request count.
   const crossBytes = payloadFor(`${CROSS_REVISION}/${path}`);
   const { loaded, refs, mock } = await prepare(
     { files: serveAll(new Map([[`${REPO}@${CROSS_REVISION}/${path}`, crossBytes]])) },
     caches,
   );
   const own = refs.find((ref) => ref.path === path);
-  assert(own !== undefined, `${path} が選択の宣言に無い`);
+  assert(own !== undefined, `${path} is not in the selection's declaration`);
   const cross: FileRef = {
     path,
     size: crossBytes.byteLength,
@@ -416,13 +463,13 @@ test("prefetchAssets: 重複判定は fileRefKey で見る（同じ path でも 
     revision: CROSS_REVISION,
   };
 
-  // 重複を path で畳む実装なら、ここが ManifestReferenceError になる。
+  // An implementation that folds duplicates by path would hit a ManifestReferenceError here.
   await prefetchAssets(loaded, [own, cross], { fetch: mock.fetch, caches });
 
   assertEquals(countCalls(mock.calls, resolveUrl(path)), 1);
   assertEquals(
     countCalls(mock.calls, `${HUB_URL}/${REPO}/resolve/${CROSS_REVISION}/${path}`),
     1,
-    "越境参照ぶんが自リポ参照へ畳まれて温められていない",
+    "the cross-repository reference was folded into the same-repository reference and not warmed",
   );
 });

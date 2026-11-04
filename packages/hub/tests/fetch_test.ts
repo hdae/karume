@@ -50,7 +50,7 @@ import {
 
 const MANIFEST_PATH = "karume.json";
 
-/** fixture が宣言する全ファイル（長さ 0 の part は中身が無いので配信しない）。 */
+/** Every file the fixture declares (zero-length parts have no content and are not served). */
 const ASSET_PATHS = declaredRefs(fetchManifest).map((ref) => ref.path);
 
 const manifestBytes = FETCH_MANIFEST_BYTES;
@@ -70,7 +70,10 @@ const revisionUrl = (ref: string): string => `${HUB_URL}/api/models/${REPO}/revi
 const countCalls = (calls: readonly string[], url: string): number =>
   calls.filter((call) => call === url).length;
 
-/** 長さは保ったまま中身だけ変える（size ではなく sha256 の門を踏ませる）。 */
+/**
+ * Changes only the content and keeps the length (so that the sha256 check fires, not the size
+ * check).
+ */
 const tamper = (bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
   const copy = new Uint8Array(bytes);
   copy[copy.length - 1] ^= 0xff;
@@ -78,11 +81,13 @@ const tamper = (bytes: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> => {
 };
 
 /**
- * URL 述語に一致する取得の**最初の 1 回だけ**を `429 Too Many Requests`（`retry-after: 0`）へ
- * 差し替え、以後は元の `fetch` へ委譲するラッパ（取得層の再試行を 1 回だけ踏ませる）。
+ * A wrapper that replaces **only the first** fetch matching a URL predicate with
+ * `429 Too Many Requests` (`retry-after: 0`) and delegates to the original `fetch` afterwards (it
+ * makes the fetch layer retry exactly once).
  *
- * 差し替えの前に元の `fetch` を必ず 1 回呼ぶ — こうしないと 429 になった要求が mock の
- * 呼び出し記録に残らず、「取り直したか」を要求回数で見られない。
+ * It always calls the original `fetch` once before replacing — otherwise the request that became a
+ * 429 would not stay in the mock's call record, and "whether it fetched again" could not be seen
+ * from the request count.
  */
 const rateLimitOnce = (
   base: typeof globalThis.fetch,
@@ -103,7 +108,9 @@ const rateLimitOnce = (
   };
 };
 
-/** `console.warn` を差し替えて `body` を走らせ、必ず元へ戻す（出た文言をそのまま返す）。 */
+/**
+ * Replaces `console.warn`, runs `body` and always restores it (returns the emitted messages as is).
+ */
 const captureWarnings = async (body: () => Promise<void>): Promise<string[]> => {
   const original = console.warn;
   const warnings: string[] = [];
@@ -118,10 +125,11 @@ const captureWarnings = async (body: () => Promise<void>): Promise<string[]> => 
   return warnings;
 };
 
-test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 SHA に固定される", async () => {
+test("loadManifest: a mutable ref is resolved only once, and later fetches are pinned to the same SHA", async () => {
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
   const caches = new MemoryCacheStorage();
-  // revision を渡さない経路なので pin の案内が出る（文言の検査は専用テスト側）。
+  // This path passes no revision, so the pin hint is emitted (its wording is checked by a dedicated
+  // test).
   let loaded!: LoadedManifest;
   await captureWarnings(async () => {
     loaded = await loadManifest({ repo: REPO, hubUrl: HUB_URL }, { fetch: mock.fetch, caches });
@@ -132,13 +140,17 @@ test("loadManifest: 可変 ref は 1 回だけ解決し、以降は同一 SHA �
   assertEquals(mock.calls[1], resolveUrl(MANIFEST_PATH));
 
   await fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches });
-  assertEquals(countCalls(mock.calls, revisionUrl("main")), 1, "解決はセッション 1 回だけ");
+  assertEquals(
+    countCalls(mock.calls, revisionUrl("main")),
+    1,
+    "resolution happens once per session",
+  );
   for (const call of mock.calls.slice(1)) {
-    assert(call.includes(`/resolve/${SHA}/`), `${call} が解決済み SHA に固定されていない`);
+    assert(call.includes(`/resolve/${SHA}/`), `${call} is not pinned to the resolved SHA`);
   }
 });
 
-describe("loadManifest: revision 未指定の main 解決だけを 1 回 warn する", () => {
+describe("loadManifest: warns once only for resolving main without a revision", () => {
   const load = async (revision?: string): Promise<string[]> => {
     const mock = createMockFetch({ sha: SHA, files: serveAll() });
     const caches = new MemoryCacheStorage();
@@ -154,35 +166,36 @@ describe("loadManifest: revision 未指定の main 解決だけを 1 回 warn �
     });
   };
 
-  it("revision 省略なら 1 回だけ出て、解決した SHA と 2 択の案内を載せる", async () => {
+  it("without a revision it is emitted once, with the resolved SHA and the two options", async () => {
     const warnings = await load();
-    assertEquals(warnings.length, 1, "警告が出ない / 複数回出ている");
+    assertEquals(warnings.length, 1, "the warning is missing or emitted more than once");
     const [warning] = warnings;
-    // コピーでそのまま pin になる形（SHA が本文に無いと案内が実行不能になる）。
-    assert(warning.includes(SHA), `${warning} が解決した commit SHA を印字していない`);
-    assert(warning.includes(REPO), `${warning} がどのリポの話か示していない`);
-    assert(warning.includes(`revision: "${SHA}"`), `${warning} が pin の書き方を出していない`);
+    // A form that becomes a pin when copied as is (without the SHA in the text the hint could not
+    // be followed).
+    assert(warning.includes(SHA), `${warning} does not print the resolved commit SHA`);
+    assert(warning.includes(REPO), `${warning} does not say which repository it is about`);
+    assert(warning.includes(`revision: "${SHA}"`), `${warning} does not show how to write the pin`);
     // The bare table name on a subpath (0.15 spelling), not a prefixed `<FAMILY>_SOURCES`.
     assert(
       /(?<![\w.])SOURCES\[/.test(warning) && warning.includes("@karume/models/"),
-      `${warning} が models の対応表へ誘導していない`,
+      `${warning} does not point to the models table`,
     );
   });
 
-  it("'main' の明示指定では出さない（可変 ref でよいという意思表示）", async () => {
+  it("not emitted for an explicit 'main' (a statement that a mutable ref is fine)", async () => {
     assertEquals(await load("main"), []);
   });
 
-  it("SHA 指定では出さない", async () => {
+  it("not emitted for a SHA", async () => {
     assertEquals(await load(SHA), []);
   });
 
-  it("タグ・ブランチの明示指定でも出さない", async () => {
+  it("not emitted for an explicit tag or branch either", async () => {
     assertEquals(await load("v1.0"), []);
   });
 
-  it("解決に失敗したときは warn ではなく失敗そのものが上がる", async () => {
-    const mock = createMockFetch({ files: serveAll() }); // sha 無し = 解決 API は 404
+  it("when resolution fails, the failure itself comes up instead of a warning", async () => {
+    const mock = createMockFetch({ files: serveAll() }); // no sha = the resolution API returns 404
     const warnings = await captureWarnings(async () => {
       await assertRejects(
         () =>
@@ -196,12 +209,12 @@ describe("loadManifest: revision 未指定の main 解決だけを 1 回 warn �
         HubFetchError,
       );
     });
-    assertEquals(warnings, [], "解決できていないのに pin を勧めている");
+    assertEquals(warnings, [], "recommends a pin although resolution failed");
   });
 });
 
-test("loadManifest: revision に SHA を渡すと解決リクエストが発生しない", async () => {
-  const mock = createMockFetch({ files: serveAll() }); // sha 無し = 解決 API は 404
+test("loadManifest: passing a SHA as revision issues no resolution request", async () => {
+  const mock = createMockFetch({ files: serveAll() }); // no sha = the resolution API returns 404
   const caches = new MemoryCacheStorage();
   const loaded = await loadManifest(
     { repo: REPO, hubUrl: HUB_URL, revision: SHA },
@@ -214,7 +227,7 @@ test("loadManifest: revision に SHA を渡すと解決リクエストが発生�
   assertEquals(mock.calls, [resolveUrl(MANIFEST_PATH)]);
 });
 
-test("loadManifest: 可変 ref の解決失敗はオフライン不可として HubFetchError で報告する", async () => {
+test("loadManifest: a failed resolution of a mutable ref is reported as HubFetchError saying it cannot work offline", async () => {
   const mock = createMockFetch({ files: serveAll() });
   const caches = new MemoryCacheStorage();
   const error = await assertRejects(
@@ -223,19 +236,20 @@ test("loadManifest: 可変 ref の解決失敗はオフライン不可として 
   );
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, undefined);
-  assert(error.message.includes("offline"), "オフライン不可であることを明示する");
+  assert(error.message.includes("offline"), "states that it cannot work offline");
 });
 
-describe("loadManifest: URL の構造を壊す repo 名は取得に出る前に HubError で断る", () => {
-  // repo は取得層で percent-encode されずに URL へ綴り込まれる（`/` が構造要素）ので、`?` `#` は
-  // `/resolve/<SHA>/...` を query / fragment へ押し出し、`../` と 3 セグメント以上は別の path を指す。
+describe("loadManifest: a repo name that breaks the URL structure is refused with HubError before any fetch", () => {
+  // The fetch layer writes repo into the URL without percent-encoding (`/` is a structural
+  // element), so `?` and `#` push `/resolve/<SHA>/...` into the query / fragment, and `../` or 3+
+  // segments point at another path.
   const cases: readonly [string, string][] = [
-    ["query の ?", "someone/anima?untrusted=yes"],
-    ["fragment の #", "someone/anima#frag"],
-    ["percent の %", "someone/anima%2Fother"],
-    ["親ディレクトリ ../", "../anima"],
-    ["3 セグメント", "someone/anima/extra"],
-    ["1 セグメント", "anima"],
+    ["? of a query", "someone/anima?untrusted=yes"],
+    ["# of a fragment", "someone/anima#frag"],
+    ["% of percent-encoding", "someone/anima%2Fother"],
+    ["parent directory ../", "../anima"],
+    ["3 segments", "someone/anima/extra"],
+    ["1 segment", "anima"],
   ];
   for (const [label, repo] of cases) {
     it(label, async () => {
@@ -252,32 +266,35 @@ describe("loadManifest: URL の構造を壊す repo 名は取得に出る前に 
             ),
           HubError,
         );
-        assert(error.message.includes(repo), `${error.message} が受け取った repo を名乗っていない`);
-        assertEquals(mock.calls, [], "不正な repo のまま取得へ出ている");
+        assert(error.message.includes(repo), `${error.message} does not name the repo it received`);
+        assertEquals(mock.calls, [], "goes to fetch with an invalid repo");
       }
     });
   }
 });
 
-test("loadManifest: repo が文字列でない参照は素の TypeError でなく HubError で断る", async () => {
-  // 型の外（JS からの呼び出し・未検証の設定値）から来る形を再現するため、意図して型を外す。
+test("loadManifest: a reference whose repo is not a string is refused with HubError, not a plain TypeError", async () => {
+  // The types are deliberately bypassed to reproduce what comes from outside them (calls from JS,
+  // unvalidated settings).
   const ref = { hubUrl: HUB_URL } as unknown as HubRepoRef;
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
   await assertRejects(
     () => loadManifest(ref, { fetch: mock.fetch, caches: new MemoryCacheStorage() }),
     HubError,
   );
-  assertEquals(mock.calls, [], "repo の無い参照のまま取得へ出ている");
+  assertEquals(mock.calls, [], "goes to fetch with a reference without a repo");
 });
 
-describe("loadManifest: revision 解決の応答が commit SHA でなければ固定せずに落とす", () => {
-  // 非準拠ミラー・カスタム fetch が可変 ref や短縮形を返すと、それを「固定済みの世代」として
-  // 以後の全取得が解決し直す形になり、1 つの commit に固定する契約が成り立たない。
+describe("loadManifest: a revision resolution response that is not a commit SHA fails without pinning", () => {
+  // If a non-conforming mirror or a custom fetch returned a mutable ref or a short form, every
+  // later
+  // fetch would resolve it again as "the pinned generation", and the contract of pinning to one
+  // commit would not hold.
   const cases: readonly [string, string][] = [
-    ["ブランチ名", "main"],
-    ["短縮 SHA", SHA.slice(0, 7)],
-    ["40 桁に満たない 16 進", SHA.slice(0, 39)],
-    ["大文字の 16 進", SHA.toUpperCase()],
+    ["branch name", "main"],
+    ["short SHA", SHA.slice(0, 7)],
+    ["hex shorter than 40 digits", SHA.slice(0, 39)],
+    ["uppercase hex", SHA.toUpperCase()],
   ];
   for (const [label, sha] of cases) {
     it(label, async () => {
@@ -296,14 +313,18 @@ describe("loadManifest: revision 解決の応答が commit SHA でなければ�
       assertEquals(error.repo, REPO);
       assert(
         error.cause instanceof Error && error.cause.message.includes(sha),
-        "受け取った応答の値を診断に載せていない",
+        "the diagnostic does not carry the value of the response it received",
       );
-      assertEquals(mock.calls, [revisionUrl("main")], "固定できていない世代で取得へ進んでいる");
+      assertEquals(
+        mock.calls,
+        [revisionUrl("main")],
+        "proceeds to fetch with a generation that could not be pinned",
+      );
     });
   }
 });
 
-test("loadManifest: 1MiB を超える karume.json は ManifestFormatError で弾く（判定は全量受信後）", async () => {
+test("loadManifest: a karume.json over 1MiB is rejected with ManifestFormatError (judged after the whole body is received)", async () => {
   const oversized = new TextEncoder().encode(" ".repeat(2 * 1024 * 1024));
   const mock = createMockFetch({
     sha: SHA,
@@ -324,7 +345,7 @@ test("loadManifest: 1MiB を超える karume.json は ManifestFormatError で弾
   });
 });
 
-test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付けて透過する", async () => {
+test("loadManifest: a 404 from the fetch layer passes through with the repo / SHA / path context added", async () => {
   const files = serveAll();
   files.delete(MANIFEST_PATH);
   const mock = createMockFetch({ sha: SHA, files });
@@ -345,10 +366,10 @@ test("loadManifest: 取得層の 404 は repo / SHA / path の文脈を付けて
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, SHA);
   assertEquals(error.path, MANIFEST_PATH);
-  assert(error.cause instanceof Error, "取得層のエラーを cause に残す");
+  assert(error.cause instanceof Error, "keeps the fetch layer's error as cause");
 });
 
-test("loadManifest: revision 解決の 429 は onRetry で届き、取り直して manifest が揃う", async () => {
+test("loadManifest: a 429 on revision resolution arrives through onRetry, and the manifest arrives after the retry", async () => {
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ sha: SHA, files: serveAll() });
   const retries: RetryDiagnostic[] = [];
@@ -363,15 +384,15 @@ test("loadManifest: revision 解決の 429 は onRetry で届き、取り直し�
       },
     );
   });
-  assertEquals(loaded.revisionSha, SHA, "429 の後に解決できていない");
+  assertEquals(loaded.revisionSha, SHA, "not resolved after the 429");
   assertEquals(
     retries,
     [{ url: revisionUrl("main"), status: 429, attempt: 1, delayMs: 0, retryAfter: "0" }],
-    "再試行の通知が届いていない / 中身が欠けている",
+    "the retry notification did not arrive or lacks content",
   );
 });
 
-test("loadManifest: karume.json の 429 も onRetry で届く", async () => {
+test("loadManifest: a 429 on karume.json also arrives through onRetry", async () => {
   const caches = new MemoryCacheStorage();
   const mock = createMockFetch({ files: serveAll() });
   const target = resolveUrl(MANIFEST_PATH);
@@ -385,19 +406,19 @@ test("loadManifest: karume.json の 429 も onRetry で届く", async () => {
     },
   );
   assertEquals(loaded.manifest.available.models, ["anima-turbo", "anima-lite"]);
-  assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
-  assertEquals(retries[0].url, target, "通知が karume.json 以外の URL を名乗っている");
+  assertEquals(retries.length, 1, "the retry notification did not arrive exactly once");
+  assertEquals(retries[0].url, target, "the notification names a URL other than karume.json");
   assertEquals(retries[0].status, 429);
-  assertEquals(countCalls(mock.calls, target), 2, "429 の後に取り直していない");
+  assertEquals(countCalls(mock.calls, target), 2, "not fetched again after the 429");
 });
 
-test("loadManifest: 破損した cached karume.json は self-heal で 1 往復だけ取り直す", async () => {
+test("loadManifest: a corrupted cached karume.json self-heals by fetching again exactly once", async () => {
   const caches = new MemoryCacheStorage();
   const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
   const first = createMockFetch({ files: serveAll() });
   await loadManifest(ref, { fetch: first.fetch, caches });
 
-  // ① UTF-8 として読めないバイト列（0xff は UTF-8 に現れない）。
+  // ① Bytes that cannot be read as UTF-8 (0xff never appears in UTF-8).
   overwriteEntry(hubCache(caches), manifestBytes, new Uint8Array([0xff, 0xfe, 0xff]), {
     keepRecord: true,
   });
@@ -406,15 +427,15 @@ test("loadManifest: 破損した cached karume.json は self-heal で 1 往復�
   assertEquals(
     afterDecodeBreak.manifest.available.models,
     ["anima-turbo", "anima-lite"],
-    "破損キャッシュから復帰できていない",
+    "did not recover from the corrupted cache",
   );
   assertEquals(
     countCalls(healedDecode.calls, resolveUrl(MANIFEST_PATH)),
     1,
-    "self-heal は 1 往復だけ",
+    "self-heal takes exactly one round trip",
   );
 
-  // ② decode は通るが JSON として壊れている。
+  // ② Decodes, but is broken as JSON.
   overwriteEntry(
     hubCache(caches),
     manifestBytes,
@@ -427,11 +448,11 @@ test("loadManifest: 破損した cached karume.json は self-heal で 1 往復�
   assertEquals(
     countCalls(healedParse.calls, resolveUrl(MANIFEST_PATH)),
     1,
-    "self-heal は 1 往復だけ",
+    "self-heal takes exactly one round trip",
   );
 });
 
-test("loadManifest: 真実源の karume.json が壊れていれば ManifestFormatError（キャッシュにも残さない）", async () => {
+test("loadManifest: a broken karume.json at the source of truth is a ManifestFormatError (and is not kept in the cache)", async () => {
   const caches = new MemoryCacheStorage();
   const broken = new TextEncoder().encode('{"format": "karume/5"');
   const mock = createMockFetch({ files: serveAll(new Map([[MANIFEST_PATH, broken]])) });
@@ -440,40 +461,45 @@ test("loadManifest: 真実源の karume.json が壊れていれば ManifestForma
       loadManifest({ repo: REPO, hubUrl: HUB_URL, revision: SHA }, { fetch: mock.fetch, caches }),
     ManifestFormatError,
   );
-  assertEquals(hubCache(caches).entries.size, 0, "壊れた manifest をキャッシュに残している");
+  assertEquals(hubCache(caches).entries.size, 0, "keeps the broken manifest in the cache");
 });
 
-test("loadManifest: 完全キャッシュ済みでも中断済み signal なら manifest を返さない", async () => {
+test("loadManifest: even when fully cached, an already aborted signal returns no manifest", async () => {
   const caches = new MemoryCacheStorage();
   const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
   const first = createMockFetch({ files: serveAll() });
   await loadManifest(ref, { fetch: first.fetch, caches });
 
   const controller = new AbortController();
-  const reason = new Error("app: 起動を取り消した");
+  const reason = new Error("app: the startup was cancelled");
   controller.abort(reason);
   const second = createMockFetch({ files: serveAll() });
   const error = await assertRejects(() =>
     loadManifest(ref, { fetch: second.fetch, caches, signal: controller.signal }),
   );
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
-  assertEquals(second.calls, [], "中断済みなのに network へ出ている");
-  assertEquals(hubCache(caches).entries.size, 1, "中断を破損と取り違えてキャッシュを捨てている");
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
+  assertEquals(second.calls, [], "goes to the network although already aborted");
+  assertEquals(
+    hubCache(caches).entries.size,
+    1,
+    "mistakes the abort for corruption and discards the cache",
+  );
 });
 
-describe("loadManifest: 渡した HubRepoRef を後から書き換えても取得先は動かない", () => {
-  // 呼び出し側の値を読み直す実装だと、表示用の `loaded.repo` は旧値のまま、取得は旧 SHA で
-  // 新しい repo・ホストへ出る（名乗りと取得先が食い違う）。
+describe("loadManifest: rewriting the passed HubRepoRef afterwards does not move the fetch target", () => {
+  // An implementation that rereads the caller's value would keep the old value in the displayed
+  // `loaded.repo` while fetching with the old SHA from the new repo and host (what it names and
+  // where it fetches would disagree).
   const OTHER_HUB = "https://another.test";
   const OTHER_REPO = "another/model";
   const assertPinnedCalls = (calls: readonly string[]): void => {
     for (const call of calls) {
-      assert(call.startsWith(`${HUB_URL}/`), `${call} が書き換え後のホストへ出ている`);
-      assert(!call.includes(OTHER_REPO), `${call} が書き換え後の repo を取りに行っている`);
+      assert(call.startsWith(`${HUB_URL}/`), `${call} goes to the rewritten host`);
+      assert(!call.includes(OTHER_REPO), `${call} fetches from the rewritten repo`);
     }
   };
 
-  it("ロードの後の書き換え", async () => {
+  it("rewriting after the load", async () => {
     const mock = createMockFetch({ files: serveAll() });
     const caches = new MemoryCacheStorage();
     const ref = { repo: REPO, hubUrl: HUB_URL, revision: SHA };
@@ -486,11 +512,12 @@ describe("loadManifest: 渡した HubRepoRef を後から書き換えても取�
     assertEquals(loaded.repo, REPO);
   });
 
-  it("revision 解決を待っている最中の書き換え", async () => {
+  it("rewriting while the revision resolution is pending", async () => {
     const mock = createMockFetch({ sha: SHA, files: serveAll() });
     const caches = new MemoryCacheStorage();
     const ref = { repo: REPO, hubUrl: HUB_URL, revision: "main" };
-    // 解決要求が出た瞬間に書き換える（解決が返る前 = pin の前）。
+    // Rewrite the moment the resolution request goes out (before the resolution returns = before
+    // the pin).
     const mutating: typeof globalThis.fetch = (input, init) => {
       ref.repo = OTHER_REPO;
       ref.hubUrl = OTHER_HUB;
@@ -517,7 +544,7 @@ const load = async (routes: MockRoutes, caches: MemoryCacheStorage) => {
   return { mock, loaded };
 };
 
-test("fetchAssets: 全キーを返し、同一 path は 1 回しか取りに行かない", async () => {
+test("fetchAssets: returns every key and fetches the same path only once", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -527,16 +554,16 @@ test("fetchAssets: 全キーを返し、同一 path は 1 回しか取りに行�
   assertEquals(
     countCalls(mock.calls, resolveUrl(STYLE_VECTORS)),
     1,
-    "重複 path は 1 回だけ取得する",
+    "a duplicate path is fetched only once",
   );
   assert(
     assets["style_alias"] === assets["style_vectors"],
-    "同一 path のキーは同じバイト列を共有する",
+    "keys of the same path share the same bytes",
   );
   assertEquals(assets["transformer[0]"], payloadFor(TRANSFORMER_I8_FETCHED[0]));
-  // 選ばれなかった dtype の容器は 1 part も取りに行かない。
+  // The containers of dtypes that were not chosen are not fetched, not even one part.
   for (const path of TRANSFORMER_F16_PARTS) {
-    assertEquals(countCalls(mock.calls, resolveUrl(path)), 0, `${path} を取りに行っている`);
+    assertEquals(countCalls(mock.calls, resolveUrl(path)), 0, `${path} is fetched`);
   }
   for (const bytes of Object.values(assets)) {
     assertEquals(bytes.byteOffset, 0);
@@ -544,7 +571,7 @@ test("fetchAssets: 全キーを返し、同一 path は 1 回しか取りに行�
   }
 });
 
-test("fetchAssets: 進捗総量は manifest の size 合計（path 一意化）", async () => {
+test("fetchAssets: the progress total is the sum of the manifest sizes (unique paths)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -560,31 +587,31 @@ test("fetchAssets: 進捗総量は manifest の size 合計（path 一意化）"
   let expectedTotal = 0;
   for (const size of uniqueSizes.values()) expectedTotal += size;
 
-  assert(events.length > 0, "進捗が 1 度も出ない");
+  assert(events.length > 0, "no progress at all");
   for (const event of events) {
-    assertEquals(event.total, expectedTotal, "総量は重複排除された size 合計");
-    assert(event.loaded <= event.total, "合計が総量を超えない");
+    assertEquals(event.total, expectedTotal, "the total is the deduplicated sum of sizes");
+    assert(event.loaded <= event.total, "loaded does not exceed the total");
     assertEquals(
       event.fileTotal,
       uniqueSizes.get(event.path),
-      `${event.path}: fileTotal はそのファイル自身の manifest size`,
+      `${event.path}: fileTotal is the file's own manifest size`,
     );
     assert(
       event.fileLoaded <= event.fileTotal,
-      `${event.path}: fileLoaded がそのファイルの size を超えた`,
+      `${event.path}: fileLoaded exceeded the file's size`,
     );
     if (event.phase !== "downloading") {
       assertEquals(
         event.fileLoaded,
         event.fileTotal,
-        `${event.path}: ${event.phase} は全量が揃った点`,
+        `${event.path}: ${event.phase} is the point where the whole file is present`,
       );
     }
   }
-  assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
+  assertEquals(events[events.length - 1].loaded, expectedTotal, "the last event reaches the total");
 });
 
-test("fetchAssets: ファイル別の進捗は全体合計とは別に 1 ファイルぶんを表す", async () => {
+test("fetchAssets: per-file progress represents one file, separately from the overall total", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -595,23 +622,29 @@ test("fetchAssets: ファイル別の進捗は全体合計とは別に 1 ファ�
     onProgress: (progress) => events.push(progress),
   });
 
-  // 受信途中（size 未満）の downloading が出ている = fileLoaded がそのファイルの受信実測である。
+  // A downloading event in mid-reception (below size) appears = fileLoaded is that file's measured
+  // reception.
   assert(
     events.some((event) => event.phase === "downloading" && event.fileLoaded < event.fileTotal),
-    "受信途中の fileLoaded が 1 度も観測できない",
+    "fileLoaded in mid-reception is never observed",
   );
-  // 先に終わったファイルのぶんが loaded に積まれた後の downloading は、そのファイル 1 本ぶんの
-  // fileLoaded より必ず大きい（同値のままなら per-file 欄が全体合計の写しになっている）。
+  // A downloading event after an earlier finished file was added to loaded is always larger than
+  // the fileLoaded of that one file (if they stayed equal, the per-file field would be a copy of
+  // the
+  // overall total).
   assert(
     events.some((event) => event.phase === "downloading" && event.loaded > event.fileLoaded),
-    "複数ファイルを落としているのに全体 loaded とファイル別 fileLoaded が食い違わない",
+    "overall loaded and per-file fileLoaded never differ although several files are downloaded",
   );
 });
 
-/** phase の進む向き（大きいほど後）。 */
+/** The direction phases advance in (larger is later). */
 const PHASE_RANK: Record<AssetPhase, number> = { downloading: 0, complete: 1 };
 
-/** path ごとの phase 列（複数ファイルの進捗は交錯して届くので path で束ね直す）。 */
+/**
+ * The phase list per path (progress for several files arrives interleaved, so it is regrouped by
+ * path).
+ */
 const phasesByPath = (events: readonly AssetProgress[]): Map<string, AssetPhase[]> => {
   const byPath = new Map<string, AssetPhase[]>();
   for (const event of events) {
@@ -626,18 +659,18 @@ const assertMonotonic = (phases: readonly AssetPhase[], path: string): void => {
   for (let index = 1; index < phases.length; index += 1) {
     assert(
       PHASE_RANK[phases[index]] >= PHASE_RANK[phases[index - 1]],
-      `${path}: ${phases[index - 1]} → ${phases[index]} は phase の逆行`,
+      `${path}: ${phases[index - 1]} → ${phases[index]} goes backwards`,
     );
   }
-  assertEquals(phases[phases.length - 1], "complete", `${path}: 終端が complete でない`);
+  assertEquals(phases[phases.length - 1], "complete", `${path}: does not end with complete`);
   assertEquals(
     phases.filter((phase) => phase === "complete").length,
     1,
-    `${path}: complete はファイルごとに 1 回だけ`,
+    `${path}: complete exactly once per file`,
   );
 };
 
-test("fetchAssets: network 取得の phase は downloading → complete と単調に進む", async () => {
+test("fetchAssets: the phases of a network fetch advance monotonically downloading → complete", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -652,15 +685,18 @@ test("fetchAssets: network 取得の phase は downloading → complete と単�
   assertEquals(
     new Set(byPath.keys()),
     new Set(Object.values(files).map((ref) => ref.path)),
-    "取得した全 path が進捗に現れる",
+    "every fetched path appears in the progress",
   );
   for (const [path, phases] of byPath) {
-    assert(phases.includes("downloading"), `${path}: network 取得なのに downloading が無い`);
+    assert(
+      phases.includes("downloading"),
+      `${path}: no downloading although fetched from the network`,
+    );
     assertMonotonic(phases, path);
   }
 });
 
-test("fetchAssets: キャッシュヒットの phase 列は complete の 1 点だけ", async () => {
+test("fetchAssets: the phase list of a cache hit is a single complete", async () => {
   const caches = new MemoryCacheStorage();
   const first = await load({ files: serveAll() }, caches);
   const files = selectionFiles(first.loaded.manifest);
@@ -673,67 +709,72 @@ test("fetchAssets: キャッシュヒットの phase 列は complete の 1 点�
     caches,
     onProgress: (progress) => events.push(progress),
   });
-  assertEquals(second.calls, [], "キャッシュヒットは network に出ない");
+  assertEquals(second.calls, [], "a cache hit does not go to the network");
   const byPath = phasesByPath(events);
-  assert(byPath.size > 0, "進捗が 1 度も出ない");
+  assert(byPath.size > 0, "no progress at all");
   for (const [path, phases] of byPath) {
     assertEquals(
       phases,
       ["complete"],
-      `${path}: DL していないのに downloading が出た / 観測できない照合を名乗っている`,
+      `${path}: downloading appeared without a download / claims a verification that cannot be observed`,
     );
   }
   for (const event of events) {
-    // downloading が 1 度も出ない経路でも、complete は全量が揃った点なので満たされる。
+    // Even on a path where downloading never appears, complete is the point where the whole file is
+    // present, so this holds.
     assertEquals(
       event.fileLoaded,
       event.fileTotal,
-      `${event.path}: キャッシュヒットの ${event.phase} で fileLoaded が size に届いていない`,
+      `${event.path}: fileLoaded does not reach size at ${event.phase} of a cache hit`,
     );
-    // 全体 loaded は「取得済みバイトの合計」なので、同一イベントの fileLoaded を必ず含む。
+    // Overall loaded is "the sum of the bytes fetched", so it always includes the fileLoaded of the
+    // same event.
     assert(
       event.loaded >= event.fileLoaded,
-      `${event.path}: ${event.phase} の全体 loaded がこのファイルぶんを数えていない`,
+      `${event.path}: the overall loaded at ${event.phase} does not count this file`,
     );
   }
 });
 
-// 律速は「本数」ではなく「in-flight の size 合計」（バイト予算）。予算そのものの境界挙動は
-// tests/concurrency_test.ts が単体で凍結し、ここは面としての観測 — 予算に収まる限り本数では
-// 絞らないこと・送出順が選択の宣言順に決まることを見る。
-test("fetchAssets: 予算に収まる限り本数では絞らない（律速はバイト予算）", async () => {
+// Rate limiting is by "the size total in flight" (a byte budget), not by "count". The budget's own
+// boundary behaviour is frozen on its own by tests/concurrency_test.ts; this is the observation as
+// a surface — that nothing is throttled by count as long as it fits the budget, and that the
+// dispatch order is fixed to the selection's declaration order.
+test("fetchAssets: nothing is throttled by count as long as it fits the budget (rate limiting is the byte budget)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const files = selectionFiles(loaded.manifest);
-  // fixture の全ファイルを足しても予算（1.5GiB）に遠く及ばないので、全本が同時に走る。
+  // All the fixture's files together are far below the budget (1.5GiB), so all of them run at once.
   const uniquePaths = new Set(Object.values(files).map((ref) => ref.path));
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
   assertEquals(
     mock.peakConcurrency(),
     uniquePaths.size,
-    `予算に収まるのに同時 ${mock.peakConcurrency()} 本で頭打ちになった`,
+    `capped at ${mock.peakConcurrency()} at once although it fits the budget`,
   );
 });
 
-test("fetchAssets: 送出順は選択の宣言順（予算待ちを後続に追い越させない）", async () => {
+test("fetchAssets: the dispatch order is the selection's declaration order (no overtaking of a request waiting for budget)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const files = selectionFiles(loaded.manifest);
-  // path 一意化の後、宣言順に 1 回ずつ。
+  // After path dedupe, once each in declaration order.
   const expected: string[] = [];
   for (const ref of Object.values(files)) {
     const url = resolveUrl(ref.path);
     if (!expected.includes(url)) expected.push(url);
   }
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
-  // calls[0] は load() が出した manifest 取得。
+  // calls[0] is the manifest fetch issued by load().
   assertEquals(mock.calls.slice(1), expected);
 });
 
-// 上の 2 本は fixture の全量が予算（1.5GiB）に届かないので、待つ場面が生まれない — 本番の律速
-// （admission）を外しても、追い越しを許しても緑のまま通る。ここは内部口で予算を数十バイトへ絞り、
-// 「先行の未完了要求・予算待ちの大きな要求・後続の小さな要求」の 3 本で本番の結線を踏む。
-test("fetchAssets: 予算待ちの大きな要求を後続の小さな要求に追い越させず、in-flight は予算に収まる", async () => {
+// In the 2 tests above, the fixture's total does not reach the budget (1.5GiB), so no waiting ever
+// happens — they stay green even with the production rate limiting (admission) removed or with
+// overtaking allowed. Here the budget is squeezed to a few dozen bytes through the internal entry
+// point, and 3 requests, "an earlier unfinished request, a large request waiting for budget and a
+// later small request", exercise the production wiring.
+test("fetchAssets: a small later request does not overtake a large request waiting for budget, and in-flight stays within the budget", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const unique = new Map<string, FileRef>();
@@ -744,13 +785,18 @@ test("fetchAssets: 予算待ちの大きな要求を後続の小さな要求に�
   const small = bySize[0];
   const first = bySize[1];
   const big = bySize[bySize.length - 1];
-  // 先行（first）と小（small）は同時に収まり、先行と大（big）は収まらない予算。
+  // A budget where the earlier (first) and the small (small) fit together, and the earlier and the
+  // large (big) do not.
   const budget = first.size + small.size;
-  assert(big.size > first.size && big.size > small.size, "大きな要求が最大になっていない");
-  assert(big.size <= budget, "大きな要求が単独でも予算を超える（予算内の検査が成り立たない）");
+  assert(big.size > first.size && big.size > small.size, "the large request is not the largest");
+  assert(
+    big.size <= budget,
+    "the large request alone exceeds the budget (the within-budget check would not hold)",
+  );
 
-  // 受信中のバイト数を数える（応答の本体を読み切った時点で外す — 予算の席を返すのはその後なので、
-  // 正しい律速ならこの値は予算を超えない）。
+  // Counts the bytes being received (released once the response body is fully read — the budget
+  // slot is returned after that, so with correct rate limiting this value never exceeds the
+  // budget).
   const sizeByUrl = new Map([small, first, big].map((ref) => [resolveUrl(ref.path), ref.size]));
   let inFlightBytes = 0;
   let peakBytes = 0;
@@ -774,17 +820,25 @@ test("fetchAssets: 予算待ちの大きな要求を後続の小さな要求に�
   const files = { first, big, small };
   const assets = await fetchAssetsWithBudget(loaded, files, { fetch: tracked, caches }, budget);
   assertEquals(Object.keys(assets), ["first", "big", "small"]);
-  // calls[0] は load() が出した manifest 取得。小さな要求は先行と同時に収まるが、予算待ちの大きな
-  // 要求を追い越さない（宣言順の head-of-line blocking）。
+  // calls[0] is the manifest fetch issued by load(). The small request fits together with the
+  // earlier one, but does not overtake the large request waiting for budget (head-of-line blocking
+  // in declaration order).
   assertEquals(
     mock.calls.slice(1),
     [first, big, small].map((ref) => resolveUrl(ref.path)),
   );
-  assert(peakBytes <= budget, `in-flight が予算を超えた（最大 ${peakBytes}B / 予算 ${budget}B）`);
-  assertEquals(mock.peakConcurrency(), 1, "収まらない要求が先行と同時に走った");
+  assert(
+    peakBytes <= budget,
+    `in-flight exceeded the budget (peak ${peakBytes}B / budget ${budget}B)`,
+  );
+  assertEquals(
+    mock.peakConcurrency(),
+    1,
+    "a request that does not fit ran together with the earlier one",
+  );
 });
 
-/** 取得対象の path を送出順（= 表の順の path 一意化）に並べる。 */
+/** Lists the fetched paths in dispatch order (= the order of the table, with paths deduped). */
 const dispatchOrder = (files: Readonly<Record<string, { path: string }>>): string[] => {
   const order: string[] = [];
   for (const ref of Object.values(files)) {
@@ -793,30 +847,31 @@ const dispatchOrder = (files: Readonly<Record<string, { path: string }>>): strin
   return order;
 };
 
-test("fetchAssets: 巻き添えではなく真の第一失敗が表面化する", async () => {
+test("fetchAssets: the real first failure surfaces, not a collateral one", async () => {
   const caches = new MemoryCacheStorage();
   const served = serveAll();
   const { mock, loaded } = await load({ files: served, delayMs: 5 }, caches);
   const files = selectionFiles(loaded.manifest);
   const order = dispatchOrder(files);
-  // **先頭以外**の 1 本だけを 404 にする。1 本の失敗は残り全部を abort するので、巻き添え側は
-  // 生の AbortError（Chrome ではさらに固定文言へ差し替えられる）として決着する — 決着順や
-  // ワーカーの配列位置で拾うと、真犯人ではないその 1 つが表面化して真因が消える。
+  // Makes only one file **other than the first** return 404. One failure aborts all the rest, so
+  // the collateral ones settle as bare AbortErrors (which Chrome further replaces with a fixed
+  // message) — picking the error by settle order or by worker array position would surface one of
+  // those that is not the real culprit, and the root cause would be lost.
   const victim = order[order.length - 1];
-  assert(order.indexOf(victim) > 0, "先頭以外が落ちる形になっていない");
+  assert(order.indexOf(victim) > 0, "the failing file is the first one");
   served.delete(victim);
 
   const error = await assertRejects(
     () => fetchAssets(loaded, files, { fetch: withChromeAbortShape(mock.fetch), caches }),
     HubFetchError,
   );
-  assertEquals(error.path, victim, "落ちたのとは別のファイルが報告されている");
+  assertEquals(error.path, victim, "a file other than the one that failed is reported");
   assertEquals(error.repo, REPO);
   assertEquals(error.revisionSha, SHA);
-  assert(error.message.includes(victim), `${error.message} が落ちた path を名乗っていない`);
+  assert(error.message.includes(victim), `${error.message} does not name the failed path`);
 });
 
-test("fetchAssets: 2 回目はキャッシュから返り network に出ない", async () => {
+test("fetchAssets: the second time returns from the cache without going to the network", async () => {
   const caches = new MemoryCacheStorage();
   const first = await load({ files: serveAll() }, caches);
   const files = selectionFiles(first.loaded.manifest);
@@ -829,43 +884,49 @@ test("fetchAssets: 2 回目はキャッシュから返り network に出ない",
     caches,
     onProgress: (progress) => events.push(progress),
   });
-  assertEquals(second.calls, [], "キャッシュヒットは network に出ない");
+  assertEquals(second.calls, [], "a cache hit does not go to the network");
   assertEquals(assets["tokenizer"], payloadFor(TOKENIZER));
   assertEquals(
     events.filter((event) => event.phase === "complete").length,
     new Set(Object.values(files).map((ref) => ref.path)).size,
-    "キャッシュヒットでも complete は全ファイルぶん出る",
+    "complete is emitted for every file even on a cache hit",
   );
 });
 
-test("fetchAssets: 記録ハッシュが一致するヒットは中身を読み直さずに信じる", async () => {
+test("fetchAssets: a hit whose recorded hash matches is trusted without reading the content again", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
-  // 記録（取得時に焼かれたヘッダ）はそのままに、中身だけ差し替える。取得層の既定は
-  // 「記録が期待と一致すれば信じる」（ローカル格納の信頼 — knob なしの裁定）なので、全量
-  // ハッシュは走らず、この壊れたバイト列がそのまま返る。**トラストの範囲を明示する門**で、
-  // ここが赤くなったなら再ハッシュが復活した（＝毎起動の全量ハッシュが戻った）ということ。
+  // Keep the record (the headers written at fetch time) and replace only the content. The fetch
+  // layer's default is "trust the entry when the record matches the expectation" (trusting local
+  // storage — a ruling without a knob), so no full hash runs and these broken bytes come back as
+  // is. **This check makes the scope of the trust explicit**: if it turns red, rehashing came back
+  // (= the full hash on every startup returned).
   const path = VAE_DECODER_PARTS[1];
   const tampered = tamper(payloadFor(path));
   overwriteEntry(hubCache(caches), payloadFor(path), tampered, { keepRecord: true });
 
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, files, { fetch: second.fetch, caches });
-  assertEquals(assets["vae_decoder[1]"], tampered, "記録一致のヒットで全量ハッシュが走っている");
-  assertEquals(second.calls, [], "記録が一致しているのに取り直している");
+  assertEquals(
+    assets["vae_decoder[1]"],
+    tampered,
+    "a full hash runs on a hit whose record matches",
+  );
+  assertEquals(second.calls, [], "fetches again although the record matches");
 });
 
-test("fetchAssets: 記録の無い破損エントリは実ハッシュが捕まえ、1 往復で治る", async () => {
+test("fetchAssets: a corrupted entry without a record is caught by the actual hash and heals in one round trip", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
-  // 記録ごと落とす = 旧版 / 無検証 prefetch 由来のエントリと同じ形。読出し側は実ハッシュで
-  // 突合するので、壊れていれば evict → 取り直し（self-heal）になる。
+  // Dropping the record too = the same shape as an entry from an older version / an unverified
+  // prefetch. The read side checks it against its actual hash, so a broken one is evicted and
+  // fetched again (self-heal).
   const path = VAE_DECODER_PARTS[1];
   overwriteEntry(hubCache(caches), payloadFor(path), tamper(payloadFor(path)), {
     keepRecord: false,
@@ -874,36 +935,48 @@ test("fetchAssets: 記録の無い破損エントリは実ハッシュが捕ま�
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, files, { fetch: second.fetch, caches });
 
-  assertEquals(assets["vae_decoder[1]"], payloadFor(path), "破損キャッシュが素通りしている");
-  assertEquals(countCalls(second.calls, resolveUrl(path)), 1, "self-heal は 1 往復だけ");
-  assertEquals(second.calls.length, 1, "壊れていないファイルまで取り直している");
+  assertEquals(assets["vae_decoder[1]"], payloadFor(path), "the corrupted cache passes through");
+  assertEquals(
+    countCalls(second.calls, resolveUrl(path)),
+    1,
+    "self-heal takes exactly one round trip",
+  );
+  assertEquals(second.calls.length, 1, "files that are not broken are fetched again too");
 });
 
-test("fetchAssets: 記録が一致してもバイト数が manifest と違えば取り直す", async () => {
+test("fetchAssets: even with a matching record, a byte count that differs from the manifest is fetched again", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
-  // 記録は一致 = 全量ハッシュは走らない状態で、長さだけが manifest と食い違うエントリ。
-  // `expectedBytes` の門（取得層 HF 層の検証）だけがこれを捕まえられる。
+  // The record matches = no full hash runs, and only the length disagrees with the manifest. Only
+  // the `expectedBytes` check (the verification in the fetch layer's HF layer) can catch this.
   const path = TEXT_ENCODER_PARTS[1];
   const truncated = payloadFor(path).slice(0, payloadFor(path).byteLength - 1);
   overwriteEntry(hubCache(caches), payloadFor(path), truncated, { keepRecord: true });
 
   const second = createMockFetch({ files: serveAll() });
   const assets = await fetchAssets(loaded, files, { fetch: second.fetch, caches });
-  assertEquals(assets["text_encoder[1]"], payloadFor(path), "長さの違うエントリが素通りしている");
-  assertEquals(countCalls(second.calls, resolveUrl(path)), 1, "self-heal は 1 往復だけ");
+  assertEquals(
+    assets["text_encoder[1]"],
+    payloadFor(path),
+    "an entry with a different length passes through",
+  );
+  assertEquals(
+    countCalls(second.calls, resolveUrl(path)),
+    1,
+    "self-heal takes exactly one round trip",
+  );
 });
 
-test("fetchAssets: content-length は正しいのに body が足りない取得は fail loudly", async () => {
+test("fetchAssets: a fetch whose content-length is right but whose body is short fails loudly", async () => {
   const caches = new MemoryCacheStorage();
   const path = TEXT_CONDITIONER_PARTS[1];
   const full = payloadFor(path);
   const short = full.slice(0, full.byteLength - 2);
-  // content-length は manifest の size を主張しつつ、body だけ短く流す（取得層の上限は
-  // 超過しか見ないので、ここを止めるのは取得層の検証だけ）。
+  // content-length claims the manifest's size while only the body is streamed short (the fetch
+  // layer's limit looks only at excess, so only the fetch layer's verification stops this).
   const { mock, loaded } = await load(
     {
       files: serveAll(new Map([[path, short]])),
@@ -916,11 +989,15 @@ test("fetchAssets: content-length は正しいのに body が足りない取得�
     HubFetchError,
   );
   assertEquals(error.path, path);
-  assert(error.cause instanceof Error, "取得層の検証失敗を cause に残す");
-  assertEquals(hasEntry(hubCache(caches), short), false, "検証を通らないバイト列を格納している");
+  assert(error.cause instanceof Error, "keeps the fetch layer's verification failure as cause");
+  assertEquals(
+    hasEntry(hubCache(caches), short),
+    false,
+    "stores bytes that did not pass verification",
+  );
 });
 
-test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバイト列が返る", async () => {
+test("fetchAssets: a 429 on an asset arrives through onRetry, and the refetched bytes are returned", async () => {
   const caches = new MemoryCacheStorage();
   const path = VAE_DECODER_PARTS[1];
   const target = resolveUrl(path);
@@ -931,14 +1008,14 @@ test("fetchAssets: 資産の 429 は onRetry で届き、取り直したバイ�
     caches,
     onRetry: (diagnostic) => retries.push(diagnostic),
   });
-  assertEquals(retries.length, 1, "再試行の通知が 1 回だけ届いていない");
-  assertEquals(retries[0].url, target, "通知が別の資産の URL を名乗っている");
+  assertEquals(retries.length, 1, "the retry notification did not arrive exactly once");
+  assertEquals(retries[0].url, target, "the notification names the URL of another asset");
   assertEquals(retries[0].status, 429);
-  assertEquals(assets["vae_decoder[1]"], payloadFor(path), "取り直したバイト列が返っていない");
-  assertEquals(countCalls(mock.calls, target), 2, "429 の後に取り直していない");
+  assertEquals(assets["vae_decoder[1]"], payloadFor(path), "the refetched bytes are not returned");
+  assertEquals(countCalls(mock.calls, target), 2, "not fetched again after the 429");
 });
 
-test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら資産を返さない", async () => {
+test("fetchAssets: even when fully cached, an already aborted signal returns no assets", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -946,22 +1023,22 @@ test("fetchAssets: 完全キャッシュ済みでも中断済み signal なら�
   const cached = hubCache(caches).entries.size;
 
   const controller = new AbortController();
-  const reason = new Error("app: 起動を取り消した");
+  const reason = new Error("app: the startup was cancelled");
   controller.abort(reason);
   const second = createMockFetch({ files: serveAll() });
   const error = await assertRejects(() =>
     fetchAssets(loaded, files, { fetch: second.fetch, caches, signal: controller.signal }),
   );
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
-  assertEquals(second.calls, [], "中断済みなのに network へ出ている");
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
+  assertEquals(second.calls, [], "goes to the network although already aborted");
   assertEquals(
     hubCache(caches).entries.size,
     cached,
-    "中断を破損と取り違えてキャッシュを捨てている",
+    "mistakes the abort for corruption and discards the cache",
   );
 });
 
-test("fetchAssets: キャッシュ読出し中の中断でも資産を返さずに素通しする", async () => {
+test("fetchAssets: an abort while reading the cache also passes through without returning assets", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -969,11 +1046,13 @@ test("fetchAssets: キャッシュ読出し中の中断でも資産を返さず�
   const uniquePaths = new Set(Object.values(files).map((ref) => ref.path)).size;
 
   const controller = new AbortController();
-  const reason = new Error("app: 読出し中に取り消した");
+  const reason = new Error("app: cancelled while reading");
   const second = createMockFetch({ files: serveAll() });
   const events: AssetProgress[] = [];
-  // 全キャッシュ済みなので downloading は出ない。最初に揃った 1 本の complete で取り消すと、
-  // 残りは「取得を抜けた直後の確認」で止まる（＝取り消し後に complete まで進むものが無い）。
+  // Everything is cached, so no downloading appears. Cancelling on the complete of the first file
+  // that is ready stops the rest at "the check right after leaving the fetch" (= nothing advances
+  // to
+  // complete after the cancel).
   const error = await assertRejects(() =>
     fetchAssets(loaded, files, {
       fetch: second.fetch,
@@ -985,15 +1064,15 @@ test("fetchAssets: キャッシュ読出し中の中断でも資産を返さず�
       },
     }),
   );
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
-  assert(uniquePaths > 1, "取り消しの効き目を観測できる本数になっていない");
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
+  assert(uniquePaths > 1, "not enough files to observe the effect of the cancel");
   assert(
     events.filter((event) => event.phase === "complete").length < uniquePaths,
-    "取り消したのに全ファイルを complete まで進めている",
+    "advances every file to complete although cancelled",
   );
 });
 
-test("fetchAssets: 認証の有無でキャッシュを分けない（ヘッダは取得へ透過する）", async () => {
+test("fetchAssets: the cache is not split by authentication (the headers pass through to the fetch)", async () => {
   const caches = new MemoryCacheStorage();
   const authed = createMockFetch({ files: serveAll() });
   const loaded = await loadManifest(
@@ -1010,30 +1089,36 @@ test("fetchAssets: 認証の有無でキャッシュを分けない（ヘッダ�
     caches,
     headers: { authorization: "Bearer hf_token" },
   });
-  assert(authed.calls.length > 0, "そもそも取得していない");
+  assert(authed.calls.length > 0, "nothing was fetched in the first place");
   assertEquals(
     new Set(authed.authorizations),
     new Set(["Bearer hf_token"]),
-    "Authorization が取得へ届いていない",
+    "Authorization does not reach the fetch",
   );
-  assertEquals(caches.namespaces.size, 1, "認証の有無で名前空間を分けている");
+  assertEquals(caches.namespaces.size, 1, "namespaces are split by authentication");
 
-  // 無認証の再要求は同じエントリに当たる（credential ごとの隔離はしない — by-design）。
+  // An unauthenticated request again hits the same entry (no isolation per credential — by design).
   const anonymous = createMockFetch({ files: serveAll() });
   await fetchAssets(loaded, files, { fetch: anonymous.fetch, caches });
-  assertEquals(anonymous.calls, [], "認証の有無でキャッシュが分かれている");
+  assertEquals(anonymous.calls, [], "the cache is split by authentication");
 });
 
-test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊れていれば残さない）", async () => {
+test("fetchAssets: a sha256 mismatch fails loudly (nothing is kept when the source of truth is broken)", async () => {
   const caches = new MemoryCacheStorage();
   const path = VAE_DECODER_PARTS[1];
-  // 長さは宣言どおり・中身だけ別物（size の門ではなく sha256 の門を踏ませる）。
+  // The length is as declared, only the content differs (so the sha256 check fires, not the size
+  // check).
   const corrupt = new TextEncoder().encode(
     "karume-test:tampered-".padEnd(payloadFor(path).byteLength, "X"),
   );
-  assertEquals(corrupt.byteLength, payloadFor(path).byteLength, "長さは合わせ sha256 だけ外す");
+  assertEquals(
+    corrupt.byteLength,
+    payloadFor(path).byteLength,
+    "the length matches; only sha256 is off",
+  );
   const { mock, loaded } = await load({ files: serveAll(new Map([[path, corrupt]])) }, caches);
-  // 照合は取得層（受信中のハッシュ）が行うので、hub からは取得の失敗として上がる。
+  // The comparison is done by the fetch layer (hashing while receiving), so to the hub it comes up
+  // as a fetch failure.
   const error = await assertRejects(
     () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
@@ -1042,11 +1127,11 @@ test("fetchAssets: sha256 の食い違いは fail loudly（真実源が壊れて
   assertEquals(error.revisionSha, SHA);
   assertEquals(error.path, path);
   assertEquals(error.available.models, ["anima-turbo", "anima-lite"]);
-  assert(error.cause instanceof Error, "取得層の不一致を cause に残す");
-  assertEquals(hasEntry(hubCache(caches), corrupt), false, "不一致のバイト列を格納している");
+  assert(error.cause instanceof Error, "keeps the fetch layer's mismatch as cause");
+  assertEquals(hasEntry(hubCache(caches), corrupt), false, "stores the mismatching bytes");
 });
 
-test("fetchAssets: 受信バイトが size を超えれば取得層の上限で fail loudly（キャッシュに残さない）", async () => {
+test("fetchAssets: received bytes over size fail loudly at the fetch layer's limit (nothing kept in the cache)", async () => {
   const caches = new MemoryCacheStorage();
   const path = TEXT_ENCODER_PARTS[1];
   const declared = payloadFor(path).byteLength;
@@ -1054,7 +1139,7 @@ test("fetchAssets: 受信バイトが size を超えれば取得層の上限で 
   const { mock, loaded } = await load(
     {
       files: serveAll(new Map([[path, bloated]])),
-      // content-length は正しい値を主張しつつ、body だけ多く流す。
+      // content-length claims the right value while only the body is streamed longer.
       contentLength: (target) => (target === path ? declared : undefined),
     },
     caches,
@@ -1064,17 +1149,18 @@ test("fetchAssets: 受信バイトが size を超えれば取得層の上限で 
     HubFetchError,
   );
   assertEquals(error.path, path);
-  assert(error.cause instanceof Error, "取得層のエラーを cause に残す");
-  // 文言は取得層 ADR 0011 が定めている（`受信が申告 N バイトを超えた`）。sha256 不一致ではなく
-  // **受信の上限**で落ちたことを、この 1 語で見分ける。
+  assert(error.cause instanceof Error, "keeps the fetch layer's error as cause");
+  // The wording is set by the fetch layer's ADR 0011 (`受信が申告 N バイトを超えた`, "received more
+  // than the declared N bytes"). This one word tells that it failed at **the receive limit**, not
+  // on a sha256 mismatch.
   assert(
     error.cause.message.includes("超えた"),
-    `${error.cause.message} が受信上限での打ち切りを示していない`,
+    `${error.cause.message} does not show that it was cut off at the receive limit`,
   );
-  assertEquals(hasEntry(hubCache(caches), bloated), false, "上限を超えたバイト列を格納している");
+  assertEquals(hasEntry(hubCache(caches), bloated), false, "stores bytes over the limit");
 });
 
-test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
+test("fetchAssets: the AbortSignal reaches every fetch", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
@@ -1086,14 +1172,14 @@ test("fetchAssets: AbortSignal は全取得へ透過する", async () => {
       onProgress: () => controller.abort(),
     }),
   );
-  assert(error instanceof DOMException && error.name === "AbortError", `${error} が中断でない`);
+  assert(error instanceof DOMException && error.name === "AbortError", `${error} is not an abort`);
 });
 
-test("fetchAssets: abort(reason) の custom Error はそのまま伝播する（取得失敗に化けない）", async () => {
+test("fetchAssets: a custom Error passed to abort(reason) propagates as is (it does not turn into a fetch failure)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
-  const reason = new Error("app: ユーザーがロードを取り消した");
+  const reason = new Error("app: the user cancelled the load");
   const error = await assertRejects(() =>
     fetchAssets(loaded, selectionFiles(loaded.manifest), {
       fetch: mock.fetch,
@@ -1102,10 +1188,10 @@ test("fetchAssets: abort(reason) の custom Error はそのまま伝播する（
       onProgress: () => controller.abort(reason),
     }),
   );
-  assertStrictEquals(error, reason, "呼び出し側が渡した reason が別のエラーに包まれている");
+  assertStrictEquals(error, reason, "the reason the caller passed is wrapped in another error");
 });
 
-test("fetchAssets: abort(reason) が primitive でもそのまま伝播する", async () => {
+test("fetchAssets: abort(reason) propagates as is even when it is a primitive", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll(), delayMs: 5 }, caches);
   const controller = new AbortController();
@@ -1120,15 +1206,16 @@ test("fetchAssets: abort(reason) が primitive でもそのまま伝播する", 
   assertStrictEquals(error, "app:cancelled");
 });
 
-describe("onProgress の例外は通知の段に依らず取得を落とさない（warn で届く）", () => {
-  // downloading は取得層が隔離して warn だけで続行する。complete まで同じ扱いでないと、同じ UI 側の
-  // 例外が「受信中なら無害・終端ならロード全体の失敗」と段で意味を変える。
-  const failure = new Error("ui: 描画の不具合");
+describe("an exception in onProgress does not fail the fetch whatever the notification stage (it arrives as a warning)", () => {
+  // For downloading, the fetch layer isolates it and continues with only a warning. Unless complete
+  // gets the same treatment, the same UI-side exception would change meaning by stage: "harmless
+  // while receiving, a failure of the whole load at the end".
+  const failure = new Error("ui: rendering bug");
   const throwing = (): void => {
     throw failure;
   };
 
-  it("fetchAssets（network 取得 = downloading と complete）", async () => {
+  it("fetchAssets (network fetch = downloading and complete)", async () => {
     const caches = new MemoryCacheStorage();
     const { mock, loaded } = await load({ files: serveAll() }, caches);
     const files = selectionFiles(loaded.manifest);
@@ -1137,14 +1224,14 @@ describe("onProgress の例外は通知の段に依らず取得を落とさな�
       bytes = await fetchAssets(loaded, files, { fetch: mock.fetch, caches, onProgress: throwing });
     });
     assertEquals(Object.keys(bytes).sort(), Object.keys(files).sort());
-    assert(warnings.length > 0, "リスナーの例外を無言で捨てている");
+    assert(warnings.length > 0, "the listener's exception is silently discarded");
     assert(
       warnings.some((warning) => warning.includes("onProgress") && warning.includes("complete")),
-      `complete 段の例外が warn で届いていない: ${JSON.stringify(warnings)}`,
+      `the exception at the complete stage does not arrive as a warning: ${JSON.stringify(warnings)}`,
     );
   });
 
-  it("prefetchAssets（キャッシュヒット = complete だけ）", async () => {
+  it("prefetchAssets (cache hit = complete only)", async () => {
     const caches = new MemoryCacheStorage();
     const { mock, loaded } = await load({ files: serveAll() }, caches);
     const refs = Object.values(selectionFiles(loaded.manifest)).filter(
@@ -1154,11 +1241,11 @@ describe("onProgress の例外は通知の段に依らず取得を落とさな�
     const warnings = await captureWarnings(async () => {
       await prefetchAssets(loaded, refs, { fetch: mock.fetch, caches, onProgress: throwing });
     });
-    assertEquals(warnings.length, refs.length, "complete の 1 本ごとに warn が 1 つ届いていない");
+    assertEquals(warnings.length, refs.length, "one warning per complete did not arrive");
   });
 });
 
-test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる（取得は落とさない）", async () => {
+test("fetchAssets: a cache I/O failure becomes a diagnostic that reaches the app (the fetch does not fail)", async () => {
   const caches = new MemoryCacheStorage({ failPut: true });
 
   const mock = createMockFetch({ files: serveAll() });
@@ -1175,13 +1262,16 @@ test("fetchAssets: cache I/O の失敗はアプリへ届く診断になる（取
   assertEquals(
     Object.keys(assets).length,
     Object.keys(selectionFiles(loaded.manifest)).length,
-    "cache が死んでも取得は成立する",
+    "the fetch succeeds even when the cache is dead",
   );
-  assert(diagnostics.length > 0, "quota 失敗が黙って握り潰されている");
+  assert(diagnostics.length > 0, "the quota failure is silently swallowed");
   assertEquals(new Set(diagnostics.map((entry) => entry.op)), new Set(["put"]));
 });
 
-/** `globalThis.caches` を差し替えて `body` を走らせ、必ず元へ戻す（実キャッシュを触らせない）。 */
+/**
+ * Replaces `globalThis.caches`, runs `body` and always restores it (the real cache is never
+ * touched).
+ */
 const withGlobalCaches = async (
   value: CacheStorage | undefined,
   body: () => Promise<void>,
@@ -1207,10 +1297,11 @@ const populated = async (...names: readonly string[]): Promise<MemoryCacheStorag
   return caches;
 };
 
-// ---- 越境参照（`FileRef` の repo / revision — ADR 0038 §7）。
+// ---- Cross-repository references (`repo` / `revision` of `FileRef` — ADR 0038 §7).
 //
-// 押さえるのは「セッションの解決済み SHA ではなく、宣言された (repo, revision) から取る」ことと、
-// **同じ path 文字列でもリポが違えば別のバイト列**（path で畳むと取り違えが起きる）の 2 点。
+// Two points are pinned: "fetch from the declared (repo, revision), not from the session's resolved
+// SHA", and **the same path string in a different repository is different bytes** (folding by path
+// would mix them up).
 
 const FOREIGN_REPO = "someone/text-stack";
 const FOREIGN_SHA = "89abcdef0123456789abcdef0123456789abcdef";
@@ -1226,7 +1317,7 @@ const digestOf = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
 const localBytes = new TextEncoder().encode("karume-test:local-text-encoder");
 const foreignBytes = new TextEncoder().encode("karume-test:foreign-text-encoder-payload");
 
-/** part 0 の宣言（`24 + graph + model` ちょうど — container-v1 §8）。 */
+/** The declaration of part 0 (exactly `24 + graph + model` — container-v1 §8). */
 const descriptorFor = (part0Bytes: number) => ({
   graph: { length: part0Bytes - 24 - 5, sha256: "f2".repeat(32) },
   model: { length: 5, sha256: "a3".repeat(32) },
@@ -1240,8 +1331,9 @@ const crossPart1 = async (path: string, mark: string) => ({
 });
 
 /**
- * 自リポと越境先が**同じ path**を part 0 に主張する manifest（取り違えの検出器）。越境は
- * **容器単位**（ADR 0109 決定 3）なので、借りる側は全 part が越境先の座標を名乗る。
+ * A manifest in which this repository and the referenced one claim **the same path** for part 0
+ * (a detector for mix-ups). A cross-repository reference is **per container** (ADR 0109 decision
+ * 3), so on the borrowing side every part names the referenced coordinates.
  */
 const crossRepoManifest = JSON.stringify({
   format: "karume/5",
@@ -1306,23 +1398,40 @@ const crossRepoFiles = (
 
 const foreignUrl = `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${CROSS_PATH}`;
 
-test("fetchAssets: 越境参照は宣言された (repo, revision) から取る", async () => {
+test("fetchAssets: a cross-repository reference is fetched from the declared (repo, revision)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const files = selectionFiles(loaded.manifest);
   const assets = await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
-  assertEquals(assets["own[0]"], localBytes, "自リポぶんが越境先のバイト列に化けている");
-  assertEquals(assets["borrowed[0]"], foreignBytes, "越境ぶんが自リポのバイト列に化けている");
-  assertEquals(countCalls(mock.calls, foreignUrl), 1, "越境先の URL を叩いていない");
-  assertEquals(countCalls(mock.calls, resolveUrl(CROSS_PATH)), 1, "自リポの URL を叩いていない");
-  // 内容キーなので取得元 URL では引けない。別リポの同名 path が別エントリで共存すること
-  // （＝キーが repo を含むこと）を、両方のバイト列が同時に残っている事実で見る。
-  assert(hasEntry(hubCache(caches), localBytes), "自リポぶんのエントリが無い");
-  assert(hasEntry(hubCache(caches), foreignBytes), "越境ぶんのエントリが無い");
+  assertEquals(
+    assets["own[0]"],
+    localBytes,
+    "this repository's file turned into the referenced repository's bytes",
+  );
+  assertEquals(
+    assets["borrowed[0]"],
+    foreignBytes,
+    "the cross-repository file turned into this repository's bytes",
+  );
+  assertEquals(
+    countCalls(mock.calls, foreignUrl),
+    1,
+    "the referenced repository's URL was not requested",
+  );
+  assertEquals(
+    countCalls(mock.calls, resolveUrl(CROSS_PATH)),
+    1,
+    "this repository's URL was not requested",
+  );
+  // It is a content key, so it cannot be looked up by the source URL. That paths of the same name
+  // in different repositories coexist as separate entries (= the key includes the repo) is checked
+  // by the fact that both byte arrays remain at the same time.
+  assert(hasEntry(hubCache(caches), localBytes), "this repository's entry is missing");
+  assert(hasEntry(hubCache(caches), foreignBytes), "the cross-repository entry is missing");
 });
 
-test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA を名乗る", async () => {
+test("fetchAssets: a failed verification of a cross-repository reference names the referenced repo / SHA", async () => {
   const caches = new MemoryCacheStorage();
   const corrupt = tamper(foreignBytes);
   const { mock, loaded } = await load(
@@ -1335,13 +1444,14 @@ test("fetchAssets: 越境参照の検証失敗は越境先の repo / SHA を名�
     () => fetchAssets(loaded, selectionFiles(loaded.manifest), { fetch: mock.fetch, caches }),
     HubFetchError,
   );
-  // セッションの repo を名乗ると「そのリポには無い path」を指す診断になる。
+  // Naming the session's repo would make the diagnostic point at "a path that does not exist in
+  // that repository".
   assertEquals(error.repo, FOREIGN_REPO);
   assertEquals(error.revisionSha, FOREIGN_SHA);
   assertEquals(error.path, CROSS_PATH);
 });
 
-test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の URL を名乗る）", async () => {
+test("fetchAssets: a 429 from the referenced repository also arrives through onRetry (naming the referenced URL)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const retries: RetryDiagnostic[] = [];
@@ -1354,11 +1464,15 @@ test("fetchAssets: 越境先の 429 も onRetry で届く（越境先の URL を
     retries.map((diagnostic) => diagnostic.url),
     [foreignUrl],
   );
-  assertEquals(assets["borrowed[0]"], foreignBytes, "取り直した越境ぶんが返っていない");
-  assertEquals(countCalls(mock.calls, foreignUrl), 2, "429 の後に取り直していない");
+  assertEquals(
+    assets["borrowed[0]"],
+    foreignBytes,
+    "the refetched cross-repository file is not returned",
+  );
+  assertEquals(countCalls(mock.calls, foreignUrl), 2, "not fetched again after the 429");
 });
 
-test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1 本として数える", async () => {
+test("fetchAssets: a same-repository and a cross-repository file with the same path count as two in the progress too", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -1370,23 +1484,24 @@ test("fetchAssets: 同じ path の自リポ / 越境は進捗でも別の 1 本�
   });
   let expectedTotal = 0;
   for (const ref of Object.values(files)) expectedTotal += ref.size;
-  for (const event of events) assertEquals(event.total, expectedTotal, "総量が畳まれている");
-  assertEquals(events[events.length - 1].loaded, expectedTotal, "最後は総量に到達する");
+  for (const event of events) assertEquals(event.total, expectedTotal, "the total is folded");
+  assertEquals(events[events.length - 1].loaded, expectedTotal, "the last event reaches the total");
   assertEquals(
     events.filter((event) => event.phase === "complete").length,
     Object.keys(files).length,
-    "同じ path の 2 本が 1 本に畳まれている",
+    "the 2 files with the same path are folded into one",
   );
   assertEquals(
     events.filter((event) => event.phase === "complete" && event.path === CROSS_PATH).length,
     2,
-    "同じ path の自リポ / 越境が 1 本に畳まれている",
+    "the same-repository and cross-repository files with the same path are folded into one",
   );
 });
 
-test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) を名乗る", async () => {
-  // 同じ path の 2 本を消費側が見分けられること — path だけでファイル別の進捗をキーにすると
-  // 2 本が 1 本に混ざる（公開イベントが識別子を運ばないと、取得層の一意化が消費側で崩れる）。
+test("fetchAssets: progress names the (repo, revision) it actually fetched from", async () => {
+  // The consumer must be able to tell the 2 files with the same path apart — keying per-file
+  // progress by path alone mixes the 2 into one (if the public event did not carry the identifier,
+  // the fetch layer's dedupe would break down on the consumer side).
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const events: AssetProgress[] = [];
@@ -1403,26 +1518,29 @@ test("fetchAssets: 進捗は実際に取りに行った先の (repo, revision) �
   assertEquals(
     origins(CROSS_PATH),
     [`${FOREIGN_REPO}@${FOREIGN_SHA}`, `${REPO}@${SHA}`].sort(),
-    "同じ path の自リポ / 越境が取得先で見分けられない",
+    "the same-repository and cross-repository files with the same path cannot be told apart by fetch origin",
   );
-  // 容器単位の越境なので、借りた側の残りの part も越境先を名乗る（自リポの part は自リポ）。
+  // The reference is per container, so the remaining parts of the borrowing side name the
+  // referenced repository too (this repository's parts name this repository).
   assertEquals(origins(BORROWED_PART1), [`${FOREIGN_REPO}@${FOREIGN_SHA}`]);
   assertEquals(origins(OWN_PART1), [`${REPO}@${SHA}`]);
-  // downloading も同じ欄を運ぶ（complete だけ名乗る形だと途中のバーが引き当てられない）。
+  // downloading carries the same fields too (if only complete named them, an in-progress bar could
+  // not be matched).
   for (const event of events) {
     assert(
       event.repo !== undefined && event.revision !== undefined,
-      `${event.path} が取得先を名乗らない`,
+      `${event.path} does not name the fetch origin`,
     );
   }
 });
 
-describe("loadManifest: 読み込んだ repo 自身を指す越境参照は ManifestFormatError で断る", () => {
-  // 自リポの別 revision を越境で指す形は、参照の同一性（repo と revision を含む）とキャッシュの
-  // 実体（HF では revision を含まない）がずれる — 片方を保護しても共有の実体ごと消える。
+describe("loadManifest: a cross-repository reference to the loaded repo itself is refused with ManifestFormatError", () => {
+  // A cross-repository reference to another revision of this repository makes the identity of the
+  // reference (which includes repo and revision) and the cached file (which on HF does not include
+  // revision) diverge — protecting one deletes the shared file along with it.
   for (const [label, revision] of [
-    ["同じ revision", SHA],
-    ["別の revision", FOREIGN_SHA],
+    ["same revision", SHA],
+    ["different revision", FOREIGN_SHA],
   ]) {
     it(label, async () => {
       const selfCross = crossRepoManifest
@@ -1442,19 +1560,20 @@ describe("loadManifest: 読み込んだ repo 自身を指す越境参照は Mani
           ),
         ManifestFormatError,
       );
-      assert(error.message.includes(REPO), `${error.message} が自リポを名乗っていない`);
+      assert(error.message.includes(REPO), `${error.message} does not name this repository`);
       assert(
         error.message.includes("models.m.weights.borrowed"),
-        `${error.message} が違反の場所を名乗っていない`,
+        `${error.message} does not name where the violation is`,
       );
     });
   }
 });
 
-// ---- 越境した容器（ADR 0038 §7 / ADR 0109 決定 3 —「越境参照は容器単位」）。exporter は
-// 共有コンポーネントを **part 1 本 = 参照 1 つ**の形で焼くので、受け側は容器の全 part を参照先の
-// URL から取れなければならない（先頭だけ越境する / 列を畳むと、残りの part がセッションの repo に
-// 無くて落ちる）。
+// ---- Cross-repository containers (ADR 0038 §7 / ADR 0109 decision 3 — "cross-repository
+// references are per container"). The exporter writes shared components in the form **one part =
+// one reference**, so the receiving side must be able to fetch every part of the container from
+// the referenced URL (referencing only the first one / folding the list would make the remaining
+// parts fail because they are not in the session's repo).
 
 const SPLIT_PATHS = [
   "text_encoder/model-00001-of-00002.krm",
@@ -1506,7 +1625,7 @@ const splitShardFiles = (): Map<string, Uint8Array<ArrayBuffer>> =>
     ),
   ]);
 
-test("fetchAssets: 越境した容器は part ごとに越境先の URL から取る", async () => {
+test("fetchAssets: a cross-repository container fetches each part from the referenced URL", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: splitShardFiles() }, caches);
   const files = selectionFiles(loaded.manifest);
@@ -1514,39 +1633,43 @@ test("fetchAssets: 越境した容器は part ごとに越境先の URL から�
   assertEquals(Object.keys(files), ["borrowed[0]", "borrowed[1]"]);
   const assets = await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
 
-  assertEquals(assets["borrowed[0]"], splitBytes[0], "part 0 のバイト列が違う");
-  assertEquals(assets["borrowed[1]"], splitBytes[1], "part 1 のバイト列が違う");
+  assertEquals(assets["borrowed[0]"], splitBytes[0], "the bytes of part 0 differ");
+  assertEquals(assets["borrowed[1]"], splitBytes[1], "the bytes of part 1 differ");
   for (const path of SPLIT_PATHS) {
     assertEquals(
       countCalls(mock.calls, `${HUB_URL}/${FOREIGN_REPO}/resolve/${FOREIGN_SHA}/${path}`),
       1,
-      `${path} を越境先から取っていない`,
+      `${path} was not fetched from the referenced repository`,
     );
     assertEquals(
       countCalls(mock.calls, resolveUrl(path)),
       0,
-      `${path} をセッションの repo へ取りに行っている（そこには無い）`,
+      `${path} is fetched from the session's repo (it is not there)`,
     );
   }
 });
 
-test("clearHubCache: 温めた資産を消す（次の取得は network に出る）", async () => {
+test("clearHubCache: deletes the warmed assets (the next fetch goes to the network)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: serveAll() }, caches);
   const files = selectionFiles(loaded.manifest);
   await fetchAssets(loaded, files, { fetch: mock.fetch, caches });
   const cached = hubCache(caches).entries.size;
-  assert(cached > 1, "manifest 以外に資産が溜まっていない");
+  assert(cached > 1, "no assets accumulated besides the manifest");
 
   assertEquals(await clearHubCache({ caches }), true);
-  assertEquals([...caches.namespaces.keys()], [], "取得層の名前空間ごと消えていない");
+  assertEquals(
+    [...caches.namespaces.keys()],
+    [],
+    "the fetch layer's namespace was not deleted as a whole",
+  );
 
   const after = createMockFetch({ files: serveAll() });
   await fetchAssets(loaded, files, { fetch: after.fetch, caches });
-  assert(after.calls.length > 0, "消した後の取得が network に出ていない");
+  assert(after.calls.length > 0, "the fetch after the deletion does not go to the network");
 });
 
-test("clearHubCache: 消すものが 1 つも無ければ false", async () => {
+test("clearHubCache: false when there is nothing to delete", async () => {
   const caches = await populated("other/1");
   assertEquals(await clearHubCache({ caches }), false);
   assertEquals([...caches.namespaces.keys()], ["other/1"]);
@@ -1571,7 +1694,7 @@ test("loadManifest / clearHubCache: leave the namespaces of hub 0.6 and earlier 
   );
 });
 
-test("clearHubCache: caches を渡すとそちらだけを消す（globalThis には触らない）", async () => {
+test("clearHubCache: with caches passed, deletes only those (does not touch globalThis)", async () => {
   const injected = new MemoryCacheStorage();
   await load({ files: serveAll() }, injected);
   const global = new MemoryCacheStorage();
@@ -1585,7 +1708,7 @@ test("clearHubCache: caches を渡すとそちらだけを消す（globalThis �
   assertEquals([...global.namespaces.keys()], warmed);
 });
 
-test("clearHubCache: caches 省略時は globalThis.caches を消す", async () => {
+test("clearHubCache: without caches, deletes globalThis.caches", async () => {
   const global = new MemoryCacheStorage();
   await load({ files: serveAll() }, global);
   await withGlobalCaches(global, async () => {
@@ -1594,18 +1717,18 @@ test("clearHubCache: caches 省略時は globalThis.caches を消す", async () 
   assertEquals([...global.namespaces.keys()], []);
 });
 
-test("clearHubCache: CacheStorage が無い環境は fail loudly（黙って no-op にしない）", async () => {
+test("clearHubCache: an environment without CacheStorage fails loudly (not a silent no-op)", async () => {
   await withGlobalCaches(undefined, async () => {
     const error = await assertRejects(() => clearHubCache(), Error);
-    assert(error.message.includes("CacheStorage"), `${error.message} が原因を名指ししていない`);
+    assert(error.message.includes("CacheStorage"), `${error.message} does not name the cause`);
   });
 });
 
-// ---- 区間読み（`openAsset` — `source.ts` ⑧）。HF 取得元の口は**キャッシュの中身**しか開けない
-// （`openHfFile` は network に出ない）ので、ここで固定するのは「温まっていれば取得ゼロで読める」
-// 「温まっていなければ開く側が 1 度だけ温める」の 2 点。
+// ---- Range reads (`openAsset` — `source.ts` ⑧). The HF source's reader can open **only the
+// cache's content** (`openHfFile` does not go to the network), so two points are pinned here: "when
+// warm, it reads with zero fetches" and "when not warm, the opening side warms once".
 
-/** 区間読みのテストが共有する下ごしらえ（manifest だけ読んだ状態 + 対象の 1 本）。 */
+/** The setup shared by the range-read tests (only the manifest read + the one target file). */
 const openable = async (): Promise<{
   mock: MockFetch;
   caches: MemoryCacheStorage;
@@ -1624,7 +1747,7 @@ const openable = async (): Promise<{
   return { mock, caches, loaded, ref: selectionFiles(loaded.manifest)["tokenizer"] };
 };
 
-test("openAsset: 温め済みの参照は取得を起こさずに区間だけを返す", async () => {
+test("openAsset: a warmed reference returns only the range without causing a fetch", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   await prefetchAssets(loaded, [ref], access);
@@ -1632,9 +1755,9 @@ test("openAsset: 温め済みの参照は取得を起こさずに区間だけを
   const calls = mock.calls.length;
 
   const reader = await openAsset(loaded, ref, access);
-  assert(reader !== undefined, "温め済みなのに区間読み口が開かない");
-  // Deno には `globalThis.Deno` があるので取得層の既定戦略は "stream"（`blob()` が全量を
-  // ヒープへ載せるため）= 読み飛ばしが offset に比例する費用。
+  assert(reader !== undefined, "the range reader does not open although warm");
+  // Deno has `globalThis.Deno`, so the fetch layer's default strategy is "stream" (because `blob()`
+  // loads the whole file onto the heap) = skipping costs in proportion to the offset.
   assertEquals(reader.cost, "scan");
 
   const middle = Math.floor(ref.size / 2);
@@ -1647,87 +1770,109 @@ test("openAsset: 温め済みの参照は取得を起こさずに区間だけを
     assertEquals(
       bytes,
       new Uint8Array(payload.subarray(offset, offset + length)),
-      `[${offset}, ${offset + length}) の中身が化けている`,
+      `the content of [${offset}, ${offset + length}) is corrupted`,
     );
-    // 消費側はそのまま TypedArray として読むので、buffer 全体を占めている必要がある。
+    // The consumer reads it as a TypedArray as is, so it must occupy its whole buffer.
     assertEquals(bytes.byteOffset, 0);
     assertEquals(bytes.buffer.byteLength, length);
   }
-  assertEquals(mock.calls.length, calls, "温め済みなのに取得が起きている");
+  assertEquals(mock.calls.length, calls, "a fetch happens although warm");
 });
 
-test("openAsset: 未取得の参照は開く側が 1 度だけ温めてから開く", async () => {
+test("openAsset: an unfetched reference is warmed once by the opening side before it opens", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   const calls = mock.calls.length;
 
-  // 呼び手に「先に prefetchAssets を通せ」という手順を負わせない（消費側は行を要求するだけ）。
+  // The caller is not burdened with the step "run prefetchAssets first" (the consumer only requests
+  // rows).
   const reader = await openAsset(loaded, ref, access);
-  assert(reader !== undefined, "未取得の参照で区間読み口が開かない");
-  assertEquals(mock.calls.length - calls, 1, "温め直しが 1 往復で済んでいない");
+  assert(reader !== undefined, "the range reader does not open for an unfetched reference");
+  assertEquals(mock.calls.length - calls, 1, "the re-warm did not take a single round trip");
 
   assertEquals(await reader.read(0, ref.size), payloadFor(ref.path));
-  // 開いた後の読みはキャッシュの中だけで完結する（読みごとに network へ出ない）。
-  assertEquals(mock.calls.length - calls, 1, "読みが取得を起こしている");
+  // Reads after opening complete inside the cache (no network per read).
+  assertEquals(mock.calls.length - calls, 1, "a read causes a fetch");
 });
 
-test("openAsset: 記録ハッシュを持たないエントリは読まずに取り直す", async () => {
+test("openAsset: an entry without a recorded hash is fetched again without being read", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   await prefetchAssets(loaded, [ref], access);
   const payload = payloadFor(ref.path);
-  // 記録を落としたうえで中身を壊す（照合するものが無いので開く側は開けない）。
+  // Drop the record and break the content (there is nothing to compare against, so the opening side
+  // cannot open it).
   overwriteEntry(hubCache(caches), payload, new Uint8Array(ref.size), { keepRecord: false });
   const calls = mock.calls.length;
 
   const reader = await openAsset(loaded, ref, access);
-  assert(reader !== undefined, "取り直したのに区間読み口が開かない");
-  assertEquals(mock.calls.length - calls, 1, "壊れたエントリを取り直していない");
-  assertEquals(await reader.read(0, ref.size), payload, "壊れたバイト列がそのまま読めている");
+  assert(reader !== undefined, "the range reader does not open although it was fetched again");
+  assertEquals(mock.calls.length - calls, 1, "the broken entry was not fetched again");
+  assertEquals(await reader.read(0, ref.size), payload, "the broken bytes are read as is");
 });
 
-test("openAsset: 記録ハッシュが宣言と食い違うエントリも読まずに取り直す", async () => {
+test("openAsset: an entry whose recorded hash disagrees with the declaration is also fetched again without being read", async () => {
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   const other = selectionFiles(loaded.manifest)["vae_decoder[0]"];
   await prefetchAssets(loaded, [ref, other], access);
   const payload = payloadFor(ref.path);
-  // 2 件の記録を入れ替える = どちらも「記録ハッシュ ≠ manifest の宣言」になる。開く側はこれを
-  // 「内容が変わった」と見て evict するので、記録なしと同じ取り直しの経路へ倒れる。
+  // Swap the records of 2 entries = both get "recorded hash ≠ the manifest's declaration". The
+  // opening side sees this as "the content changed" and evicts, so it falls into the same refetch
+  // path as an entry without a record.
   swapRecords(hubCache(caches), payload, payloadFor(other.path));
   const calls = mock.calls.length;
 
   const reader = await openAsset(loaded, ref, access);
-  assert(reader !== undefined, "取り直したのに区間読み口が開かない");
-  // 取り直すのは開いた 1 本だけ（記録を壊したもう 1 本は触らない）。
-  assertEquals(mock.calls.length - calls, 1, "食い違うエントリを 1 往復で取り直していない");
-  assertEquals(await reader.read(0, ref.size), payload, "取り直した中身が読めていない");
+  assert(reader !== undefined, "the range reader does not open although it was fetched again");
+  // Only the one that was opened is fetched again (the other one whose record was broken is not
+  // touched).
+  assertEquals(
+    mock.calls.length - calls,
+    1,
+    "the disagreeing entry was not fetched again in one round trip",
+  );
+  assertEquals(await reader.read(0, ref.size), payload, "the refetched content cannot be read");
 });
 
-test("openAsset: 越境参照は宣言された (repo, revision) の口で開く", async () => {
+test("openAsset: a cross-repository reference opens through the reader of the declared (repo, revision)", async () => {
   const caches = new MemoryCacheStorage();
   const { mock, loaded } = await load({ files: crossRepoFiles() }, caches);
   const access = { fetch: mock.fetch, caches };
-  // 自リポと越境先が**同じ path** を主張する manifest なので、path で畳んでいれば自リポの
-  // バイト列が読めてしまう（区間読みの口も `originFor` 経由で越境先から生えることの検出器）。
+  // The manifest has this repository and the referenced one claim **the same path**, so folding by
+  // path would read this repository's bytes (a detector that the range reader also comes from the
+  // referenced repository through `originFor`).
   const ref = selectionFiles(loaded.manifest)["borrowed[0]"];
   const calls = mock.calls.length;
 
   const reader = await openAsset(loaded, ref, access);
-  assert(reader !== undefined, "越境先でも能力は継承されるはずなのに口が開かない");
-  assertEquals(countCalls(mock.calls, foreignUrl), 1, "越境先の URL を温めていない");
-  assertEquals(mock.calls.length - calls, 1, "越境の温めが 1 往復で済んでいない");
-  assertEquals(await reader.read(0, ref.size), foreignBytes, "自リポのバイト列が読めている");
+  assert(
+    reader !== undefined,
+    "the reader does not open although the capability should carry over to the referenced repository",
+  );
+  assertEquals(
+    countCalls(mock.calls, foreignUrl),
+    1,
+    "the referenced repository's URL was not warmed",
+  );
+  assertEquals(
+    mock.calls.length - calls,
+    1,
+    "warming the cross-repository file did not take a single round trip",
+  );
+  assertEquals(await reader.read(0, ref.size), foreignBytes, "this repository's bytes are read");
 });
 
-describe("openAsset: 宣言 size の外は取得元と在庫の有無に依らず読めない", () => {
-  // 区間読み口が見る境界は**宣言 size**（`openAsset` の doc）。HF の取得層は宣言 size を読み出しの
-  // 境界に使わないので、同じ sha256 に短い size を宣言した参照が warm エントリを開くと、宣言の外
-  // （実体の残り）が読めてしまう — ローカルは宣言 size で拒否するので取得元で挙動が割れる。
+describe("openAsset: nothing outside the declared size can be read, regardless of the source and of what is cached", () => {
+  // The boundary the range reader checks is **the declared size** (the doc of `openAsset`). HF's
+  // fetch layer does not use the declared size as the read boundary, so a reference that declares a
+  // shorter size for the same sha256 and opens a warm entry could read outside the declaration (the
+  // rest of the file) — the local source rejects by the declared size, so the behaviour would split
+  // by source.
   const served = serveAll();
   const lookup = (path: string): Uint8Array<ArrayBuffer> => {
     const bytes = served.get(path);
-    if (bytes === undefined) throw new Error(`test-directory: ${path} を読めない`);
+    if (bytes === undefined) throw new Error(`test-directory: cannot read ${path}`);
     return bytes;
   };
   const adapter: DirectoryAdapter = {
@@ -1735,7 +1880,10 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
     readFileRange: (path, offset, length) =>
       Promise.resolve(new Uint8Array(lookup(path).subarray(offset, offset + length))),
   };
-  /** 宣言の外へ出る区間（宣言 size ちょうどから 1 バイト・負の offset・整数でない length）。 */
+  /**
+   * Ranges that go outside the declaration (1 byte from exactly the declared size, a negative
+   * offset, a non-integer length).
+   */
   const outside = (size: number): readonly (readonly [number, number])[] => [
     [size, 1],
     [size - 1, 2],
@@ -1744,7 +1892,7 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
   ];
 
   for (const warm of [false, true]) {
-    it(`HF・${warm ? "warm" : "cold"}・宣言どおりの参照`, async () => {
+    it(`HF, ${warm ? "warm" : "cold"}, a reference as declared`, async () => {
       const { mock, caches, loaded, ref } = await openable();
       const access = { fetch: mock.fetch, caches };
       if (warm) await prefetchAssets(loaded, [ref], access);
@@ -1756,7 +1904,7 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
     });
   }
 
-  it("HF・warm・同じ sha256 に短い size を宣言した参照", async () => {
+  it("HF, warm, a reference that declares a shorter size for the same sha256", async () => {
     const { mock, caches, loaded, ref } = await openable();
     const access = { fetch: mock.fetch, caches };
     await prefetchAssets(loaded, [ref], access);
@@ -1791,7 +1939,7 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
   });
 
   for (const shrink of [0, 1]) {
-    it(`ローカル・${shrink === 0 ? "宣言どおり" : "短い size を宣言"}の参照`, async () => {
+    it(`local, a reference ${shrink === 0 ? "as declared" : "declaring a shorter size"}`, async () => {
       const local = await loadManifest(localDirectory(adapter, { label: "./models/test" }));
       const ref = selectionFiles(local.manifest)["tokenizer"];
       const declared: FileRef = { ...ref, size: ref.size - shrink };
@@ -1804,25 +1952,26 @@ describe("openAsset: 宣言 size の外は取得元と在庫の有無に依ら�
   }
 });
 
-test("openAsset: 温め済みの口を開いている最中の中断でも読み口を返さない", async () => {
-  // warm cache のヒットは network に出ない＝取得元の signal 監視が効かない区間なので、開いた後に
-  // 中断を見ないと「取り消したのに読み口が返る」（loadManifest / prefetchAssets と不揃い）。
+test("openAsset: an abort while opening a warmed reader also returns no reader", async () => {
+  // A warm-cache hit does not go to the network = a stretch where the source's signal watch has no
+  // effect, so without checking the abort after opening, "a reader comes back although cancelled"
+  // (inconsistent with loadManifest / prefetchAssets).
   const { mock, caches, loaded, ref } = await openable();
   const access = { fetch: mock.fetch, caches };
   await prefetchAssets(loaded, [ref], access);
   const controller = new AbortController();
-  const reason = new Error("app: 開いている最中に取り消した");
+  const reason = new Error("app: cancelled while opening");
   hubCache(caches).onMatch = () => controller.abort(reason);
   const calls = mock.calls.length;
 
   const error = await assertRejects(() =>
     openAsset(loaded, ref, { ...access, signal: controller.signal }),
   );
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
-  assertEquals(mock.calls.length, calls, "温め済みなのに取得が起きている");
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
+  assertEquals(mock.calls.length, calls, "a fetch happens although warm");
 });
 
-test("openAsset: abort 済み signal は口の有無に依らず reason をそのまま上げる", async () => {
+test("openAsset: an already aborted signal raises the reason as is, whether or not a reader exists", async () => {
   const mock = createMockFetch({ files: serveAll() });
   const remote = await loadManifest(
     { repo: REPO, hubUrl: HUB_URL, revision: SHA },
@@ -1834,11 +1983,11 @@ test("openAsset: abort 済み signal は口の有無に依らず reason をそ�
   const files = selectionFiles(remote.manifest);
   const ref = files[Object.keys(files)[0]];
 
-  // 口を持たない取得元（位置読みを持たないアダプター）を同じ manifest で 1 本作る。
+  // Build one source without a reader (an adapter without positional reads) from the same manifest.
   const served = serveAll();
   const lookup = (path: string): Uint8Array<ArrayBuffer> => {
     const bytes = served.get(path);
-    if (bytes === undefined) throw new Error(`test-directory: ${path} を読めない`);
+    if (bytes === undefined) throw new Error(`test-directory: cannot read ${path}`);
     return bytes;
   };
   const adapter: DirectoryAdapter = {
@@ -1849,10 +1998,11 @@ test("openAsset: abort 済み signal は口の有無に依らず reason をそ�
   });
 
   const controller = new AbortController();
-  const reason = new Error("test: 呼び出し側の中断");
+  const reason = new Error("test: aborted by the caller");
   controller.abort(reason);
 
-  // 中断は能力の差より先に見る — 口を持たない取得元でも `undefined` ではなく reason で落ちる。
+  // The abort is checked before the difference in capability — even a source without a reader fails
+  // with the reason, not `undefined`.
   for (const loadedSource of [remote, local]) {
     const error = await assertRejects(
       () => openAsset(loadedSource, ref, { signal: controller.signal }),
@@ -1862,7 +2012,7 @@ test("openAsset: abort 済み signal は口の有無に依らず reason をそ�
   }
 });
 
-test("fetchAssets: 特殊キーも own property で返し、同じ参照の bytes を共有する", async () => {
+test("fetchAssets: special keys are also returned as own properties, sharing the bytes of the same reference", async () => {
   const served = serveAll();
   const reads: string[] = [];
   const loaded = await loadManifest(
@@ -1871,7 +2021,7 @@ test("fetchAssets: 特殊キーも own property で返し、同じ参照の byte
         readFile: (path) => {
           reads.push(path);
           const bytes = served.get(path);
-          if (bytes === undefined) throw new Error(`未定義の資産 ${path}`);
+          if (bytes === undefined) throw new Error(`undefined asset ${path}`);
           return Promise.resolve(bytes);
         },
       },

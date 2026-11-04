@@ -1,18 +1,19 @@
 /**
- * 選択を扱うテスト側の道具。`karume/5` の hub は「取得キー → FileRef」の平坦な表を持たない
- * （選択は構造型 — ADR 0109 決定 6）ので、`fetchAssets` に渡す表と mock の配信表はテストが組む。
+ * Test-side tools for selections. The `karume/5` hub has no flat "fetch key → FileRef" table (a
+ * selection is a structured type — ADR 0109 decision 6), so the tests build the table passed to
+ * `fetchAssets` and the mock's serving table.
  *
- * MUST: path を手で写さない — manifest から導く形にしておくと、fixture を焼き直したときに
- * テスト側の表も一緒に動く（写すと「fixture を直したのにテストが古い path を配信し続ける」が
- * 黙って起きる）。
+ * MUST: do not copy paths by hand — deriving them from the manifest makes the test-side tables move
+ * along when the fixture is regenerated (a copy silently leads to "the fixture was fixed but the
+ * tests keep serving the old path").
  */
 
 import type { FileRef, Manifest, ResolveOptions } from "../../mod.ts";
 import { resolveSelection } from "../../mod.ts";
 
 /**
- * manifest が宣言する全 FileRef を**宣言順・path 一意**で並べる（長さ 0 の part は除く —
- * 配信する中身が無い）。mock の配信表を作るのに使う。
+ * Lists every FileRef the manifest declares **in declaration order with unique paths** (zero-length
+ * parts are left out — there is no content to serve). Used to build the mock's serving table.
  */
 export const declaredRefs = (manifest: Manifest): readonly FileRef[] => {
   const seen = new Map<string, FileRef>();
@@ -33,14 +34,15 @@ export const declaredRefs = (manifest: Manifest): readonly FileRef[] => {
 };
 
 /**
- * 選択を「取得キー → FileRef」の表にする。キーはテストが読むための綴りで、hub はこの綴りを
- * 持たない（`fetchAssets` は渡された表のキーをそのまま返すだけ）:
+ * Turns a selection into a "fetch key → FileRef" table. The keys are spellings for the tests to
+ * read; the hub does not have them (`fetchAssets` only returns the keys of the table it was given):
  *
- * - コンテナの part … `<部品名>[<part の添字>]`（長さ 0 の part は表に出ない）
- * - assets … 資産名そのまま
+ * - a container part … `<component name>[<part index>]` (zero-length parts do not appear)
+ * - assets … the asset name as is
  *
- * 並びは `selectionRefs` と同じ宣言順。**同じ実体を指すキーは落とさない**（別名の資産のように
- * 2 つの名前が 1 本を指す形があるため — 取得と進捗の一意化は `fetchAssets` が行う）。
+ * The order is the same declaration order as `selectionRefs`. **Keys that point at the same file
+ * are not dropped** (two names can point at one file, as with an aliased asset — `fetchAssets`
+ * dedupes fetches and progress).
  */
 export const selectionFiles = (
   manifest: Manifest,

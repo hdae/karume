@@ -3,8 +3,9 @@ import { assert, assertEquals } from "@std/assert";
 import { createByteAdmission } from "../src/concurrency.ts";
 
 /**
- * バイト予算の観測台。`fetchAssets` の送出ループと同じ形（1 本のループが admit → 送出、
- * 各仕事が終わったら release）で回し、in-flight 合計のピークを記録する。
+ * A test rig for the byte budget. It runs in the same shape as the dispatch loop of `fetchAssets`
+ * (one loop admits, then dispatches; each job releases when it finishes) and records the peak of
+ * the in-flight total.
  */
 const dispatch = async (
   maxBytes: number,
@@ -32,27 +33,31 @@ const dispatch = async (
   return { peak, order };
 };
 
-test("createByteAdmission: in-flight の合計が予算を超えない", async () => {
+test("createByteAdmission: the in-flight total does not exceed the budget", async () => {
   const { peak, order } = await dispatch(100, [40, 40, 40, 40, 40]);
-  assert(peak <= 100, `in-flight が ${peak} バイトまで膨らんだ`);
-  assert(peak > 40, "1 本ずつしか通していない（予算に収まる 2 本目を待たせている）");
-  assertEquals(order.length, 5, "全部が送出されていない");
+  assert(peak <= 100, `in-flight grew to ${peak} bytes`);
+  assert(
+    peak > 40,
+    "only one at a time passes (a second request that fits the budget is made to wait)",
+  );
+  assertEquals(order.length, 5, "not every request was dispatched");
 });
 
-test("createByteAdmission: in-flight 0 なら予算超の単独要求も通す（詰まらせない）", async () => {
-  // 席を返す相手が居ないのに待てば永久に詰まる。予算 100 に対する単独 250 が通ること。
+test("createByteAdmission: with 0 in flight, a single request over the budget still passes (no deadlock)", async () => {
+  // Waiting when nobody is left to release a slot deadlocks forever. A single 250 against a budget
+  // of 100 must pass.
   const { peak, order } = await dispatch(100, [250]);
   assertEquals(order, [0]);
   assertEquals(peak, 250);
 });
 
-test("createByteAdmission: 予算超の巨大要求は他の 1 本とも重ならない", async () => {
-  // 「in-flight 0 なら通す」の例外が、周りを巻き込んで予算を二重に破らないこと。
+test("createByteAdmission: an oversized request does not overlap even one other request", async () => {
+  // The "pass when 0 in flight" exception must not drag others along and break the budget twice.
   const { peak } = await dispatch(100, [60, 250, 60]);
-  assertEquals(peak, 250, `巨大要求が他と重なって ${peak} バイトになった`);
+  assertEquals(peak, 250, `the oversized request overlapped another and reached ${peak} bytes`);
 });
 
-test("createByteAdmission: release が 2 連続でも待機者を取りこぼさない", async () => {
+test("createByteAdmission: two releases in a row do not lose a waiter", async () => {
   const admission = createByteAdmission(100);
   await admission.admit(50);
   await admission.admit(50);
@@ -61,10 +66,10 @@ test("createByteAdmission: release が 2 連続でも待機者を取りこぼさ
     admitted = true;
   });
   await Promise.resolve();
-  assertEquals(admitted, false, "予算が埋まっているのに通してしまった");
-  // 起こしの席は 1 つしか無い。2 連続の release で取りこぼすと待機者は永久に起きない。
+  assertEquals(admitted, false, "admitted although the budget is full");
+  // There is only one wake-up slot. If two releases in a row drop one, the waiter never wakes.
   admission.release(50);
   admission.release(50);
   await pending;
-  assertEquals(admitted, true, "release を取りこぼして詰まった（lost wakeup）");
+  assertEquals(admitted, true, "a release was lost and the waiter stalled (lost wakeup)");
 });

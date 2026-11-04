@@ -1,19 +1,23 @@
 /**
- * コンテナ 1 本の取得面（`openContainerSource` — ADR 0109 決定 7）。
+ * The fetch surface for one container (`openContainerSource` — ADR 0109 decision 7).
  *
- * 押さえるのは 9 つ:
- *  ① 開くだけでは**何も取りに行かない**（温めは呼び手が `prefetchAssets` で先に済ませる）。
- *  ② 温めずに開いても読める（HF 取得元が初回の読みで 1 度だけ温め直す）。温め済みなら network 0。
- *  ③ `read` は区間ちょうどを返し（scan 型は保持枠の part の器の view — 写さない・次の part を
- *     読んでも前の view は化けない）、範囲外 / 長さ 0 の part / 未知の添字は fail loudly。
- *  ④ `verified` は**取得元が全量を検証したか**（HF = true / ローカルディレクトリ = false・
- *     越境は越境先の取得元で決まる）。
- *  ⑤ scan 型は同じ part を何度読んでも**全量読みが 1 回**（並行に読んでも 1 回）。
- *  ⑥ seek 型は要求した区間だけをアダプターへ降ろす。
- *  ⑦ 越境した容器は越境先の取得元から読む。未 mapping は開くときに `HubFetchError`。
- *  ⑧ 読みの失敗は取得元の素の `Error`（この面は取得ではない）。
- *  ⑨ 失敗は覚えない — 読み口を開けなかった part も、全量読みに失敗した part も、次の読みで
- *     取り直す。
+ * Nine points are pinned here:
+ *  ① Opening alone **fetches nothing** (warming is done first by the caller with `prefetchAssets`).
+ *  ② Opening without warming still reads (the HF source warms again once on the first read). When
+ *     already warm, 0 network requests.
+ *  ③ `read` returns exactly the range (for the scan type, a view of the buffer of the part in the
+ *     holding slot — no copy; reading the next part does not corrupt the earlier view), and an
+ *     out-of-range read, a zero-length part or an unknown index fails loudly.
+ *  ④ `verified` says **whether the source verified the whole file** (HF = true / a local directory
+ *     = false; for a cross-repository reference the referenced source decides).
+ *  ⑤ The scan type reads the whole part **once** however many times the same part is read (once
+ *     even for parallel reads).
+ *  ⑥ The seek type passes only the requested range down to the adapter.
+ *  ⑦ A cross-repository container is read from the referenced source. Without a mapping, opening
+ *     fails with `HubFetchError`.
+ *  ⑧ A read failure is the source's plain `Error` (this surface is not a fetch).
+ *  ⑨ Failures are not remembered — a part whose reader could not be opened and a part whose whole
+ *     read failed are both fetched again on the next read.
  */
 
 import { describe, it, test } from "vite-plus/test";
@@ -50,8 +54,9 @@ const FOREIGN_REPO = "someone/shared";
 const FOREIGN_SHA = "89abcdef0123456789abcdef0123456789abcdef";
 
 /**
- * 長さ 0 の part 1 を持つ容器（ADR 0109 決定 3 の形）。連番は書き手の綴り（1 始まり —
- * `tools/exporter/src/karume/container.py` の `container_paths`）。
+ * A container with a zero-length part 1 (the shape of ADR 0109 decision 3). The numbering is the
+ * writer's spelling (starting at 1 — `container_paths` of
+ * `tools/exporter/src/karume/container.py`).
  */
 const NET_PARTS = [
   "net/model-00001-of-00003.krm",
@@ -59,7 +64,7 @@ const NET_PARTS = [
   "net/model-00003-of-00003.krm",
 ];
 const EMPTY_INDEX = 1;
-/** 取得も読みも起きる part（長さ 0 を除いた 2 本）。 */
+/** The parts that are fetched and read (the 2 without the zero-length one). */
 const NET_FETCHED = NET_PARTS.filter((_path, index) => index !== EMPTY_INDEX);
 
 const CROSS_PARTS = ["shared/model-00001-of-00002.krm", "shared/model-00002-of-00002.krm"];
@@ -76,7 +81,9 @@ const partRef = async (path: string, cross: boolean) => ({
   ...(cross ? { repo: FOREIGN_REPO, revision: FOREIGN_SHA } : {}),
 });
 
-/** `descriptor` は part 0 の長さ（= ヘッダ + 2 文書）から導く（container-v1 §8）。 */
+/**
+ * `descriptor` is derived from the length of part 0 (= header + the 2 documents) (container-v1 §8).
+ */
 const containerFor = async (
   paths: readonly string[],
   options: { readonly emptyIndex?: number; readonly cross?: boolean } = {},
@@ -129,7 +136,9 @@ const manifestText = JSON.stringify({
 
 const manifestBytes = new TextEncoder().encode(manifestText);
 
-/** HF 取得元が配信するファイル表（越境ぶんは修飾キーで登録する）。 */
+/**
+ * The file table the HF source serves (cross-repository files are registered under qualified keys).
+ */
 const serveAll = (
   overrides: ReadonlyMap<string, Uint8Array<ArrayBuffer>> = new Map(),
 ): Map<string, Uint8Array<ArrayBuffer>> => {
@@ -142,7 +151,9 @@ const serveAll = (
   return files;
 };
 
-/** ディレクトリの中身（長さ 0 の part も 0 バイトのファイルとして置く — container-v1 §8）。 */
+/**
+ * The directory contents (the zero-length part is placed as a 0-byte file too — container-v1 §8).
+ */
 const localFiles = (): Map<string, Uint8Array<ArrayBuffer>> => {
   const files = new Map<string, Uint8Array<ArrayBuffer>>([[MANIFEST_PATH, manifestBytes]]);
   NET_PARTS.forEach((path, index) => {
@@ -170,14 +181,17 @@ const openRemote = async (
       caches,
     },
   );
-  // manifest の取得を数えないよう、以降は記録の空な mock を渡す。
+  // From here on a mock with an empty record is passed, so that the manifest fetch is not counted.
   return { loaded, mock: createMockFetch({ files }) };
 };
 
 const containerOf = (loaded: LoadedManifest, name: string) =>
   resolveSelection(loaded.manifest).containers[name];
 
-/** 相 1（温め）は**呼び手の責務** — この面は温めないので、先に通す側をテストも明示的に呼ぶ。 */
+/**
+ * Phase 1 (warming) is **the caller's responsibility** — this surface does not warm, so the tests
+ * call the step that runs first explicitly too.
+ */
 const warmParts = async (
   loaded: LoadedManifest,
   name: string,
@@ -193,7 +207,7 @@ const warmParts = async (
   );
 };
 
-/** ローカルディレクトリのセッション（越境先だけ差し替えられる）。 */
+/** A local directory session (only the referenced repository can be swapped in). */
 const openLocal = async (
   options: Parameters<typeof localDirectory>[1] = {},
 ): Promise<{ loaded: LoadedManifest; directory: ReturnType<typeof memoryDirectory> }> => {
@@ -205,9 +219,10 @@ const openLocal = async (
   return { loaded, directory };
 };
 
-test("openContainerSource: 開くだけでは 1 バイトも取りに行かない", async () => {
-  // 温めは呼び手の順序（descriptor で admission → prefetchAssets → open）に属する。面の中で
-  // 全 part を温めると、実行できないモデルの重みが先に落ちる（ADR 0108 決定 19 / 0070 決定 5）。
+test("openContainerSource: opening alone fetches not a single byte", async () => {
+  // Warming belongs to the caller's order (admission on the descriptor → prefetchAssets → open).
+  // Warming every part inside the surface would download the weights of a model that cannot run
+  // first (ADR 0108 decision 19 / 0070 decision 5).
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
 
@@ -216,11 +231,11 @@ test("openContainerSource: 開くだけでは 1 バイトも取りに行かな�
     caches,
   });
 
-  assertEquals(mock.calls, [], "開いただけで network に出ている");
+  assertEquals(mock.calls, [], "opening alone goes to the network");
   assertEquals(source.partCount, NET_PARTS.length);
 });
 
-test("openContainerSource: 温めていなければ初回の読みが触れた part だけを温める", async () => {
+test("openContainerSource: without warming, the first read warms only the part it touched", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -229,18 +244,23 @@ test("openContainerSource: 温めていなければ初回の読みが触れた p
   });
 
   assertEquals(await source.read(0, 0, 4), payloadFor(NET_PARTS[0]).subarray(0, 4));
-  assertEquals(countCalls(mock.calls, resolveUrl(NET_PARTS[0])), 1, "温め直しが 1 回でない");
-  // 触っていない part は 1 バイトも取りに行かない（面が全 part を温めないことの観測点）。
+  assertEquals(
+    countCalls(mock.calls, resolveUrl(NET_PARTS[0])),
+    1,
+    "the re-warm did not happen exactly once",
+  );
+  // A part that was not touched is not fetched at all (the observation point that the surface does
+  // not warm every part).
   for (const path of [NET_PARTS[1], NET_PARTS[2]]) {
-    assertEquals(countCalls(mock.calls, resolveUrl(path)), 0, `${path} を先回りで取っている`);
+    assertEquals(countCalls(mock.calls, resolveUrl(path)), 0, `${path} is fetched ahead of time`);
   }
 
   const warmed = mock.calls.length;
   await source.read(0, 4, 4);
-  assertEquals(mock.calls.length, warmed, "同じ part の 2 度目の読みが network を起こしている");
+  assertEquals(mock.calls.length, warmed, "the second read of the same part goes to the network");
 });
 
-test("openContainerSource: 先に温めてあれば読みは 1 度も network に出ない", async () => {
+test("openContainerSource: when warmed beforehand, reads never go to the network", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   await warmParts(loaded, "net", { fetch: mock.fetch, caches });
@@ -251,10 +271,10 @@ test("openContainerSource: 先に温めてあれば読みは 1 度も network �
     caches,
   });
   for (const index of [0, 2]) await source.read(index, 0, source.partLength(index));
-  assertEquals(second.calls, [], "温め済みなのに network へ出ている");
+  assertEquals(second.calls, [], "goes to the network although already warm");
 });
 
-test("openContainerSource: partCount / partLength は宣言をそのまま答える", async () => {
+test("openContainerSource: partCount / partLength answer the declaration as is", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -262,16 +282,18 @@ test("openContainerSource: partCount / partLength は宣言をそのまま答え
     caches,
   });
 
-  // 長さ 0 の part も**本数には数える**（添字が part の id なので、詰めると後続がずれる）。
+  // The zero-length part **is counted** too (the index is the part id, so closing the gap would
+  // shift the following ones).
   assertEquals(source.partCount, NET_PARTS.length);
   assertEquals(source.partLength(EMPTY_INDEX), 0);
   assertEquals(source.partLength(0), payloadFor(NET_PARTS[0]).byteLength);
   assertEquals(source.partLength(2), payloadFor(NET_PARTS[2]).byteLength);
 });
 
-test("openContainerSource: scan 型の read は保持枠の part の器を写さずに view で返す", async () => {
-  // 写すと part ごとに器と写しで part 長を 2 重に持つ（container-v1 §11）。消費側は byteOffset を
-  // 尊重して読む（整列は器が tight + block 開始の 64 B 整列で成り立つ — container.ts の MUST）。
+test("openContainerSource: a scan-type read returns a view of the holding slot's part buffer without copying", async () => {
+  // A copy would hold the part length twice per part, in the buffer and in the copy
+  // (container-v1 §11). The consumer reads honouring byteOffset (alignment holds because the buffer
+  // is tight + blocks start 64 B aligned — the MUST of container.ts).
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -292,27 +314,33 @@ test("openContainerSource: scan 型の read は保持枠の part の器を写さ
     assertEquals(
       bytes,
       new Uint8Array(payload.subarray(offset, offset + length)),
-      `[${offset}, ${offset + length}) の中身が化けている`,
+      `the content of [${offset}, ${offset + length}) is corrupted`,
     );
-    // 区間の位置は byteOffset に、part 全体は buffer に出る（写しなら byteOffset 0・buffer = 区間長）。
-    assertEquals(bytes.byteOffset, offset, `[${offset}, ${offset + length}) の位置がずれている`);
-    assertEquals(bytes.buffer.byteLength, source.partLength(2), "buffer が part の器でない");
+    // The range's position shows in byteOffset and the whole part in buffer (a copy would have
+    // byteOffset 0 and buffer = range length).
+    assertEquals(
+      bytes.byteOffset,
+      offset,
+      `the position of [${offset}, ${offset + length}) is off`,
+    );
+    assertEquals(bytes.buffer.byteLength, source.partLength(2), "buffer is not the part's buffer");
     views.push(bytes);
   }
-  // 同じ part の区間はどれも同じ器を指す（区間ごとに写していない）。
+  // Every range of the same part points at the same buffer (no copy per range).
   for (const view of views.slice(1)) {
     assertStrictEquals(
       view.buffer,
       views[0].buffer,
-      "同じ part の区間が別の buffer に写されている",
+      "ranges of the same part are copied into different buffers",
     );
   }
 });
 
-test("openContainerSource: scan 型は次の part を読んでも前の part の view が化けない", async () => {
-  // 保持枠が別の part へ移っても、手放した器は上書きしない。器を part 間で使い回す実装
-  // （全量読みの受け皿を 1 本だけ確保して次の part を読み込む形）を入れると、呼び手がまだ握って
-  // いる view の中身が黙って次の part に化ける — この門で赤にする。
+test("openContainerSource: with the scan type, reading the next part does not corrupt the view of the earlier part", async () => {
+  // When the holding slot moves to another part, the released buffer is not overwritten. An
+  // implementation that reuses the buffer across parts (allocating one receiver for whole reads and
+  // reading the next part into it) would silently turn the content of a view the caller still holds
+  // into the next part — this check turns that red.
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -325,16 +353,17 @@ test("openContainerSource: scan 型は次の part を読んでも前の part の
   const snapshot = earlier.slice();
   assertEquals(snapshot, payloadFor(NET_PARTS[2]));
 
-  // 別の part を読んで保持枠を移し、さらに元の part を読み直す（器の確保が 2 度起きる）。
+  // Read another part to move the holding slot, then read the original part again (the buffer is
+  // allocated twice).
   const other = await source.read(0, 0, lengthOf(0));
   const again = await source.read(2, 0, lengthOf(2));
 
-  assertEquals(earlier, snapshot, "手放した part の view の中身が書き換わっている");
+  assertEquals(earlier, snapshot, "the content of the released part's view was rewritten");
   assertEquals(other, payloadFor(NET_PARTS[0]));
   assertEquals(again, snapshot);
 });
 
-test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fail loudly", async () => {
+test("openContainerSource: an out-of-range read, a zero-length part and an unknown index fail loudly", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const source = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -351,34 +380,37 @@ test("openContainerSource: 範囲外・長さ 0 の part・未知の添字は fa
     [0, size + 1],
   ]) {
     const error = await assertRejects(() => source.read(2, offset, length), Error);
-    assert(error.message.includes(String(size)), `${error.message} が宣言 size を名乗っていない`);
+    assert(
+      error.message.includes(String(size)),
+      `${error.message} does not name the declared size`,
+    );
   }
 
-  // 長さ 0 の part は読めない（読み手は partLength が 0 を答えた時点で読みに行かない）。
+  // A zero-length part cannot be read (a reader does not read once partLength answers 0).
   const empty = await assertRejects(() => source.read(EMPTY_INDEX, 0, 0), Error);
   assert(
     empty.message.includes("zero-length"),
-    `${empty.message} が長さ 0 の part を名乗っていない`,
+    `${empty.message} does not name the zero-length part`,
   );
 
   for (const index of [NET_PARTS.length, -1, 1.5]) {
     const error = await assertRejects(() => source.read(index, 0, 1), Error);
-    assert(error.message.includes(`part ${index}`), `${error.message} が添字を名乗っていない`);
+    assert(error.message.includes(`part ${index}`), `${error.message} does not name the index`);
   }
-  // 同期の面も同じ規則で落ちる。
+  // The synchronous methods fail by the same rule.
   for (const index of [NET_PARTS.length, -1]) {
     try {
       source.partLength(index);
-      throw new Error(`partLength(${index}) が通ってしまった`);
+      throw new Error(`partLength(${index}) passed`);
     } catch (error) {
       assert(
         error instanceof Error && error.message.includes(`part ${index}`),
-        `${error} が添字を名乗っていない`,
+        `${error} does not name the index`,
       );
     }
   }
-  // 宣言だけで閉じる検査なので、1 本も取りに行かないまま落ちている。
-  assertEquals(mock.calls, [], "不正な区間の読みが network に出ている");
+  // The checks are closed over the declaration, so it fails without fetching anything.
+  assertEquals(mock.calls, [], "a read of an invalid range goes to the network");
 });
 
 test("openContainerSource: a bad range names the part, its path and its declared size", async () => {
@@ -408,8 +440,8 @@ test("openContainerSource: a bad range names the part, its path and its declared
   assertEquals(await source.read(2, 0, size), payloadFor(NET_PARTS[2]));
 });
 
-describe("openContainerSource: verified は取得元が全量を検証したかを答える", () => {
-  it("HF セッションは取得層が part 全量を流しながら照合する", async () => {
+describe("openContainerSource: verified says whether the source verified the whole file", () => {
+  it("an HF session compares while the fetch layer streams the whole part", async () => {
     const caches = new MemoryCacheStorage();
     const { loaded, mock } = await openRemote(caches);
     const remote = openContainerSource(loaded, containerOf(loaded, "net"), {
@@ -419,13 +451,13 @@ describe("openContainerSource: verified は取得元が全量を検証したか�
     assertEquals(remote.verified, true);
   });
 
-  it("ローカルディレクトリは sha256 を照合しない（ADR 0086 決定 2）", async () => {
+  it("a local directory does not compare sha256 (ADR 0086 decision 2)", async () => {
     const { loaded } = await openLocal();
     assertEquals(openContainerSource(loaded, containerOf(loaded, "net")).verified, false);
   });
 
-  it("越境は**越境先**の取得元で決まる（ローカルセッション + HF 越境）", async () => {
-    // セッションの取得元（ローカル）だけを見る綴りなら false になる組み合わせ。
+  it("for a cross-repository reference **the referenced** source decides (local session + HF reference)", async () => {
+    // The combination that would be false for code that looks only at the session's source (local).
     const caches = new MemoryCacheStorage();
     const mock = createMockFetch({ files: serveAll() });
     const { loaded } = await openLocal({
@@ -442,16 +474,22 @@ describe("openContainerSource: verified は取得元が全量を検証したか�
       caches,
     });
 
-    assertEquals(source.verified, true, "越境先の検証済みの名乗りが継がれていない");
-    // 実体も越境先から来る（セッションのディレクトリに shared の part は置いていない）。
+    assertEquals(
+      source.verified,
+      true,
+      "the referenced source's verified claim is not carried over",
+    );
+    // The file comes from the referenced repository too (the session's directory has no shared
+    // parts).
     assertEquals(await source.read(1, 0, source.partLength(1)), payloadFor(CROSS_PARTS[1]));
     assertEquals(countCalls(mock.calls, foreignUrl(CROSS_PARTS[1])), 1);
   });
 });
 
-test("openContainerSource: scan 型は同じ part を何度読んでも全量読みが 1 回", async () => {
-  // 区間読み（`readFileRange`）を持たないアダプター = 全量読みへ倒れる経路。同じ part の block を
-  // 順に読むたびに全量を読み直すと、読み飛ばしが二次になる（ADR 0109 決定 7）。
+test("openContainerSource: the scan type reads the whole part once however many times the same part is read", async () => {
+  // An adapter without range reads (`readFileRange`) = the path that falls back to whole reads.
+  // Reading the whole part again for every block of the same part read in order would make
+  // skipping quadratic (ADR 0109 decision 7).
   const { loaded, directory } = await openLocal();
   const source = openContainerSource(loaded, containerOf(loaded, "net"));
   directory.reads.length = 0;
@@ -467,17 +505,18 @@ test("openContainerSource: scan 型は同じ part を何度読んでも全量読
       new Uint8Array(payload.subarray(offset, offset + length)),
     );
   }
-  assertEquals(directory.reads, [NET_PARTS[2]], "同じ part を読み直している");
+  assertEquals(directory.reads, [NET_PARTS[2]], "the same part is read again");
 
-  // 別の part へ移ると前の全量は手放される（保持枠は 1 part ぶん）。
+  // Moving to another part releases the earlier whole read (the holding slot holds one part).
   await source.read(0, 0, 4);
   await source.read(2, 0, 4);
   assertEquals(directory.reads, [NET_PARTS[2], NET_PARTS[0], NET_PARTS[2]]);
 });
 
-test("openContainerSource: scan 型は同じ part への並行 read も全量読み 1 回に畳む", async () => {
-  // 決着したバイト列だけを枠に置くと、並行 read が全員 readFile へ入り、その瞬間だけ
-  // 「part 長 × 本数」が同時に生きる（保持枠 1 part ぶんの RAM 契約 — container-v1 §11 — が破れる）。
+test("openContainerSource: the scan type folds parallel reads of the same part into one whole read", async () => {
+  // Putting only settled bytes into the slot would let every parallel read enter readFile, and for
+  // that moment "part length × count" would be alive at once (breaking the RAM contract of one
+  // part in the holding slot — container-v1 §11).
   const { loaded, directory } = await openLocal();
   const source = openContainerSource(loaded, containerOf(loaded, "net"));
   directory.reads.length = 0;
@@ -493,13 +532,13 @@ test("openContainerSource: scan 型は同じ part への並行 read も全量読
   ranges.forEach(([offset, length], index) => {
     assertEquals(bytes[index], new Uint8Array(payload.subarray(offset, offset + length)));
   });
-  assertEquals(directory.reads, [NET_PARTS[2]], "並行 read が全量読みを重ねている");
+  assertEquals(directory.reads, [NET_PARTS[2]], "parallel reads stack whole reads");
 });
 
-test("openContainerSource: HF の scan 経路も 2 区間目で取得層を叩き直さない", async () => {
-  // Deno の HF 読み口は cost "scan"（取得層の戦略 "stream"）なので、実運用の経路はこちら。
-  // network 呼び出し数だけを数えると、保持枠を外した実装でも緑のまま通る（温め済みなら
-  // どちらも 0 回）ので、キャッシュ読出しの回数で観測する。
+test("openContainerSource: the HF scan path does not hit the fetch layer again for the second range", async () => {
+  // Deno's HF read path has cost "scan" (the fetch layer's strategy "stream"), so this is the path
+  // used in practice. Counting only network calls would stay green even for an implementation
+  // without the holding slot (both are 0 when warm), so the number of cache reads is observed.
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   await warmParts(loaded, "net", { fetch: mock.fetch, caches });
@@ -526,11 +565,16 @@ test("openContainerSource: HF の scan 経路も 2 区間目で取得層を叩�
     [4, 4],
     [8, 4],
   ]);
-  assertEquals(thrice, once, "同じ part の 2 区間目以降が取得層の読出しを起こしている");
+  assertEquals(
+    thrice,
+    once,
+    "the second and later ranges of the same part cause reads in the fetch layer",
+  );
 });
 
-test("openContainerSource: seek 型は要求した区間だけをアダプターへ降ろす", async () => {
-  // 位置読みを持つアダプター = block ごとに引く経路（全量読みへ降りない）。
+test("openContainerSource: the seek type passes only the requested range down to the adapter", async () => {
+  // An adapter with positional reads = the path that reads per block (does not fall back to whole
+  // reads).
   const base = memoryDirectory(localFiles());
   const ranges: [string, number, number][] = [];
   const files = localFiles();
@@ -556,10 +600,10 @@ test("openContainerSource: seek 型は要求した区間だけをアダプター
     [NET_PARTS[2], 4, 3],
     [NET_PARTS[2], 0, 2],
   ]);
-  assertEquals(base.reads, [], "区間読みが全量読みへ降りている");
+  assertEquals(base.reads, [], "range reads fell back to whole reads");
 });
 
-test("openContainerSource: 越境した容器は越境先の取得元から読む", async () => {
+test("openContainerSource: a cross-repository container is read from the referenced source", async () => {
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
 
@@ -571,20 +615,29 @@ test("openContainerSource: 越境した容器は越境先の取得元から読�
   assertEquals(
     await source.read(1, 0, source.partLength(1)),
     payloadFor(CROSS_PARTS[1]),
-    "越境先の実体が読めていない",
+    "the referenced file could not be read",
   );
-  assertEquals(countCalls(mock.calls, foreignUrl(CROSS_PARTS[1])), 1, "越境先から取っていない");
+  assertEquals(
+    countCalls(mock.calls, foreignUrl(CROSS_PARTS[1])),
+    1,
+    "not fetched from the referenced repository",
+  );
   assertEquals(
     countCalls(mock.calls, resolveUrl(CROSS_PARTS[1])),
     0,
-    "セッションの repo へ取りに行っている（そこには無い）",
+    "fetches from the session's repo (the file is not there)",
   );
-  assertEquals(source.verified, true, "越境先でも検証済みの名乗りが継がれていない");
+  assertEquals(
+    source.verified,
+    true,
+    "the verified claim is not carried over for the referenced repository either",
+  );
 });
 
-test("openContainerSource: 未 mapping の越境は開くときに HubFetchError で落ちる", async () => {
-  // 同じ設定不足が面ごとに別の見え方（素の Error / 無言の成功）になると、呼び手は診断から
-  // 「crossRepo を渡せ」へ辿れない。全量面 fetchAssets と同じ構造化欄を名乗る。
+test("openContainerSource: a cross-repository reference without a mapping fails with HubFetchError on open", async () => {
+  // If the same missing setting looked different per surface (a plain Error / a silent success),
+  // the caller could not get from the diagnostic to "pass crossRepo". It names the same structured
+  // fields as the whole-file surface fetchAssets.
   const { loaded } = await openLocal();
 
   const error = assertThrows(
@@ -594,15 +647,16 @@ test("openContainerSource: 未 mapping の越境は開くときに HubFetchError
   assertEquals(error.path, CROSS_PARTS[0]);
   assertEquals(error.repo, FOREIGN_REPO);
   assertEquals(error.revisionSha, FOREIGN_SHA);
-  assert(error.cause instanceof Error, "設定不足の理由を cause に残していない");
+  assert(error.cause instanceof Error, "the reason for the missing setting is not kept as cause");
   assert(
     error.cause.message.includes("crossRepo"),
-    `${error.cause.message} が足りない設定を名乗っていない`,
+    `${error.cause.message} does not name the missing setting`,
   );
 });
 
-test("openContainerSource: 読みの失敗は取得元の素の Error（取得の文脈に包まない）", async () => {
-  // この面は取得ではないので `openAsset` と同じ扱い（包むのは取得元の解決までで、読みは素通し）。
+test("openContainerSource: a read failure is the source's plain Error (not wrapped in a fetch context)", async () => {
+  // This surface is not a fetch, so it is treated like `openAsset` (wrapping covers only the source
+  // resolution; reads pass through).
   const caches = new MemoryCacheStorage();
   const served = serveAll();
   served.delete(NET_FETCHED[1]);
@@ -613,13 +667,14 @@ test("openContainerSource: 読みの失敗は取得元の素の Error（取得�
   });
 
   const error = await assertRejects(() => source.read(2, 0, 4), Error);
-  assert(!(error instanceof HubFetchError), `${error.name} が取得の文脈に包まれている`);
+  assert(!(error instanceof HubFetchError), `${error.name} is wrapped in a fetch context`);
 });
 
-test("openContainerSource: 読み口を開けなかった part も次の読みで開き直す", async () => {
-  // Deno の HF 経由は、part ごとの初回の読みで区間読み口を開く（温め直しつき）。その失敗を
-  // 経路の決定として覚えると、一過性の 404・切断で開けなかった part が以後の読みで同じ reject を
-  // 返し続け、Session 構築が恒久的に失敗する（container.ts の planFor の MUST）。
+test("openContainerSource: a part whose reader could not be opened is opened again on the next read", async () => {
+  // Through HF on Deno, the first read of each part opens a range reader (with a re-warm).
+  // Remembering that failure as the path decision would make a part that could not be opened
+  // because of a transient 404 or disconnect keep returning the same rejection on later reads, and
+  // the Session build would fail permanently (the MUST of planFor in container.ts).
   const caches = new MemoryCacheStorage();
   const served = serveAll();
   const path = NET_PARTS[2];
@@ -631,18 +686,19 @@ test("openContainerSource: 読み口を開けなかった part も次の読み�
   });
 
   await assertRejects(() => source.read(2, 0, 4), Error);
-  // 取得元が戻った（一過性の失敗が解けた）後の読みは、同じ面のまま成功する。
+  // Once the source is back (the transient failure cleared), the read succeeds on the same surface.
   served.set(path, payloadFor(path));
   assertEquals(
     await source.read(2, 0, 4),
     new Uint8Array(payloadFor(path).subarray(0, 4)),
-    "1 度開けなかった part を開き直していない",
+    "a part that failed to open once is not opened again",
   );
 });
 
-test("openContainerSource: scan 型は全量読みに失敗した part を次の読みで読み直す", async () => {
-  // 失敗した全量読みを保持枠に残すと、一過性の読み失敗で落ちた part が以後の読みで同じ reject を
-  // 返し続ける（container.ts の readWhole の MUST）。区間読みを持たないアダプター = 全量読みの経路。
+test("openContainerSource: the scan type reads again a part whose whole read failed", async () => {
+  // Keeping a failed whole read in the holding slot would make a part that failed on a transient
+  // read error keep returning the same rejection on later reads (the MUST of readWhole in
+  // container.ts). An adapter without range reads = the whole-read path.
   const base = memoryDirectory(localFiles());
   const path = NET_PARTS[2];
   let failures = 1;
@@ -650,7 +706,9 @@ test("openContainerSource: scan 型は全量読みに失敗した part を次の
     readFile: (target, options) => {
       if (target === path && failures > 0) {
         failures -= 1;
-        return Promise.reject(new Error(`test-directory: ${target} の読みが一時的に切れた`));
+        return Promise.reject(
+          new Error(`test-directory: the read of ${target} was cut off temporarily`),
+        );
       }
       return base.adapter.readFile(target, options);
     },
@@ -661,22 +719,22 @@ test("openContainerSource: scan 型は全量読みに失敗した part を次の
   const source = openContainerSource(loaded, containerOf(loaded, "net"));
   base.reads.length = 0;
 
-  await assertRejects(() => source.read(2, 0, 4), Error, "一時的に切れた");
+  await assertRejects(() => source.read(2, 0, 4), Error, "cut off temporarily");
   assertEquals(
     await source.read(2, 0, 4),
     new Uint8Array(payloadFor(path).subarray(0, 4)),
-    "失敗した全量読みが保持枠に残っている",
+    "the failed whole read remains in the holding slot",
   );
-  assertEquals(base.reads, [path], "2 度目の読みが全量読みをやり直していない");
+  assertEquals(base.reads, [path], "the second read did not redo the whole read");
 });
 
-test("openContainerSource: 中断済みの signal では口を返さない", async () => {
-  // 開いた後の読みには効かない（読み口は消費側が寿命ぶん掴む — `source.ts` ⑧）が、面の境界では
-  // 明示的に見る。
+test("openContainerSource: returns no reader for an already aborted signal", async () => {
+  // It has no effect on reads after opening (the consumer holds the reader for its lifetime —
+  // `source.ts` ⑧), but the surface boundary checks it explicitly.
   const caches = new MemoryCacheStorage();
   const { loaded, mock } = await openRemote(caches);
   const controller = new AbortController();
-  const reason = new Error("app: ロードを取り消した");
+  const reason = new Error("app: the load was cancelled");
   controller.abort(reason);
 
   const error = assertThrows(() =>
@@ -686,6 +744,6 @@ test("openContainerSource: 中断済みの signal では口を返さない", asy
       signal: controller.signal,
     }),
   );
-  assertStrictEquals(error, reason, "中断が別のエラーに包まれている");
-  assertEquals(mock.calls, [], "中断済みなのに network へ出ている");
+  assertStrictEquals(error, reason, "the abort is wrapped in another error");
+  assertEquals(mock.calls, [], "goes to the network although already aborted");
 });

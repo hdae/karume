@@ -1,10 +1,12 @@
 /**
- * ローカル取得元（`localDirectory`）の振る舞い。HF 取得元との差は「無い能力」に集中している
- * ので、テストも**無いことの観測**が中心になる — 世代を名乗らない / CacheStorage を開かない /
- * 相 1 を持たない / sha256 を照合しない（size だけ見る）/ 越境先を推測しない。
+ * Behaviour of the local source (`localDirectory`). Its difference from the HF source lies in "the
+ * capabilities it does not have", so the tests mostly **observe absences** — it names no
+ * generation / does not open CacheStorage / has no phase 1 / does not compare sha256 (looks only
+ * at size) / does not guess the referenced repository.
  *
- * リモートの越境先を踏むために、crossRepo には fake の取得元（`DistributionSource` の内部契約を
- * 直接実装したもの）を注入する — HF 取得元のハンドルを組む公開 factory は無い。
+ * To exercise a remote referenced repository, a fake source (directly implementing the internal
+ * contract of `DistributionSource`) is injected into crossRepo — there is no public factory that
+ * builds an HF source handle.
  */
 
 import { beforeAll, describe, it, test } from "vite-plus/test";
@@ -50,22 +52,25 @@ import { MemoryCacheStorage, payloadFor } from "./helpers/mock.ts";
 
 const LABEL = "./models/karume-test";
 
-/** 触れた瞬間に落ちる CacheStorage。ローカル取得元が 1 度も開かないことの門。 */
+/**
+ * A CacheStorage that fails the moment it is touched. The check that the local source never opens
+ * it.
+ */
 class HostileCacheStorage implements CacheStorage {
   open(): Promise<Cache> {
-    throw new Error("test: ローカル取得元が CacheStorage を開いた");
+    throw new Error("test: the local source opened CacheStorage");
   }
   match(): Promise<Response | undefined> {
-    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+    throw new Error("test: the local source looked up CacheStorage");
   }
   has(): Promise<boolean> {
-    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+    throw new Error("test: the local source looked up CacheStorage");
   }
   delete(): Promise<boolean> {
-    throw new Error("test: ローカル取得元が CacheStorage を消した");
+    throw new Error("test: the local source deleted from CacheStorage");
   }
   keys(): Promise<string[]> {
-    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+    throw new Error("test: the local source looked up CacheStorage");
   }
 }
 
@@ -81,13 +86,18 @@ const openLocal = async (
   return { directory, loaded };
 };
 
-/** 進捗の記録（phase と path だけ — 数値の意味論は `stream_test` / `fetch_test` の担当）。 */
+/**
+ * A progress record (phase and path only — the semantics of the numbers belong to `stream_test` /
+ * `fetch_test`).
+ */
 const recordProgress = (): { events: AssetProgress[]; onProgress: (p: AssetProgress) => void } => {
   const events: AssetProgress[] = [];
   return { events, onProgress: (progress) => events.push(progress) };
 };
 
-/** Orders [phase, path] pairs element-wise in UTF-16 code-unit order (only a total order is needed). */
+/**
+ * Orders [phase, path] pairs element-wise in UTF-16 code-unit order (only a total order is needed).
+ */
 const comparePairs = (a: readonly string[], b: readonly string[]): number => {
   for (let index = 0; index < Math.min(a.length, b.length); index++) {
     if (a[index] < b[index]) return -1;
@@ -96,11 +106,12 @@ const comparePairs = (a: readonly string[], b: readonly string[]): number => {
   return a.length - b.length;
 };
 
-test("localDirectory: manifest → resolveSelection → fetchAssets が実体のバイト列で完走する", async () => {
+test("localDirectory: manifest → resolveSelection → fetchAssets runs to the end with the actual bytes", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
 
-  // 世代も repo も持たない取得元なので、識別欄は**欄ごと現れない**（偽の SHA を名乗らない）。
+  // The source has neither a generation nor a repo, so the identifying fields **do not appear at
+  // all** (no fake SHA).
   assertEquals(loaded.repo, undefined);
   assertEquals(loaded.revisionSha, undefined);
   assertEquals(loaded.manifest.available.models, ["m"]);
@@ -110,24 +121,26 @@ test("localDirectory: manifest → resolveSelection → fetchAssets が実体の
   assertEquals(Object.keys(assets).sort(), [...PART_KEYS, "tokenizer"].sort());
   PART_KEYS.forEach((key, index) => {
     const part = FETCHED_PART_PATHS[index];
-    assertEquals(assets[key], payloadFor(part), `${part} の実体が配られていない`);
+    assertEquals(assets[key], payloadFor(part), `the actual bytes of ${part} were not delivered`);
   });
   assertEquals(assets["tokenizer"], payloadFor(TOKENIZER_PATH));
-  // 読んだのは manifest 1 本 + 資産 3 本だけ（長さ 0 の part は読まない・同じ path も 2 度読まない）。
+  // Only the manifest + 3 assets were read (zero-length parts are not read; the same path is not
+  // read twice).
   assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS, TOKENIZER_PATH]);
 });
 
-test("localDirectory: 中断は資産の読みへ透過する", async () => {
+test("localDirectory: an abort reaches the asset reads", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
   await fetchAssets(loaded, selectionFiles(loaded.manifest), {
     signal: AbortSignal.timeout(60_000),
   });
-  // manifest は loadManifest の signal 無し呼び出し、資産は面の signal つき。
+  // The manifest comes from loadManifest's call without a signal, the assets from the surface's
+  // call with a signal.
   assertEquals(directory.signals, [false, true, true, true]);
 });
 
-test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheStorage を 1 度も開かない", async () => {
+test("localDirectory: fetchAssets reads each file only once and never opens CacheStorage", async () => {
   const dist = await buildLocalDist();
   const caches = new MemoryCacheStorage();
   const directory = memoryDirectory(dist.files);
@@ -143,31 +156,27 @@ test("localDirectory: fetchAssets は 1 本につき 1 回だけ読み、CacheSt
   PART_KEYS.forEach((key, index) => {
     assertEquals(assets[key], payloadFor(FETCHED_PART_PATHS[index]));
   });
-  // 温めが丸ごと省かれるので、1 本につき読みは 1 回だけ（温めてから読み直す形にならない）。
+  // Warming is skipped entirely, so each file is read only once (not warmed and then read again).
   assertEquals(directory.reads, [MANIFEST_FILENAME, ...FETCHED_PART_PATHS]);
-  // 受信の途中という状態が無いので、進捗はファイルごとの complete 1 点だけ。
+  // There is no "in the middle of receiving" state, so progress is a single complete per file.
   assertEquals(
     progress.events.map((event) => event.phase),
     ["complete", "complete"],
   );
-  // repo も世代も持たない取得元のファイルは、取得先の欄を**欄ごと**出さない（合成した名前や
-  // 偽の SHA を名乗らない — `loaded.repo` / `revisionSha` と同じ規律）。
+  // Files of a source with neither a repo nor a generation do not emit the fetch-origin fields
+  // **at all** (no synthesized name or fake SHA — the same rule as `loaded.repo` / `revisionSha`).
   for (const event of progress.events) {
-    assertEquals(Object.hasOwn(event, "repo"), false, `${event.path} が repo を名乗っている`);
-    assertEquals(
-      Object.hasOwn(event, "revision"),
-      false,
-      `${event.path} が revision を名乗っている`,
-    );
+    assertEquals(Object.hasOwn(event, "repo"), false, `${event.path} names a repo`);
+    assertEquals(Object.hasOwn(event, "revision"), false, `${event.path} names a revision`);
   }
   assertEquals(
     caches.namespaces.size,
     0,
-    "ローカル取得元がキャッシュ名前空間を作っている（バイト列を複製している）",
+    "the local source creates a cache namespace (duplicating the bytes)",
   );
 });
 
-describe("prefetchAssets: 相 1 を持たない取得元では温めずに complete だけを出す（入力検査だけは効く）", () => {
+describe("prefetchAssets: a source without phase 1 emits only complete without warming (the input check still applies)", () => {
   let directory: MemoryDirectory;
   let loaded: LoadedManifest;
   let refs: FileRef[];
@@ -179,31 +188,37 @@ describe("prefetchAssets: 相 1 を持たない取得元では温めずに compl
     refs = PART_KEYS.map((key): FileRef => files[key]);
   });
 
-  it("温めるべきキャッシュが無いのは失敗ではない（実体を読まずに返る）", async () => {
+  it("having no cache to warm is not a failure (returns without reading the files)", async () => {
     const progress = recordProgress();
     directory.reads.length = 0;
     await prefetchAssets(loaded, refs, { onProgress: progress.onProgress });
-    assertEquals(directory.reads, [], "相 1 が無いのに実体を読んでいる");
-    // 取得の要らない ref も complete を 1 回ずつ出す（ADR 0086 追記 2026-10-11）— 渡した ref の
-    // size 合計を分母にする呼び手の進捗が、取得元に依らず合計へ届く。
+    assertEquals(directory.reads, [], "reads the files although there is no phase 1");
+    // A ref that needs no fetch also emits complete once each (ADR 0086 addendum 2026-10-11) — a
+    // caller whose progress uses the size total of the refs passed as denominator reaches the total
+    // regardless of the source.
     assertEquals(
       progress.events.map((event) => [event.phase, event.path]).sort(comparePairs),
       refs.map((ref) => ["complete", ref.path]).sort(comparePairs),
-      "温めの要らない ref が complete を 1 回ずつ出していない",
+      "a ref that needs no warming does not emit complete once each",
     );
     const total = refs.reduce((sum, ref) => sum + ref.size, 0);
-    assertEquals(progress.events.at(-1)?.loaded, total, "最後の通知が合計に届いていない");
+    assertEquals(
+      progress.events.at(-1)?.loaded,
+      total,
+      "the last notification does not reach the total",
+    );
     for (const event of progress.events) assertEquals(event.fileLoaded, event.fileTotal);
   });
 
-  it("呼び出し側の誤り（空の refs）は取得元に触れる前に落とす", async () => {
+  it("a caller error (empty refs) fails before touching the source", async () => {
     await assertRejects(() => prefetchAssets(loaded, []), ManifestReferenceError, LABEL);
   });
 });
 
-test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つなら越境ぶんだけ温める", async () => {
-  // セッションの取得元だけで判定すると、ローカル配布形 + 越境先がリモートという正当な構成で
-  // 越境ぶんの温めが丸ごと飛ぶ（進捗も signal も届かないまま、実際の取得は後の読みの中で走る）。
+test("prefetchAssets: phase 1 is per ref — when the referenced repository has it, only the cross-repository files are warmed", async () => {
+  // Deciding by the session's source alone would skip warming the cross-repository files entirely
+  // in the valid setup of a local distribution form + a remote referenced repository (neither
+  // progress nor signal arrives, and the actual fetch runs later inside the read).
   const dist = await buildLocalDist({ cross: true });
   const warmed: string[] = [];
   const { directory, loaded } = await openLocal(dist.files, {
@@ -216,17 +231,17 @@ test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つなら
 
   await prefetchAssets(loaded, refs, { onProgress: progress.onProgress });
 
-  assertEquals(warmed, [CROSS_PATH], "越境 ref が温められていない");
-  // 進捗は 1 つの規則（全 ref が complete を 1 回）— 温めた越境 ref も、温めの要らないローカルの
-  // ref も同じく出る（ADR 0086 追記 2026-10-11）。
+  assertEquals(warmed, [CROSS_PATH], "the cross-repository ref was not warmed");
+  // Progress follows one rule (every ref emits complete once) — the warmed cross-repository ref and
+  // the local ref that needs no warming both emit it (ADR 0086 addendum 2026-10-11).
   assertEquals(
     progress.events.map((event) => [event.phase, event.path]).sort(comparePairs),
     refs.map((ref) => ["complete", ref.path]).sort(comparePairs),
-    "ref ごとの complete が揃っていない",
+    "the complete events per ref are not all there",
   );
-  // ローカルセッションでも越境ぶんは宣言された越境先を名乗る（セッションが名乗りを持たない
-  // ことに引きずられて欄が落ちると、別リポの同じ path と見分けが付かなくなる）。ローカルの ref は
-  // 取得先の欄を欄ごと出さない。
+  // Even in a local session, the cross-repository files name the declared referenced repository
+  // (if the fields dropped because the session names nothing, they could not be told apart from the
+  // same path in another repository). The local refs do not emit the fetch-origin fields at all.
   assertEquals(
     progress.events
       .map((event) => [event.path, event.repo, event.revision])
@@ -235,17 +250,21 @@ test("prefetchAssets: 相 1 の有無は ref ごと — 越境先が持つなら
   );
   for (const event of progress.events) {
     if (event.path !== CROSS_PATH) {
-      assertEquals(Object.hasOwn(event, "repo"), false, `${event.path} が repo を名乗っている`);
+      assertEquals(Object.hasOwn(event, "repo"), false, `${event.path} names a repo`);
     }
   }
   const total = refs.reduce((sum, ref) => sum + ref.size, 0);
-  assertEquals(progress.events.at(-1)?.loaded, total, "最後の通知が合計に届いていない");
-  assertEquals(directory.reads, [], "相 1 を持たない取得元の ref を読みに行っている");
+  assertEquals(
+    progress.events.at(-1)?.loaded,
+    total,
+    "the last notification does not reach the total",
+  );
+  assertEquals(directory.reads, [], "reads a ref of a source without phase 1");
 });
 
-test("localDirectory: size 不一致は fail loudly（path とディレクトリを名乗る）", async () => {
+test("localDirectory: a size mismatch fails loudly (naming the path and the directory)", async () => {
   const dist = await buildLocalDist();
-  // 実体だけを差し替える（manifest の size / sha256 は元のまま = 途中で切れたコピーの形）。
+  // Replace only the file (the manifest's size / sha256 unchanged = the shape of a truncated copy).
   const tampered = new Map(dist.files);
   tampered.set(TOKENIZER_PATH, payloadFor(`${TOKENIZER_PATH}:truncated`));
   const { loaded } = await openLocal(tampered);
@@ -255,17 +274,18 @@ test("localDirectory: size 不一致は fail loudly（path とディレクトリ
     IntegrityError,
   );
   assertEquals(error.path, TOKENIZER_PATH);
-  assertEquals(error.source, "local", "ローカルの実体読みが network / cache を名乗っている");
-  assertEquals(error.repo, undefined, "存在しない repo を名乗っている");
-  assertEquals(error.revisionSha, undefined, "偽の SHA を名乗っている");
-  assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
-  assert(error.message.includes(LABEL), `${error.message} がディレクトリを名乗っていない`);
+  assertEquals(error.source, "local", "the local file read names network / cache");
+  assertEquals(error.repo, undefined, "names a repo that does not exist");
+  assertEquals(error.revisionSha, undefined, "names a fake SHA");
+  assert(error.message.includes(TOKENIZER_PATH), `${error.message} does not name the path`);
+  assert(error.message.includes(LABEL), `${error.message} does not name the directory`);
 });
 
-test("localDirectory: sha256 は照合しない（size が合えば読み切る）", async () => {
+test("localDirectory: sha256 is not compared (a matching size reads to the end)", async () => {
   const dist = await buildLocalDist();
   const original = payloadFor(TOKENIZER_PATH);
-  // 長さは保ったまま中身だけ変える（HF 取得元なら sha256 の門で落ちる形）。
+  // Change only the content and keep the length (the shape that would fail the sha256 check with
+  // the HF source).
   const swapped = new Uint8Array(original);
   swapped[swapped.length - 1] ^= 0xff;
   const tampered = new Map(dist.files);
@@ -276,11 +296,11 @@ test("localDirectory: sha256 は照合しない（size が合えば読み切る�
   assertEquals(
     assets["tokenizer"],
     swapped,
-    "手元の実体を信じる設計（size だけが門）から外れている",
+    "departs from the design that trusts the local files (size is the only check)",
   );
 });
 
-test("localDirectory: 実体が無いファイルは実パスを cause に残して HubFetchError", async () => {
+test("localDirectory: a missing file is a HubFetchError keeping the actual path in cause", async () => {
   const dist = await buildLocalDist();
   const missing = new Map(dist.files);
   missing.delete(FETCHED_PART_PATHS[1]);
@@ -292,15 +312,15 @@ test("localDirectory: 実体が無いファイルは実パスを cause に残し
   );
   assertEquals(error.path, FETCHED_PART_PATHS[1]);
   assertEquals(error.repo, undefined);
-  assert(error.message.includes(LABEL), `${error.message} がディレクトリを名乗っていない`);
-  assert(error.cause instanceof Error, "アダプターのエラーを cause に残していない");
+  assert(error.message.includes(LABEL), `${error.message} does not name the directory`);
+  assert(error.cause instanceof Error, "the adapter's error is not kept as cause");
   assert(
     error.cause.message.includes(FETCHED_PART_PATHS[1]),
-    `${error.cause.message} が読めなかった実体を名乗っていない`,
+    `${error.cause.message} does not name the file that could not be read`,
   );
 });
 
-test("localDirectory: 上限を超えた karume.json は ManifestFormatError", async () => {
+test("localDirectory: a karume.json over the limit is a ManifestFormatError", async () => {
   const oversized = new Map<string, Uint8Array<ArrayBuffer>>([
     [MANIFEST_FILENAME, new TextEncoder().encode(" ".repeat(2 * 1024 * 1024))],
   ]);
@@ -309,28 +329,30 @@ test("localDirectory: 上限を超えた karume.json は ManifestFormatError", a
     () => loadManifest(localDirectory(directory.adapter, { label: LABEL })),
     ManifestFormatError,
   );
-  assert(error.message.includes(LABEL), `${error.message} がディレクトリを名乗っていない`);
+  assert(error.message.includes(LABEL), `${error.message} does not name the directory`);
 });
 
-test("localDirectory: 壊れた karume.json は毎回同じ ManifestFormatError で落ちる", async () => {
+test("localDirectory: a broken karume.json fails with the same ManifestFormatError every time", async () => {
   const broken = new Map<string, Uint8Array<ArrayBuffer>>([
     [MANIFEST_FILENAME, new TextEncoder().encode('{"format": "karume/5"')],
   ]);
   const directory = memoryDirectory(broken);
   const source = localDirectory(directory.adapter, { label: LABEL });
-  // ローカルには evict すべきキャッシュが無いので、self-heal も「1 往復だけ取り直す」も無い。
+  // Locally there is no cache to evict, so there is neither self-heal nor "fetch again once".
   for (const _attempt of [0, 1]) {
     await assertRejects(() => loadManifest(source), ManifestFormatError);
   }
   assertEquals(directory.reads, [MANIFEST_FILENAME, MANIFEST_FILENAME]);
 });
 
-// ---- 越境（ADR 0038 §7）: 明示 mapping / mapping に無い の 2 形（委譲先の欄は持たない）。
+// ---- Cross-repository references (ADR 0038 §7): the 2 shapes, explicit mapping / not in the
+// mapping (there is no field for a delegate).
 
 /**
- * 越境先だけを提供する fake の取得元（HF 取得元の代役）。`shortBy` を渡すと、宣言
- * `size` より短いバイト数を名乗る**リモート**取得元になる（越境先の完全性検証の失敗を踏む形）。
- * `warmed` を渡すと**相 1 を持つ**取得元になり、温めた path をそこへ記録する。
+ * A fake source that only provides the referenced repository (standing in for the HF source).
+ * Passing `shortBy` makes it a **remote** source that reports fewer bytes than the declared `size`
+ * (the shape that exercises a failed integrity check in the referenced repository). Passing
+ * `warmed` makes it a source **with phase 1** that records the warmed paths there.
  */
 const fakeRemote = (
   files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>,
@@ -345,19 +367,20 @@ const fakeRemote = (
     };
     return {
       origin,
-      readManifest: () => Promise.reject(new Error("fake: manifest は読まれない")),
+      readManifest: () => Promise.reject(new Error("fake: the manifest is not read")),
       readFile: (ref, { sizeViolation }) => {
         const bytes = files.get(ref.path);
-        if (bytes === undefined) return Promise.reject(new Error(`fake: ${ref.path} が無い`));
+        if (bytes === undefined) return Promise.reject(new Error(`fake: ${ref.path} missing`));
         const { shortBy } = options;
-        // 取得元は自分の失敗元（`origin.integrity`）を名乗って共通層へ返す — 組み立てるのは
-        // 共通層（`context.ts`）。
+        // The source returns to the shared layer naming its own failure origin (`origin.integrity`)
+        // — assembling the error is the shared layer's job (`context.ts`).
         if (shortBy !== undefined) {
           return Promise.reject(sizeViolation(bytes.byteLength - shortBy, origin.integrity));
         }
         return Promise.resolve(new Uint8Array(bytes));
       },
-      // 相 1 は取得元ごとの optional 能力（`source.ts` ④）。持つ取得元だけがこの席を生やす。
+      // Phase 1 is an optional capability per source (`source.ts` ④). Only a source that has it
+      // grows this member.
       ...(options.warmed === undefined
         ? {}
         : {
@@ -385,50 +408,54 @@ const crossAssets = async (
   return await fetchAssets(loaded, selectionFiles(loaded.manifest));
 };
 
-test("localDirectory: 越境参照は明示 mapping の取得元から取る", async () => {
+test("localDirectory: a cross-repository reference is fetched from the source of the explicit mapping", async () => {
   const dist = await buildLocalDist({ cross: true });
   const crossDirectory = memoryDirectory(dist.crossFiles);
   const assets = await crossAssets({
-    crossRepo: { [CROSS_REPO]: localDirectory(crossDirectory.adapter, { label: "./models/共有" }) },
+    crossRepo: {
+      [CROSS_REPO]: localDirectory(crossDirectory.adapter, { label: "./models/shared" }),
+    },
   });
   assertEquals(assets["text_encoder"], payloadFor(`${CROSS_REPO}/${CROSS_PATH}`));
-  assertEquals(crossDirectory.reads, [CROSS_PATH], "越境先から取っていない");
+  assertEquals(crossDirectory.reads, [CROSS_PATH], "not fetched from the referenced repository");
 });
 
-test("localDirectory: 越境の委譲先（fallback）の欄は受けない — 渡しても委譲せずに落ちる", async () => {
+test("localDirectory: a delegate (fallback) field for cross-repository references is not accepted — passing one fails without delegating", async () => {
   const dist = await buildLocalDist({ cross: true });
   const crossDirectory = memoryDirectory(dist.crossFiles);
-  // 型の門: 欄が公開面へ戻ると `@ts-expect-error` が余って `deno check` が赤くなる（公開面で
-  // 作れる値のどれも委譲先として機能しない — `LocalDirectoryOptions.crossRepo` の NOTE）。
+  // The type check: if the field came back to the public surface, the `@ts-expect-error` would be
+  // unused and `deno check` would turn red (no value buildable through the public surface works as
+  // a delegate — the NOTE on `LocalDirectoryOptions.crossRepo`).
   const options: LocalDirectoryOptions = {
-    // @ts-expect-error 委譲先の欄は LocalDirectoryOptions に無い
-    fallback: localDirectory(crossDirectory.adapter, { label: "./models/共有" }),
+    // @ts-expect-error there is no delegate field in LocalDirectoryOptions
+    fallback: localDirectory(crossDirectory.adapter, { label: "./models/shared" }),
   };
 
-  // 型を経ない呼び手（JS）が渡しても、黙って委譲せず mapping 不足として落ちる。
+  // Even when a caller that bypasses the types (JS) passes it, it does not delegate silently and
+  // fails as a missing mapping.
   const error = await assertRejects(() => crossAssets(options), HubFetchError);
-  assert(error.cause instanceof Error, "設定不足の理由を cause に残していない");
+  assert(error.cause instanceof Error, "the reason for the missing setting is not kept as cause");
   assert(
     !error.cause.message.includes("fallback"),
-    `${error.cause.message} が存在しない欄を案内している`,
+    `${error.cause.message} points to a field that does not exist`,
   );
-  assertEquals(crossDirectory.reads, [], "受けないはずの委譲先を読んだ");
+  assertEquals(crossDirectory.reads, [], "read the delegate that should not be accepted");
 });
 
-test("localDirectory: mapping に無い越境は推測せずに落ちる", async () => {
+test("localDirectory: a cross-repository reference not in the mapping fails without guessing", async () => {
   const error = await assertRejects(() => crossAssets({}), HubFetchError);
   assertEquals(error.path, CROSS_PATH);
-  // 診断は**宣言された越境先**を名乗る（セッションのディレクトリではない）。
+  // The diagnostic names **the declared referenced repository** (not the session's directory).
   assertEquals(error.repo, CROSS_REPO);
   assertEquals(error.revisionSha, CROSS_REVISION);
-  assert(error.cause instanceof Error, "設定不足の理由を cause に残していない");
+  assert(error.cause instanceof Error, "the reason for the missing setting is not kept as cause");
   assert(
     error.cause.message.includes("crossRepo") && error.cause.message.includes(CROSS_REPO),
-    `${error.cause.message} が足りない設定を名乗っていない`,
+    `${error.cause.message} does not name the missing setting`,
   );
 });
 
-test("localDirectory: 越境先の完全性検証の失敗は越境先の失敗元を名乗る", async () => {
+test("localDirectory: a failed integrity check in the referenced repository names the referenced repository's failure origin", async () => {
   const dist = await buildLocalDist({ cross: true });
 
   const error = await assertRejects(
@@ -436,49 +463,56 @@ test("localDirectory: 越境先の完全性検証の失敗は越境先の失敗�
     IntegrityError,
   );
 
-  // 診断は宣言された越境先を名乗る（label / repo / revisionSha は既存の門と同じ）。
+  // The diagnostic names the declared referenced repository (label / repo / revisionSha as in the
+  // existing checks).
   assertEquals(error.path, CROSS_PATH);
   assertEquals(error.repo, CROSS_REPO);
   assertEquals(error.revisionSha, CROSS_REVISION);
   assertEquals(error.actual, String(payloadFor(`${CROSS_REPO}/${CROSS_PATH}`).byteLength - 1));
-  // ローカルセッション + リモート越境（`crossRepo` が正式に受ける構成）。バイト列は network から
-  // 来たので再試行に意味がある — セッションの分類 "local"（取り直しても同じ）を継ぐと、アプリに
-  // 「回復手段は無い」と嘘を伝える。
+  // A local session + a remote referenced repository (a setup `crossRepo` officially accepts). The
+  // bytes came from the network, so retrying makes sense — inheriting the session's classification
+  // "local" (fetching again gives the same result) would tell the app the lie that "there is no way
+  // to recover".
   assertEquals(error.source, "network");
 });
 
-test("localDirectory: 越境先の取得元は同じハンドルを使い回しても混ざらない", async () => {
+test("localDirectory: sources of referenced repositories do not mix even when the same handle is reused", async () => {
   const dist = await buildLocalDist({ cross: true });
   const crossDirectory = memoryDirectory(dist.crossFiles);
-  const shared = localDirectory(crossDirectory.adapter, { label: "./models/共有" });
+  const shared = localDirectory(crossDirectory.adapter, { label: "./models/shared" });
   const first = await crossAssets({ crossRepo: { [CROSS_REPO]: shared } });
   const second = await crossAssets({ crossRepo: { [CROSS_REPO]: shared } });
   assertEquals(first["text_encoder"], second["text_encoder"]);
-  // セッション側の同名 path（`text_encoder/...` は自リポに存在しない）を引きに行っていない。
+  // It does not look up the session's path of the same name (`text_encoder/...` does not exist in
+  // this repository).
   assertEquals(crossDirectory.reads, [CROSS_PATH, CROSS_PATH]);
 });
 
-test("localDirectory: 取得元ハンドルは不透明（loadManifest が同一性で判別する）", async () => {
+test("localDirectory: the source handle is opaque (loadManifest tells it apart by identity)", async () => {
   const dist = await buildLocalDist();
   const directory = memoryDirectory(dist.files);
   const source = localDirectory(directory.adapter, { label: LABEL });
-  // 公開面に生えているメンバは 1 つも無い（実装は hub 内部の表に閉じている — `source.ts`）。
+  // No member is exposed on the public surface (the implementation is confined to a table inside
+  // the hub — `source.ts`).
   assertEquals(Object.keys(source), []);
   assertEquals(Reflect.ownKeys(source).length, 0);
   const first = await loadManifest(source);
   const second = await loadManifest(source);
-  // 同じハンドルから何セッション開いても、取得元の状態は共有されない（毎回読み直す）。
+  // However many sessions are opened from the same handle, the source's state is not shared (it
+  // reads again every time).
   assertStrictEquals(first === second, false);
   assertEquals(directory.reads, [MANIFEST_FILENAME, MANIFEST_FILENAME]);
 });
 
-// ---- 区間読み（`openAsset` — `source.ts` ⑧）。ローカル取得元では**アダプターが位置読みを
-// 持つときだけ**口が生える。取得元側の責務は「宣言 size での検査」と「短い戻りを通さない」の
-// 2 つで、実体の読み方（`Deno.open` → `seek`）は `deno_directory_test.ts` の担当。
+// ---- Range reads (`openAsset` — `source.ts` ⑧). With the local source, a reader exists **only
+// when the adapter has positional reads**. The source's responsibilities are two, "checking
+// against the declared size" and "not letting a short return through"; how the file is read
+// (`Deno.open` → `seek`) belongs to `deno_directory_test.ts`.
 
 /**
- * 記録つきの位置読み。`short` を渡すと要求より 1 バイト少なく返し、`loose` を渡すと中身は
- * 正しいまま余白のある buffer の中程を指す view（非 tight view）を返すアダプターになる。
+ * A recording positional read. Passing `short` makes an adapter that returns 1 byte less than
+ * requested; passing `loose` makes one that returns a view into the middle of a padded buffer
+ * (a non-tight view) with correct content.
  */
 type RangeDirectoryOptions = { readonly short?: boolean; readonly loose?: boolean };
 
@@ -487,7 +521,7 @@ const rangeDirectory = (
   options: RangeDirectoryOptions = {},
 ) => {
   const base = memoryDirectory(files);
-  /** `readFileRange` に降りてきた要求（path / offset / length）。 */
+  /** The requests that reached `readFileRange` (path / offset / length). */
   const ranges: [string, number, number][] = [];
   const adapter: DirectoryAdapter = {
     ...base.adapter,
@@ -495,13 +529,13 @@ const rangeDirectory = (
       ranges.push([path, offset, length]);
       const bytes = files.get(path);
       if (bytes === undefined) {
-        return Promise.reject(new Error(`test-directory: ${path} を読めない`));
+        return Promise.reject(new Error(`test-directory: cannot read ${path}`));
       }
       const served = options.short === true ? Math.max(length - 1, 0) : length;
       const slice = bytes.subarray(offset, offset + served);
       if (options.loose !== true) return Promise.resolve(new Uint8Array(slice));
-      // 余白のある buffer の中程へ写した view（中身も長さも正しい — 落ちる理由を view の形だけ
-      // に絞る）。
+      // A view copied into the middle of a padded buffer (content and length are correct — the only
+      // reason to fail is the shape of the view).
       const padded = new Uint8Array(new ArrayBuffer(slice.byteLength + 8));
       padded.set(slice, 4);
       return Promise.resolve(padded.subarray(4, 4 + slice.byteLength));
@@ -523,48 +557,55 @@ const openRangeLocal = async (
   return { directory, loaded };
 };
 
-test("openAsset: 位置読みを持たないアダプターでは undefined（全量読みへ倒す）", async () => {
+test("openAsset: undefined for an adapter without positional reads (falls back to whole reads)", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openLocal(dist.files);
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
   directory.reads.length = 0;
 
-  // 能力の差であって失敗ではない（口が無いことを fail loudly にすると、取得元を差し替えられる
-  // はずのアプリが取得元ごとに分岐する羽目になる）。
+  // This is a difference in capability, not a failure (failing loudly on a missing reader would
+  // force an app that should be able to swap sources to branch per source).
   assertEquals(await openAsset(loaded, ref), undefined);
-  assertEquals(directory.reads, [], "口を開くだけで実体を読んでいる");
+  assertEquals(directory.reads, [], "opening a reader reads the file");
 });
 
-test("openAsset: 位置読みを持つアダプターでは seek の口が開き、要求区間だけが降りる", async () => {
+test("openAsset: an adapter with positional reads opens a seek reader, and only the requested range goes down", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openRangeLocal(dist.files);
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
   directory.reads.length = 0;
 
   const reader = await openAsset(loaded, ref);
-  assert(reader !== undefined, "位置読みを持つのに口が開かない");
+  assert(
+    reader !== undefined,
+    "the reader does not open although the adapter has positional reads",
+  );
   assertEquals(reader.cost, "seek");
-  assertEquals(directory.ranges, [], "開いただけで実体を読んでいる");
+  assertEquals(directory.ranges, [], "opening alone reads the file");
 
   const bytes = await reader.read(4, 3);
   assertEquals(bytes, payloadFor(TOKENIZER_PATH).subarray(4, 7).slice());
-  // 全量読み（`readFile`）へ降りていないこと = 行だけを引く面が成立していること。
+  // Not falling back to whole reads (`readFile`) = the surface that reads only rows works.
   assertEquals(directory.ranges, [[TOKENIZER_PATH, 4, 3]]);
-  assertEquals(directory.reads, [], "区間読みが全量読みへ降りている");
+  assertEquals(directory.reads, [], "range reads fell back to whole reads");
 });
 
-test("openAsset: 宣言 size の外はアダプターを 1 度も呼ばずに落ちる", async () => {
+test("openAsset: a range outside the declared size fails without calling the adapter once", async () => {
   const dist = await buildLocalDist();
   const { directory, loaded } = await openRangeLocal(dist.files);
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
   const reader = await openAsset(loaded, ref);
-  assert(reader !== undefined, "口が開かない");
+  assert(reader !== undefined, "the reader does not open");
 
-  // 実体は宣言より長いことがある（別 quant の取り違え）ので、実体長ではなく宣言 size が門。
+  // The file can be longer than declared (a mixed-up quant), so the check uses the declared size,
+  // not the file length.
   const error = await assertRejects(() => reader.read(ref.size - 1, 2), Error);
-  assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
-  assert(error.message.includes(String(ref.size)), `${error.message} が宣言 size を名乗っていない`);
-  assertEquals(directory.ranges, [], "範囲外の要求がアダプターへ降りている");
+  assert(error.message.includes(TOKENIZER_PATH), `${error.message} does not name the path`);
+  assert(
+    error.message.includes(String(ref.size)),
+    `${error.message} does not name the declared size`,
+  );
+  assertEquals(directory.ranges, [], "an out-of-range request reached the adapter");
 });
 
 test("local source range reader: checks the declared size itself, before the adapter", async () => {
@@ -601,50 +642,57 @@ test("local source range reader: checks the declared size itself, before the ada
   assertEquals(await reader.read(0, ref.size), payloadFor(TOKENIZER_PATH).slice(0, ref.size));
 });
 
-test("openAsset: 短い戻りは throw（0 埋めの行を正常な値として配らない）", async () => {
+test("openAsset: a short return throws (zero-filled rows are not delivered as valid values)", async () => {
   const dist = await buildLocalDist();
   const { loaded } = await openRangeLocal(dist.files, {}, { short: true });
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
   const reader = await openAsset(loaded, ref);
-  assert(reader !== undefined, "口が開かない");
+  assert(reader !== undefined, "the reader does not open");
 
   const error = await assertRejects(() => reader.read(0, 8), Error);
-  assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
-  assert(error.message.includes("7"), `${error.message} が実際のバイト数を名乗っていない`);
+  assert(error.message.includes(TOKENIZER_PATH), `${error.message} does not name the path`);
+  assert(error.message.includes("7"), `${error.message} does not name the actual byte count`);
 });
 
-test("openAsset: 非 tight view を返すアダプターは fail loudly（余白つきの view を配らない）", async () => {
+test("openAsset: an adapter that returns a non-tight view fails loudly (padded views are not delivered)", async () => {
   const dist = await buildLocalDist();
   const { loaded } = await openRangeLocal(dist.files, {}, { loose: true });
   const ref = selectionFiles(loaded.manifest)["tokenizer"];
   const reader = await openAsset(loaded, ref);
-  assert(reader !== undefined, "口が開かない");
+  assert(reader !== undefined, "the reader does not open");
 
-  // 消費側は返ったバイト列をそのまま TypedArray として読むので、余白のある view は値が
-  // ずれる。検査は共通層（`fetch.ts`）— 取得元ごとに置くと同じ不変条件の写しが増える。
+  // The consumer reads the returned bytes as a TypedArray as is, so a padded view shifts the
+  // values. The check lives in the shared layer (`fetch.ts`) — placing it per source would multiply
+  // copies of the same invariant.
   const error = await assertRejects(() => reader.read(0, 8), Error);
   assert(
     error.message.includes("do not span the whole buffer"),
-    `${error.message} が tight view 違反を名乗っていない`,
+    `${error.message} does not name the tight-view violation`,
   );
-  assert(error.message.includes(TOKENIZER_PATH), `${error.message} が path を名乗っていない`);
+  assert(error.message.includes(TOKENIZER_PATH), `${error.message} does not name the path`);
 });
 
-test("openAsset: 越境参照は参照先の取得元の口で解決する", async () => {
+test("openAsset: a cross-repository reference resolves through the referenced source's reader", async () => {
   const dist = await buildLocalDist({ cross: true });
-  // セッション側は位置読みを持たず、越境先だけが持つ形（能力は取得元ごとに違う）。
+  // The session has no positional reads and only the referenced repository does (capabilities
+  // differ per source).
   const cross = rangeDirectory(dist.crossFiles);
   const { loaded } = await openLocal(dist.files, {
-    crossRepo: { [CROSS_REPO]: localDirectory(cross.adapter, { label: "./models/共有" }) },
+    crossRepo: { [CROSS_REPO]: localDirectory(cross.adapter, { label: "./models/shared" }) },
   });
   const files = selectionFiles(loaded.manifest);
 
-  assertEquals(await openAsset(loaded, files["tokenizer"]), undefined, "自リポの口が生えている");
+  assertEquals(
+    await openAsset(loaded, files["tokenizer"]),
+    undefined,
+    "this repository's reader exists",
+  );
   const reader = await openAsset(loaded, files["text_encoder"]);
-  assert(reader !== undefined, "越境先の口が開かない");
+  assert(reader !== undefined, "the referenced repository's reader does not open");
   assertEquals(reader.cost, "seek");
 
-  // 越境先の実体（同じ path 文字列でもセッション側とはバイト列が違う）から引けている。
+  // Read from the referenced repository's file (the same path string, but bytes different from the
+  // session's).
   const bytes = await reader.read(0, 5);
   assertEquals(bytes, payloadFor(`${CROSS_REPO}/${CROSS_PATH}`).subarray(0, 5).slice());
   assertEquals(cross.ranges, [[CROSS_PATH, 0, 5]]);

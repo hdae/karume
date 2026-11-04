@@ -1,10 +1,11 @@
 /**
- * ローカル配布形（ディレクトリに置かれた `karume.json` + 資産）の合成。実 fs を使うテスト
- * （`deno_directory_test.ts`）とメモリ上のアダプターを使うテスト（`local_test.ts`）が同じ
- * 配布形を共有する — 片方だけの形に寄せると「実 fs では通らない合成」が生まれる。
+ * Synthesis of the local distribution form (`karume.json` + assets placed in a directory). The test
+ * on the real fs (`deno_directory_test.ts`) and the test on an in-memory adapter (`local_test.ts`)
+ * share the same distribution form — leaning it towards only one of them produces "a synthesis that
+ * does not pass on the real fs".
  *
- * `size` / `sha256` は**実際のバイト列から導出**する（手書きの定数にすると、payload を変えた
- * ときに size 門が意味を失う）。
+ * `size` / `sha256` are **derived from the actual bytes** (with hand-written constants the size
+ * check would lose its meaning when the payload changes).
  */
 
 import { MANIFEST_FILENAME } from "../../src/manifest.ts";
@@ -12,36 +13,44 @@ import type { DirectoryAdapter } from "../../src/sources/local.ts";
 import { payloadFor } from "./mock.ts";
 
 /**
- * 容器 1 本ぶんの part（container-v1 §8 の綴り）。添字 1 は**長さ 0 の part**（const が空の
- * コンテナ — ADR 0109 決定 3）で、0 バイトのファイルとして配布形に置かれるが取得も読みも
- * 起きない。
+ * The parts of one container (the spelling of container-v1 §8). Index 1 is a **zero-length part**
+ * (a container with an empty const region — ADR 0109 decision 3); it is placed in the distribution
+ * form as a 0-byte file but is neither fetched nor read.
  */
 export const PART_PATHS = [
   "net/model-00001-of-00003.krm",
   "net/model-00002-of-00003.krm",
   "net/model-00003-of-00003.krm",
 ] as const;
-/** 長さ 0 の part の添字（{@link PART_PATHS} の中の 1 本）。 */
+/** The index of the zero-length part (one of {@link PART_PATHS}). */
 export const EMPTY_PART_INDEX = 1;
-/** 選択の列に載る part（長さ 0 を除いた 2 本 — 取得も進捗もこの本数で数える）。 */
+/**
+ * The parts listed in the selection (the 2 without the zero-length one — fetches and progress count
+ * these).
+ */
 export const FETCHED_PART_PATHS: readonly string[] = PART_PATHS.filter(
   (_path, index) => index !== EMPTY_PART_INDEX,
 );
 /**
- * 選択の表（`helpers/selection.ts` の `selectionFiles`）で part を指すキー。添字は**宣言上の
- * part の id** なので、長さ 0 の part を飛ばしても後続の添字は詰まらない。
+ * The keys that point at parts in the selection table (`selectionFiles` of `helpers/selection.ts`).
+ * The index is **the declared part id**, so skipping the zero-length part does not shift the
+ * indices
+ * after it.
  */
 export const PART_KEYS: readonly string[] = PART_PATHS.map(
   (_path, index) => `net[${index}]`,
 ).filter((_key, index) => index !== EMPTY_PART_INDEX);
 export const TOKENIZER_PATH = "tokenizer/tokenizer.json";
 
-/** コンテナのヘッダ長（container-v1 §1）。part 0 は「ヘッダ + 2 文書ちょうど」。 */
+/** The container header length (container-v1 §1). Part 0 is exactly "header + the 2 documents". */
 const HEADER_BYTES = 24;
-/** モデル記述のバイト長（ダミー — hub は descriptor を parse しない）。 */
+/** The byte length of the model descriptor (a dummy — the hub does not parse descriptors). */
 const MODEL_DOC_BYTES = 5;
 
-/** 越境参照（ADR 0038 §7）— 別リポの資産を 1 本だけ持つ形。 */
+/**
+ * A cross-repository reference (ADR 0038 §7) — the shape with a single asset from another
+ * repository.
+ */
 export const CROSS_REPO = "someone/shared";
 export const CROSS_REVISION = "c".repeat(40);
 export const CROSS_PATH = "text_encoder/model.safetensors";
@@ -70,19 +79,24 @@ const fileRefJson = async (
   ...cross,
 });
 
-/** 合成した配布形 1 つぶん（`files` は `karume.json` を含む「ディレクトリの中身」）。 */
+/**
+ * One synthesized distribution form (`files` is "the directory contents", `karume.json` included).
+ */
 export type LocalDist = {
   readonly files: Map<string, Uint8Array<ArrayBuffer>>;
-  /** 越境先リポのディレクトリの中身（`cross` を頼んだときだけ中身が入る）。 */
+  /**
+   * The directory contents of the referenced repository (filled only when `cross` is requested).
+   */
   readonly crossFiles: Map<string, Uint8Array<ArrayBuffer>>;
 };
 
 /**
- * 1 モデル・容器 1 本（part 3 本・うち 1 本は長さ 0）+ tokenizer の最小配布形。`cross` を真に
- * すると、その上に越境参照の資産（別リポの `text_encoder`）が 1 本乗る。
+ * The minimal distribution form of 1 model, 1 container (3 parts, one of them zero-length) +
+ * tokenizer. With `cross` set, a cross-repository asset (another repository's `text_encoder`) is
+ * added on top.
  *
- * 長さ 0 の part も**0 バイトのファイルとして置く**（container-v1 §8）— 取得は起きないが、
- * 配布形としては実在する。
+ * The zero-length part is **placed as a 0-byte file** too (container-v1 §8) — it is never fetched,
+ * but it does exist in the distribution form.
  */
 export const buildLocalDist = async (
   options: { readonly cross?: boolean } = {},
@@ -97,7 +111,8 @@ export const buildLocalDist = async (
   );
   files.set(TOKENIZER_PATH, tokenizer);
   const crossFiles = new Map<string, Uint8Array<ArrayBuffer>>();
-  // 越境先は**別の実体**（同じ path 文字列でもバイト列が違うことを踏ませる）。
+  // The referenced repository holds **different content** (the same path string with different
+  // bytes).
   const crossBytes = payloadFor(`${CROSS_REPO}/${CROSS_PATH}`);
   if (options.cross === true) crossFiles.set(CROSS_PATH, crossBytes);
 
@@ -124,7 +139,8 @@ export const buildLocalDist = async (
           net: {
             f16: {
               container: {
-                // part 0 は「ヘッダ + グラフ記述 + モデル記述」ちょうど（container-v1 §8）。
+                // Part 0 is exactly "header + graph descriptor + model descriptor" (container-v1
+                // §8).
                 descriptor: {
                   graph: {
                     length: partRefs[0].size - HEADER_BYTES - MODEL_DOC_BYTES,
@@ -151,12 +167,12 @@ export const buildLocalDist = async (
   return { files, crossFiles };
 };
 
-/** メモリ上のディレクトリ。読んだ path と、透過してきた `signal` の有無を記録する。 */
+/** An in-memory directory. Records the paths read and whether a `signal` was passed through. */
 export type MemoryDirectory = {
   readonly adapter: DirectoryAdapter;
-  /** `readFile` に渡された path（順序どおり）。 */
+  /** The paths passed to `readFile` (in order). */
   readonly reads: string[];
-  /** `readFile` に `signal` が透過してきたか（`reads` と同じ順）。 */
+  /** Whether a `signal` reached `readFile` (in the same order as `reads`). */
   readonly signals: boolean[];
 };
 
@@ -167,8 +183,9 @@ export const memoryDirectory = (
   const signals: boolean[] = [];
   const lookup = (path: string): Uint8Array<ArrayBuffer> => {
     const bytes = files.get(path);
-    // 実 fs のアダプター（`deno.ts`）と同じ作法 — 欠損は実体のパスを名乗って落とす。
-    if (bytes === undefined) throw new Error(`test-directory: ${path} を読めない`);
+    // The same convention as the real-fs adapter (`deno.ts`) — a missing file fails naming the
+    // path.
+    if (bytes === undefined) throw new Error(`test-directory: cannot read ${path}`);
     return bytes;
   };
   const adapter: DirectoryAdapter = {
@@ -176,8 +193,8 @@ export const memoryDirectory = (
       reads.push(path);
       signals.push(signal !== undefined);
       try {
-        // 実体を読むたびに新しい buffer が来る（tight view）— 同じ参照を配ると、共通層が
-        // 「別の実体を読んだ」ことをテストが観測できなくなる。
+        // Every read of a file returns a new buffer (tight view) — handing out the same reference
+        // would hide from the test that the shared layer "read a different file".
         return Promise.resolve(new Uint8Array(lookup(path)));
       } catch (error) {
         return Promise.reject(error);

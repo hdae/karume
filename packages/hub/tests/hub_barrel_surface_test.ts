@@ -1,11 +1,13 @@
-// barrel（`mod.ts`）の**値非公開**の門（models の `models_barrel_surface_test.ts` と同型）。
-// ネットワークも実資産も要らない。
+// The check that the barrel (`mod.ts`) **exports no values** for these names (the same shape as
+// models' `models_barrel_surface_test.ts`). Needs neither the network nor real assets.
 //
-// `DistributionSource` は**中身が不透明**なハンドルで、判別は `isDistributionSource` に閉じる
-// （`mod.ts` の doc が理由の正本 — 構造で見分けようとすると綴り間違いが取得元として通る）。
-// その不透明さは `export type` でしか保てないのに、`export` へ変えても型検査は通り、公開面
-// スナップショット門も差分を出さない（`deno doc --json` は type-only 再輸出と値再輸出を
-// 区別しない — 2026-09-21 実測）。値として出ていないことは実行時にしか観測できない。
+// `DistributionSource` is an **opaque** handle, and telling it apart is confined to
+// `isDistributionSource` (the doc of `mod.ts` is the source of truth for why — telling it apart by
+// structure would let a misspelling pass as a source). That opacity holds only through
+// `export type`, yet changing it to `export` still passes the type check, and the public surface
+// snapshot check shows no diff either (`deno doc --json` does not tell a type-only re-export from
+// a value re-export — measured 2026-09-21). That nothing is exported as a value can be observed
+// only at run time.
 
 import { fileURLToPath } from "node:url";
 import { makeTempDir, remove, writeTextFile } from "@karume/test-support/fs";
@@ -22,39 +24,42 @@ import * as hub from "../mod.ts";
 import type { DistributionSource, LoadedManifest } from "../mod.ts";
 import { fetchManifest } from "./helpers/fixture.ts";
 
-/** 型としてのみ公開する綴り（不透明ハンドルの面）。 */
+/** Names exported as types only (the surface of the opaque handle). */
 const TYPE_ONLY = ["DistributionSource"];
 
-test("barrel: 不透明ハンドルの型は値として出ていない", () => {
+test("barrel: the opaque handle types are not exported as values", () => {
   const surface = Object.keys(hub);
-  // 陽性対照 — 空の名前空間を見て緑になっている形でないことを先に確かめる。
+  // Positive control — first make sure this is not green because it looks at an empty namespace.
   assert(
     surface.includes("isDistributionSource"),
-    `barrel の import が壊れている（${surface.length} 件）`,
+    `the barrel import is broken (${surface.length} entries)`,
   );
   assertEquals(
     surface.filter((name) => TYPE_ONLY.includes(name)),
     [],
-    "型としてのみ公開する綴りが値として出ている（不透明ハンドルの判別が構造依存になる）",
+    "a name exported as a type only is exported as a value (telling the opaque handle apart would depend on structure)",
   );
 });
 
-test("barrel: 不透明ハンドルと LoadedManifest は手で組んだ値を受けない", async () => {
-  // 型の上でも受けない（名目型）— 構造的な型だと `HubRepoRef` の綴り間違いや手で組んだ値が
-  // 型検査を通る。下の 2 行が型エラーにならなくなれば、この test ファイルの型検査が落ちる。
-  // @ts-expect-error 構造的なオブジェクトは取得元ハンドルの型を満たさない
+test("barrel: the opaque handle and LoadedManifest do not accept hand-built values", async () => {
+  // Not accepted in the types either (nominal types) — with structural types a misspelled
+  // `HubRepoRef` or a hand-built value would pass the type check. If the two lines below stop being
+  // type errors, the type check of this test file fails.
+  // @ts-expect-error a structural object does not satisfy the source handle type
   const source: DistributionSource = {};
-  // @ts-expect-error 公開欄を揃えただけの値は LoadedManifest の型を満たさない
+  // @ts-expect-error a value that only has the public fields does not satisfy the LoadedManifest type
   const loaded: LoadedManifest = { manifest: fetchManifest };
-  // 実行時も受けない — 取得元は loadManifest の返り値にしか結び付いていない。
+  // Not accepted at run time either — a source is bound only to what loadManifest returns.
   assertEquals(hub.isDistributionSource(source), false);
   const error = await assertRejects(() => hub.fetchAssets(loaded, {}), Error);
   assertStringIncludes(error.message, "no source is bound to the LoadedManifest");
 });
 
 /**
- * `source` だけを書いた入口を Vite（Rolldown）の build API でメモリ上に束ねた JS を返す
- * （minify しない — 名前で観測する）。external は置かない — barrel ごと束ねて tree-shaking を観測する。
+ * Bundles an entry that contains only `source` in memory with Vite's (Rolldown's) build API and
+ * returns the JS (not minified — the test observes names). Nothing is external — the whole barrel
+ * is
+ * bundled so that tree-shaking can be observed.
  */
 const bundle = async (source: string): Promise<string> => {
   const dir = await makeTempDir();
@@ -73,9 +78,9 @@ const bundle = async (source: string): Promise<string> => {
         lib: { entry: input, formats: ["es"] },
       },
     });
-    // write: false で watch しない build は RolldownOutput（またはその配列）を返す。
+    // A build with write: false and no watch returns a RolldownOutput (or an array of them).
     if (!Array.isArray(result) && !("output" in result)) {
-      throw new Error("build が bundle の出力でなく watcher を返した");
+      throw new Error("build returned a watcher instead of the bundle output");
     }
     return (Array.isArray(result) ? result : [result])
       .flatMap(({ output }) => output)
@@ -86,25 +91,27 @@ const bundle = async (source: string): Promise<string> => {
   }
 };
 
-test("barrel: import するだけでは hub のクラスが bundle に残らない（import 時実行が無い）", async () => {
-  // 横断の不変条件「全モジュール副作用ゼロ」は barrel 経由 tree-shaking の成立条件。クラス評価時に
-  // 走るコード（`static` ブロック）を持つクラスは、使われていなくても bundler が副作用と見て残す。
+test("barrel: importing alone leaves no hub class in the bundle (nothing runs at import)", async () => {
+  // The cross-cutting invariant "zero side effects in every module" is the condition for
+  // tree-shaking through the barrel. A class with code that runs when the class is evaluated (a
+  // `static` block) is kept by the bundler as a side effect even when it is unused.
   const barrel = fileURLToPath(new URL("../mod.ts", import.meta.url));
-  // 陽性対照 — 使う側の bundle には同じ名前が現れる（名前で観測できる形であることを先に確かめる）。
+  // Positive control — the using side's bundle does contain the names (first make sure they can be
+  // observed by name).
   const used = await bundle(
     `import { isDistributionSource, loadManifest } from "${barrel}";\n` +
       `console.log(isDistributionSource, loadManifest);\n`,
   );
   for (const name of ["DistributionSource", "LoadedManifest"]) {
-    // Rolldown は `class Name` と `Name = class` のどちらの形でも出し得る。
+    // Rolldown may emit either the `class Name` or the `Name = class` form.
     assertMatch(
       used,
       new RegExp(`\\bclass ${name}\\b|\\b${name} = class\\b`),
-      `陽性対照: 使う側の bundle に ${name} が無い`,
+      `positive control: ${name} missing from the using side's bundle`,
     );
   }
   const bare = await bundle(`import "${barrel}";\n`);
   for (const name of ["DistributionSource", "LoadedManifest"]) {
-    assert(!bare.includes(name), `使われていない ${name} が bundle に残っている（import 時実行）`);
+    assert(!bare.includes(name), `unused ${name} remains in the bundle (code runs at import)`);
   }
 });

@@ -1,31 +1,38 @@
 /**
- * hub のテスト用差し替え（実網・実 Cache Storage を一切叩かない）。
+ * Test doubles for the hub (they never touch the real network or the real Cache Storage).
  *
- * 取得層（`@hdae/fetch-cache`）は `fetch` と `caches` の注入口を持つので、hub のテストは
- * そこへこのモックを差し込む。MUST: `caches` は必ず渡す — 渡さないと Deno の実キャッシュ
- * （ディスク）に書きに行く。
+ * The fetch layer (`@hdae/fetch-cache`) takes `fetch` and `caches` as injection points, so the hub
+ * tests plug these mocks in there. MUST: always pass `caches` — without it the fetch layer writes
+ * to
+ * Deno's real cache (on disk).
  */
 
 /**
- * キャッシュエントリ 1 件。**ヘッダは put されたものをそのまま持つ** — 取得層は記録ハッシュを
- * レスポンスヘッダへ載せるので、ヘッダを落とすモックは「記録が毎回消えるキャッシュ」になり、
- * 実環境では起きない全量再ハッシュ経路ばかりをテストすることになる。
+ * One cache entry. **It keeps the headers exactly as they were put** — the fetch layer stores the
+ * recorded hash in the response headers, so a mock that drops headers becomes "a cache whose record
+ * vanishes every time", and the tests would only exercise the full rehash path that does not happen
+ * in a real environment.
  *
- * MUST: ヘッダの綴りをテスト側で解釈しない（取得層の内部仕様に寄りかからない）。put された
- * ものを返すだけに徹し、「記録あり / なし」を作りたいテストは `headers` を丸ごと持ち回るか
- * 空にする。
+ * MUST: the tests do not interpret the header names (they do not lean on the fetch layer's internal
+ * format). The mock only returns what was put; a test that wants "with record / without record"
+ * carries `headers` over as a whole or empties it.
  */
 export type CacheEntry = {
   readonly bytes: Uint8Array<ArrayBuffer>;
   readonly headers: Headers;
 };
 
-/** メモリ上の Cache（`Cache` の実装は hub が使う match / put / delete / keys だけ）。 */
+/**
+ * An in-memory Cache (implements only the match / put / delete / keys of `Cache` that the hub
+ * uses).
+ */
 export class MemoryCache implements Cache {
   readonly entries = new Map<string, CacheEntry>();
-  /** put を失敗させる（quota 超過の模擬）。 */
+  /** Makes put fail (simulates exceeding the quota). */
   failPut = false;
-  /** 読出しが起きた瞬間の観測席（読出し中の中断を差し込むために使う）。 */
+  /**
+   * A hook called at the moment a read happens (used to inject an abort in the middle of a read).
+   */
   onMatch?: (key: string) => void;
 
   match(request: RequestInfo | URL): Promise<Response | undefined> {
@@ -38,7 +45,8 @@ export class MemoryCache implements Cache {
 
   async put(request: RequestInfo | URL, response: Response): Promise<void> {
     if (this.failPut) throw new Error("mock: quota exceeded");
-    // 実 Cache API はヘッダごと格納するので、ヘッダもエントリと同じ寿命で保持する。
+    // The real Cache API stores the headers too, so they are kept for the same lifetime as the
+    // entry.
     const headers = new Headers(response.headers);
     const bytes = new Uint8Array(await response.arrayBuffer());
     this.entries.set(urlOf(request), { bytes, headers });
@@ -54,27 +62,32 @@ export class MemoryCache implements Cache {
   }
 
   add(): Promise<void> {
-    throw new Error("mock: add は使わない");
+    throw new Error("mock: add is not used");
   }
 
   addAll(): Promise<void> {
-    throw new Error("mock: addAll は使わない");
+    throw new Error("mock: addAll is not used");
   }
 
   matchAll(): Promise<readonly Response[]> {
-    throw new Error("mock: matchAll は使わない");
+    throw new Error("mock: matchAll is not used");
   }
 }
 
 /**
- * メモリ上の CacheStorage。名前空間の名前は**取得層が所有する**（0.5.0 で内部固定 1 個）ので、
- * テストは名前を名指しせず {@link hubCache} で引く。名前をそのまま持つのは、
- * 「他コードの名前空間に触らない」ことを観測するため。
+ * An in-memory CacheStorage. The namespace name is **owned by the fetch layer** (fixed internally
+ * to
+ * one since 0.5.0), so tests do not name it and look it up with {@link hubCache}. The names are
+ * kept
+ * as is in order to observe that "the namespaces of other code are not touched".
  */
 export class MemoryCacheStorage implements CacheStorage {
   readonly namespaces = new Map<string, MemoryCache>();
 
-  /** `failPut` は以後 open される全名前空間へ効く（名前を知らずに quota 失敗を模擬する）。 */
+  /**
+   * `failPut` applies to every namespace opened afterwards (simulates a quota failure without
+   * knowing the name).
+   */
   constructor(private readonly defaults: { readonly failPut?: boolean } = {}) {}
 
   open(cacheName: string): Promise<Cache> {
@@ -99,7 +112,7 @@ export class MemoryCacheStorage implements CacheStorage {
   }
 
   match(): Promise<Response | undefined> {
-    throw new Error("mock: CacheStorage.match は使わない");
+    throw new Error("mock: CacheStorage.match is not used");
   }
 }
 
@@ -107,22 +120,26 @@ const urlOf = (request: RequestInfo | URL): string =>
   typeof request === "string" ? request : request instanceof URL ? request.href : request.url;
 
 /**
- * hub が使っている唯一の名前空間を取り出す。名前空間の**名前は取得層が所有する**ので、テストは
- * 綴りを名指しせず「hub が触った名前空間はこれ 1 つ」という観測可能な事実で引く。
+ * Returns the one namespace the hub uses. The namespace **name is owned by the fetch layer**, so
+ * the
+ * tests do not name it and look it up by the observable fact that "the hub touched exactly this one
+ * namespace".
  */
 export const hubCache = (caches: MemoryCacheStorage): MemoryCache => {
   const found = [...caches.namespaces.values()];
   if (found.length !== 1) {
     throw new Error(
-      `test: hub の名前空間が 1 つに定まらない（${JSON.stringify([...caches.namespaces.keys()])}）`,
+      `test: the hub's namespace is not exactly one (${JSON.stringify([...caches.namespaces.keys()])})`,
     );
   }
   return found[0];
 };
 
 /**
- * `bytes` を格納しているエントリのキーを引く。**キーの綴りは取得層が所有する**（内容キーは
- * 予約 origin へ畳まれた不透明な URL）ので、テストは中身から引き当てる。
+ * Looks up the key of the entry that stores `bytes`. **The key's spelling is owned by the fetch
+ * layer** (a content key is an opaque URL folded under a reserved origin), so the tests find it
+ * from
+ * the content.
  */
 const keyOf = (cache: MemoryCache, bytes: Uint8Array): string | undefined => {
   for (const [key, entry] of cache.entries) {
@@ -132,16 +149,17 @@ const keyOf = (cache: MemoryCache, bytes: Uint8Array): string | undefined => {
   return undefined;
 };
 
-/** `bytes` を格納しているエントリがあるか。 */
+/** Whether an entry stores `bytes`. */
 export const hasEntry = (cache: MemoryCache, bytes: Uint8Array): boolean =>
   keyOf(cache, bytes) !== undefined;
 
 /**
- * キャッシュ済みの `original` を `replacement` へ差し替える（キャッシュ破損の模擬）。
+ * Replaces the cached `original` with `replacement` (simulates cache corruption).
  *
- * `keepRecord` が真なら取得層が焼いたヘッダをそのまま残す（= 記録は一致したまま中身だけ壊れた
- * エントリ）、偽なら落とす（= 記録の無いエントリ。無検証 prefetch 由来・旧版の形）。この 2 つは
- * 読出し側の分岐がまったく違う（前者は信じられ、後者は実ハッシュで突合される）。
+ * With `keepRecord` true, the headers the fetch layer wrote are kept (= an entry whose record still
+ * matches but whose content is broken); with false they are dropped (= an entry without a record,
+ * the shape left by an unverified prefetch or an older version). The read side branches completely
+ * differently on the two (the former is trusted, the latter is checked against its actual hash).
  */
 export const overwriteEntry = (
   cache: MemoryCache,
@@ -150,9 +168,9 @@ export const overwriteEntry = (
   options: { readonly keepRecord: boolean },
 ): void => {
   const key = keyOf(cache, original);
-  if (key === undefined) throw new Error("test: 指定のバイト列を持つキャッシュエントリが無い");
+  if (key === undefined) throw new Error("test: no cache entry holds the given bytes");
   const entry = cache.entries.get(key);
-  if (entry === undefined) throw new Error(`test: ${key} のエントリが消えている`);
+  if (entry === undefined) throw new Error(`test: the entry ${key} is gone`);
   cache.entries.set(key, {
     bytes: replacement,
     headers: options.keepRecord ? entry.headers : new Headers(),
@@ -160,22 +178,26 @@ export const overwriteEntry = (
 };
 
 /**
- * 2 件のエントリの**記録（ヘッダ）だけを入れ替える** — どちらも「記録ハッシュ ≠ manifest の
- * 宣言」になる形の模擬。{@link overwriteEntry} が作れるのは「記録一致のまま中身が壊れた」
- * （信じられる）「記録が無い」（実ハッシュで突合される）の 2 形だけで、**記録が食い違う**
- * 3 つ目の形（読出し側が evict して取り直す）はこちらでしか作れない。
+ * **Swaps only the records (headers)** of two entries — simulates the shape where both have
+ * "recorded
+ * hash ≠ the manifest's declaration". {@link overwriteEntry} can only make two shapes, "record
+ * matches but content broken" (trusted) and "no record" (checked against its actual hash); the
+ * third
+ * shape, where **the record disagrees** (the read side evicts and fetches again), can only be made
+ * here.
  *
- * MUST: ヘッダは丸ごと持ち回る — 綴りをテスト側で解釈しない（{@link CacheEntry} の MUST）。
+ * MUST: the headers are carried over as a whole — the tests do not interpret their names (the MUST
+ * of {@link CacheEntry}).
  */
 export const swapRecords = (cache: MemoryCache, left: Uint8Array, right: Uint8Array): void => {
   const keys = [left, right].map((bytes) => {
     const key = keyOf(cache, bytes);
-    if (key === undefined) throw new Error("test: 指定のバイト列を持つキャッシュエントリが無い");
+    if (key === undefined) throw new Error("test: no cache entry holds the given bytes");
     return key;
   });
   const entries = keys.map((key) => {
     const entry = cache.entries.get(key);
-    if (entry === undefined) throw new Error(`test: ${key} のエントリが消えている`);
+    if (entry === undefined) throw new Error(`test: the entry ${key} is gone`);
     return entry;
   });
   cache.entries.set(keys[0], { bytes: entries[0].bytes, headers: entries[1].headers });
@@ -186,33 +208,40 @@ export const HUB_URL = "https://hub.test";
 export const REPO = "someone/anima";
 export const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-/** payload(path) — tests/fixtures/manifest-fetch.json の size / sha256 はこの規則から導出済み。 */
+/**
+ * payload(path) — the size / sha256 of tests/fixtures/manifest-fetch.json are derived from this
+ * rule.
+ */
 export const payloadFor = (path: string): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(`karume-test:${path}`);
 
 export type MockRoutes = {
-  /** revision 解決 API が返す sha。undefined なら 404 を返す。 */
+  /** The sha the revision resolution API returns. undefined returns 404. */
   readonly sha?: string;
   /**
-   * path → 返すバイト列。無い path は 404。
+   * path → the bytes to return. A path that is not present returns 404.
    *
-   * 越境参照（別リポ）のファイルは `"<repo>@<revision>/<path>"` の修飾キーで登録する
-   * （同じ path 文字列が repo ごとに別の実体を指すため — 修飾キーが無ければ素の path を引く）。
+   * Files of a cross-repository reference (another repository) are registered under the qualified
+   * key
+   * `"<repo>@<revision>/<path>"` (the same path string points at different content per repository —
+   * without a qualified key the bare path is looked up).
    */
   readonly files: ReadonlyMap<string, Uint8Array<ArrayBuffer>>;
-  /** content-length ヘッダの上書き（食い違いの模擬）。 */
+  /** Overrides the content-length header (simulates a mismatch). */
   readonly contentLength?: (path: string) => number | undefined;
-  /** 1 チャンクごとに解決を挟むためのディレイ（同時実行数の観測用）。 */
+  /**
+   * A delay inserted before each chunk resolves (for observing the number of concurrent fetches).
+   */
   readonly delayMs?: number;
 };
 
 export type MockFetch = {
   readonly fetch: typeof globalThis.fetch;
-  /** 発行された URL（順序どおり）。 */
+  /** The URLs requested (in order). */
   readonly calls: string[];
-  /** 発行された `Authorization` ヘッダ（`calls` と同じ順・無ければ `null`）。 */
+  /** The `Authorization` headers sent (in the same order as `calls`; `null` when absent). */
   readonly authorizations: (string | null)[];
-  /** 同時に走った取得の最大数。 */
+  /** The maximum number of fetches that ran at the same time. */
   readonly peakConcurrency: () => number;
 };
 
@@ -220,8 +249,9 @@ const REVISION_RE = /^\/api\/models\/(.+)\/revision\/(.+)$/;
 const RESOLVE_RE = /^\/(.+?)\/resolve\/([^/]+)\/(.+)$/;
 
 /**
- * HF の 2 経路（revision 解決 API・resolve URL）だけを喋る `fetch`。body は必ず
- * ReadableStream で 2 チャンクに割って返す（受信途中で止める門を実際に踏ませるため）。
+ * A `fetch` that speaks only HF's two endpoints (the revision resolution API and the resolve URL).
+ * The body is always a ReadableStream split into 2 chunks (so that the checks that stop in the
+ * middle of receiving are actually exercised).
  */
 export const createMockFetch = (routes: MockRoutes): MockFetch => {
   const calls: string[] = [];
@@ -290,13 +320,15 @@ const notFound = (): Response =>
   new Response("not found", { status: 404, statusText: "Not Found" });
 
 /**
- * 同じ Chrome の差し替えを**応答ヘッダ待ち**の段で起こす `fetch` ラッパ。`victimPath` だけは
- * 素通し（＝真っ先に失敗できる）で、それ以外は abort されるまで応答を返さず、abort されたら
- * 固定文言の生 `AbortError` で reject する。
+ * A `fetch` wrapper that causes the same Chrome substitution at the stage of **waiting for the
+ * response headers**. Only `victimPath` passes straight through (= can fail first); every other
+ * request returns no response until it is aborted, and once aborted rejects with a bare
+ * `AbortError` with a fixed message.
  *
- * `withChromeAbortShape`（body 読み取り中）との違いが要るのは、取得層が段によって別の包み方を
- * するため — 温め面（相 1）の `prefetchUrl` は転送中断を `cache.put` の reject 経由で包み直すので
- * signal の reason が復元されるが、応答待ちの中断は生の `AbortError` のまま上がってくる。
+ * It has to differ from `withChromeAbortShape` (during the body read) because the fetch layer wraps
+ * errors differently depending on the stage — `prefetchUrl` of the warming surface (phase 1)
+ * rewraps a transfer abort via the rejection of `cache.put`, so the signal's reason is restored,
+ * while an abort during the wait for the response comes up as the bare `AbortError`.
  */
 export const abortWhileAwaitingResponse =
   (base: typeof globalThis.fetch, victimPath: string): typeof globalThis.fetch =>
@@ -321,13 +353,17 @@ export const abortWhileAwaitingResponse =
   };
 
 /**
- * Chrome の観測挙動を被せる `fetch` ラッパ。**body 読み取り中に abort された取得を、
- * `signal.reason` ではなく固定文言の生 `AbortError` で落とす**（Chrome は reason を
- * "BodyStreamBuffer was aborted" に差し替える — 差し替えを防ぐフラグは stable 既定 OFF）。
+ * A `fetch` wrapper that applies Chrome's observed behaviour. **A fetch aborted during the body
+ * read fails with a bare `AbortError` with a fixed message instead of `signal.reason`** (Chrome
+ * replaces the reason with "BodyStreamBuffer was aborted" — the flag that prevents the replacement
+ * is OFF by default on stable).
  *
- * 素の `createMockFetch` は仕様どおり reason をそのまま伝えるため、巻き添えで落ちた取得も
- * 「最初の失敗そのもの」を持って決着してしまい、真因が失われる形を再現できない。真犯人以外が
- * この固定文言で落ちる状況を作って初めて、決着順やワーカーの配列位置で拾う実装が露見する。
+ * The plain `createMockFetch` passes the reason through as the spec says, so even a fetch that
+ * fails
+ * as collateral settles carrying "the first failure itself", and the shape in which the root cause
+ * is lost cannot be reproduced. Only when fetches other than the real culprit fail with this fixed
+ * message does an implementation that picks the error by settle order or by worker array position
+ * get exposed.
  */
 export const withChromeAbortShape =
   (base: typeof globalThis.fetch): typeof globalThis.fetch =>
