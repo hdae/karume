@@ -267,7 +267,19 @@
         "kind": "variable"
       },
       {
+        "name": "ChatAssistantMessage",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatDialect",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatJsonObject",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatJsonValue",
         "kind": "typeAlias"
       },
       {
@@ -287,6 +299,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ChatReply",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatResponse",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatRole",
         "kind": "typeAlias"
       },
@@ -303,11 +323,35 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ChatSessionStream",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatStop",
         "kind": "typeAlias"
       },
       {
         "name": "ChatStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatTemplateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatTextMessage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatTool",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatToolCall",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatToolMessage",
         "kind": "typeAlias"
       },
       {
@@ -387,6 +431,10 @@
         "kind": "class"
       },
       {
+        "name": "ParsedToolCall",
+        "kind": "typeAlias"
+      },
+      {
         "name": "Pipeline",
         "kind": "class"
       },
@@ -451,11 +499,19 @@
         "kind": "function"
       },
       {
+        "name": "chatToolResults",
+        "kind": "function"
+      },
+      {
         "name": "chatTurn",
         "kind": "function"
       },
       {
         "name": "dropOldestTurns",
+        "kind": "function"
+      },
+      {
+        "name": "parseChatResponse",
         "kind": "function"
       },
       {
@@ -477,7 +533,19 @@
         "kind": "variable"
       },
       {
+        "name": "ChatAssistantMessage",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatDialect",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatJsonObject",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatJsonValue",
         "kind": "typeAlias"
       },
       {
@@ -497,6 +565,14 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ChatReply",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatResponse",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatSession",
         "kind": "class"
       },
@@ -509,11 +585,35 @@
         "kind": "typeAlias"
       },
       {
+        "name": "ChatSessionStream",
+        "kind": "typeAlias"
+      },
+      {
         "name": "ChatStop",
         "kind": "typeAlias"
       },
       {
         "name": "ChatStream",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatTemplateOptions",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatTextMessage",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatTool",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatToolCall",
+        "kind": "typeAlias"
+      },
+      {
+        "name": "ChatToolMessage",
         "kind": "typeAlias"
       },
       {
@@ -547,6 +647,10 @@
       {
         "name": "ModelInputError",
         "kind": "class"
+      },
+      {
+        "name": "ParsedToolCall",
+        "kind": "typeAlias"
       },
       {
         "name": "Pipeline",
@@ -601,11 +705,19 @@
         "kind": "function"
       },
       {
+        "name": "chatToolResults",
+        "kind": "function"
+      },
+      {
         "name": "chatTurn",
         "kind": "function"
       },
       {
         "name": "dropOldestTurns",
+        "kind": "function"
+      },
+      {
+        "name": "parseChatResponse",
         "kind": "function"
       },
       {

@@ -282,3 +282,241 @@ class TestDialects:
 
         suffix = chat.GENERATION_PROMPT_SUFFIX[chat.GEMMA4_UNIFIED_CHAT_DIALECT]
         assert all(row["rendered"].endswith("<|turn>model\n" + suffix) for row in rows)
+
+
+# ---- the widened scope: tools, tool calls, tool results, thinking, output parsing -------------
+
+#: A synthetic template that writes the options it receives (it renders nothing like the real one;
+#: it shows that the harvest passes the case's options through and records what comes back).
+SYNTHETIC_TOOL_TEMPLATE = (
+    "{{- bos_token -}}"
+    "{%- if enable_thinking -%}<think>{%- endif -%}"
+    "{%- if preserve_thinking -%}<keep>{%- endif -%}"
+    "{%- for t in tools or [] -%}{{- '<tool:' + t['function']['name'] + '>' -}}{%- endfor -%}"
+    "{%- for m in messages -%}{{- '<' + m['role'] + '>' -}}{{- m['content'] or '' -}}{%- endfor -%}"
+    "{%- if add_generation_prompt -%}{{- '<model>' -}}{%- endif -%}"
+)
+
+
+class TestToolScopeGate:
+    def test_the_tool_battery_is_in_scope(self) -> None:
+        for case in chat.TOOL_CASES:
+            chat.assert_tool_conversation(case.messages, case.options)
+
+    def test_the_response_conversations_are_in_scope(self) -> None:
+        for case in chat.RESPONSE_CASES:
+            chat.assert_tool_conversation(case.messages, case.options)
+
+    def test_names_are_unique_within_each_battery(self) -> None:
+        """A duplicated name would hide which case failed on the TS side."""
+        for battery in (chat.TOOL_CASES, chat.REJECTED_CASES, chat.RESPONSE_CASES):
+            names = [case.name for case in battery]
+            assert sorted(names) == sorted(set(names))
+
+    def test_every_response_case_has_a_known_label(self) -> None:
+        assert {case.expect for case in chat.RESPONSE_CASES} == chat.RESPONSE_EXPECTATIONS
+
+    @pytest.mark.parametrize(
+        ("message", "match"),
+        [
+            (
+                {"role": "assistant", "tool_responses": [{"name": "f", "response": {}}]},
+                "out-of-scope fields",
+            ),
+            ({"role": "assistant", "thinking": "…"}, "out-of-scope fields"),
+            ({"role": "user", "content": "hi", "reasoning": "…"}, "out-of-scope fields"),
+            ({"role": "tool", "content": [{"type": "text", "text": "x"}]}, "array"),
+            ({"role": "user", "content": [{"type": "image_url"}]}, "array"),
+            ({"role": "user", "content": None}, "not a string"),
+            ({"role": "model", "content": "hi"}, "role"),
+        ],
+    )
+    def test_out_of_scope_messages_are_rejected(self, message: dict[str, Any], match: str) -> None:
+        with pytest.raises(chat.OutOfScopeChatError, match=match):
+            chat.assert_tool_conversation([message], {})
+
+    def test_an_unknown_option_is_rejected(self) -> None:
+        with pytest.raises(chat.OutOfScopeChatError, match="unknown template options"):
+            chat.assert_tool_conversation([{"role": "user", "content": "hi"}], {"thinking": True})
+
+    def test_an_empty_conversation_is_rejected(self) -> None:
+        with pytest.raises(chat.OutOfScopeChatError, match="empty"):
+            chat.assert_tool_conversation([], {})
+
+
+class TestToolHarvest:
+    def test_the_options_reach_the_injected_template(self) -> None:
+        """The expectation is what the injected tokenizer rendered with the case's options."""
+        case = chat.ToolChatCase(
+            "one",
+            "options pass through",
+            ({"role": "user", "content": "abc"},),
+            {"tools": [{"type": "function", "function": {"name": "f"}}], "enable_thinking": True},
+        )
+
+        [row] = chat.harvest_tool_cases(_hf_tokenizer(SYNTHETIC_TOOL_TEMPLATE), [case])
+
+        assert row["rendered"] == "<bos><think><tool:f><user>abc<model>"
+        assert row["options"] == dict(case.options)
+
+    def test_the_ids_are_the_encoding_of_the_rendered_text(self) -> None:
+        tokenizer = _hf_tokenizer(SYNTHETIC_TOOL_TEMPLATE)
+        case = chat.ToolChatCase("one", "ids", ({"role": "user", "content": "abc"},), {})
+
+        [row] = chat.harvest_tool_cases(tokenizer, [case])
+
+        assert row["ids"] == list(tokenizer(row["rendered"], add_special_tokens=False)["input_ids"])
+
+    def test_the_gate_runs_on_every_tool_case(self) -> None:
+        bad = chat.ToolChatCase(
+            "bad", "legacy field", ({"role": "assistant", "tool_responses": []},), {}
+        )
+        with pytest.raises(chat.OutOfScopeChatError):
+            chat.harvest_tool_cases(_hf_tokenizer(SYNTHETIC_TOOL_TEMPLATE), [bad])
+
+
+class _FakeParser:
+    """A tokenizer whose template and parser are scripted (the label checks need no assets)."""
+
+    def apply_chat_template(
+        self, messages: Any, *, tokenize: bool, add_generation_prompt: bool, **options: Any
+    ) -> Any:
+        if options.get("raise_please"):
+            raise ValueError("template refused\nsecond line")
+        return "PFX"
+
+    def parse_response(self, text: str, *, prefix: str) -> Any:
+        if text == "bad":
+            raise ValueError("cannot parse\nmore detail")
+        return {"role": "assistant", "content": f"{prefix}:{text}"}
+
+
+def _response(text: str, expect: str) -> chat.ResponseCase:
+    return chat.ResponseCase("r", "why", ({"role": "user", "content": "q"},), {}, text, expect)
+
+
+class TestResponseHarvest:
+    def test_a_parsed_case_records_upstream_s_result_and_prefix(self) -> None:
+        [row] = chat.harvest_responses(_FakeParser(), [_response("ok", "parse")])
+
+        assert row["prefix"] == "PFX"
+        assert row["parsed"] == {"role": "assistant", "content": "PFX:ok"}
+        assert "error" not in row
+
+    def test_an_upstream_error_is_recorded_by_type_and_first_line(self) -> None:
+        [row] = chat.harvest_responses(_FakeParser(), [_response("bad", "upstream-raises")])
+
+        assert row["error"] == "ValueError: cannot parse"
+
+    def test_a_ts_rejection_keeps_upstream_s_value_as_a_repr(self) -> None:
+        [row] = chat.harvest_responses(_FakeParser(), [_response("ok", "ts-rejects")])
+
+        assert row["upstream"] == repr({"role": "assistant", "content": "PFX:ok"})
+        assert "parsed" not in row
+
+    @pytest.mark.parametrize(
+        ("text", "expect"), [("bad", "parse"), ("bad", "ts-rejects"), ("ok", "upstream-raises")]
+    )
+    def test_a_label_that_contradicts_upstream_fails_the_harvest(
+        self, text: str, expect: str
+    ) -> None:
+        """MUST: the label documents observed behaviour — a mismatch stops the harvest."""
+        with pytest.raises(AssertionError):
+            chat.harvest_responses(_FakeParser(), [_response(text, expect)])
+
+    def test_an_unknown_label_fails_the_harvest(self) -> None:
+        with pytest.raises(AssertionError, match="unknown expect label"):
+            chat.harvest_responses(_FakeParser(), [_response("ok", "maybe")])
+
+
+class TestRejectedHarvest:
+    def test_upstream_s_rendering_or_error_is_recorded(self) -> None:
+        rendered, raised = chat.harvest_rejected_cases(
+            _FakeParser(),
+            [
+                chat.RejectedCase("a", "renders", ({"role": "user", "content": "x"},), {}),
+                chat.RejectedCase(
+                    "b", "raises", ({"role": "user", "content": "x"},), {"raise_please": True}
+                ),
+            ],
+        )
+
+        assert rendered["rendered"] == "PFX" and "error" not in rendered
+        assert raised["error"] == "ValueError: template refused" and "rendered" not in raised
+
+
+class TestToolFixture:
+    def test_the_new_batteries_ride_the_fixture_and_its_subset(self) -> None:
+        compiled = compile_tokenizer(tokenizer_json())
+        tokenizer = _hf_tokenizer(SYNTHETIC_TOOL_TEMPLATE)
+        tokenizer.parse_response = lambda text, *, prefix: {"role": "assistant", "content": text}
+
+        fixture = chat.build_chat_fixture(
+            tokenizer=tokenizer,
+            compiled=compiled,
+            cases=[chat.ChatCase("one", "plain", ({"role": "user", "content": "abc"},))],
+            stops=[compiled.eos_id],
+            source={},
+            tool_cases=[chat.ToolChatCase("t", "tool", ({"role": "user", "content": "abc"},), {})],
+            rejected_cases=[
+                chat.RejectedCase("x", "rejected", ({"role": "user", "content": "abc"},), {})
+            ],
+            response_cases=[_response("<pad>", "parse")],
+        )
+
+        assert [row["name"] for row in fixture["toolChat"]] == ["t"]
+        assert [row["name"] for row in fixture["rejectedChat"]] == ["x"]
+        assert [row["name"] for row in fixture["responses"]] == ["r"]
+        # The response text joins the subset (the TS session tests encode model outputs).
+        assert "<pad>" in [row[0] for row in fixture["asset"]["addedTokens"]]
+
+
+def _model_tokenizer(model: str) -> Any:
+    """Model `model`'s tokenizer from its tokenizer directory (SKIPs without the files)."""
+    pytest.importorskip("transformers")
+    directory = sources.tokenizer_dir(model)
+    if not (directory / "chat_template.jinja").is_file():
+        pytest.skip(f"{model}'s tokenizer files are not present ({directory})")
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(str(directory), local_files_only=True)
+
+
+class TestToolDialects:
+    def test_12b_renders_the_tool_battery_as_e2b_plus_the_suffix_when_a_turn_opens(self) -> None:
+        """The two templates share their tool and thinking parts: 12B adds the empty thought only
+        where the generation prompt opens a new model turn with thinking off (never after a tool
+        result — that prompt continues the open turn)."""
+        tokenizer = _twelve_b_tokenizer()
+        rows = json.loads(chat.FIXTURE_PATH.read_text(encoding="utf-8"))["toolChat"]
+        suffix = chat.GENERATION_PROMPT_SUFFIX[chat.GEMMA4_UNIFIED_CHAT_DIALECT]
+
+        assert [row["name"] for row in rows] == [case.name for case in chat.TOOL_CASES]
+        for row in rows:
+            opens = row["rendered"].endswith("<|turn>model\n")
+            expected = row["rendered"] + (
+                suffix if opens and not row["options"].get("enable_thinking") else ""
+            )
+            rendered = tokenizer.apply_chat_template(
+                row["messages"], tokenize=False, add_generation_prompt=True, **row["options"]
+            )
+            assert rendered == expected, row["name"]
+
+    def test_e4b_renders_and_encodes_the_tool_battery_as_e2b(self) -> None:
+        """E4B has no chat fixture of its own: its template is E2B's bytes, and on this battery
+        its tokenizer gives E2B's ids too (checked against the tracked E2B fixture)."""
+        tokenizer = _model_tokenizer("e4b")
+        rows = json.loads(chat.FIXTURE_PATH.read_text(encoding="utf-8"))["toolChat"]
+
+        for row in rows:
+            ids = tokenizer.apply_chat_template(
+                row["messages"], tokenize=True, add_generation_prompt=True, **row["options"]
+            )["input_ids"]
+            assert list(ids) == row["ids"], row["name"]
+
+    def test_the_three_models_share_one_response_template(self) -> None:
+        """One TS parser serves every model only while the snapshots declare the same parser."""
+        e2b = _model_tokenizer("e2b").response_template
+
+        assert e2b == _model_tokenizer("e4b").response_template
+        assert e2b == _twelve_b_tokenizer().response_template

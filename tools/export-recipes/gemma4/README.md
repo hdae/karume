@@ -510,18 +510,46 @@ is shared, the assets are not.
 ## What `chat.py` emits
 
 The git-tracked chat parity fixture
-`packages/models/tests/fixtures/gemma-text/gemma4-chat.json`: for each plain-conversation case, the
-**rendered string** and the **token id list** taken from upstream `apply_chat_template`
-independently (decision 7 again — the TypeScript renderer is never in the path), plus the vocabulary
-subset the cases need and the stop-token set declared by `generation_config.json` with its
-spellings.
+`packages/models/tests/fixtures/gemma-text/gemma4-chat.json` (and `gemma4-12b-chat.json`): every
+expectation is taken from upstream independently (decision 7 again — the TypeScript renderer and
+parser are never in the path), plus the vocabulary subset the cases need (the response texts
+included) and the stop-token set declared by `generation_config.json` with its spellings. Four
+lists:
 
-The scope of the first release is a **plain conversation** only: roles `system` / `developer` /
-`user` / `assistant` with string content. Tools, thinking (`reasoning`), tool calls and
-image/audio parts are **not** harvested, and the TypeScript side rejects them loudly rather than
-ignoring them (ADR [0084](../../../docs/decisions/0084-gemma-tokenizer-chat.md) decision 5). The
-turn markers of this checkpoint are `<|turn>` / `<turn|>` / `<|channel>` / `<|think|>` — the
-Gemma 3 spelling `<start_of_turn>` is not in this vocabulary at all.
+- `chat` — plain conversations (roles `system` / `developer` / `user` / `assistant`, string
+  content): the **rendered string** and the **token id list** of `apply_chat_template`.
+- `toolChat` — the same two halves with template options: function declarations (`tools`, every
+  branch of `format_parameters`), assistant `tool_calls` (one and several, nested argument
+  values, strings with quotes and newlines), role `tool` results (resolved by `tool_call_id` or
+  `name`; string, number, boolean and null contents), a model turn that continues after a result,
+  thinking (`enable_thinking`, `reasoning` / `reasoning_content` and the thinking gate,
+  `preserve_thinking`, `strip_thinking` of assistant content). The options are recorded with
+  upstream's keyword names; the TypeScript side spells them `tools` / `enableThinking` /
+  `preserveThinking`.
+- `rejectedChat` — inputs the TypeScript side rejects although upstream renders them (or raises),
+  with upstream's `rendered` string or `error` beside each: several calls without ids (every
+  result gets the last call's name), a contradicting `name`, an unmatched `tool_call_id`, an
+  orphan result, a call without results, an object result, JSON-string arguments, a tool name
+  outside `\w+`, the `thinking` field, and the two scopes still out — the legacy
+  `tool_responses` field and content-part arrays.
+- `responses` — model outputs and upstream `tokenizer.parse_response(text, prefix=...)`, where
+  the prefix is upstream's rendering of the case's conversation with the generation prompt. Each
+  case carries an `expect` label checked against upstream at harvest time: `parse` (the result
+  is recorded), `upstream-raises` (the error is recorded) and `ts-rejects` (upstream returns
+  data that would hide a failure — a cut turn, a region left open, a segment overwritten; its
+  Python repr is recorded and the TypeScript parser throws).
+
+E2B and E4B share one template file (byte-identical), and on these lists E4B's tokenizer gives
+E2B's ids too (`tests/test_chat.py` checks it when the hand-placed E4B checkpoint is present), so
+E4B has no chat fixture of its own. 12B's template adds the empty thought channel where a
+generation prompt opens a model turn with thinking off; the pytest checks that this is the only
+difference on the `toolChat` list. All three snapshots declare the same `response_template`.
+
+Out of scope (ADR [0084](../../../docs/decisions/0084-gemma-tokenizer-chat.md) decision 5 and its
+addendum of 2026-11-04): `tool_responses` and content parts — the TypeScript side rejects them
+loudly rather than ignoring them. The turn markers of this checkpoint are `<|turn>` / `<turn|>` /
+`<|channel>` / `<|think|>` — the Gemma 3 spelling `<start_of_turn>` is not in this vocabulary at
+all.
 
 The chat format and the stop-token set are harvested together on purpose: both come from the
 checkpoint's companion files, and picking them up separately is how one of them goes stale

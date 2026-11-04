@@ -15,6 +15,37 @@ measurements in `docs/research/`.
 
 ## [Unreleased]
 
+### Added
+
+- `@karume/models`: function calling and thinking in the Gemma 4 chat layer (`gemma.*` and
+  `gemma4QatMobile.*`; ADR 0084 addendum of 2026-11-04). `chatPrompt` / `chatTurn` take template
+  options `{ tools, enableThinking, preserveThinking }` and messages in the HF / OpenAI shape —
+  role `tool` results, assistant `tool_calls`, `reasoning` / `reasoning_content` — rendered as
+  upstream `apply_chat_template` does for E2B / E4B and 12B (checked against harvested fixtures,
+  ids included). `chatToolResults` is the delta that continues a model turn after a tool call;
+  `parseChatResponse` turns a generated turn (ids with their stop token) into
+  `{ content, thinking, tool_calls }` as upstream `parse_response` does. `ChatSession` takes
+  `tools` / `enableThinking`, its streams carry a parsed `reply` (`"turn"` / `"tool-call"` /
+  `"cut-off"`), and `sendToolResults` answers a turn that ended on a call within the same model
+  turn, the KV carried over. What the template renders wrongly (ambiguous results, orphan
+  results, calls without results), the legacy `tool_responses` field and content parts fail
+  loudly; so does output that is cut or malformed. Not yet checked on a real model.
+
+### Changed
+
+- `@karume/models/gemma`: `ChatSession` parses every turn closed by an EOS token and records what
+  the parser read: an answer's content is stripped as the template renders it (the re-render is
+  unchanged), and a malformed closed turn rejects `reply`, keeps the raw text and rebuilds the KV
+  on the next turn. In a session with tools or thinking the streamed pieces keep the special
+  spellings. `dropOldestTurns` drops the oldest whole exchange (up to the next user message — the
+  same user / assistant pair in a plain conversation).
+
+### Breaking
+
+- `@karume/models/gemma`: `ChatRole` gains `"tool"` and `ChatMessage` becomes a union of
+  `ChatTextMessage` / `ChatAssistantMessage` / `ChatToolMessage` (every one with `content:
+  string`). Code that switches exhaustively over a message's `role` follows the new branch.
+
 ## [0.16.0] - 2026-11-04
 
 ### Added

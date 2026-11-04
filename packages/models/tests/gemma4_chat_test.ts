@@ -64,13 +64,26 @@ import {
 import { type GemmaTokenizerAssets, parseGemmaTokenizerAsset } from "../src/gemma/text/asset.ts";
 import { Tokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
+  type ChatAssistantMessage,
   type ChatMessage,
   chatPrompt,
+  type ChatTemplateOptions,
+  type ChatTool,
+  type ChatToolCall,
+  type ChatToolMessage,
+  chatToolResults,
   chatTurn,
   gemma4StopTokens,
+  pythonNumber,
   renderGemma4Chat,
   renderGemma4ChatTurn,
+  renderGemma4ToolResults,
 } from "../src/gemma/text/chat.ts";
+import {
+  type ChatResponse,
+  parseChatResponse,
+  parseGemma4ChatResponse,
+} from "../src/gemma/text/chat-response.ts";
 import { mirrorPresent, mirrorRoot, readMirrorAsset } from "./helpers/mirror.ts";
 import { GEMMA4_12B_IN_MIRROR, readGemma4_12bTokenizer } from "./helpers/gemma-mirror.ts";
 import { SERIES_CHECKS_OPT_IN } from "./helpers/series-checks.ts";
@@ -182,15 +195,18 @@ describe("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無�
     [{ role: "user", content: "hi", tools: [{ name: "search" }] }],
     "out-of-scope fields",
   );
+  // The scope widened on 2026-11-04 (ADR 0084 addendum): `reasoning` and `tool_calls` on an
+  // assistant message are rendered now (the `toolChat` goldens below). What stays out: a
+  // thought on a non-assistant message, and a tool call the template cannot render.
   reject(
-    "reasoning（thinking チャネル）",
-    [{ role: "assistant", content: "hi", reasoning: "…" }],
+    "reasoning on a user message (only assistant messages carry a thought)",
+    [{ role: "user", content: "hi", reasoning: "…" }],
     "out-of-scope fields",
   );
   reject(
-    "tool_calls",
+    "a tool call without arguments (the template raises on it)",
     [{ role: "assistant", content: "", tool_calls: [{ function: { name: "f" } }] }],
-    "out-of-scope fields",
+    "arguments",
   );
   reject("role が tool", [{ role: "tool", content: "…" }], "role");
   reject("role が model（template の出力側の綴り）", [{ role: "model", content: "…" }], "role");
@@ -199,11 +215,13 @@ describe("gemma4 chat 射程: 素の会話の外は fail loudly（黙って無�
     [{ role: "user", content: [{ type: "image_url", image_url: { url: "…" } }] }],
     "content",
   );
-  reject(
-    "assistant 本文の thinking 綴り（上流は strip_thinking で巻き戻す）",
-    [{ role: "assistant", content: "a<|channel>thought\nx<channel|>b" }],
-    "thinking",
-  );
+  it("a thought channel spelled in assistant content is removed by strip_thinking (no longer rejected)", () => {
+    // Pinned against upstream by the `strip-thinking` golden; here the shortest form.
+    assertEquals(
+      renderGemma4Chat([{ role: "assistant", content: "a<|channel>thought\nx<channel|>b" }]),
+      "<bos><|turn>model\nab<turn|>\n<|turn>model\n",
+    );
+  });
 });
 
 // ---- 増分描画（turn-local 契約） ----------------------------------------
@@ -1233,3 +1251,436 @@ test.skipIf(full12bBytes === undefined)(
     assertEquals(gemma4StopTokens(full), fixture12b.stopTokens);
   },
 );
+
+// ---- tools, tool calls, tool results, thinking (ADR 0084 addendum 2026-11-04) ----------------
+//
+// The `toolChat` / `rejectedChat` / `responses` lists of both fixtures are harvested by
+// `tools/export-recipes/gemma4/chat.py` from upstream `apply_chat_template` and
+// `tokenizer.parse_response` (ADR 0084 decision 7 — independent of this renderer and parser).
+
+/** Upstream's keyword arguments of one case (`apply_chat_template(..., **options)`). */
+type UpstreamOptions = {
+  readonly tools?: ChatTool[];
+  readonly enable_thinking?: boolean;
+  readonly preserve_thinking?: boolean;
+};
+
+type ToolChatRow = {
+  readonly name: string;
+  readonly why: string;
+  readonly messages: ChatMessage[];
+  readonly options: UpstreamOptions;
+  readonly rendered: string;
+  readonly ids: number[];
+};
+
+type RejectedRow = {
+  readonly name: string;
+  readonly why: string;
+  readonly messages: unknown[];
+  readonly options: UpstreamOptions;
+  /** What upstream rendered (when it accepts the input). */
+  readonly rendered?: string;
+  /** What upstream raised (`Type: first line`). */
+  readonly error?: string;
+};
+
+type ResponseRow = {
+  readonly name: string;
+  readonly why: string;
+  readonly prefix: string;
+  readonly text: string;
+  readonly expect: "parse" | "upstream-raises" | "ts-rejects";
+  readonly parsed?: ChatResponse;
+  readonly error?: string;
+  /** Upstream's result as a Python repr (`ts-rejects` only — documentation). */
+  readonly upstream?: string;
+};
+
+type ToolFixture = Fixture & {
+  readonly toolChat: ToolChatRow[];
+  readonly rejectedChat: RejectedRow[];
+  readonly responses: ResponseRow[];
+};
+
+/** Upstream's keyword arguments → the TS options object (camelCase — the maintainer's ruling). */
+const optionsOf = (options: UpstreamOptions): ChatTemplateOptions => ({
+  ...(options.tools === undefined ? {} : { tools: options.tools }),
+  ...(options.enable_thinking === undefined ? {} : { enableThinking: options.enable_thinking }),
+  ...(options.preserve_thinking === undefined
+    ? {}
+    : { preserveThinking: options.preserve_thinking }),
+});
+
+const toolFixtures: readonly {
+  readonly label: string;
+  readonly dialect: ChatDialect;
+  readonly fixture: ToolFixture;
+  readonly tokenizer: Tokenizer;
+}[] = [
+  { label: "E2B", dialect: "gemma4", fixture: fixture as ToolFixture, tokenizer },
+  {
+    label: "12B",
+    dialect: "gemma4-unified",
+    fixture: fixture12b as ToolFixture,
+    tokenizer: tokenizer12b,
+  },
+];
+
+for (const { label, dialect, fixture: source, tokenizer: owner } of toolFixtures) {
+  describe(`gemma4 ${label} tool chat rendering: equals upstream apply_chat_template`, () => {
+    for (const row of source.toolChat) {
+      it(`${row.name} — ${row.why}`, () => {
+        assertEquals(renderGemma4Chat(row.messages, dialect, optionsOf(row.options)), row.rendered);
+      });
+    }
+  });
+
+  describe(`gemma4 ${label} tool chat ids: equal apply_chat_template(tokenize=True)`, () => {
+    for (const row of source.toolChat) {
+      it(`${row.name} — ${row.why}`, () => {
+        assertEquals(chatPrompt(owner, row.messages, optionsOf(row.options)), row.ids);
+      });
+    }
+  });
+
+  describe(`gemma4 ${label} rejected input: fails loudly where upstream renders wrongly or raises`, () => {
+    for (const row of source.rejectedChat) {
+      it(`${row.name} — ${row.why}`, () => {
+        // The rejection rests on what upstream was observed to do (one of the two is recorded).
+        assert(
+          (row.rendered === undefined) !== (row.error === undefined),
+          "upstream's outcome is recorded",
+        );
+        assertThrows(
+          () => renderGemma4Chat(row.messages as ChatMessage[], dialect, optionsOf(row.options)),
+          ModelInputError,
+        );
+      });
+    }
+  });
+
+  describe(`gemma4 ${label} output parsing: equals upstream parse_response`, () => {
+    for (const row of source.responses) {
+      it(`${row.name} (${row.expect}) — ${row.why}`, () => {
+        if (row.expect === "parse") {
+          assertEquals(parseGemma4ChatResponse(row.text, row.prefix), row.parsed);
+          return;
+        }
+        // `upstream-raises`: upstream raises too; `ts-rejects`: upstream returns data that would
+        // hide a failure (its repr is in the fixture — the doc of `chat-response.ts` lists why).
+        assert((row.error ?? row.upstream) !== undefined, "upstream's outcome is recorded");
+        assertThrows(() => parseGemma4ChatResponse(row.text, row.prefix), ModelInputError);
+      });
+    }
+  });
+}
+
+describe("gemma4 tool chat goldens discriminate (fault injection)", () => {
+  const rows = (fixture as ToolFixture).toolChat;
+
+  it("rendering without the case's options misses every golden that has options", () => {
+    const optioned = rows.filter((row) => Object.keys(row.options).length > 0);
+    assert(optioned.length >= 20, `only ${optioned.length} cases carry options`);
+    for (const row of optioned) {
+      let bare: string | undefined;
+      try {
+        bare = renderGemma4Chat(row.messages);
+      } catch {
+        bare = undefined;
+      }
+      assertNotEquals(bare, row.rendered, row.name);
+    }
+  });
+
+  it("a parser that returns only the role matches no golden but the empty turn", () => {
+    const parsed = (fixture as ToolFixture).responses.filter((row) => row.expect === "parse");
+    const trivial = parsed.filter((row) => assertEqualsQuiet(row.parsed, { role: "assistant" }));
+    assertEquals(
+      trivial.map((row) => row.name),
+      ["empty-turn"],
+    );
+    // Each field is pinned by several goldens.
+    for (const field of ["content", "thinking", "tool_calls"] as const) {
+      assert(
+        parsed.filter((row) => row.parsed?.[field] !== undefined).length >= 3,
+        `fewer than 3 goldens carry ${field}`,
+      );
+    }
+  });
+});
+
+/** Deep equality as a boolean (for counting, not asserting). */
+const assertEqualsQuiet = (left: unknown, right: unknown): boolean => {
+  try {
+    assertEquals(left, right);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+describe("gemma4 parseChatResponse: token ids in, special spellings kept", () => {
+  const rows = (fixture as ToolFixture).responses.filter((row) => row.expect === "parse");
+
+  it("decoding the encoded prompt and output gives upstream's result on every golden", () => {
+    for (const row of rows) {
+      assertEquals(
+        parseChatResponse(tokenizer, tokenizer.encode(row.text), tokenizer.encode(row.prefix)),
+        row.parsed,
+        row.name,
+      );
+    }
+  });
+
+  it("the default decode (special tokens skipped) would lose the structure (fault injection)", () => {
+    // `<|tool_call>` / `<|"|>` / `<turn|>` are special tokens — the text of a ChatStream drops them.
+    const call = rows.find((row) => row.name === "one-call");
+    assert(call !== undefined);
+    const lossy = tokenizer.decode(tokenizer.encode(call.text));
+    assertThrows(() => parseGemma4ChatResponse(lossy, call.prefix), ModelInputError, "not closed");
+  });
+});
+
+describe("gemma4 chatToolResults: the delta after a tool call continues the model turn", () => {
+  /** The model's canonical output for one assistant message (thought if rendered, then calls). */
+  const canonicalOutput = (head: string, message: ChatAssistantMessage, gate: boolean): string => {
+    const thought = message.reasoning || message.reasoning_content;
+    const calls = (message.tool_calls ?? [])
+      .map((call) => {
+        const args = call.function.arguments ?? {};
+        const body = Object.keys(args)
+          .sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : 1))
+          .map((key) => `${key}:${JSON.stringify(args[key]).replaceAll('"', '<|"|>')}`)
+          .join(",");
+        return `<|tool_call>call:${call.function.name}{${body}}<tool_call|>`;
+      })
+      .join("");
+    if (thought === undefined || thought === "" || !gate) return calls;
+    // After a result with thinking on, the prompt already opened the channel.
+    const open = head.endsWith("<|channel>thought\n") ? "" : "<|channel>thought\n";
+    return `${open}${thought}\n<channel|>${calls}`;
+  };
+
+  // Cases whose model turn is a chain of calls answered by results (simple string arguments, so
+  // the canonical spelling above is the template's).
+  for (const name of [
+    "tool-call-then-result",
+    "tool-multi-step",
+    "thinking-on-after-tool-result",
+    "tool-calls-parallel-ids",
+    "tool-call-single-without-ids",
+  ]) {
+    it(`${name}: whole render = prompt ⧺ call ⧺ <|tool_response> ⧺ results delta, at every step`, () => {
+      const row = (fixture as ToolFixture).toolChat.find((candidate) => candidate.name === name);
+      assert(row !== undefined, name);
+      const options = optionsOf(row.options);
+      const lastUser = row.messages.findLastIndex((message) => message.role === "user");
+      let checked = 0;
+      row.messages.forEach((message, index) => {
+        if (message.role !== "assistant" || (message.tool_calls ?? []).length === 0) return;
+        let end = index + 1;
+        while (row.messages[end]?.role === "tool") end += 1;
+        const head = renderGemma4Chat(row.messages.slice(0, index), "gemma4", options);
+        const results = row.messages.slice(index + 1, end) as ChatToolMessage[];
+        const grown = renderGemma4Chat(row.messages.slice(0, end), "gemma4", options);
+        assertEquals(
+          grown,
+          head +
+            canonicalOutput(head, message, index > lastUser) +
+            "<|tool_response>" +
+            renderGemma4ToolResults(message.tool_calls ?? [], results, options),
+          `${name} step ${index}`,
+        );
+        // The same identity on token ids, with the stop token as the pending token.
+        const stop = tokenizer.addedTokenId("<|tool_response>") as number;
+        const generated = tokenizer.encode(canonicalOutput(head, message, index > lastUser));
+        assertEquals(
+          chatPrompt(tokenizer, row.messages.slice(0, end), options),
+          [
+            ...chatPrompt(tokenizer, row.messages.slice(0, index), options),
+            ...generated,
+            stop,
+            ...chatToolResults(tokenizer, message.tool_calls ?? [], results, options),
+          ],
+          `${name} step ${index} (ids)`,
+        );
+        checked += 1;
+      });
+      assert(checked >= 1, `${name}: no tool-calling step was checked`);
+    });
+  }
+
+  it("the delta starts after the pending <|tool_response>; further results open their own", () => {
+    const calls: ChatToolCall[] = [
+      { id: "a", type: "function", function: { name: "f", arguments: { x: 1 } } },
+      { id: "b", type: "function", function: { name: "g", arguments: null } },
+    ];
+    const results: ChatToolMessage[] = [
+      { role: "tool", tool_call_id: "b", content: "two" },
+      { role: "tool", tool_call_id: "a", content: "one" },
+    ];
+    assertEquals(
+      renderGemma4ToolResults(calls, results),
+      'response:g{value:<|"|>two<|"|>}<tool_response|><|tool_response>response:f{value:<|"|>one<|"|>}<tool_response|>',
+    );
+    assertEquals(
+      renderGemma4ToolResults(calls, results, { enableThinking: true }).endsWith(
+        "<tool_response|><|channel>thought\n",
+      ),
+      true,
+      "thinking on reopens the thought channel",
+    );
+  });
+
+  it("results that cannot be resolved, or are not results, fail loudly", () => {
+    const calls: ChatToolCall[] = [
+      { type: "function", function: { name: "f", arguments: {} } },
+      { type: "function", function: { name: "g", arguments: {} } },
+    ];
+    assertThrows(
+      () => renderGemma4ToolResults(calls, [{ role: "tool", content: "x" }]),
+      ModelInputError,
+      "the last call's name",
+    );
+    assertThrows(() => renderGemma4ToolResults(calls, []), ModelInputError, "no results");
+    assertThrows(
+      () => renderGemma4ToolResults([], [{ role: "tool", content: "x" }]),
+      ModelInputError,
+    );
+    assertThrows(
+      () =>
+        renderGemma4ToolResults(calls.slice(0, 1), [
+          { role: "user", content: "x" } as unknown as ChatToolMessage,
+        ]),
+      ModelInputError,
+      "not 'tool'",
+    );
+  });
+
+  it("chatTurn refuses a tool message and points at chatToolResults", () => {
+    assertThrows(
+      () => renderGemma4ChatTurn({ role: "tool", content: "x" }),
+      ModelInputError,
+      "chatToolResults",
+    );
+  });
+
+  it("a user delta ends with the 12B empty thought only while thinking is off", () => {
+    const message: ChatMessage = { role: "user", content: "hi" };
+    assertEquals(
+      renderGemma4ChatTurn(message, "gemma4-unified"),
+      "\n<|turn>user\nhi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+    );
+    assertEquals(
+      renderGemma4ChatTurn(message, "gemma4-unified", { enableThinking: true }),
+      "\n<|turn>user\nhi<turn|>\n<|turn>model\n",
+    );
+  });
+});
+
+describe("gemma4 chat options and declarations: the accepted set", () => {
+  const user: ChatMessage[] = [{ role: "user", content: "hi" }];
+  const reject = (label: string, options: unknown, expected: string): void => {
+    it(label, () => {
+      assertThrows(
+        () => renderGemma4Chat(user, "gemma4", options as ChatTemplateOptions),
+        ModelInputError,
+        expected,
+      );
+    });
+  };
+
+  reject(
+    "an unknown option (snake_case is upstream's spelling)",
+    { enable_thinking: true },
+    "out-of-scope fields",
+  );
+  reject("a non-boolean enableThinking", { enableThinking: "yes" }, "not a boolean");
+  reject("tools that are not an array", { tools: {} }, "not an array");
+  reject(
+    "a declaration of another type",
+    { tools: [{ type: "custom", function: { name: "f" } }] },
+    "not 'function'",
+  );
+  reject(
+    "an unknown declaration field (OpenAI's strict)",
+    { tools: [{ type: "function", function: { name: "f", strict: true } }] },
+    "out-of-scope fields",
+  );
+  reject(
+    "a property type list (the template would print a Python repr)",
+    {
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "f",
+            parameters: { type: "object", properties: { a: { type: ["string", "null"] } } },
+          },
+        },
+      ],
+    },
+    "not a string",
+  );
+  reject(
+    "a non-finite number in a schema",
+    {
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "f",
+            parameters: { type: "object", properties: { a: { enum: [Number.NaN] } } },
+          },
+        },
+      ],
+    },
+    "not a finite number",
+  );
+
+  it("tool call arguments must be JSON values (undefined is not one)", () => {
+    assertThrows(
+      () =>
+        renderGemma4Chat([
+          { role: "user", content: "x" },
+          {
+            role: "assistant",
+            content: "",
+            tool_calls: [
+              { type: "function", function: { name: "f", arguments: { a: undefined } as never } },
+            ],
+          },
+          { role: "tool", name: "f", content: "ok" },
+        ]),
+      ModelInputError,
+      "not a JSON value",
+    );
+  });
+});
+
+describe("pythonNumber: numbers as Python's str() prints them", () => {
+  it("non-integers print as repr(float) (values measured with CPython 3.14)", () => {
+    const measured: [number, string][] = [
+      [0.1, "0.1"],
+      [1e-5, "1e-05"],
+      [0.0001, "0.0001"],
+      [1.5e-7, "1.5e-07"],
+      [123.456, "123.456"],
+      [-2.5, "-2.5"],
+      [0.30000000000000004, "0.30000000000000004"],
+      [2.5e-10, "2.5e-10"],
+      [5e-324, "5e-324"],
+      [12345678.9, "12345678.9"],
+      [-0.001, "-0.001"],
+    ];
+    for (const [value, expected] of measured) assertEquals(pythonNumber(value), expected, expected);
+  });
+
+  it("an integer value prints as Python's int (a JS number carries no int / float distinction)", () => {
+    assertEquals(pythonNumber(2), "2");
+    assertEquals(pythonNumber(-3), "-3");
+    assertEquals(pythonNumber(-0), "0");
+    assertEquals(pythonNumber(1e21), "1000000000000000000000");
+  });
+});

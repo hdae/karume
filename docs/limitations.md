@@ -154,6 +154,38 @@ drive `sequence()` yourself and want to stop on a string, look at the decoded te
 `break` (the conversation advances "only by the successful runs", and the last token stays in the
 uncommitted frontier = the same state as a `chat` stop string).
 
+## Gemma 4 chat: what tools / thinking leave out, and where the KV differs from a re-render
+
+The chat layer renders tools, tool calls, tool results and thinking as upstream's
+`apply_chat_template` does, and parses output as `parse_response` does (ADR
+[0084](decisions/0084-gemma-tokenizer-chat.md) addendum of 2026-11-04). By design:
+
+- **Out of scope, rejected loudly:** the legacy `tool_responses` field on assistant messages (send
+  role `tool` messages instead), and content-part arrays — text, image, audio and video parts —
+  in any message.
+- **Narrower than upstream, rejected loudly:** inputs upstream renders wrongly without an exception
+  — several tool calls without ids (every result would get the last call's name), a result whose
+  `name` contradicts its call or whose `tool_call_id` matches none, an orphan result, a call without
+  results, content plus calls on a message whose results end the conversation, a tool name outside
+  `\w+`, an object result (upstream raises; serialize it), the `thinking` field (use `reasoning`).
+  The output parser also throws where upstream returns partial data: a turn without its stop token,
+  a region left open, text after the stop token, content or a thought in two segments, a
+  non-object argument body, `NaN` / `Infinity`, a structure spelling left in the content.
+- **Numbers:** a JS number has no int / float distinction, so an integer-valued number renders as
+  Python's `int` would (`2`) where upstream, given the float `2.0`, writes `2.0`; non-integers
+  match `repr(float)`. Arguments parsed from output lose precision beyond 2^53, as JSON does in JS.
+- **The KV of a carried conversation is not a whole re-render** in three places (the identity and
+  its check are in the doc of `gemma.ChatSession`): 12B (`gemma4-unified`) with thinking off keeps
+  the empty thought channel at the start of each past model turn a generation prompt opened; with
+  thinking on, the thoughts of model turns before the last user message stay in the KV while a
+  re-render (after overflow handling, a cut-off or a malformed turn) drops them; and the parser's
+  normalisation — stripped content and thoughts, argument keys in sorted order, content written
+  after a call placed before it — is what a re-render shows.
+- **`Pipeline.chat`** accepts the widened messages but has no `tools` / `enableThinking` options and
+  streams text without the special spellings; tools and thinking are driven through
+  `gemma.ChatSession` (or `sequence()` with `chatPrompt` / `chatToolResults` / `parseChatResponse`).
+- Checked against upstream fixtures and CPU tests only — not yet on a real model.
+
 ## sampler: top-k differs from HF in its candidate set at a tie on the boundary (by-design)
 
 `SamplerSpec.topK` (`packages/models/src/generation/sampler.ts`) narrows to **exactly k entries**,

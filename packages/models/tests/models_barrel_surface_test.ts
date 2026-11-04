@@ -180,6 +180,12 @@ const GEMMA_VALUES = [
   // The entry point for consumers that run several turns with `sequence`. Without it they guess
   // ("render everything and strip the leading `<bos>`") — the turn-local contract is not public.
   "chatTurn",
+  // The delta after a turn that stopped at a tool call (its pending token is `<|tool_response>`,
+  // not `<turn|>`) — without it a `sequence` consumer guesses the spelling of a result.
+  "chatToolResults",
+  // Generated ids → content / thinking / tool calls (upstream `parse_response`). The streamed text
+  // drops the special spellings the parser needs, so a consumer could not parse it themselves.
+  "parseChatResponse",
   "GenerationCapacityError",
   // How a `fromAssets` consumer builds the config from the hub's `Record<string, unknown>`.
   // Without it they cast with `as`, or keep the three numbers in both the distribution and the
@@ -212,6 +218,11 @@ const INTERNAL_VALUES = [
   "parseGemmaTokenizerAsset",
   "renderGemma4Chat",
   "renderGemma4ChatTurn",
+  "renderGemma4ToolResults",
+  "parseGemma4ChatResponse",
+  "assertChatTemplateOptions",
+  "wordCharacterClass",
+  "pythonNumber",
   "gemma4StopTokens",
   "Tokenizer",
   // The chat layer's internals (`gemma4_chat_test.ts` takes them from `src/` directly). The public

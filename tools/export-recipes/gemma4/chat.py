@@ -21,21 +21,27 @@ MUST: 期待値は上流の `apply_chat_template` を**独立に**呼んで採�
 自前のレンダラも compile 台本の畳み込みも 1 行も通さない。共有すると parity が恒真化する
 （ADR 0048 追記の実例）。
 
-## 射程は「素の会話」だけ（採らないケースの記録）
+## Scope: four batteries (ADR 0084 decision 5 and its addendum of 2026-11-04)
 
-初版の射程は **role が `system` / `developer` / `user` / `assistant` の、content が文字列の
-会話**だけで、次は**フィクスチャに採らない**（TS 側は fail loudly で拒否する — ADR 0084
-決定 5・6.3）。射程を広げるのは実需が出てからで、そのときはここへケースを足す:
+The fixture carries four lists, each harvested from upstream on its own:
 
-- `tools`（関数宣言）— `chat_template.jinja` の `format_function_declaration` /
-  `format_parameters` が要る（tool 宣言のフォーマッタだけで 150 行級）
-- `reasoning` / `reasoning_content`（thinking チャネル）と `enable_thinking` —
-  `<|channel>thought` の順序制御と `strip_thinking` の巻き戻しが要る
-- `tool_calls` / `tool_responses` / role `tool` — 引数の直列化と OpenAI 形の前方走査
-- 画像 / 音声 / 動画パート（`<|image|>` / `<|audio|>` / `<|video|>`）
+- `chat` ({@link CASES}) — plain conversations: roles `system` / `developer` / `user` /
+  `assistant`, string content, no template options. Unchanged since the first scope; its gate
+  ({@link assert_plain_conversation}) still rejects every other field.
+- `toolChat` ({@link TOOL_CASES}) — function declarations (`tools`, the OpenAI shape the template
+  reads), assistant `tool_calls`, role `tool` results, thinking (`enable_thinking`, `reasoning` /
+  `reasoning_content`, `preserve_thinking`, `strip_thinking` of assistant content). Gate:
+  {@link assert_tool_conversation}.
+- `rejectedChat` ({@link REJECTED_CASES}) — inputs the TS side rejects although upstream renders
+  them (or raises), with upstream's outcome recorded as evidence for the rejection.
+- `responses` ({@link RESPONSE_CASES}) — model output strings and what upstream
+  `tokenizer.parse_response(text, prefix=...)` makes of them (or the error it raises), the
+  expectations of the TS output parser.
 
-**黙って無視しない**のが要点である（無視すると「tool を渡したのに使われない」が例外なしで
-通る）。
+Still out of scope (the TS side rejects them, and no case is harvested): the legacy
+`tool_responses` field on assistant messages, and content-part arrays (`<|image|>` / `<|audio|>` /
+`<|video|>` and text parts). **Nothing is silently ignored** — ignoring `tool_responses` would let
+"I passed the results and they were not used" through without an exception.
 
 ## 素の会話の射程（実測した分岐）
 
@@ -81,16 +87,19 @@ from gemma4 import sources
 
 #: The chat dialects — the closed set of `pipelineConfig.chatDialect` (the TS side's
 #: `gemma.chatPrompt` renders each one; an absent key reads as {@link GEMMA4_CHAT_DIALECT}).
-#: `gemma4` is E2B / E4B's `chat_template.jinja`; `gemma4-unified` is 12B's, which differs from
-#: it in exactly one place for the conversations in scope here — see
-#: {@link GENERATION_PROMPT_SUFFIX} (the pytest renders every case through 12B's own template).
+#: `gemma4` is E2B / E4B's `chat_template.jinja` (byte-identical in the two snapshots);
+#: `gemma4-unified` is 12B's, which differs from it in exactly one place that renders anything —
+#: see {@link GENERATION_PROMPT_SUFFIX} (the pytest renders every case through 12B's own template).
+#: The tool and thinking parts are the same text in both.
 GEMMA4_CHAT_DIALECT = "gemma4"
 GEMMA4_UNIFIED_CHAT_DIALECT = "gemma4-unified"
 
 #: Dialect → what the generation prompt appends after `<|turn>model\n` with thinking off. 12B's
 #: template (lines 380-386 at the pinned revision) opens and closes an empty thought channel there
 #: when `enable_thinking` is false — its default — so a host that omitted it would hand the model a
-#: prompt it never saw in training.
+#: prompt it never saw in training. The suffix rides only on a generation prompt that opens a new
+#: model turn: after a tool result the prompt continues the open model turn and is the same in
+#: both dialects (`<|channel>thought\n` with thinking on, nothing with it off).
 GENERATION_PROMPT_SUFFIX: Mapping[str, str] = {
     GEMMA4_CHAT_DIALECT: "",
     GEMMA4_UNIFIED_CHAT_DIALECT: "<|channel>thought\n<channel|>",
@@ -287,6 +296,1032 @@ CASES: tuple[ChatCase, ...] = (
     ),
 )
 
+# ---------------------------------------------------------------------------
+# tools, tool calls, tool results and thinking (ADR 0084 addendum 2026-11-04)
+# ---------------------------------------------------------------------------
+
+#: The keyword arguments a tool-conversation case passes to `apply_chat_template` (upstream's
+#: spellings; the TS options object spells them `tools` / `enableThinking` / `preserveThinking`).
+TEMPLATE_OPTION_KEYS = frozenset({"tools", "enable_thinking", "preserve_thinking"})
+
+#: Role → the fields a message of that role may carry in the widened scope (an allow list, for the
+#: same reason as {@link ALLOWED_MESSAGE_KEYS}: a field outside it would pass as "given but without
+#: effect"). These are the fields the template reads for that role: `reasoning` /
+#: `reasoning_content` / `tool_calls` on an assistant message, `tool_call_id` / `name` on a tool
+#: result (it resolves the function name with them).
+TOOL_ROLE_KEYS: Mapping[str, frozenset[str]] = {
+    "system": frozenset({"role", "content"}),
+    "developer": frozenset({"role", "content"}),
+    "user": frozenset({"role", "content"}),
+    "assistant": frozenset({"role", "content", "reasoning", "reasoning_content", "tool_calls"}),
+    "tool": frozenset({"role", "content", "tool_call_id", "name"}),
+}
+
+
+@dataclass(frozen=True)
+class ToolChatCase:
+    """A rendering case with template options (`why` names the branch it pins, in one line)."""
+
+    name: str
+    why: str
+    messages: tuple[Mapping[str, Any], ...]
+    #: `apply_chat_template` keyword arguments ({@link TEMPLATE_OPTION_KEYS}).
+    options: Mapping[str, Any]
+
+
+def assert_tool_conversation(
+    messages: Sequence[Mapping[str, Any]], options: Mapping[str, Any]
+) -> None:
+    """Checks that a case is inside the widened scope (out-of-scope input is not harvested).
+
+    MUST: reject the legacy `tool_responses` field and content-part arrays — both stay out of scope
+    on the TS side, so a case using them would ship an expectation nothing may produce.
+    """
+    if not messages:
+        raise OutOfScopeChatError(
+            "the conversation is empty (upstream apply_chat_template rejects it)"
+        )
+    extra_options = sorted(set(options) - TEMPLATE_OPTION_KEYS)
+    if extra_options:
+        raise OutOfScopeChatError(f"unknown template options {extra_options}")
+    for index, message in enumerate(messages):
+        role = message.get("role")
+        allowed = TOOL_ROLE_KEYS.get(role) if isinstance(role, str) else None
+        if allowed is None:
+            raise OutOfScopeChatError(
+                f"messages[{index}].role {role!r} is none of {sorted(TOOL_ROLE_KEYS)}"
+            )
+        extra = sorted(set(message) - allowed)
+        if extra:
+            raise OutOfScopeChatError(
+                f"messages[{index}]: out-of-scope fields {extra} for role {role!r}"
+                " (`tool_responses` and content parts stay out of scope)"
+            )
+        content = message.get("content")
+        if isinstance(content, list):
+            raise OutOfScopeChatError(
+                f"messages[{index}].content is an array (content parts stay out of scope)"
+            )
+        if role in ("system", "developer", "user") and not isinstance(content, str):
+            raise OutOfScopeChatError(f"messages[{index}].content is not a string")
+
+
+#: One function declaration per shape the template's `format_function_declaration` reads.
+WEATHER_TOOL: Mapping[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "The city name"},
+                "unit": {
+                    "type": "string",
+                    "enum": ["celsius", "fahrenheit"],
+                    "description": "Temperature unit",
+                },
+            },
+            "required": ["location"],
+        },
+    },
+}
+TIME_TOOL: Mapping[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "get_time",
+        "description": "Current local time.",
+        "parameters": {"type": "object", "properties": {"timezone": {"type": "string"}}},
+    },
+}
+SEARCH_TOOL: Mapping[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "search",
+        "description": "Search the web.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "Max results"},
+                "safe": {"type": "boolean"},
+                "score": {"type": "number", "nullable": True},
+            },
+            "required": ["query"],
+        },
+        "response": {"type": "object", "description": "The results."},
+    },
+}
+#: No `parameters` at all (the block is skipped) and an empty `properties` (falsy — only `type`).
+PING_TOOL: Mapping[str, Any] = {
+    "type": "function",
+    "function": {"name": "ping", "description": "Liveness check."},
+}
+NOOP_TOOL: Mapping[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "noop",
+        "description": "",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+#: Every branch of `format_parameters`: case-insensitive key order, arrays (string items, object
+#: items with their own properties and required, a type list, nested arrays rendered through
+#: `format_argument`, empty items), nested objects (with properties, or without — the
+#: `filter_keys` branch), nullable, an upper-case type, a property without a type, and a key that a
+#: JSON-ish reader would need to escape (rendered bare).
+TRIP_TOOL: Mapping[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "plan_trip",
+        "description": "Plan a trip.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "Zeta": {"type": "string"},
+                "alpha": {"type": "integer"},
+                "Beta": {"type": "boolean"},
+                "stops": {
+                    "type": "array",
+                    "description": "Cities in order",
+                    "items": {"type": "string"},
+                },
+                "legs": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": {"type": "string"},
+                            "to": {"type": "string"},
+                            "days": {"type": "integer"},
+                        },
+                        "required": ["from", "to"],
+                    },
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": ["string", "null"],
+                        "enum": ["a", "b"],
+                        "description": "A tag",
+                    },
+                },
+                "matrix": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "number"}},
+                },
+                "empty_items": {"type": "array", "items": {}},
+                "budget": {
+                    "type": "object",
+                    "description": "Budget limits",
+                    "properties": {
+                        "max": {"type": "number"},
+                        "currency": {"type": "string", "enum": ["EUR", "JPY"]},
+                    },
+                    "required": ["max"],
+                },
+                "extras": {"type": "object", "additionalProperties": {"type": "string"}},
+                "flexible": {"type": "boolean", "nullable": True, "description": "Dates can move"},
+                "max-results": {"type": "integer"},
+                "kind": {"type": "STRING", "enum": ["x"]},
+                "anything": {"description": "No type at all"},
+            },
+            "required": ["stops", "budget"],
+        },
+    },
+}
+#: Shapes the template leaves unclosed: `parameters` without a `type`, and a `response` whose type
+#: is not an object (the declaration is rendered as written — mirrored, not repaired).
+LEGACY_TOOL: Mapping[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "legacy",
+        "description": "Old style",
+        "parameters": {"properties": {"x": {"type": "string"}}},
+        "response": {"type": "string", "description": "Text"},
+    },
+}
+
+
+def _call(name: str, arguments: Any, call_id: str | None = None) -> dict[str, Any]:
+    """One OpenAI-shape tool call (arguments as an object — the template rejects a string)."""
+    call: dict[str, Any] = {"type": "function", "function": {"name": name, "arguments": arguments}}
+    if call_id is not None:
+        call["id"] = call_id
+    return call
+
+
+_ASK_WEATHER: Mapping[str, Any] = {"role": "user", "content": "What is the weather in Paris?"}
+_CALL_WEATHER: Mapping[str, Any] = {
+    "role": "assistant",
+    "tool_calls": [_call("get_weather", {"location": "Paris"})],
+}
+_WEATHER_RESULT: Mapping[str, Any] = {
+    "role": "tool",
+    "name": "get_weather",
+    "content": "18 degrees and sunny",
+}
+
+#: The widened battery. Every case is harvested for E2B and 12B from each model's own template.
+TOOL_CASES: tuple[ToolChatCase, ...] = (
+    ToolChatCase(
+        "tools-one",
+        "tools alone open the system block (no system message); one declaration",
+        (_ASK_WEATHER,),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "tools-several-with-system",
+        "system text first, then the declarations in list order; a response declaration, no "
+        "parameters, empty properties and an empty description",
+        (
+            {"role": "system", "content": "  You are a helpful assistant.  "},
+            {"role": "user", "content": "Hi"},
+        ),
+        {"tools": [WEATHER_TOOL, TIME_TOOL, SEARCH_TOOL, PING_TOOL, NOOP_TOOL]},
+    ),
+    ToolChatCase(
+        "tools-schema-branches",
+        "every branch of format_parameters, and the unclosed shapes the template writes as is",
+        ({"role": "user", "content": "Plan something."},),
+        {"tools": [TRIP_TOOL, LEGACY_TOOL]},
+    ),
+    ToolChatCase(
+        "tools-developer-first",
+        "a leading developer message also lands in the system block before the declarations",
+        ({"role": "developer", "content": "Prefer metric units."}, _ASK_WEATHER),
+        {"tools": [TIME_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-call-then-result",
+        "the result continues the open model turn: no <turn|>, no generation prompt (thinking off)",
+        (_ASK_WEATHER, _CALL_WEATHER, _WEATHER_RESULT),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-call-then-answer",
+        "the answer after the result folds into the same model turn, which then closes",
+        (
+            _ASK_WEATHER,
+            _CALL_WEATHER,
+            _WEATHER_RESULT,
+            {"role": "assistant", "content": "It is 18 degrees and sunny in Paris."},
+            {"role": "user", "content": "Thanks!"},
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-calls-parallel-ids",
+        "two calls with ids; results resolved by tool_call_id out of order; string and float "
+        "results; content null",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _call("get_weather", {"location": "Paris", "unit": "celsius"}, "call_1"),
+                    _call("get_time", {"timezone": "Europe/Paris"}, "call_2"),
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_2", "content": "14:05 (CEST)"},
+            {"role": "tool", "tool_call_id": "call_1", "content": 18.5},
+        ),
+        {"tools": [WEATHER_TOOL, TIME_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-call-arguments-nested",
+        "argument values of every JSON kind, nested, keys sorted case-insensitively, strings with "
+        "quotes / newlines / tabs / a chat spelling, numbers int / negative / fraction / exponent",
+        (
+            {"role": "user", "content": "Plan a trip."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    _call(
+                        "plan_trip",
+                        {
+                            "stops": ["Paris", "Lyon"],
+                            "legs": [{"from": "Paris", "to": "Lyon", "days": 2}],
+                            "budget": {"max": 1200.5, "currency": "EUR"},
+                            "flexible": False,
+                            "Zeta": "",
+                            "alpha": -3,
+                            "notes": 'Say "hi"\nthen\tleave <|turn> it',
+                            "matrix": [[0.25, 1e-05], []],
+                            "extras": {},
+                            "anything": None,
+                        },
+                    )
+                ],
+            },
+            {"role": "tool", "name": "plan_trip", "content": "Booked.\nRef: A1"},
+            {"role": "assistant", "content": "Your trip is booked."},
+        ),
+        {"tools": [TRIP_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-result-kinds",
+        "result content of every kind (string with quotes, a JSON-looking string, integer, "
+        "boolean, null, empty string); a result named by `name` alone when every call has an id",
+        (
+            {"role": "user", "content": "Check everything."},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    _call("search", {"query": "karume"}, "a"),
+                    _call("get_time", {"timezone": "UTC"}, "b"),
+                    _call("ping", None, "c"),
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": 'Found "karume".'},
+            {"role": "tool", "tool_call_id": "b", "content": '{"utc": "09:05"}'},
+            {"role": "tool", "tool_call_id": "c", "content": 42},
+            {"role": "tool", "name": "ping", "content": False},
+            {"role": "tool", "name": "search", "content": None},
+            {"role": "tool", "name": "get_time", "content": ""},
+        ),
+        {"tools": [SEARCH_TOOL, TIME_TOOL, PING_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-call-single-without-ids",
+        "one call and no ids: each result resolves to that call's name (with or without `name`)",
+        (
+            _ASK_WEATHER,
+            _CALL_WEATHER,
+            {"role": "tool", "content": "18 degrees"},
+            {"role": "tool", "name": "get_weather", "content": "and sunny"},
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-call-with-content",
+        "content on a tool-calling message is written after the results, and closes the turn",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [_call("get_weather", {"location": "Paris"})],
+            },
+            _WEATHER_RESULT,
+            {"role": "user", "content": "And tomorrow?"},
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-multi-step",
+        "a second call after a result continues the same model turn; ends on the second result",
+        (
+            _ASK_WEATHER,
+            _CALL_WEATHER,
+            _WEATHER_RESULT,
+            {"role": "assistant", "tool_calls": [_call("get_time", {"timezone": "Europe/Paris"})]},
+            {"role": "tool", "name": "get_time", "content": "14:05"},
+        ),
+        {"tools": [WEATHER_TOOL, TIME_TOOL]},
+    ),
+    ToolChatCase(
+        "tool-call-arguments-null",
+        "arguments null renders an empty body (a string would raise)",
+        (
+            {"role": "user", "content": "Are you there?"},
+            {"role": "assistant", "tool_calls": [_call("ping", None)]},
+            {"role": "tool", "name": "ping", "content": "pong"},
+            {"role": "assistant", "content": "Yes."},
+        ),
+        {"tools": [PING_TOOL]},
+    ),
+    ToolChatCase(
+        "thinking-on-user-only",
+        "enable_thinking alone opens the system block with <|think|>",
+        ({"role": "user", "content": "What is 2+2?"},),
+        {"enable_thinking": True},
+    ),
+    ToolChatCase(
+        "thinking-on-system-only",
+        "<|think|> comes before the system text; the generation prompt is the plain one",
+        ({"role": "system", "content": "Be brief."},),
+        {"enable_thinking": True},
+    ),
+    ToolChatCase(
+        "thinking-on-system-tools",
+        "<|think|>, then the system text, then the declarations",
+        ({"role": "system", "content": "Be brief."}, _ASK_WEATHER),
+        {"enable_thinking": True, "tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "thinking-on-after-tool-result",
+        "after a result with thinking on, the generation prompt reopens the thought channel",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "reasoning": "I should call the weather tool.",
+                "tool_calls": [_call("get_weather", {"location": "Paris"})],
+            },
+            _WEATHER_RESULT,
+        ),
+        {"enable_thinking": True, "tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "thinking-gate",
+        "reasoning is kept only after the last user message (reasoning / reasoning_content)",
+        (
+            {"role": "user", "content": "First question?"},
+            {"role": "assistant", "reasoning": "R1 dropped", "content": "A1"},
+            {"role": "user", "content": "What is the weather in Paris?"},
+            {
+                "role": "assistant",
+                "reasoning_content": "R2 kept",
+                "tool_calls": [_call("get_weather", {"location": "Paris"})],
+            },
+            _WEATHER_RESULT,
+            {"role": "assistant", "reasoning": "R3 kept", "content": "It is sunny."},
+        ),
+        {"enable_thinking": True, "tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "reasoning-precedence",
+        "`reasoning or reasoning_content`: an empty reasoning falls through; the text is not "
+        "trimmed; the gate ignores enable_thinking (off here)",
+        (
+            {"role": "user", "content": "Go."},
+            {
+                "role": "assistant",
+                "reasoning": "",
+                "reasoning_content": "  from reasoning_content \n",
+                "content": "A",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "from reasoning",
+                "reasoning_content": "ignored",
+                "content": "B",
+            },
+        ),
+        {},
+    ),
+    ToolChatCase(
+        "preserve-thinking",
+        "preserve_thinking keeps the reasoning of a tool-calling message before the last user "
+        "message; a message without tool calls still loses it",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "reasoning": "kept: it has tool calls",
+                "tool_calls": [_call("get_weather", {"location": "Paris"})],
+            },
+            _WEATHER_RESULT,
+            {"role": "assistant", "reasoning": "dropped: no tool calls", "content": "Sunny."},
+            {"role": "user", "content": "Thanks."},
+        ),
+        {"enable_thinking": True, "preserve_thinking": True, "tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "preserve-thinking-off",
+        "the same conversation without preserve_thinking: both reasonings are dropped",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "reasoning": "kept: it has tool calls",
+                "tool_calls": [_call("get_weather", {"location": "Paris"})],
+            },
+            _WEATHER_RESULT,
+            {"role": "assistant", "reasoning": "dropped: no tool calls", "content": "Sunny."},
+            {"role": "user", "content": "Thanks."},
+        ),
+        {"enable_thinking": True, "tools": [WEATHER_TOOL]},
+    ),
+    ToolChatCase(
+        "strip-thinking",
+        "strip_thinking on assistant content: a closed channel, a stray <channel|>, an "
+        "unterminated <|channel> — then the trim",
+        (
+            {"role": "user", "content": "One."},
+            {"role": "assistant", "content": "<|channel>thought\nhidden<channel|>Visible answer."},
+            {"role": "user", "content": "Two."},
+            {
+                "role": "assistant",
+                "content": (
+                    " Before<|channel>thought\nX<channel|> after <channel|>tail<|channel>cut "
+                ),
+            },
+            {"role": "user", "content": "Three."},
+        ),
+        {},
+    ),
+    ToolChatCase(
+        "assistant-content-null",
+        "an assistant message with null content and no tool calls is an empty model turn",
+        ({"role": "user", "content": "Say nothing."}, {"role": "assistant", "content": None}),
+        {},
+    ),
+    ToolChatCase(
+        "tool-call-japanese",
+        "non-ASCII argument and result values (word characters in a key)",
+        (
+            {"role": "user", "content": "「こんにちは」を英訳して"},
+            {"role": "assistant", "tool_calls": [_call("translate", {"原文": "こんにちは"})]},
+            {"role": "tool", "name": "translate", "content": "Hello"},
+            {"role": "assistant", "content": "Hello です。"},
+        ),
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "translate",
+                        "description": "日本語を英語へ",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"原文": {"type": "string"}},
+                            "required": ["原文"],
+                        },
+                    },
+                }
+            ]
+        },
+    ),
+)
+
+
+@dataclass(frozen=True)
+class RejectedCase:
+    """An input the TS side rejects (`why` says why), harvested to record what upstream does."""
+
+    name: str
+    why: str
+    messages: tuple[Mapping[str, Any], ...]
+    options: Mapping[str, Any]
+
+
+#: Inputs the TS renderer rejects with `ModelInputError`. Upstream's outcome (the rendered string,
+#: or the error it raises) is recorded beside each, so the rejection rests on observed behaviour.
+REJECTED_CASES: tuple[RejectedCase, ...] = (
+    RejectedCase(
+        "several-calls-without-ids",
+        "with no ids the template matches every result to the LAST call (None == None), whatever "
+        "its `name` says",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    _call("get_weather", {"location": "Paris"}),
+                    _call("get_time", {"timezone": "Europe/Paris"}),
+                ],
+            },
+            {"role": "tool", "name": "get_weather", "content": "18 degrees"},
+            {"role": "tool", "name": "get_time", "content": "14:05"},
+        ),
+        {"tools": [WEATHER_TOOL, TIME_TOOL]},
+    ),
+    RejectedCase(
+        "result-name-contradicts-call",
+        "the single call without an id overrides the result's own `name`",
+        (
+            _ASK_WEATHER,
+            _CALL_WEATHER,
+            {"role": "tool", "name": "get_time", "content": "14:05"},
+        ),
+        {"tools": [WEATHER_TOOL, TIME_TOOL]},
+    ),
+    RejectedCase(
+        "result-id-matches-no-call",
+        "an unmatched tool_call_id falls back to `name`, then to the spelling 'unknown'",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "tool_calls": [_call("get_weather", {"location": "Paris"}, "call_1")],
+            },
+            {"role": "tool", "tool_call_id": "call_9", "content": "18 degrees"},
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "orphan-tool-result",
+        "a tool message that follows no tool-calling message is dropped without a trace",
+        (_ASK_WEATHER, {"role": "tool", "name": "get_weather", "content": "18 degrees"}),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "tool-calls-without-results",
+        "a tool call not followed by a result leaves a bare <|tool_response> and an unclosed turn",
+        (_ASK_WEATHER, _CALL_WEATHER, {"role": "user", "content": "Never mind."}),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "tool-calls-awaiting-results",
+        "a conversation ending on a tool call has no generation prompt (the model would write "
+        "the result itself)",
+        (_ASK_WEATHER, _CALL_WEATHER),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "tool-call-content-at-end",
+        "content on a tool-calling message whose results end the conversation: the template "
+        "writes it after the results and closes the turn, leaving no generation prompt",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+                "tool_calls": [_call("get_weather", {"location": "Paris"})],
+            },
+            _WEATHER_RESULT,
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "arguments-as-string",
+        "OpenAI's JSON-string arguments are refused by the template itself",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "tool_calls": [_call("get_weather", '{"location": "Paris"}')],
+            },
+            _WEATHER_RESULT,
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "legacy-tool-responses",
+        "the legacy `tool_responses` field stays out of scope",
+        (
+            _ASK_WEATHER,
+            {
+                "role": "assistant",
+                "tool_calls": [_call("get_weather", {"location": "Paris"})],
+                "tool_responses": [{"name": "get_weather", "response": {"temp": 18}}],
+            },
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "content-parts",
+        "content-part arrays stay out of scope (text parts included)",
+        ({"role": "user", "content": [{"type": "text", "text": "hi"}]},),
+        {},
+    ),
+    RejectedCase(
+        "tool-result-object",
+        "an object result is read as a content-part array (Jinja's `sequence` test is true for a "
+        "dict) and raises — serialize it to a string",
+        (
+            _ASK_WEATHER,
+            _CALL_WEATHER,
+            {"role": "tool", "name": "get_weather", "content": {"temp": 18}},
+        ),
+        {"tools": [WEATHER_TOOL]},
+    ),
+    RejectedCase(
+        "tool-name-not-a-word",
+        "a declared name outside \\w+ renders, but the output parser reads a call's name with "
+        "\\w+, so the tool could never be called back",
+        (_ASK_WEATHER,),
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "get-weather", "description": "Hyphenated."},
+                }
+            ]
+        },
+    ),
+    RejectedCase(
+        "thinking-field",
+        "`thinking` (parse_response's output key) is not read by the template — passing a parsed "
+        "message back as is would drop the thought silently",
+        (_ASK_WEATHER, {"role": "assistant", "thinking": "hmm", "content": "Sunny."}),
+        {},
+    ),
+)
+
+
+@dataclass(frozen=True)
+class ResponseCase:
+    """One model output and the conversation whose generation prompt it follows."""
+
+    name: str
+    why: str
+    #: The conversation rendered (by upstream, with `add_generation_prompt`) into the `prefix`.
+    messages: tuple[Mapping[str, Any], ...]
+    options: Mapping[str, Any]
+    #: The generated text, special spellings included, ending with its stop token.
+    text: str
+    #: `parse` — TS returns upstream's result; `upstream-raises` — upstream raises and TS throws;
+    #: `ts-rejects` — upstream returns a value but TS throws (the reason is in `why`).
+    expect: str
+
+
+#: The `expect` labels of {@link ResponseCase}.
+RESPONSE_EXPECTATIONS = frozenset({"parse", "upstream-raises", "ts-rejects"})
+
+_WEATHER_PROMPT: tuple[Mapping[str, Any], ...] = (_ASK_WEATHER,)
+_AFTER_RESULT: tuple[Mapping[str, Any], ...] = (_ASK_WEATHER, _CALL_WEATHER, _WEATHER_RESULT)
+_TOOLS: Mapping[str, Any] = {"tools": [WEATHER_TOOL, TIME_TOOL]}
+_THINKING_TOOLS: Mapping[str, Any] = {"tools": [WEATHER_TOOL, TIME_TOOL], "enable_thinking": True}
+_Q = '<|"|>'
+
+#: The output-parser battery (`tokenizer.parse_response` with the snapshot's `response_template`).
+RESPONSE_CASES: tuple[ResponseCase, ...] = (
+    ResponseCase(
+        "content-turn",
+        "content closed by <turn|>",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "It is sunny.<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "content-eos", "content closed by <eos>", _WEATHER_PROMPT, _TOOLS, "Sunny.<eos>", "parse"
+    ),
+    ResponseCase(
+        "content-tool-response",
+        "content closed by <|tool_response> without a call",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "Sunny.<|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "content-stripped",
+        "content is stripped (Python str.strip)",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "\n  Sunny.\u3000\n<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "empty-turn",
+        "only the stop token: no content key",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "one-call",
+        "one tool call, closed by <|tool_response>",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:get_weather{{location:{_Q}Paris{_Q}}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "several-calls",
+        "calls back to back accumulate in order",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:get_weather{{location:{_Q}Paris{_Q},unit:{_Q}celsius{_Q}}}<tool_call|>"
+        f"<|tool_call>call:get_time{{timezone:{_Q}Europe/Paris{_Q}}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "thinking-content",
+        "a thought channel then content (both stripped)",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        "<|channel>thought\nThe user wants the weather.\n<channel|>It is sunny.<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "thinking-call",
+        "a thought channel then a call",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        f"<|channel>thought\nI need the tool.<channel|><|tool_call>call:get_weather{{location:"
+        f"{_Q}Paris{_Q}}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "content-then-call",
+        "content written before a call is kept",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"Let me check.<|tool_call>call:get_weather{{location:{_Q}Paris{_Q}}}<tool_call|>"
+        "<|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "empty-thought",
+        "an empty thought channel leaves no thinking key",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|channel>thought\n<channel|>Sunny.<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "nested-arguments",
+        "objects, arrays, booleans, null, fractions, negative numbers and exponents",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:plan_trip{{budget:{{currency:{_Q}EUR{_Q},max:1200.5}},flexible:false,"
+        f"legs:[{{days:2,from:{_Q}Paris{_Q},to:{_Q}Lyon{_Q}}}],notes:null,"
+        f"stops:[{_Q}Paris{_Q},{_Q}Lyon{_Q}],values:[1,-2.5,1e-05,3]}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "string-special-characters",
+        "string values keep quotes, newlines, braces, commas, colons and backslashes",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f'<|tool_call>call:note{{text:{_Q}He said "hi"\nthen left: {{a,b}}, done{_Q},'
+        f"path:{_Q}C:\\dir\\x{_Q}}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "empty-arguments",
+        "an empty object body",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "unicode-name-and-key",
+        "\\w is Unicode: a non-ASCII function name and key",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:翻訳{{原文:{_Q}こんにちは{_Q}}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "call-closed-by-turn",
+        "a call followed by <turn|> instead of <|tool_response> still parses",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{}<tool_call|><turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "after-result-content",
+        "after a result the anchor is <tool_response|>",
+        _AFTER_RESULT,
+        _TOOLS,
+        "It is 18 degrees and sunny.<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "after-result-thinking",
+        "after a result with thinking on, the prompt opened the channel the output closes",
+        _AFTER_RESULT,
+        _THINKING_TOOLS,
+        "Got the weather.\n<channel|>It is 18 degrees.<turn|>",
+        "parse",
+    ),
+    ResponseCase(
+        "after-result-second-call",
+        "a second call after a result",
+        _AFTER_RESULT,
+        _TOOLS,
+        f"<|tool_call>call:get_time{{timezone:{_Q}Europe/Paris{_Q}}}<tool_call|><|tool_response>",
+        "parse",
+    ),
+    ResponseCase(
+        "unterminated-string",
+        "a call cut inside a string: the JSON does not parse",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:get_weather{{location:{_Q}Par",
+        "upstream-raises",
+    ),
+    ResponseCase(
+        "bare-string-value",
+        "an undelimited string value is not JSON",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:get_weather{location:Paris}<tool_call|><|tool_response>",
+        "upstream-raises",
+    ),
+    ResponseCase(
+        "stop-token-inside-call",
+        "<|tool_response> before <tool_call|> lands in the JSON body",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{}<|tool_response>",
+        "upstream-raises",
+    ),
+    ResponseCase(
+        "empty-call-body",
+        "no body at all",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping<tool_call|><|tool_response>",
+        "upstream-raises",
+    ),
+    ResponseCase(
+        "space-before-key",
+        "only a key right after { or , is quoted",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{ a:1}<tool_call|><|tool_response>",
+        "upstream-raises",
+    ),
+    ResponseCase(
+        "sentinel-character",
+        "the reserved \\x01 / \\x02 characters are refused",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:ping{{a:{_Q}x\x01y{_Q}}}<tool_call|><|tool_response>",
+        "upstream-raises",
+    ),
+    ResponseCase(
+        "hyphenated-name",
+        "the name stops at the first non-word character, the rest breaks the JSON",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:get-weather{{location:{_Q}Paris{_Q}}}<tool_call|><|tool_response>",
+        "upstream-raises",
+    ),
+    ResponseCase(
+        "unterminated-call",
+        "TS rejects: no <tool_call|> and no stop token — upstream returns the call as if complete",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>call:get_weather{{location:{_Q}Paris{_Q}}}",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "unterminated-thought",
+        "TS rejects: the thought channel never closes — upstream returns a partial thought",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        "<|channel>thought\nStill thinking",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "stop-token-inside-thought",
+        "TS rejects: the stop token arrives inside the thought — upstream keeps it in the thought",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        "<|channel>thought\nHmm<turn|>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "no-stop-token",
+        "TS rejects: the turn is not closed (cut by max tokens) — upstream returns the content",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "It is sun",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "text-after-stop-token",
+        "TS rejects: text after the stop token — upstream keeps only the last segment",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "First.<turn|>Second.",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "content-overwritten",
+        "TS rejects: content in two segments — upstream keeps only the last",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        "First part.<|channel>thought\nT<channel|>Second part.<turn|>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "thought-overwritten",
+        "TS rejects: two thought channels — upstream keeps only the last",
+        _WEATHER_PROMPT,
+        _THINKING_TOOLS,
+        "<|channel>thought\nA<channel|><|channel>thought\nB<channel|>C<turn|>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "arguments-not-an-object",
+        "TS rejects: a list body — upstream returns it; the template cannot render it back",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping[1,2]<tool_call|><|tool_response>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "non-finite-number",
+        "TS rejects: NaN is not JSON — Python's json.loads accepts it",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        "<|tool_call>call:ping{a:NaN}<tool_call|><|tool_response>",
+        "ts-rejects",
+    ),
+    ResponseCase(
+        "call-without-name",
+        "TS rejects: an opener without call:NAME — upstream returns the spelling as content",
+        _WEATHER_PROMPT,
+        _TOOLS,
+        f"<|tool_call>{{location:{_Q}Paris{_Q}}}<tool_call|><|tool_response>",
+        "ts-rejects",
+    ),
+)
+
 
 def _source(checkpoint_dir: Path, label: str) -> dict[str, Any]:
     """出所記録（chat 形式と EOS 集合を束ねる 4 ファイルの digest — ADR 0084 決定 5）。
@@ -352,6 +1387,123 @@ def harvest_cases(tokenizer: Any, cases: Sequence[ChatCase]) -> list[dict[str, A
     return rows
 
 
+def _upstream_error(error: Exception) -> str:
+    """How a fixture records an upstream exception: its type and the first line of its message."""
+    return f"{type(error).__name__}: {str(error).splitlines()[0] if str(error) else ''}"
+
+
+def harvest_tool_cases(tokenizer: Any, cases: Sequence[ToolChatCase]) -> list[dict[str, Any]]:
+    """The widened battery's expectations from upstream `apply_chat_template` (same two halves and
+    the same render → encode check as {@link harvest_cases}; the options ride as keyword
+    arguments)."""
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        assert_tool_conversation(case.messages, case.options)
+        messages = [dict(message) for message in case.messages]
+        options = dict(case.options)
+        rendered = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, **options
+        )
+        ids = list(
+            tokenizer.apply_chat_template(
+                messages, tokenize=True, add_generation_prompt=True, **options
+            )["input_ids"]
+        )
+        direct = list(tokenizer(rendered, add_special_tokens=False)["input_ids"])
+        if ids != direct:
+            raise AssertionError(
+                f"{case.name}: apply_chat_template(tokenize=True) differs from rendering then"
+                " encoding with add_special_tokens=False (the TS two-step premise broke)"
+            )
+        rows.append(
+            {
+                "name": case.name,
+                "why": case.why,
+                "messages": messages,
+                "options": options,
+                "rendered": rendered,
+                "ids": ids,
+            }
+        )
+    return rows
+
+
+def harvest_rejected_cases(tokenizer: Any, cases: Sequence[RejectedCase]) -> list[dict[str, Any]]:
+    """What upstream does with each input the TS side rejects: `rendered` (the template accepts
+    it) or `error` (it raises). No gate runs here — these cases are outside the scope on purpose."""
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        messages = [dict(message) for message in case.messages]
+        options = dict(case.options)
+        row: dict[str, Any] = {
+            "name": case.name,
+            "why": case.why,
+            "messages": messages,
+            "options": options,
+        }
+        try:
+            row["rendered"] = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, **options
+            )
+        except Exception as error:  # the outcome itself is the record
+            row["error"] = _upstream_error(error)
+        rows.append(row)
+    return rows
+
+
+def harvest_responses(tokenizer: Any, cases: Sequence[ResponseCase]) -> list[dict[str, Any]]:
+    """Upstream `parse_response(text, prefix=...)` for each output (ADR 0084 decision 7 — the
+    parser is upstream's, called independently).
+
+    The prefix is upstream's own rendering of the case's conversation with the generation prompt,
+    so the parser sees the prefill it would see in use (`<|turn>model\\n`, 12B's empty thought, the
+    thought channel reopened after a result).
+
+    MUST: each case's `expect` label is checked against what upstream did — `upstream-raises` must
+    raise and the others must not — so a label cannot drift from the behaviour it documents. For
+    `ts-rejects` the upstream result is kept as a Python repr (documentation only — it can hold
+    values JSON cannot, such as NaN).
+    """
+    rows: list[dict[str, Any]] = []
+    for case in cases:
+        if case.expect not in RESPONSE_EXPECTATIONS:
+            raise AssertionError(f"{case.name}: unknown expect label {case.expect!r}")
+        assert_tool_conversation(case.messages, case.options)
+        prefix = tokenizer.apply_chat_template(
+            [dict(message) for message in case.messages],
+            tokenize=False,
+            add_generation_prompt=True,
+            **dict(case.options),
+        )
+        row: dict[str, Any] = {
+            "name": case.name,
+            "why": case.why,
+            "prefix": prefix,
+            "text": case.text,
+            "expect": case.expect,
+        }
+        try:
+            parsed = tokenizer.parse_response(case.text, prefix=prefix)
+        except ValueError as error:
+            if case.expect != "upstream-raises":
+                raise AssertionError(
+                    f"{case.name}: upstream raised although the case expects {case.expect!r}"
+                    f" ({_upstream_error(error)})"
+                ) from error
+            row["error"] = _upstream_error(error)
+        else:
+            if case.expect == "upstream-raises":
+                raise AssertionError(
+                    f"{case.name}: upstream returned {parsed!r} instead of raising"
+                )
+            if case.expect == "parse":
+                row["parsed"] = parsed
+            else:
+                row["upstream"] = repr(parsed)
+        rows.append(row)
+    return rows
+
+
 def build_chat_fixture(
     *,
     tokenizer: Any,
@@ -359,6 +1511,9 @@ def build_chat_fixture(
     cases: Sequence[ChatCase],
     stops: Sequence[int],
     source: Mapping[str, Any],
+    tool_cases: Sequence[ToolChatCase] = (),
+    rejected_cases: Sequence[RejectedCase] = (),
+    response_cases: Sequence[ResponseCase] = (),
 ) -> dict[str, Any]:
     """chat フィクスチャ 1 本を組む（期待値は上流・部分集合は compile 済み資産から）。
 
@@ -367,24 +1522,34 @@ def build_chat_fixture(
     足りなければ TS 側の突合が**落ちる**ので、誤りは危険側に倒れない。
     """
     chat = harvest_cases(tokenizer, cases)
-    required = {token_id for row in chat for token_id in row["ids"]}
+    tool_chat = harvest_tool_cases(tokenizer, tool_cases)
+    rejected = harvest_rejected_cases(tokenizer, rejected_cases)
+    responses = harvest_responses(tokenizer, response_cases)
+    required = {token_id for row in [*chat, *tool_chat] for token_id in row["ids"]}
     # EOS 集合の id は本文に出ないもの（`<|tool_response>`）を含むので、明示的に残す —
     # TS 側は追加語彙からこの集合を導出し、ここの `stopTokens` と突き合わせる。
     required.update(stops)
     required.add(compiled.bos_id)
     added_by_id = {token_id: token for token, token_id in compiled.added_tokens}
-    return {
+    # The response texts join the subset too: the TS session tests encode model outputs with
+    # their special spellings (a spelling missing from the subset would encode as bytes).
+    texts = [row["rendered"] for row in [*chat, *tool_chat]]
+    texts.extend(row["prefix"] + row["text"] for row in responses)
+    fixture: dict[str, Any] = {
         "source": dict(source),
         "spec": spec_of(compiled),
-        "asset": asset_subset(
-            compiled,
-            texts=[row["rendered"] for row in chat],
-            required_ids=required,
-        ),
+        "asset": asset_subset(compiled, texts=texts, required_ids=required),
         "stopTokens": list(stops),
         "stopTokenSpellings": [added_by_id.get(token_id) for token_id in stops],
         "chat": chat,
     }
+    if tool_cases:
+        fixture["toolChat"] = tool_chat
+    if rejected_cases:
+        fixture["rejectedChat"] = rejected
+    if response_cases:
+        fixture["responses"] = responses
+    return fixture
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -412,12 +1577,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         cases=CASES,
         stops=stop_tokens(checkpoint_dir),
         source=_source(checkpoint_dir, sources.tokenizer_label(model)),
+        tool_cases=TOOL_CASES,
+        rejected_cases=REJECTED_CASES,
+        response_cases=RESPONSE_CASES,
     )
     written = write_json(fixture_path, fixture)
     print(
-        f"[karume] フィクスチャ {fixture_path} ({written / 1e3:.0f} KB・"
-        f"chat {len(fixture['chat'])} ケース / 語彙 {len(fixture['asset']['vocab'])} / "
-        f"merges {len(fixture['asset']['merges'])} / 停止 {fixture['stopTokens']})"
+        f"[karume] fixture {fixture_path} ({written / 1e3:.0f} KB, chat {len(fixture['chat'])}"
+        f" / toolChat {len(fixture['toolChat'])} / rejectedChat {len(fixture['rejectedChat'])} /"
+        f" responses {len(fixture['responses'])} cases, vocabulary"
+        f" {len(fixture['asset']['vocab'])}, merges {len(fixture['asset']['merges'])}, stops"
+        f" {fixture['stopTokens']})"
     )
     print(
         f"[karume] then format it from the repository root: `vp fmt"

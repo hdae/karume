@@ -26,14 +26,52 @@
  * discarded and re-rendered from the history.
  *
  * NOTE: the distribution's EOS set contains `<eos>` and `<|tool_response>` as well
- * (`gemma4StopTokens`). Carrying over a turn closed by something other than `<turn|>` makes the
- * spelling differ from the upstream template by one token, but the conversation loses nothing (the
- * delta always starts "right after the closing token").
+ * (`gemma4StopTokens`). Carrying over a turn closed by something other than `<turn|>` without a
+ * tool call makes the spelling differ from the upstream template by one token, but the conversation
+ * loses nothing (the delta always starts "right after the closing token").
  *
- * NOTE: in the `"gemma4-unified"` chat dialect (gemma-4-12B-it) every generation prompt ends with
- * an empty thought channel, so a carried-over conversation keeps it at the start of each past model
- * turn, where a whole re-render (after overflow handling or a cut-off turn) drops it as the upstream
- * template does (the NOTE of `renderGemma4ChatTurn` in `./text/chat.ts`).
+ * ## Tools, tool calls and thinking (ADR 0084 addendum 2026-11-04)
+ *
+ * {@link ChatSessionOptions.tools} and {@link ChatSessionOptions.enableThinking} are fixed for the
+ * session: they shape the system block at the start of the conversation and the tail of every
+ * generation prompt. Every turn that closes with an EOS token is parsed
+ * (`parseChatResponse`, the reply of {@link ChatSessionStream.reply}); a turn that stopped at
+ * `<|tool_response>` after a call ends `"tool-call"`, and {@link ChatSession.sendToolResults}
+ * continues **the same model turn** with the results (the delta of `chatToolResults` — the
+ * `<|tool_response>` that stopped generation is the pending token, as `<turn|>` is for a closed
+ * turn). The history records what the parser read, in the template's input shape: the thought as
+ * `reasoning`, the calls as `tool_calls` (with session-assigned ids), each result as a role `tool`
+ * message; content the model wrote **before** its calls becomes its own assistant message in front
+ * of the tool-calling one, because the template writes a message's content after its results.
+ *
+ * ## The identity between the KV and a whole re-render
+ *
+ * With `P₀ = chatPrompt(h₀, o)` the first prompt (`h₀` the history then, `o` the session's
+ * template options), `Gⱼ` / `sⱼ` the ids and the stop token generated in step `j`, and `Dⱼ` the
+ * delta of step `j` — `chatTurn(m, o)` after a turn closed by `<turn|>`, `chatToolResults(calls,
+ * results, o)` after a tool call — the KV of step `k` holds
+ *
+ * ```text
+ * P₀ ⧺ G₀ ⧺ s₀ ⧺ D₁ ⧺ G₁ ⧺ s₁ ⧺ … ⧺ Dₖ  =  chatPrompt(hₖ, o)
+ * ```
+ *
+ * token for token (`hₖ` = {@link ChatSession.turns} once step `k`'s messages are pushed, before it
+ * generates), whenever each `Gⱼ` is the encoding of the canonical rendering of what step `j`
+ * recorded. It differs, by design, in
+ * three places — all of them the template's own spellings; only the whole re-render matches
+ * `apply_chat_template`:
+ *
+ * 1. `"gemma4-unified"` (gemma-4-12B-it) with thinking off: every generation prompt that opens a
+ *    model turn ends with an empty thought channel, which the KV keeps at the start of each past
+ *    model turn and a re-render drops (the NOTE of `renderGemma4ChatTurn` in `./text/chat.ts`).
+ * 2. Thinking on: a re-render drops the thought of the model turns before the last user message
+ *    (the template's gate); the KV keeps every thought.
+ * 3. What the parser normalizes: content and thoughts are stripped (a thought is re-rendered as
+ *    `<|channel>thought\n…\n<channel|>`), argument keys come back in the template's sorted order
+ *    and values in its spelling, and content written after a call (before `<|tool_response>`) is
+ *    re-rendered before it.
+ *
+ * The check is `gemma4_chat_session_test.ts` (a multi-step tool conversation for both dialects).
  *
  * ## Overflow handling is **injectable** (the revision of ADR 0083 decision 10)
  *
@@ -77,7 +115,20 @@ import {
   type PrefillProgress,
 } from "./chat-turn.ts";
 import type { SequenceOptions } from "./pipeline.ts";
-import { type ChatMessage, chatPrompt, chatTurn } from "./text/chat.ts";
+import {
+  assertChatTemplateOptions,
+  type ChatAssistantMessage,
+  type ChatMessage,
+  chatPrompt,
+  type ChatTemplateOptions,
+  type ChatTool,
+  type ChatToolCall,
+  type ChatToolMessage,
+  chatToolResults,
+  chatTurn,
+  renderGemma4ToolResults,
+} from "./text/chat.ts";
+import { type ChatResponse, type ParsedToolCall, parseChatResponse } from "./text/chat-response.ts";
 import type { Tokenizer } from "./text/tokenizer.ts";
 
 /**
@@ -122,10 +173,12 @@ export type ChatOverflow = {
  * not shrink can only loop forever, and would also crush the fact that "the conversation does not
  * fit". A throw reaches the caller as is.
  *
- * MUST: **keep the last entry (the message being answered now)**. A history that dropped it passes
- * into rendering without an exception (`chatPrompt` does not constrain the last role), and an
- * answer gets attached to "a conversation with no question". An implementation that returns copies
- * (`turns.map((turn) => ({ ...turn }))`) is legitimate; the check compares values.
+ * MUST: **keep the last entries being answered now** (the message just sent, or every tool result
+ * just sent). A history that dropped them passes into rendering without an exception (`chatPrompt`
+ * does not constrain the last role), and an answer gets attached to "a conversation with no
+ * question". An implementation that returns copies (`turns.map((turn) => ({ ...turn }))`) is
+ * legitimate; the check compares values. A history that splits a tool-calling message from its
+ * results fails loudly when it is rendered.
  */
 export type ChatOverflowPolicy = (
   context: ChatOverflow,
@@ -168,7 +221,51 @@ export type ChatSessionOptions = {
    * same lifetime, so it keeps measuring across turns.
    */
   readonly speculative?: boolean | "always";
+  /**
+   * The function declarations of this conversation (the OpenAI shape — `gemma.ChatTool`).
+   *
+   * Fixed for the session: the declarations live in the system block at the start of the
+   * conversation, so changing them would mean re-rendering everything. Checked at construction.
+   */
+  readonly tools?: readonly ChatTool[];
+  /**
+   * Thinking mode (default off) — `<|think|>` in the system block, and the model writes a thought
+   * channel before its answer. Fixed for the session (it shapes the system block and every
+   * generation prompt).
+   */
+  readonly enableThinking?: boolean;
 };
+
+/**
+ * How one turn of a session ended ({@link ChatSessionStream.reply}).
+ *
+ * - `"turn"` — the turn closed with an EOS token and holds no tool call; `message` is what the
+ *   parser read (`content`, `thinking`).
+ * - `"tool-call"` — the turn stopped at `<|tool_response>` after one or more calls; `message`
+ *   carries them (each with a session-assigned `id`). The session waits for
+ *   {@link ChatSession.sendToolResults}.
+ * - `"cut-off"` — the turn did not close (max tokens, a stop string, a host stop token, `break`, an
+ *   interruption): nothing is parsed, the streamed text is what the history keeps.
+ */
+export type ChatReply =
+  | { readonly end: "turn"; readonly message: ChatResponse; readonly stop: ChatStop }
+  | {
+      readonly end: "tool-call";
+      readonly message: ChatResponse & { readonly tool_calls: readonly ParsedToolCall[] };
+      readonly stop: ChatStop;
+    }
+  | { readonly end: "cut-off"; readonly stop: ChatStop };
+
+/**
+ * The stream of one session turn: the {@link ChatStream} of `Pipeline.chat` plus the parsed reply.
+ *
+ * `reply` settles after the stream has ended (drain it or close it with `break` first). It rejects
+ * with the turn's failure, like `done`, and also — with a `ModelInputError` while `done` resolves —
+ * when the model's closed turn is malformed (a broken call, tool calls closed by `<turn|>`, a call
+ * in a session without tools); the history then keeps the raw text and the KV is rebuilt on the
+ * next turn.
+ */
+export type ChatSessionStream = ChatStream & { readonly reply: Promise<ChatReply> };
 
 /**
  * Options that apply to one turn only (the same vocabulary and meaning as the request of
@@ -206,20 +303,23 @@ export type ChatTurnOptions = {
 };
 
 /**
- * The default overflow handling — **drop the oldest user / assistant pair** (the system message is
- * kept).
+ * The default overflow handling — **drop the oldest exchange** (the system message is kept): the
+ * entries from the first one after the system message up to the next user message — a user /
+ * assistant pair in a plain conversation, the question with its tool calls, results and answer in
+ * a tool conversation.
  *
- * Two entries are dropped at a time because dropping only one leaves "a conversation with only the
- * answer" or "a conversation with only the question", a broken context to show the model. When
- * nothing can be dropped, `turns` is returned as is (= the session fails with
- * `GenerationCapacityError` — this one message alone does not fit).
+ * A whole exchange is dropped at a time because dropping only part of it leaves "a conversation
+ * with only the answer", "only the question", or a tool result without its call — a broken context
+ * to show the model (the last one fails loudly when rendered). When nothing can be dropped (the
+ * exchange being answered now is all there is), `turns` is returned as is (= the session fails with
+ * `GenerationCapacityError` — this exchange alone does not fit).
  */
 export const dropOldestTurns: ChatOverflowPolicy = ({ turns, system }): readonly ChatMessage[] => {
   const floor = system === undefined ? 0 : 1;
-  // The last entry (= the message being answered now) is never dropped.
-  const droppable = turns.length - floor - 1;
-  if (droppable <= 0) return turns;
-  return [...turns.slice(0, floor), ...turns.slice(floor + Math.min(2, droppable))];
+  // The exchange being answered now (from the last user message on) is never dropped.
+  const next = turns.findIndex((turn, index) => index > floor && turn.role === "user");
+  if (next < 0) return turns;
+  return [...turns.slice(0, floor), ...turns.slice(next)];
 };
 
 /**
@@ -280,8 +380,77 @@ const neededOf = (detail: GenerationCapacityDetail): number =>
  * "judged to have dropped the last entry while keeping it" (the check side) or "silently disable the
  * rewind of a turn that emitted no character" (the `#finish` side).
  */
-const sameTurn = (left: ChatMessage, right: ChatMessage): boolean =>
-  left.role === right.role && left.content === right.content;
+const sameTurn = (left: ChatMessage, right: ChatMessage): boolean => sameValue(left, right);
+
+/** Structural equality of JSON-like values (messages hold only plain objects, arrays, scalars). */
+const sameValue = (left: unknown, right: unknown): boolean => {
+  if (left === right) return true;
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null) {
+    return false;
+  }
+  if (Array.isArray(left) !== Array.isArray(right)) return false;
+  const leftRecord = left as Readonly<Record<string, unknown>>;
+  const rightRecord = right as Readonly<Record<string, unknown>>;
+  const keys = Object.keys(leftRecord);
+  if (keys.length !== Object.keys(rightRecord).length) return false;
+  return keys.every(
+    (key) => Object.hasOwn(rightRecord, key) && sameValue(leftRecord[key], rightRecord[key]),
+  );
+};
+
+/** Whether `turns` ends with exactly `tail` (by value — {@link sameTurn}). */
+const endsWith = (turns: readonly ChatMessage[], tail: readonly ChatMessage[]): boolean =>
+  turns.length >= tail.length &&
+  tail.every((message, index) => sameTurn(turns[turns.length - tail.length + index], message));
+
+/** A deep copy whose every object is frozen (the history handed out cannot reach the internal one). */
+const frozenCopy = <T>(value: T): T => {
+  const freeze = (item: unknown): void => {
+    if (typeof item !== "object" || item === null) return;
+    Object.values(item).forEach(freeze);
+    Object.freeze(item);
+  };
+  const copy = structuredClone(value);
+  freeze(copy);
+  return copy;
+};
+
+/** The tool calls of a history entry (none for anything but a tool-calling assistant message). */
+const callsOf = (message: ChatMessage | undefined): readonly ChatToolCall[] =>
+  message?.role === "assistant" ? (message.tool_calls ?? []) : [];
+
+/**
+ * The history entries of a parsed closed turn (the template's input shape — the doc of
+ * {@link ChatSession}, "Tools, tool calls and thinking").
+ *
+ * The calls get session-assigned ids (`call_1`, `call_2`, … — unique within the turn, which is all a
+ * result's `tool_call_id` is resolved against); the template does not render ids.
+ */
+const entriesOf = (
+  parsed: ChatResponse,
+): { readonly entries: ChatAssistantMessage[]; readonly calls: ParsedToolCall[] } => {
+  const reasoning = parsed.thinking === undefined ? {} : { reasoning: parsed.thinking };
+  const calls = (parsed.tool_calls ?? []).map((call, index): ParsedToolCall => ({
+    ...call,
+    id: `call_${index + 1}`,
+  }));
+  if (calls.length === 0) {
+    return { entries: [{ role: "assistant", content: parsed.content ?? "", ...reasoning }], calls };
+  }
+  if (parsed.content === undefined) {
+    return {
+      entries: [{ role: "assistant", content: "", ...reasoning, tool_calls: calls }],
+      calls,
+    };
+  }
+  return {
+    entries: [
+      { role: "assistant", content: parsed.content, ...reasoning },
+      { role: "assistant", content: "", tool_calls: calls },
+    ],
+    calls,
+  };
+};
 
 /**
  * A session holding one conversation (history + KV).
@@ -292,6 +461,25 @@ const sameTurn = (left: ChatMessage, right: ChatMessage): boolean =>
  * let reply = "";
  * for await (const chunk of session.send("Name a color.")) reply += chunk; // streamed text
  * console.log(await session.send("Another one.").text());
+ * ```
+ *
+ * With tools, a turn can end on a tool call; the results continue the same model turn:
+ *
+ * ```ts
+ * await using session = new ChatSession(pipeline, { maxNewTokens: 256, tools: [weather] });
+ * let turn = session.send("What is the weather in Paris?");
+ * await turn.text();
+ * let reply = await turn.reply;
+ * while (reply.end === "tool-call") {
+ *   const results = reply.message.tool_calls.map((call) => ({
+ *     role: "tool" as const,
+ *     tool_call_id: call.id,
+ *     content: run(call.function.name, call.function.arguments), // the host runs the tool
+ *   }));
+ *   turn = session.sendToolResults(results);
+ *   await turn.text();
+ *   reply = await turn.reply;
+ * }
  * ```
  *
  * MUST: only one turn can run at a time (a second `send` throws **synchronously**). The history is
@@ -319,6 +507,8 @@ export class ChatSession {
    * sequence is rebuilt).
    */
   readonly #speculative: boolean | "always" | undefined;
+  /** The template options of every render (a frozen copy — fixed for the session). */
+  readonly #template: ChatTemplateOptions;
   /**
    * The conversation history (this layer's only mutable state — the sequence holds no transcript).
    */
@@ -340,6 +530,14 @@ export class ChatSession {
     this.#onOverflow = options.onOverflow ?? dropOldestTurns;
     this.#capacity = options.capacity ?? host.program.capacity;
     this.#speculative = options.speculative;
+    // MUST: check the declarations **at construction** — they are rendered only into the first
+    // prompt, so a bad one would otherwise surface on the first `send`, after the history moved.
+    const template: ChatTemplateOptions = {
+      ...(options.tools === undefined ? {} : { tools: options.tools }),
+      ...(options.enableThinking === undefined ? {} : { enableThinking: options.enableThinking }),
+    };
+    assertChatTemplateOptions(template, "gemma.ChatSession");
+    this.#template = frozenCopy(template);
     // MUST: check the capacity relations **at construction** (the same two formulas as
     // `createGenerationSequence` in `sequence.ts`). This layer uses `#capacity` as the measure of
     // the overflow decision **before** the sequence is allocated, so leaving the check to the
@@ -367,27 +565,89 @@ export class ChatSession {
   }
 
   /**
-   * The conversation so far (if a system message is declared, it comes first).
+   * The conversation so far (if a system message is declared, it comes first) — in the template's
+   * input shape, assistant tool calls and role `tool` results included.
    *
-   * Returns a frozen **copy** — exposing the internal array as is would let the consumer's `push` /
-   * `splice` silently break the mapping to the KV ("When the KV is carried over" of
-   * {@link ChatSession}).
+   * Returns a deep-frozen **copy** — exposing the internal array as is would let the consumer's
+   * `push` / `splice` (or a write into a call's arguments) silently break the mapping to the KV
+   * ("When the KV is carried over" of {@link ChatSession}).
    */
   get turns(): readonly ChatMessage[] {
-    return Object.freeze(this.#turns.map((turn) => Object.freeze({ ...turn })));
+    return frozenCopy(this.#turns);
   }
 
   /**
-   * Sends one message and streams **committed text pieces** (the same stream, the same stop reason
-   * and the same `text()` as {@link Pipeline.chat}).
+   * Sends one user message and streams **committed text pieces** (the same stream, the same stop
+   * reason and the same `text()` as {@link Pipeline.chat}, plus the parsed
+   * {@link ChatSessionStream.reply}).
    *
    * If the previous turn closed with EOS, the KV is carried over and **only the delta** is streamed;
    * otherwise the sequence is rebuilt and the history re-rendered. A turn that does not fit goes to
    * overflow handling **before sending** ({@link ChatSessionOptions.onOverflow}).
+   *
+   * NOTE: in a session with tools or thinking the pieces keep the special spellings
+   * (`<|channel>thought\n…<channel|>`, `<|tool_call>call:…<tool_call|>`, `<|"|>`) — without them a
+   * thought would run into the answer and a call would lose its string delimiters. A plain session
+   * streams the text without them, as `Pipeline.chat` does.
+   *
+   * MUST: after a turn that ended on a tool call, the results come first
+   * ({@link ChatSession.sendToolResults}) — the model turn is still open, and a user message there
+   * cannot be rendered.
    */
-  send(text: string, options: ChatTurnOptions = {}): ChatStream {
+  send(text: string, options: ChatTurnOptions = {}): ChatSessionStream {
+    this.#assertIdle("send");
+    if (callsOf(this.#turns.at(-1)).length > 0) {
+      throw new Error(
+        "gemma.ChatSession: the previous turn ended on a tool call — send its results with " +
+          "sendToolResults first (the model turn is still open)",
+      );
+    }
+    return this.#issue([{ role: "user", content: text }], options);
+  }
+
+  /**
+   * Sends the results of the tool calls the previous turn ended on, and streams the model's
+   * continuation of **the same model turn** (another call, or the answer).
+   *
+   * Each result is a role `tool` message naming its call by `tool_call_id` (the `id` of
+   * `reply.message.tool_calls`) or by `name`; one call may be answered by several results, in
+   * order. The results are checked and **copied** at issue (a malformed or ambiguous one throws
+   * `ModelInputError` synchronously, before the history moves).
+   *
+   * MUST: `content` is a string here (serialize a structured result) — the history keeps the
+   * typed shape of {@link ChatToolMessage}, which `turns` hands out.
+   */
+  sendToolResults(
+    results: readonly ChatToolMessage[],
+    options: ChatTurnOptions = {},
+  ): ChatSessionStream {
+    this.#assertIdle("sendToolResults");
+    const calls = callsOf(this.#turns.at(-1));
+    if (calls.length === 0) {
+      throw new Error(
+        "gemma.ChatSession: no tool call is waiting for results (sendToolResults continues a turn " +
+          "that ended on a tool call)",
+      );
+    }
+    // The same checks as the render (shape and name resolution), so nothing invalid enters the
+    // history.
+    renderGemma4ToolResults(calls, results, this.#template);
+    results.forEach((result, index) => {
+      const content: unknown = result.content;
+      if (typeof content !== "string") {
+        throw new ModelInputError(
+          `gemma.ChatSession.sendToolResults: results[${index}].content is not a string ` +
+            `(${JSON.stringify(content)} — serialize the result)`,
+        );
+      }
+    });
+    return this.#issue(structuredClone([...results]), options);
+  }
+
+  /** Throws synchronously when no turn can be issued (disposed, or a turn is running). */
+  #assertIdle(entry: string): void {
     if (this.#disposal !== undefined) {
-      throw new Error("gemma.ChatSession: cannot generate after dispose");
+      throw new Error(`gemma.ChatSession: cannot ${entry} after dispose`);
     }
     if (this.#busy) {
       throw new Error(
@@ -395,6 +655,10 @@ export class ChatSession {
           " (1 session = 1 generation — drain the issued stream or close it with break)",
       );
     }
+  }
+
+  /** Issues one turn for the messages just sent (`pending` — one user message, or the results). */
+  #issue(pending: readonly ChatMessage[], options: ChatTurnOptions): ChatSessionStream {
     // MUST: the request is **copied at issue** (ADR 0083 addendum 2026-09-02). The body (an async
     // generator) does not run until the first `next()`, so without reading everything here it would
     // run with "the values at the time draining started".
@@ -411,7 +675,11 @@ export class ChatSession {
     // The stop-string state machine is also built here (the option check and copy happen inside it =
     // the accepted set fails synchronously).
     const stopStrings = createStopStringFilter(options.stopStrings ?? []);
-    const detokenizer = this.#host.tokenizer.createDetokenizer();
+    const structured =
+      (this.#template.tools?.length ?? 0) > 0 || this.#template.enableThinking === true;
+    const detokenizer = this.#host.tokenizer.createDetokenizer({
+      skipSpecialTokens: !structured,
+    });
     // MUST: check the value ranges of the accepted set **before moving the session's state** (the
     // source of truth of the check is the one in `sequence.ts`). Placed later, an invalid request
     // would push a message onto the history and set `#busy`, "not failing until draining starts" —
@@ -422,8 +690,7 @@ export class ChatSession {
       ...(sampler === undefined ? {} : { sampler }),
     });
 
-    const asked: ChatMessage = { role: "user", content: text };
-    this.#turns.push(asked);
+    this.#turns.push(...pending);
     this.#busy = true;
 
     let settle!: (stop: ChatStop) => void;
@@ -434,6 +701,13 @@ export class ChatSession {
     });
     // A secondary notification path, so not an unhandled rejection even when nobody reads it.
     done.catch(() => {});
+    let settleReply!: (reply: ChatReply) => void;
+    let failReply!: (error: unknown) => void;
+    const reply = new Promise<ChatReply>((resolve, reject) => {
+      settleReply = resolve;
+      failReply = reject;
+    });
+    reply.catch(() => {});
 
     const prepare = this.#prepare.bind(this);
     const finish = this.#finish.bind(this);
@@ -442,18 +716,25 @@ export class ChatSession {
       let failure: { readonly error: unknown } | undefined;
       /** The matched stop string (this layer's stop reason). */
       let matched: string | undefined;
-      /** The text streamed in this turn (the assistant entry pushed onto the history). */
-      let reply = "";
+      /** The text streamed in this turn (what a cut-off turn leaves in the history). */
+      let text = "";
+      /** The generated ids (stop tokens excluded — what the parser reads, with `done.token`). */
+      const generated: number[] = [];
+      let prompt: readonly number[] = [];
       try {
-        const { sequence, prompt } = await prepare(maxNewTokens);
-        stream = sequence.generate({
-          prompt,
+        const prepared = await prepare(maxNewTokens);
+        prompt = prepared.prompt;
+        stream = prepared.sequence.generate({
+          prompt: prepared.prompt,
           maxNewTokens,
           ...(stopTokens === undefined ? {} : { stopTokens }),
           ...(sampler === undefined ? {} : { sampler }),
           ...(signal === undefined ? {} : { signal }),
         });
-        const parts = decodeChatChunks(stream, detokenizer, stopStrings, onPrefill, onToken);
+        const parts = decodeChatChunks(stream, detokenizer, stopStrings, onPrefill, (id) => {
+          generated.push(id);
+          onToken?.(id);
+        });
         try {
           for (;;) {
             const step = await parts.next();
@@ -461,7 +742,7 @@ export class ChatSession {
               matched = step.value;
               break;
             }
-            reply += step.value;
+            text += step.value;
             yield step.value;
           }
         } finally {
@@ -475,29 +756,37 @@ export class ChatSession {
         // interruption with `error === signal.reason`).
         throw error;
       } finally {
-        await completeChatTurn({
-          where: "gemma.ChatSession.send",
+        await completeSessionTurn({
           stream,
           matched,
           failure,
           settle,
           fail,
-          cleanup: (stop) => finish(asked, reply, stop),
+          settleReply,
+          failReply,
+          finish: (stop) => finish(pending, { text, generated, prompt }, stop),
         });
       }
     };
 
-    return chatStreamOf(
+    const stream = chatStreamOf(
       closeableGenerator(chunks(), (failure) => {
-        // prepare has not run, so only the provisionally added message is removed. The previous
+        // prepare has not run, so only the provisionally added messages are removed. The previous
         // turn's KV can still be carried over.
-        this.#turns.pop();
+        this.#turns.splice(this.#turns.length - pending.length, pending.length);
         this.#busy = false;
-        if (failure !== undefined) fail(failure.error);
-        else settle({ reason: "closed", tokens: 0 });
+        if (failure !== undefined) {
+          fail(failure.error);
+          failReply(failure.error);
+        } else {
+          const stop: ChatStop = { reason: "closed", tokens: 0 };
+          settle(stop);
+          settleReply({ end: "cut-off", stop });
+        }
       }),
       done,
     );
+    return Object.assign(stream, { reply });
   }
 
   /**
@@ -567,7 +856,7 @@ export class ChatSession {
     }
     // Copy along with the KV-to-history mapping (`#committed`). Between turns, "no sequence ⇔ the KV
     // is empty (`#committed === 0`)", so the KV copy is made only when there is a sequence.
-    const turns = this.#turns.map((turn) => ({ ...turn }));
+    const turns = structuredClone(this.#turns);
     const committed = this.#committed;
     const copying = this.#sequence?.fork();
     const branch = new ChatSession(this.#host, {
@@ -577,6 +866,7 @@ export class ChatSession {
       ...(this.#system === undefined ? {} : { system: this.#system }),
       ...(this.#sampler === undefined ? {} : { sampler: this.#sampler }),
       ...(this.#speculative === undefined ? {} : { speculative: this.#speculative }),
+      ...this.#template,
     });
     branch.#turns = turns;
     if (copying === undefined) return Promise.resolve(branch);
@@ -585,6 +875,35 @@ export class ChatSession {
       branch.#committed = committed;
       return branch;
     });
+  }
+
+  /**
+   * This turn's prompt when the KV is carried over: the delta of the messages after the committed
+   * ones — one message after a closed turn (`chatTurn`), or the results after a tool call
+   * (`chatToolResults`).
+   *
+   * MUST: anything else is a broken mapping between the KV and the history — streaming a delta
+   * while out of step would silently lose part of the conversation, so the premise of carrying over
+   * is itself a check.
+   */
+  #delta(): number[] {
+    const pending = this.#turns.slice(this.#committed);
+    const owner = this.#turns[this.#committed - 1];
+    if (pending.length > 0 && pending.every((message) => message.role === "tool")) {
+      return chatToolResults(
+        this.#host.tokenizer,
+        callsOf(owner),
+        pending as ChatToolMessage[],
+        this.#template,
+      );
+    }
+    if (pending.length === 1 && callsOf(owner).length === 0) {
+      return chatTurn(this.#host.tokenizer, pending[0], this.#template);
+    }
+    throw new Error(
+      `gemma.ChatSession internal inconsistency: the KV holds ${this.#committed} turns but the history holds ` +
+        `${this.#turns.length} (${pending.map((message) => message.role).join(", ")} after them)`,
+    );
   }
 
   /**
@@ -612,15 +931,6 @@ export class ChatSession {
         throw new Error("gemma.ChatSession: cannot generate after dispose");
       }
       const held = this.#sequence;
-      // Carry on with a delta only when "exactly the last message is uncommitted". Streaming a delta
-      // while out of step would silently lose part of the conversation, so the premise of carrying
-      // over is itself a check.
-      if (this.#committed !== 0 && this.#committed !== this.#turns.length - 1) {
-        throw new Error(
-          `gemma.ChatSession internal inconsistency: the KV holds ${this.#committed} turns but the history holds ` +
-            `${this.#turns.length}`,
-        );
-      }
       // `used` is a derived value (`#committed === 0` ⇔ the KV is empty ⇔ `used === 0`). Assuming 0
       // while the equivalence is broken would make the overflow decision looser than reality, so a
       // guard that fails the break by name sits next to it.
@@ -639,8 +949,8 @@ export class ChatSession {
       }
       const prompt =
         this.#committed === 0
-          ? chatPrompt(this.#host.tokenizer, this.#turns)
-          : chatTurn(this.#host.tokenizer, this.#turns[this.#turns.length - 1]);
+          ? chatPrompt(this.#host.tokenizer, this.#turns, this.#template)
+          : this.#delta();
       const detail = overflowOf(
         this.#host.program,
         this.#capacity,
@@ -683,7 +993,10 @@ export class ChatSession {
    */
   async #shrink(detail: GenerationCapacityDetail): Promise<void> {
     const before = this.#turns.length;
-    const asked = this.#turns[before - 1];
+    // The messages being answered now (one user message, or the results just sent).
+    const asked = this.#turns.slice(
+      this.#committed === 0 ? pendingStart(this.#turns) : this.#committed,
+    );
     const needed = neededOf(detail);
     const next = await this.#onOverflow({
       turns: this.turns,
@@ -691,13 +1004,12 @@ export class ChatSession {
       capacity: detail.limit,
       needed,
     });
-    // MUST: the message being answered now (the last entry) remains. Letting it through dropped
-    // would make `#prepare` re-render "a conversation with no question", and since
+    // MUST: the messages being answered now (the last entries) remain. Letting them through
+    // dropped would make `#prepare` re-render "a conversation with no question", and since
     // `chatPrompt` does not constrain the last role either, only an answer would be committed
     // with **zero exceptions**. The comparison is by value ({@link sameTurn}) — a legitimate policy
     // that returns copies is not rejected.
-    const last = next.at(-1);
-    if (last === undefined || !sameTurn(last, asked)) {
+    if (!endsWith(next, asked)) {
       throw new Error(
         `gemma.ChatSession: overflow handling dropped the current utterance (the last one)` +
           ` (history ${before} turns → ${next.length} — keep the utterance being answered now)`,
@@ -711,36 +1023,80 @@ export class ChatSession {
         detail,
       );
     }
-    this.#turns = next.map((turn) => ({ ...turn }));
+    this.#turns = structuredClone([...next]);
     // A truncated history is re-rendered from the start, so the context is returned and rebuilt.
     await this.#releaseSequence();
   }
 
   /**
    * The turn's wrap-up (appending to the history, deciding whether to carry the KV, accepting the
-   * next `send`).
+   * next `send`) → the parsed reply, or the reason the closed turn could not be parsed.
    */
-  async #finish(asked: ChatMessage, reply: string, stop: ChatStop | undefined): Promise<void> {
+  async #finish(
+    pending: readonly ChatMessage[],
+    output: {
+      readonly text: string;
+      readonly generated: readonly number[];
+      readonly prompt: readonly number[];
+    },
+    stop: ChatStop | undefined,
+  ): Promise<{ readonly reply: ChatReply } | { readonly malformed: unknown } | undefined> {
     try {
       if (stop?.reason === "eos") {
-        // Closed with the distribution's EOS = the model turn is closed. The entry is pushed even
-        // when the body is empty (the KV holds an empty model turn, so without it the re-render would
-        // be a different conversation from the KV).
-        this.#turns.push({ role: "assistant", content: reply });
-        this.#committed = this.#turns.length;
-        return;
+        // Closed with the distribution's EOS = the model turn is closed (or stopped at a tool call).
+        const tokenizer = this.#host.tokenizer;
+        let parsed: ChatResponse | undefined;
+        let malformed: unknown;
+        try {
+          parsed = parseChatResponse(tokenizer, [...output.generated, stop.token], output.prompt);
+        } catch (error) {
+          malformed = error;
+        }
+        const calledTool = (parsed?.tool_calls?.length ?? 0) > 0;
+        if (calledTool && (this.#template.tools?.length ?? 0) === 0) {
+          // Waiting for results nobody can produce would block the conversation.
+          malformed = new ModelInputError(
+            "gemma.ChatSession: the model wrote a tool call, but the session declares no tools",
+          );
+        } else if (calledTool && stop.token !== tokenizer.addedTokenId("<|tool_response>")) {
+          malformed = new ModelInputError(
+            `gemma.ChatSession: the model wrote tool calls but closed its turn with ` +
+              `${tokenizer.decode([stop.token], { skipSpecialTokens: false })} instead of ` +
+              `<|tool_response> (the results could not continue that turn)`,
+          );
+        }
+        if (parsed !== undefined && malformed === undefined) {
+          // The entries are pushed even when the body is empty (the KV holds an empty model turn,
+          // so without them the re-render would be a different conversation from the KV).
+          const { entries, calls } = entriesOf(parsed);
+          this.#turns.push(...entries);
+          this.#committed = this.#turns.length;
+          return {
+            reply: calledTool
+              ? { end: "tool-call", message: { ...parsed, tool_calls: calls }, stop }
+              : { end: "turn", message: parsed, stop },
+          };
+        }
+        // A closed turn the parser rejects: the history keeps what the model wrote, with its
+        // spellings (a re-render shows the model its own output), and the KV is rebuilt from it.
+        this.#turns.push({
+          role: "assistant",
+          content: tokenizer.decode(output.generated, { skipSpecialTokens: false }),
+        });
+        await this.#releaseSequence();
+        return { malformed };
       }
       // max-tokens / a stop string / an interruption / a failure leave the model turn unclosed = the
       // premise of a delta is missing.
-      if (reply !== "") this.#turns.push({ role: "assistant", content: reply });
-      else {
-        // A turn that emitted no character is **treated as never having happened** (no question
-        // without an answer is left in the history). The comparison is by value ({@link sameTurn}) —
-        // when overflow handling copies the history, references break.
-        const last = this.#turns.at(-1);
-        if (last !== undefined && sameTurn(last, asked)) this.#turns.pop();
+      if (output.text !== "") this.#turns.push({ role: "assistant", content: output.text });
+      // A turn that emitted no character is **treated as never having happened** (no question
+      // without an answer is left in the history). The comparison is by value ({@link sameTurn}) —
+      // when overflow handling copies the history, references break.
+      else if (endsWith(this.#turns, pending)) {
+        this.#turns.splice(this.#turns.length - pending.length, pending.length);
       }
       await this.#releaseSequence();
+      return stop === undefined ? undefined : { reply: { end: "cut-off", stop } };
     } finally {
       this.#busy = false;
     }
@@ -757,3 +1113,58 @@ export class ChatSession {
     await held?.dispose();
   }
 }
+
+/**
+ * Where the messages being answered now start in a history whose KV is empty: the trailing tool
+ * results, or the last message.
+ */
+const pendingStart = (turns: readonly ChatMessage[]): number => {
+  let start = turns.length - 1;
+  while (start > 0 && turns[start].role === "tool" && turns[start - 1].role === "tool") start -= 1;
+  return start;
+};
+
+/**
+ * The end of one session turn: {@link completeChatTurn} (the stop reason, the clean-up through
+ * `finish`, the lease) and then the reply.
+ *
+ * NOTE: a separate function so that no control-flow statement sits in the caller's `finally`
+ * (`no-unsafe-finally` — the same reason as `closeChatTurn`).
+ */
+const completeSessionTurn = async (options: {
+  readonly stream: GenerationStream | undefined;
+  readonly matched: string | undefined;
+  readonly failure: { readonly error: unknown } | undefined;
+  readonly settle: (stop: ChatStop) => void;
+  readonly fail: (error: unknown) => void;
+  readonly settleReply: (reply: ChatReply) => void;
+  readonly failReply: (error: unknown) => void;
+  readonly finish: (
+    stop: ChatStop | undefined,
+  ) => Promise<{ readonly reply: ChatReply } | { readonly malformed: unknown } | undefined>;
+}): Promise<void> => {
+  let outcome: { readonly reply: ChatReply } | { readonly malformed: unknown } | undefined;
+  try {
+    await completeChatTurn({
+      where: "gemma.ChatSession.send",
+      stream: options.stream,
+      matched: options.matched,
+      failure: options.failure,
+      settle: options.settle,
+      fail: options.fail,
+      cleanup: async (stop) => {
+        outcome = await options.finish(stop);
+      },
+    });
+  } catch (error) {
+    options.failReply(error);
+    throw error;
+  }
+  if (outcome === undefined) {
+    options.settleReply({ end: "cut-off", stop: { reason: "closed", tokens: 0 } });
+  } else if ("reply" in outcome) {
+    options.settleReply(outcome.reply);
+  } else {
+    options.failReply(outcome.malformed);
+  }
+};

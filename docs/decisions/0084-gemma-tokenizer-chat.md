@@ -223,3 +223,79 @@ Japanese character is three byte-level symbols, and the 512-token truncation act
 - Qwen2 numbers symbols locally within a pre-token; the vocab is needed only for the final
   spellings, and the accepted set equals the former full adjacent scan's.
 - On the real vocab the id sequences matched the former implementation (2,036 inputs, 0 mismatches).
+
+## Addendum (2026-11-04) — tools, tool calls, tool results and thinking
+
+The maintainer widened decision 5's scope: function calling and thinking. Decision 5's reasoning
+stands — no generic Jinja renderer. `packages/models/src/gemma/text/chat.ts` transliterates the
+template's control flow (the system block, the turn loop with its continuation rules,
+`format_parameters` / `format_function_declaration` / `format_argument`, tool calls, tool results,
+the thought channel and `strip_thinking`, the generation prompt), and
+`packages/models/src/gemma/text/chat-response.ts` transliterates upstream's output parser
+(`transformers/utils/chat_parsing/response_parser.py` driven by the snapshot's `response_template`)
+for the one Gemma 4 template.
+
+Upstream facts this rests on (measured 2026-11-04; transformers 5.14.1):
+
+- The E2B and E4B `chat_template.jinja` are byte-identical (SHA-256 `0a2c8073…`, both pinned
+  snapshots and `inputs/gemma4/`), as are their `tokenizer_config.json`. 12B's template
+  (`google/gemma-4-12B-it@43c9d014`) differs in two places only: a blank line after line 234
+  (outputs nothing) and lines 384-386, the empty thought channel after `<|turn>model\n` when
+  thinking is off. Its tool and thinking parts are the same text; its `tokenizer_config.json`
+  differs only in `processor_class`, so the three models share one `response_template`.
+- On the widened battery E4B renders and encodes exactly as E2B (24 cases, 0 differences), so E4B
+  still has no chat fixture of its own; 12B renders E2B's text plus the empty channel wherever a
+  generation prompt opens a model turn with thinking off (24 of 24).
+
+Decisions:
+
+1. **Shapes.** Messages, tool calls, tool results and declarations take the HF / OpenAI shape and
+   field names (`role` ∈ system / developer / user / assistant / tool; `tool_calls` of
+   `{id?, type: "function", function: {name, arguments: object}}`; `reasoning` /
+   `reasoning_content`; `tool_call_id` / `name` on a result; declarations
+   `{type: "function", function: {name, description, parameters, response?}}`). The template
+   options are a camelCase object: `{ tools?, enableThinking?, preserveThinking? }`. At the type
+   level every message has `content: string` (so `ChatSession.turns` stays a string-content
+   history); untyped input may also pass what upstream accepts there — a null or absent assistant
+   content, a number / boolean / null result.
+2. **The accepted set is upstream's, narrowed only where upstream's output would be wrong without an
+   exception** — each case is harvested with upstream's outcome beside it (`rejectedChat` in the
+   fixtures). Rejected: several calls without ids (every result gets the last call's name — the
+   template's `None == None`), a result `name` that contradicts its call, a `tool_call_id` that
+   matches no call (the spelling `unknown`), an orphan result (dropped), a call without results (a
+   bare `<|tool_response>`), content plus calls on a message whose results end the conversation (no
+   generation prompt), a tool name outside `\w+` (the parser could never read the call back), an
+   object result (the template raises), JSON-string arguments (the template raises), and the
+   `thinking` field (the template does not read it — it is `parse_response`'s output key).
+3. **Still out of scope, rejected loudly:** the legacy `tool_responses` field and content-part
+   arrays (text / image / audio / video), for the reason decision 5 gave.
+4. **Output parsing** (`gemma.parseChatResponse(tokenizer, output, prompt)`) takes token ids and
+   decodes them **with** their special spellings — `<|channel>`, `<|tool_call>`, `<|"|>` and the
+   stop tokens are special tokens that a `ChatStream`'s text drops. It equals upstream on every
+   well-formed golden (19 per fixture) and throws `ModelInputError` where upstream raises (7). It
+   also throws where upstream returns data that would hide a failure (10, labelled `ts-rejects`
+   with upstream's result recorded): a turn without its stop token, a region still open at the end,
+   text after the stop token, content or a thought in two segments (upstream keeps the last), a
+   non-object argument body, non-finite numbers, and a structure spelling left in the content.
+   Alternative considered: mirror upstream exactly and leave the checks to the host — rejected,
+   because a truncated call that happens to be valid JSON would be executed as a finished call.
+5. **Incremental path.** `gemma.chatToolResults(tokenizer, toolCalls, results, options)` is the
+   delta after a turn that stopped at `<|tool_response>`: that token is the pending token (it is in
+   the EOS set), so the delta starts with `response:NAME{…}<tool_response|>` and ends with
+   `<|channel>thought\n` when thinking is on (both dialects). `chatTurn` gained the options (the
+   12B tail depends on thinking) and rejects a tool message.
+6. **`ChatSession`** takes `tools` / `enableThinking` per session (they shape the system block),
+   parses every turn closed by an EOS token (`reply` of the returned stream: `"turn"`,
+   `"tool-call"` or `"cut-off"`), assigns ids to parsed calls, continues a tool-call turn with
+   `sendToolResults`, and records the history in the template's input shape (content written
+   before a call becomes its own assistant message, since the template writes a message's content
+   after its results). A malformed closed turn rejects `reply`, keeps the raw text and rebuilds the
+   KV. The default overflow policy drops the oldest whole exchange (up to the next user message),
+   so a result never loses its call. In a session with tools or thinking the streamed pieces keep
+   the special spellings. The identity between the KV and a whole re-render, with its three
+   by-design divergences (12B's empty channel, thoughts before the last user message, the parser's
+   normalisation), is written in the doc of `ChatSession` and checked in
+   `gemma4_chat_session_test.ts`.
+
+Not verified on a real model yet (fixtures and CPU tests only); `Pipeline.chat` takes the widened
+messages but has no `tools` / `enableThinking` options and streams text without special spellings.

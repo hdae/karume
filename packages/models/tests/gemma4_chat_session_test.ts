@@ -32,14 +32,16 @@
 //    走行中 / dispose 済みは同期に throw・写しは呼んだ同期区間（直後の send が分岐に入らない）
 
 import { readTextFile } from "@karume/test-support/fs";
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import { assert, assertEquals, assertNotEquals, assertRejects, assertThrows } from "@std/assert";
 import { beforeAll, describe, it, test } from "vite-plus/test";
 import { ModelInputError } from "../src/errors.ts";
 import {
   dropOldestTurns,
   type ChatOverflow,
+  type ChatReply,
   ChatSession,
   type ChatSessionHost,
+  type ChatSessionStream,
 } from "../src/gemma/chat-session.ts";
 import type { DefaultSampler } from "../src/gemma/config.ts";
 import type { GenerationProgram } from "../src/generation/program.ts";
@@ -58,8 +60,12 @@ import { Tokenizer } from "../src/gemma/text/tokenizer.ts";
 import {
   type ChatMessage,
   chatPrompt,
+  type ChatTool,
+  type ChatToolMessage,
+  chatToolResults,
   chatTurn,
   gemma4StopTokens,
+  renderGemma4Chat,
 } from "../src/gemma/text/chat.ts";
 
 type Fixture = {
@@ -115,7 +121,12 @@ const TIGHT_CAPACITY = 32;
 const LONG_ASK = "Name a color, then name another color, then explain the difference between them.";
 
 /** 台本 1 ターンぶん。`closes` = 配布形の停止 token で閉じる（次ターンを差分で継げる）。 */
-type Answer = { readonly text: string; readonly closes: boolean };
+type Answer = {
+  readonly text: string;
+  readonly closes: boolean;
+  /** The stop token a closing answer ends with (default `<turn|>`; `<|tool_response>` after a call). */
+  readonly stop?: number;
+};
 
 /** そのターンが会話へ積む論理位置の数（本文 + 停止 token）。 */
 const answerCost = (answer: Answer): number =>
@@ -189,6 +200,8 @@ const fakeHost = (
   faults: FakeFaults = {},
   /** 配布形が宣言する推奨サンプラ（解決順の最下段）。 */
   defaultSampler?: DefaultSampler,
+  /** The tokenizer the host hands out (its dialect decides what the session renders). */
+  hostTokenizer: Tokenizer = tokenizer,
 ): FakeHost => {
   const prompts: number[][] = [];
   const capacities: (number | undefined)[] = [];
@@ -219,10 +232,10 @@ const fakeHost = (
         const answer = answers[turn];
         assert(answer !== undefined, `台本に ${turn + 1} ターン目が無い`);
         turn += 1;
-        const ids = tokenizer.encode(answer.text);
+        const ids = hostTokenizer.encode(answer.text);
         used += request.prompt.length;
         const stop: GenerationStop = answer.closes
-          ? { reason: "eos", token: END_OF_TURN, tokens: ids.length + 1 }
+          ? { reason: "eos", token: answer.stop ?? END_OF_TURN, tokens: ids.length + 1 }
           : { reason: "max-tokens", tokens: ids.length };
 
         let settle!: (value: GenerationStop) => void;
@@ -281,7 +294,7 @@ const fakeHost = (
     return sequence;
   };
   return {
-    tokenizer,
+    tokenizer: hostTokenizer,
     program,
     defaultSampler,
     created: () => created,
@@ -1338,4 +1351,581 @@ test("ChatSession.fork: KV の複製が失敗したら reject し、元はその
     chatTurn(tokenizer, { role: "user", content: "Another one." }),
   );
   await session.dispose();
+});
+
+// ---- tools, tool calls and thinking (ADR 0084 addendum 2026-11-04) ---------------------------
+//
+// The identity the doc of `ChatSession` states — the KV of step k (P₀ ⧺ G₀ ⧺ s₀ ⧺ D₁ ⧺ … ⧺ Dₖ)
+// equals `chatPrompt(hₖ)` — checked over a multi-step tool conversation, in both dialects, with
+// the documented divergences pinned as such (a check that only says "different" would pass for any
+// bug, so each one names the exact difference).
+
+const TOOL_RESPONSE = tokenizer.addedTokenId("<|tool_response>") as number;
+const Q = '<|"|>';
+
+const WEATHER: ChatTool = {
+  type: "function",
+  function: {
+    name: "get_weather",
+    description: "Get the current weather for a city.",
+    parameters: {
+      type: "object",
+      properties: { location: { type: "string", description: "The city name" } },
+      required: ["location"],
+    },
+  },
+};
+const TIME: ChatTool = {
+  type: "function",
+  function: {
+    name: "get_time",
+    description: "Current local time.",
+    parameters: { type: "object", properties: { timezone: { type: "string" } } },
+  },
+};
+const TOOLS = [WEATHER, TIME];
+const ASK = "What is the weather in Paris?";
+const CALL_WEATHER = `<|tool_call>call:get_weather{location:${Q}Paris${Q}}<tool_call|>`;
+const CALL_TIME = `<|tool_call>call:get_time{timezone:${Q}Europe/Paris${Q}}<tool_call|>`;
+
+/** A step of a scripted conversation: what the host sends, and the KV right before generating. */
+type Step = {
+  readonly send: (session: ChatSession) => ChatSessionStream;
+  /** The messages the step adds before generating (to rebuild hₖ from the turns). */
+  readonly pending: readonly ChatMessage[];
+};
+
+/**
+ * Runs `steps` and returns, per step, the KV (built from what the host received and generated)
+ * next to `hₖ` (the session's turns plus the step's pending messages, before generating).
+ */
+const runSteps = async (
+  session: ChatSession,
+  host: FakeHost,
+  answers: readonly Answer[],
+  steps: readonly Step[],
+  owner: Tokenizer,
+): Promise<
+  { readonly kv: number[]; readonly history: ChatMessage[]; readonly reply: ChatReply }[]
+> => {
+  const out: { kv: number[]; history: ChatMessage[]; reply: ChatReply }[] = [];
+  let kv: number[] = [];
+  for (const [index, step] of steps.entries()) {
+    const history = [...session.turns, ...step.pending];
+    const stream = step.send(session);
+    await stream.text();
+    const reply = await stream.reply;
+    kv = [...kv, ...host.prompts()[index]];
+    out.push({ kv: [...kv], history, reply });
+    const answer = answers[index];
+    kv = [
+      ...kv,
+      ...owner.encode(answer.text),
+      ...(answer.closes ? [answer.stop ?? END_OF_TURN] : []),
+    ];
+  }
+  return out;
+};
+
+const toolAnswers: readonly Answer[] = [
+  { text: CALL_WEATHER, closes: true, stop: TOOL_RESPONSE },
+  { text: CALL_TIME, closes: true, stop: TOOL_RESPONSE },
+  { text: "It is 18 degrees at 14:05.", closes: true },
+  { text: "You are welcome.", closes: true },
+];
+const toolSteps: readonly Step[] = [
+  { send: (session) => session.send(ASK), pending: [{ role: "user", content: ASK }] },
+  {
+    send: (session) =>
+      session.sendToolResults([{ role: "tool", tool_call_id: "call_1", content: "18 degrees" }]),
+    pending: [{ role: "tool", tool_call_id: "call_1", content: "18 degrees" }],
+  },
+  {
+    send: (session) =>
+      session.sendToolResults([{ role: "tool", tool_call_id: "call_1", content: "14:05" }]),
+    pending: [{ role: "tool", tool_call_id: "call_1", content: "14:05" }],
+  },
+  { send: (session) => session.send("Thanks!"), pending: [{ role: "user", content: "Thanks!" }] },
+];
+
+describe("ChatSession tools: a multi-step tool conversation carried in the KV", () => {
+  it("E2B (gemma4): the KV equals the whole re-render at every step, token for token", async () => {
+    const host = fakeHost(toolAnswers, programOf(4096));
+    const session = new ChatSession(host, { system: SYSTEM, maxNewTokens: 32, tools: TOOLS });
+    const options = { tools: TOOLS };
+
+    const steps = await runSteps(session, host, toolAnswers, toolSteps, tokenizer);
+
+    assertEquals(host.created(), 1, "the KV was carried through calls, results and a new question");
+    for (const [index, step] of steps.entries()) {
+      assertEquals(step.kv, chatPrompt(tokenizer, step.history, options), `step ${index}`);
+    }
+    assertEquals(
+      steps.map((step) => step.reply.end),
+      ["tool-call", "tool-call", "turn", "turn"],
+    );
+    assertEquals(
+      host.prompts()[1],
+      chatToolResults(
+        tokenizer,
+        steps[0].reply.end === "tool-call" ? steps[0].reply.message.tool_calls : [],
+        [{ role: "tool", tool_call_id: "call_1", content: "18 degrees" }],
+        options,
+      ),
+      "a result is a delta",
+    );
+    assertEquals(session.turns, [
+      SYSTEM_MESSAGE,
+      { role: "user", content: ASK },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            type: "function",
+            function: { name: "get_weather", arguments: { location: "Paris" } },
+            id: "call_1",
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "18 degrees" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            type: "function",
+            function: { name: "get_time", arguments: { timezone: "Europe/Paris" } },
+            id: "call_1",
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "14:05" },
+      { role: "assistant", content: "It is 18 degrees at 14:05." },
+      { role: "user", content: "Thanks!" },
+      { role: "assistant", content: "You are welcome." },
+    ]);
+  });
+
+  it("12B (gemma4-unified): identical but for the empty thought of each model turn a prompt opened", async () => {
+    const unified = new Tokenizer(assets, "gemma4-unified");
+    const host = fakeHost(toolAnswers, programOf(4096), {}, undefined, unified);
+    const session = new ChatSession(host, { system: SYSTEM, maxNewTokens: 32, tools: TOOLS });
+    const options = { tools: TOOLS };
+    const opened = "<|turn>model\n<|channel>thought\n<channel|>";
+    const plain = (text: string): string => text.replaceAll(opened, "<|turn>model\n");
+
+    const steps = await runSteps(session, host, toolAnswers, toolSteps, unified);
+
+    for (const [index, step] of steps.entries()) {
+      const carried = unified.decode(step.kv, { skipSpecialTokens: false });
+      const whole = renderGemma4Chat(step.history, "gemma4-unified", options);
+      assertEquals(
+        plain(carried),
+        plain(whole),
+        `step ${index}: equal once the channel is removed`,
+      );
+    }
+    // Step 1 continues the first model turn: the KV opened it with the empty channel, the re-render
+    // writes the call right after `<|turn>model\n` (divergence 1 of the doc).
+    const step1 = unified.decode(steps[1].kv, { skipSpecialTokens: false });
+    assert(step1.includes(`${opened}${CALL_WEATHER}`), "the KV keeps the channel before the call");
+    assert(
+      renderGemma4Chat(steps[1].history, "gemma4-unified", options).includes(
+        `<|turn>model\n${CALL_WEATHER}`,
+      ),
+      "the re-render has none",
+    );
+    // After a result the prompt continues the turn — no tail in either dialect.
+    assert(!unified.decode(host.prompts()[1], { skipSpecialTokens: false }).includes("<|channel>"));
+  });
+
+  it("thinking on: exact within one user turn; a new question drops the past thoughts on re-render", async () => {
+    const answers: readonly Answer[] = [
+      {
+        text: `<|channel>thought\nI need the weather.\n<channel|>${CALL_WEATHER}`,
+        closes: true,
+        stop: TOOL_RESPONSE,
+      },
+      // The prompt after a result reopened the channel; the model closes it.
+      { text: "It is 18 degrees.\n<channel|>Sunny, 18 degrees.", closes: true },
+      { text: "<|channel>thought\nPolite.\n<channel|>You are welcome.", closes: true },
+    ];
+    const steps: readonly Step[] = [
+      toolSteps[0],
+      toolSteps[1],
+      {
+        send: (session) => session.send("Thanks!"),
+        pending: [{ role: "user", content: "Thanks!" }],
+      },
+    ];
+    const host = fakeHost(answers, programOf(4096));
+    const session = new ChatSession(host, {
+      maxNewTokens: 32,
+      tools: [WEATHER],
+      enableThinking: true,
+    });
+    const options = { tools: [WEATHER], enableThinking: true };
+
+    const run = await runSteps(session, host, answers, steps, tokenizer);
+
+    assertEquals(run[0].kv, chatPrompt(tokenizer, run[0].history, options), "step 0");
+    assertEquals(
+      run[1].kv,
+      chatPrompt(tokenizer, run[1].history, options),
+      "step 1 (thought kept)",
+    );
+    assertEquals(
+      tokenizer
+        .decode(host.prompts()[1], { skipSpecialTokens: false })
+        .endsWith("<tool_response|><|channel>thought\n"),
+      true,
+      "the results delta reopens the thought channel",
+    );
+    assertEquals(run[1].reply.end, "turn");
+    assertEquals(run[1].reply.end === "turn" ? run[1].reply.message : undefined, {
+      role: "assistant",
+      thinking: "It is 18 degrees.",
+      content: "Sunny, 18 degrees.",
+    });
+    // Divergence 2 of the doc: the thoughts before the new question stay in the KV only.
+    const carried = tokenizer.decode(run[2].kv, { skipSpecialTokens: false });
+    const whole = renderGemma4Chat(run[2].history, "gemma4", options);
+    assertNotEquals(carried, whole);
+    assertEquals(
+      carried
+        .replace("<|channel>thought\nI need the weather.\n<channel|>", "")
+        .replace("<|channel>thought\nIt is 18 degrees.\n<channel|>", ""),
+      whole,
+      "the only difference is the two past thoughts",
+    );
+  });
+});
+
+describe("ChatSession tools: the order of turns and results is enforced", () => {
+  const callFirst = (): { host: FakeHost; session: ChatSession } => {
+    const host = fakeHost(
+      [
+        { text: CALL_WEATHER, closes: true, stop: TOOL_RESPONSE },
+        { text: "Sunny.", closes: true },
+      ],
+      programOf(4096),
+    );
+    return { host, session: new ChatSession(host, { maxNewTokens: 32, tools: TOOLS }) };
+  };
+
+  it("after a tool call, send throws until the results are sent", async () => {
+    const { session } = callFirst();
+    const first = session.send(ASK);
+    await first.text();
+    assertEquals((await first.reply).end, "tool-call");
+
+    assertThrows(() => session.send("Never mind."), Error, "sendToolResults first");
+    const answered = session.sendToolResults([
+      { role: "tool", name: "get_weather", content: "18 degrees" },
+    ]);
+    assertEquals(await answered.text(), "Sunny.");
+    assertEquals((await answered.reply).end, "turn");
+  });
+
+  it("sendToolResults without a waiting call throws synchronously", () => {
+    const { session } = callFirst();
+    assertThrows(
+      () => session.sendToolResults([{ role: "tool", name: "get_weather", content: "x" }]),
+      Error,
+      "no tool call is waiting",
+    );
+  });
+
+  it("an invalid result fails synchronously and leaves the session as it was", async () => {
+    const { session } = callFirst();
+    await session.send(ASK).text();
+    const before = session.turns;
+
+    assertThrows(
+      () => session.sendToolResults([{ role: "tool", tool_call_id: "call_9", content: "x" }]),
+      ModelInputError,
+      "matches 0 of the calls",
+    );
+    assertThrows(
+      () =>
+        session.sendToolResults([
+          { role: "tool", tool_call_id: "call_1", content: 18 as unknown as string },
+        ]),
+      ModelInputError,
+      "not a string",
+    );
+    assertThrows(() => session.sendToolResults([]), ModelInputError, "no results");
+    assertEquals(session.turns, before, "nothing entered the history");
+    // Still usable: the right result goes through.
+    const answered = session.sendToolResults([
+      { role: "tool", tool_call_id: "call_1", content: "18 degrees" },
+    ]);
+    assertEquals(await answered.text(), "Sunny.");
+  });
+
+  it("the history handed out is deep-frozen (a call's arguments cannot be rewritten)", async () => {
+    const { session } = callFirst();
+    await session.send(ASK).text();
+    const turns = session.turns;
+    const call = turns.at(-1);
+    assert(call?.role === "assistant" && call.tool_calls !== undefined);
+    assertEquals(
+      Reflect.set(call.tool_calls[0].function.arguments ?? {}, "location", "Rome"),
+      false,
+    );
+    const again = session.turns.at(-1);
+    assert(again?.role === "assistant");
+    assertEquals(again.tool_calls?.[0].function.arguments, { location: "Paris" });
+  });
+
+  it("a branch forked while a call waits can answer it on its own", async () => {
+    const host = fakeHost(
+      [
+        { text: CALL_WEATHER, closes: true, stop: TOOL_RESPONSE },
+        { text: "Sunny.", closes: true },
+      ],
+      programOf(4096),
+    );
+    const session = new ChatSession(host, { maxNewTokens: 32, tools: TOOLS });
+    await session.send(ASK).text();
+
+    const branch = await session.fork();
+    assertEquals(host.forks(), 1, "the KV was copied");
+    assertEquals(
+      await branch
+        .sendToolResults([{ role: "tool", tool_call_id: "call_1", content: "18" }])
+        .text(),
+      "Sunny.",
+    );
+    assertThrows(() => session.send("x"), Error, "sendToolResults first", "the base still waits");
+  });
+
+  it("bad declarations fail at construction", () => {
+    const host = fakeHost([], programOf(4096));
+    assertThrows(
+      () =>
+        new ChatSession(host, {
+          maxNewTokens: 8,
+          tools: [{ type: "function", function: { name: "get-weather" } }],
+        }),
+      ModelInputError,
+      "not a word",
+    );
+    assertThrows(
+      () => new ChatSession(host, { maxNewTokens: 8, enableThinking: "yes" as unknown as boolean }),
+      ModelInputError,
+      "not a boolean",
+    );
+  });
+});
+
+describe("ChatSession tools: what the model writes is parsed, and a malformed turn is not trusted", () => {
+  it("a tools session streams the special spellings; the reply carries the parsed call", async () => {
+    const host = fakeHost(
+      [{ text: CALL_WEATHER, closes: true, stop: TOOL_RESPONSE }],
+      programOf(4096),
+    );
+    const session = new ChatSession(host, { maxNewTokens: 32, tools: TOOLS });
+    const stream = session.send(ASK);
+
+    assertEquals(await stream.text(), CALL_WEATHER);
+    const reply = await stream.reply;
+    assertEquals(reply.end, "tool-call");
+    assertEquals((await stream.done).reason, "eos");
+  });
+
+  it("a plain session streams without them, and still parses the turn from its ids", async () => {
+    const host = fakeHost(
+      [{ text: "<|channel>thought\nX<channel|>Blue.", closes: true }],
+      programOf(4096),
+    );
+    const session = new ChatSession(host, { maxNewTokens: 32 });
+    const stream = session.send("Name a color.");
+
+    assertEquals(await stream.text(), "thought\nXBlue.", "the stream drops special tokens");
+    assertEquals(await stream.reply, {
+      end: "turn",
+      message: { role: "assistant", thinking: "X", content: "Blue." },
+      stop: await stream.done,
+    });
+    assertEquals(session.turns.at(-1), { role: "assistant", content: "Blue.", reasoning: "X" });
+  });
+
+  it("a broken call rejects the reply (done still resolves), keeps the raw text and drops the KV", async () => {
+    const broken = "<|tool_call>call:get_weather{location:Paris}<tool_call|>";
+    const host = fakeHost(
+      [
+        { text: broken, closes: true, stop: TOOL_RESPONSE },
+        { text: "Sorry.", closes: true },
+      ],
+      programOf(4096),
+    );
+    const session = new ChatSession(host, { maxNewTokens: 32, tools: TOOLS });
+    const stream = session.send(ASK);
+    await stream.text();
+
+    assertEquals((await stream.done).reason, "eos");
+    await assertRejects(() => stream.reply, ModelInputError, "not JSON");
+    assertEquals(session.turns.at(-1), { role: "assistant", content: broken });
+    await session.send("Try again.").text();
+    assertEquals(host.created(), 2, "the next turn re-renders the history");
+  });
+
+  it("tool calls closed by <turn|> are not a tool-call turn", async () => {
+    const host = fakeHost([{ text: CALL_WEATHER, closes: true }], programOf(4096));
+    const session = new ChatSession(host, { maxNewTokens: 32, tools: TOOLS });
+    const stream = session.send(ASK);
+    await stream.text();
+
+    await assertRejects(() => stream.reply, ModelInputError, "closed its turn");
+    assertThrows(() => session.sendToolResults([]), Error, "no tool call is waiting");
+  });
+
+  it("a tool call in a session without tools is not waited on (the reply rejects)", async () => {
+    const host = fakeHost(
+      [
+        { text: CALL_WEATHER, closes: true, stop: TOOL_RESPONSE },
+        { text: "Blue.", closes: true },
+      ],
+      programOf(4096),
+    );
+    const session = new ChatSession(host, { maxNewTokens: 32 });
+    const stream = session.send(ASK);
+    await stream.text();
+
+    await assertRejects(() => stream.reply, ModelInputError, "declares no tools");
+    assertEquals(await session.send("Name a color.").text(), "Blue.", "the conversation goes on");
+  });
+
+  it("a cut-off turn is not parsed and reports cut-off", async () => {
+    const host = fakeHost([{ text: CALL_WEATHER.slice(0, 20), closes: false }], programOf(4096));
+    const session = new ChatSession(host, { maxNewTokens: 32, tools: TOOLS });
+    const stream = session.send(ASK);
+    await stream.text();
+
+    const reply = await stream.reply;
+    assertEquals(reply.end, "cut-off");
+    assertEquals(reply.stop.reason, "max-tokens");
+  });
+});
+
+describe("dropOldestTurns: drops the oldest whole exchange", () => {
+  const exchange: ChatMessage[] = [
+    { role: "user", content: ASK },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "call_1", type: "function", function: { name: "get_weather", arguments: {} } },
+      ],
+    },
+    { role: "tool", tool_call_id: "call_1", content: "18" },
+    { role: "assistant", content: "Sunny." },
+  ];
+
+  it("a tool exchange goes as a whole (no result is left without its call)", async () => {
+    const next = await dropOldestTurns({
+      turns: [SYSTEM_MESSAGE, ...exchange, { role: "user", content: "Thanks!" }],
+      system: SYSTEM,
+      capacity: 1,
+      needed: 2,
+    });
+    assertEquals(next, [SYSTEM_MESSAGE, { role: "user", content: "Thanks!" }]);
+  });
+
+  it("the exchange being answered (results included) is never dropped", async () => {
+    const turns = [SYSTEM_MESSAGE, ...exchange.slice(0, 3)];
+    assertEquals(await dropOldestTurns({ turns, system: SYSTEM, capacity: 1, needed: 2 }), turns);
+  });
+
+  it("an overflow while sending results drops the older exchange and re-renders the rest", async () => {
+    const maxNewTokens = 64;
+    const answers: readonly Answer[] = [
+      { text: "Blue.", closes: true },
+      { text: CALL_WEATHER, closes: true, stop: TOOL_RESPONSE },
+      { text: "Sunny.", closes: true },
+    ];
+    const result: ChatToolMessage = { role: "tool", tool_call_id: "call_1", content: "18 degrees" };
+    const kept: ChatMessage[] = [
+      { role: "user", content: ASK },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            type: "function",
+            function: { name: "get_weather", arguments: { location: "Paris" } },
+            id: "call_1",
+          },
+        ],
+      },
+      result,
+    ];
+    const shrunk = chatPrompt(tokenizer, kept, { tools: TOOLS }).length;
+    const capacity = shrunk + maxNewTokens - 1;
+    const host = fakeHost(answers, programOf(capacity));
+    const session = new ChatSession(host, { maxNewTokens: 16, tools: TOOLS });
+    await session.send(LONG_ASK).text();
+    await session.send(ASK).text();
+    // Precondition: carried in the KV, the results would not fit (so the overflow path is taken).
+    const carried =
+      chatPrompt(tokenizer, [...session.turns, result], { tools: TOOLS }).length + maxNewTokens - 1;
+    assert(carried > capacity, `the results fit without overflow (${carried} ≤ ${capacity})`);
+
+    const answered = session.sendToolResults([result], { maxNewTokens });
+    assertEquals(await answered.text(), "Sunny.");
+
+    assertEquals(host.created(), 2, "the shrunk history is re-rendered on a new sequence");
+    assertEquals(host.prompts()[2], chatPrompt(tokenizer, kept, { tools: TOOLS }));
+  });
+});
+
+test("ChatSession tools: content written before a call is its own entry, so the re-render keeps its place", async () => {
+  const answers: readonly Answer[] = [
+    { text: `Let me check.${CALL_WEATHER}`, closes: true, stop: TOOL_RESPONSE },
+    { text: "Sunny.", closes: true },
+  ];
+  const host = fakeHost(answers, programOf(4096));
+  const session = new ChatSession(host, { maxNewTokens: 32, tools: TOOLS });
+
+  const run = await runSteps(session, host, answers, toolSteps.slice(0, 2), tokenizer);
+
+  assertEquals(session.turns.slice(1, 3), [
+    { role: "assistant", content: "Let me check." },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          type: "function",
+          function: { name: "get_weather", arguments: { location: "Paris" } },
+          id: "call_1",
+        },
+      ],
+    },
+  ]);
+  assertEquals(run[1].kv, chatPrompt(tokenizer, run[1].history, { tools: TOOLS }));
+  // One message carrying both would put the content after the results (the template's order).
+  const merged: ChatMessage[] = [
+    { role: "user", content: ASK },
+    {
+      role: "assistant",
+      content: "Let me check.",
+      tool_calls: [
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "get_weather", arguments: { location: "Paris" } },
+        },
+      ],
+    },
+    ...toolSteps[1].pending,
+    { role: "user", content: "x" },
+  ];
+  assert(
+    renderGemma4Chat(merged, "gemma4", { tools: TOOLS }).includes(
+      `<tool_response|>Let me check.<turn|>`,
+    ),
+  );
 });

@@ -75,16 +75,23 @@ export type { PleResidency } from "./src/gemma/ple-gpu.ts";
  * {@link ChatSession} covers only the gap between them — it carries the KV over and truncates
  * a turn that does not fit the capacity **before sending it** with
  * {@link ChatSessionOptions.onOverflow} (default {@link dropOldestTurns}).
+ *
+ * With {@link ChatSessionOptions.tools} a turn can end on a tool call (`reply.end === "tool-call"`);
+ * {@link ChatSession.sendToolResults} continues the same model turn with the results.
  */
 export { dropOldestTurns, ChatSession } from "./src/gemma/chat-session.ts";
 export type {
   ChatOverflow,
   ChatOverflowPolicy,
+  /** How one session turn ended — `"turn"` / `"tool-call"` / `"cut-off"`, with the parsed message. */
+  ChatReply,
   /**
    * The surface the session reads from the pipeline ({@link Pipeline} satisfies it as is).
    */
   ChatSessionHost,
   ChatSessionOptions,
+  /** The stream of one session turn (`ChatStream` + `reply`). */
+  ChatSessionStream,
   ChatTurnOptions,
 } from "./src/gemma/chat-session.ts";
 /**
@@ -136,9 +143,11 @@ export type { RopeLayerSpec, RopeLayerType, RopeSpec } from "./src/gemma/rope.ts
 export { ropeInputs } from "./src/gemma/rope.ts";
 
 /**
- * Conversation → token ids (including `<bos>`, ending with the generation prompt). Accepts plain
- * conversations only; tools / thinking / unknown roles are rejected with fail loudly (ADR 0084
- * decision 5).
+ * Conversation → token ids (including `<bos>`, ending with the generation prompt), with the
+ * template options (function declarations, thinking — ADR 0084 decision 5 and its addendum of
+ * 2026-11-04). Messages, tool calls, tool results and declarations take the HF / OpenAI shape;
+ * what the template cannot take (content parts, the legacy `tool_responses`, ambiguous results)
+ * fails loudly.
  *
  * `chat` runs this internally, so it is needed only when driving the low-level surface
  * (`sequence`) yourself.
@@ -154,7 +163,35 @@ export { chatPrompt } from "./src/gemma/text/chat.ts";
  * `renderGemma4ChatTurn`, and the check in `gemma4_chat_test.ts` verifies it holds).
  */
 export { chatTurn } from "./src/gemma/text/chat.ts";
-export type { ChatMessage, ChatRole } from "./src/gemma/text/chat.ts";
+/**
+ * Tool results → **the delta tokens that continue the model turn after a tool call** (generation
+ * stopped at `<|tool_response>`, which the sequence holds as the pending token — the counterpart of
+ * {@link chatTurn} for a turn that ended on a call).
+ */
+export { chatToolResults } from "./src/gemma/text/chat.ts";
+export type {
+  ChatAssistantMessage,
+  ChatJsonObject,
+  ChatJsonValue,
+  ChatMessage,
+  ChatRole,
+  /** The template options (`tools` / `enableThinking` / `preserveThinking`). */
+  ChatTemplateOptions,
+  ChatTextMessage,
+  /** One function declaration (the OpenAI shape). */
+  ChatTool,
+  /** One tool call of an assistant message (arguments as an object). */
+  ChatToolCall,
+  /** One tool result (role `tool`). */
+  ChatToolMessage,
+} from "./src/gemma/text/chat.ts";
+/**
+ * Generated token ids (with their stop token) + the prompt they followed → **the parsed model
+ * turn** (`content` / `thinking` / `tool_calls`) — upstream `parse_response`. A turn that is cut,
+ * or malformed, fails loudly.
+ */
+export { parseChatResponse } from "./src/gemma/text/chat-response.ts";
+export type { ChatResponse, ParsedToolCall } from "./src/gemma/text/chat-response.ts";
 /**
  * The chat template a model follows ({@link PipelineConfig.chatDialect} — `"gemma4"` for E2B / E4B,
  * `"gemma4-unified"` for 12B). {@link chatPrompt} / {@link chatTurn} read it from the tokenizer.
