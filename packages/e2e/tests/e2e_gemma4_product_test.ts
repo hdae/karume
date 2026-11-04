@@ -14,6 +14,9 @@
 //    35 表経路で採った `ple.probe.safetensors`（= PLE をグラフに残していたら `embedding` +
 //    直後の `mul` が出していた値そのもの）と**厳密一致**する。GPU を要さない。
 //    併せて「触った block だけ遅延ロード + LRU」（決定 3）を実測で見る。
+//    The container read here is the `bf16` preset's (schema 5): its "dequantization" is the exact
+//    widening of the bf16 bits to f32, then `× embedScale` — the policy checks walk whichever tables
+//    the index has (`values` alone here; `values` + `scales` on a quantized index).
 // ③ **交差 parity**: ホスト PLE gather + ホスト `argmax(logits)` の greedy ループが、logits
 //    opt-in 系列の `greedy.<case>.safetensors`（torch full re-forward の期待列）と 3 ケース ×
 //    K=16 で厳密一致する。PLE を外に出しても・出口から argmax を外しても**機能が不変**である
@@ -31,11 +34,13 @@
 // ## 資産
 //
 // The container is the distribution mirror's `model` component (`models/karume-gemma4/`, model
-// e2b, quant i4 — 3.73 GiB, the graph and weights next to 2.22 GiB of PLE assets; byte-identical to
-// the product series it was assembled from), opened through the manifest (ADR 0139 decision 1).
-// The goldens come from the test-asset root (decision 2): `goldens/gemma4-e2b-product/`
-// (`ple.probe.safetensors`, `reference.json`) and `goldens/gemma4-e2b-decode/` (the greedy
-// expected lists). Without the mirror the container cases SKIP explicitly. The goldens follow ADR
+// e2b, quant bf16 — the regular line's one preset since 2026-11-04: the graph and the checkpoint's
+// bf16 weights next to 4.70 GB of bf16 PLE assets; byte-identical to the bf16 product series it was
+// assembled from), opened through the manifest (ADR 0139 decision 1). The goldens come from the
+// test-asset root (decision 2): `goldens/gemma4-e2b-product-bf16/` — the series' own
+// `ple.probe.safetensors`, `reference.json` and greedy expected lists (the series binds its own
+// goldens, where the int4 product borrowed the decode series'). Without the mirror the container
+// cases SKIP explicitly. The goldens follow ADR
 // 0139's fetched rule: a golden absent from a complete fetch of the pinned test-asset dataset FAILs
 // the case that reads it (the dataset at the pin lacks it); without a complete fetch that case SKIPs
 // with the missing files and `node tools/test-assets/fetch.ts` in its title. A mirror whose
@@ -58,8 +63,10 @@ import {
   defaultGemma4PleResidentBytes,
   gemma4PleBlockBytes,
   gemma4PleBlockOf,
-  type Gemma4PleQuantizedIndex,
+  type Gemma4PleFloatIndex,
+  type Gemma4PleIndex,
   type Gemma4PleTable,
+  gemma4PleTables,
   PLE_INDEX_ASSET,
 } from "../../models/src/gemma/ple-index.ts";
 import { gemma4RopeInputNames, ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
@@ -86,17 +93,20 @@ import { openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
 /** The distribution mirror that ships the product graph. */
 const MIRROR = mirrorRoot("karume-gemma4");
 /**
- * The mirror seat this gate reads: e2b with the i4 weights. MUST: name the quant — the manifest's
- * default (`i4-fast`) carries other session options, while the sessions below are built with the
- * options this gate always used (none), so the bytes it checks stay those of the i4 seat.
+ * The mirror seat this gate reads: e2b with the bf16 weights. MUST: name the quant — the sessions
+ * below are built with the options this gate always used (none, which the `bf16` preset declares
+ * too), so the bytes it checks stay those of the named seat whatever the manifest's default becomes.
  */
-const PRODUCT_CHOICE = { model: "e2b", quant: "i4" } as const;
+const PRODUCT_CHOICE = { model: "e2b", quant: "bf16" } as const;
 /** The component key, which is also the container's graph name (container-v1 §2.1). */
 const MODEL_GRAPH = "model";
-/** The product series' goldens (the PLE probe and the provenance record). */
-const PRODUCT_ROOT = goldenDir("gemma4-e2b-product");
-/** The decode series' greedy goldens (the expected lists of ③ and of the provenance record). */
-const GOLDEN_ROOT = goldenDir("gemma4-e2b-decode");
+/** The bf16 product series' goldens (the PLE probe and the provenance record). */
+const PRODUCT_ROOT = goldenDir("gemma4-e2b-product-bf16");
+/**
+ * The greedy goldens of ③ and of the provenance record — the bf16 series binds its own
+ * (`reference.series` is the series itself), so this is the same folder.
+ */
+const GOLDEN_ROOT = goldenDir("gemma4-e2b-product-bf16");
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
@@ -115,7 +125,7 @@ const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 /** The recipe commands that regenerate the product container and the goldens. */
 const GENERATE_COMMAND =
   "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m gemma4.export_product" +
-  "（期待列の正本は … python -m gemma4.export_decode）";
+  " --storage bf16";
 
 /** 期待列の正本 = logits opt-in 系列の greedy golden（正典は export_decode.GREEDY_CASES）。 */
 const EXPECTED_CASES = ["capital-en", "capital-ja", "context-en"] as const;
@@ -158,11 +168,16 @@ const ROW_SYMBOL = "R";
 const SLOTS = 30;
 
 /**
- * 常駐した圧縮重みの上限（ADR 0085 の主張そのもの — PLE を外して 3.70 → 1.51 GiB）。
- * decode 系列は同じ観測で 3.0e9 を**超える**ので、この線は両者を分ける（the token-only series,
- * removed on 2026-10-17, sat above it too）。
+ * The ceiling of the resident compressed weights (ADR 0085's claim itself: a container with the
+ * PLE moved out does not put the PLE on the GPU).
+ *
+ * Re-collected 2026-11-04 on the RTX 3080 Ti (Node + Dawn) when the gate moved from the int4 seat
+ * (3.70 → 1.51 GiB, ceiling 2.0e9 with the decode series above 3.0e9) to `bf16` (a new target):
+ * the bf16 container keeps 4,558,946,304 B resident, and kept in the graph its PLE would add the
+ * 4.70e9 B of bf16 values (262,144 × 35 × 256 × 2). The line sits between the two with the old
+ * line's relative headroom (about 1.2 × the measurement).
  */
-const RESIDENT_CEILING = 2_000_000_000;
+const RESIDENT_CEILING = 5_500_000_000;
 
 const exists = (url: URL): boolean => {
   try {
@@ -224,7 +239,7 @@ const PROVENANCE_GATE = goldensGate([REFERENCE, ...GREEDY_GOLDENS]);
 const GOLDENS_PRESENT = GREEDY_GOLDENS.every((file) => exists(file));
 const AVAILABLE = MODEL_PRESENT && GOLDENS_PRESENT;
 
-/** Opens the mirror's `model` container (e2b / i4) with range reads. */
+/** Opens the mirror's `model` container (e2b / bf16) with range reads. */
 const openProductContainer = async () =>
   await openSelectedContainer(await selectMirrorComponent(MIRROR, MODEL_GRAPH, PRODUCT_CHOICE));
 
@@ -375,11 +390,11 @@ const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
   return createGemma4Ple({ index, openBlock, vocabSize: VOCAB, maxResidentBytes });
 };
 
-const readPleIndex = async (): Promise<Gemma4PleQuantizedIndex> => {
+const readPleIndex = async (): Promise<Gemma4PleFloatIndex> => {
   const { index } = await openGemma4Ple(MIRROR, PRODUCT_CHOICE);
   assert(
-    index.storage !== "bf16",
-    "the i4 product's PLE index is bf16 (a quantized one is read here)",
+    index.storage === "bf16",
+    `the bf16 preset's PLE index is ${index.storage} (schema 5 bf16 is read here)`,
   );
   return index;
 };
@@ -433,11 +448,33 @@ const fullBytesOf = (table: Gemma4PleTable, plan: TableExpectation): number =>
   plan.full.reduce((sum, position) => sum + gemma4PleBlockBytes(table, table.blocks[position]), 0);
 
 /**
+ * {@link planTable} over every table the index has (`values`, then `scales` for a quantized
+ * index — a bf16 index has `values` alone), summed the way the loader's stats count the tables
+ * together.
+ */
+const planTables = (
+  index: Gemma4PleIndex,
+  ids: readonly number[],
+): { readonly full: number; readonly rowReads: number; readonly fullBytes: number } =>
+  gemma4PleTables(index).reduce(
+    (sum, [, table]) => {
+      const plan = planTable(table, ids);
+      return {
+        full: sum.full + plan.full.length,
+        rowReads: sum.rowReads + plan.rowReads,
+        fullBytes: sum.fullBytes + fullBytesOf(table, plan),
+      };
+    },
+    { full: 0, rowReads: 0, fullBytes: 0 },
+  );
+
+/**
  * ② PLE 逆量子化のビット一致（ADR 0085 決定 4）+ 遅延ロード / LRU（決定 3）。
  *
  * 参照は台本が **35 表経路の torch** で採った `ple.probe.safetensors` — PLE をグラフに残して
  * いれば `embedding` + 直後の `mul` がその値を出していた。ホスト側は `f32(i8) × per-row scale`
- * → `× embedScale` を同じ順序で組むので、**1 bit も違ってはならない**。ここが割れると③の
+ * → `× embedScale` を同じ順序で組むので（for the bf16 index read here: the exact widening of the
+ * bf16 bits, then `× embedScale`）、**1 bit も違ってはならない**。ここが割れると③の
  * token 列 parity も割れる（が、そのときどこが原因かは③からは読めない — 切り分けの線）。
  *
  * GPU を要さない（loader は Web 標準 API だけで閉じている）。
@@ -502,10 +539,11 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     // あたり数行なので全段が行読み。scales は 1 本の block が十数万 token を覆うので、probe の
     // 大半が同じ block に載り、その block だけが下限（32 行）に届いて全量読みへ倒れる。
     // 期待値は索引と probe の id から計算する（本数を定数で書くと資産世代で意味が変わる）。
+    // A bf16 index has no scale table, so its row path reads every probe row by range.
     const distinctIds = [...new Set(tokens)];
     const distinct = distinctIds.length;
     const valuePlan = planTable(index.values, distinctIds);
-    const scalePlan = planTable(index.scales, distinctIds);
+    const plans = planTables(index, distinctIds);
     const rows = await openPle(budget);
     const byRows = await rows.gather(tokens);
     assertEquals(byRows.dtype, "f32", "gather の dtype");
@@ -514,8 +552,7 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     assertProbeMatch(byRows.data, "行読み経路");
     const rowStats = rows.stats();
     // 期待値の前提: 全量へ倒れるぶんが既定予算に収まること（溢れると方針表が諦めて行読みへ戻る）。
-    const plannedFullBytes =
-      fullBytesOf(index.values, valuePlan) + fullBytesOf(index.scales, scalePlan);
+    const plannedFullBytes = plans.fullBytes;
     assert(
       plannedFullBytes <= budget,
       `全量読みへ倒れる ${plannedFullBytes} バイトが既定予算 ${budget} バイトを超える` +
@@ -528,17 +565,18 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     );
     assertEquals(
       rowStats.loads,
-      scalePlan.full.length,
-      "全量読みへ倒れた block 数（values は 0・scales は probe の行が 32 以上載る block のぶん）",
+      plans.full,
+      "whole-read blocks (values 0; a scale table, where the index has one, adds its blocks with" +
+        " 32 or more probe rows)",
     );
     assertEquals(
       rowStats.rowReads,
-      valuePlan.rowReads + scalePlan.rowReads,
+      plans.rowReads,
       "行読みの区間数（表ごとに、全量へ倒れなかった block の一意行数の合計）",
     );
     assertEquals(
       rowStats.resident,
-      scalePlan.full.length,
+      plans.full,
       "常駐 block 数（全量読みへ倒れたぶんだけ常駐する）",
     );
 
@@ -559,17 +597,16 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     );
     const fullStats = full.stats();
     const combined = [...new Set([...tokens, ...filler])];
-    const valueFull = planTable(index.values, combined);
-    const scaleFull = planTable(index.scales, combined);
+    const fullPlans = planTables(index, combined);
     assertEquals(
-      valueFull.rowReads + scaleFull.rowReads,
+      fullPlans.rowReads,
       0,
       "filler を足しても下限に届かない block がある（②-b の前提が崩れている）",
     );
     assertEquals(
       fullStats.loads,
-      valueFull.full.length + scaleFull.full.length,
-      "全量で読んだ block 数（values + scales の触ったぶん）",
+      fullPlans.full,
+      "whole-read blocks (the touched blocks of every table the index has)",
     );
     assertEquals(fullStats.rowReads, 0, "全量読みへ倒れた gather で行読みが起きている");
 
@@ -815,7 +852,7 @@ describe.skipIf(!MODEL_PRESENT || !GPU_AVAILABLE)(
         );
         console.log(
           `[e2e] gemma4 product 常駐: 圧縮 ${storage.residentCompressedBytes} バイト` +
-            `（PLE 外出し前の decode 系列は 3.0e9 超）`,
+            ` (kept in the graph, the bf16 PLE would add 4.70e9 B)`,
         );
       } finally {
         await session.dispose();
@@ -834,7 +871,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
   `Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     let logitsName: string;
-    let index: Gemma4PleQuantizedIndex;
+    let index: Gemma4PleFloatIndex;
     let ple: Gemma4Ple;
     let gpu: GpuContext | undefined;
     let session: Awaited<ReturnType<PreparedModel["createContainerSession"]>> | undefined;
@@ -906,15 +943,17 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
         `PLE gather ${totalGathers} 回に対し block 取得 ${stats.loads} 回` +
           `（キャッシュが効いていない）`,
       );
+      const blocks = gemma4PleTables(index).reduce(
+        (sum, [, table]) => sum + table.blocks.length,
+        0,
+      );
       assert(
-        stats.loads <= index.values.blocks.length + index.scales.blocks.length,
-        `block 取得 ${stats.loads} 回が本数 ${
-          index.values.blocks.length + index.scales.blocks.length
-        } を超える（読み直しが起きている）`,
+        stats.loads <= blocks,
+        `block 取得 ${stats.loads} 回が本数 ${blocks} を超える（読み直しが起きている）`,
       );
       console.log(
         `[e2e] gemma4 product PLE 遅延ロード: gather ${totalGathers} 回 / block 取得 ` +
-          `${stats.loads} 回（全 ${index.values.blocks.length + index.scales.blocks.length} 本中）`,
+          `${stats.loads} 回（全 ${blocks} 本中）`,
       );
     });
   },

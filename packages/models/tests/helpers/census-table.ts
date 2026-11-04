@@ -260,12 +260,23 @@ export type BundleCensusRow = {
 // 表
 // ---------------------------------------------------------------------------
 
-/** gemma4 E2B（製品グラフ）: linear 277 本（i4 276 + lm_head i8 1）が M ≤ 8 で全て並列 GEMV の行に載る。 */
-const GEMMA4_E2B_GEMV = { variant: 277, reference: 0 } as const;
 /**
- * gemma4 E2B の drafter: linear 68 本（全て i8）のうち並列 GEMV の実測表に載るのは 1536×256 の
- * 2 本だけ — 残り 66 本（256×{1024,2048,3072}・{1024,2048}×256・lm_head 262144×256）は逐次 GEMV へ
- * 落ちる（実測表が drafter の形を持たない。census は現状の本数をそのまま固定する）。
+ * Pipeline `gemma4` rows: the q4_0 QAT line's mirror (`models/karume-gemma4-qat`) — the line that
+ * keeps the int4 presets once the regular line ships `bf16` alone. Re-derived 2026-11-04 from that
+ * mirror's E2B / E4B `model` and `drafter` part 0 with the procedure of the file header, after the
+ * same computation reproduced the regular i4 mirror's former rows (E2B 277 / 0, RMS→add 106,
+ * 35 attention nodes, drafter 2 / 66 / 24 / 12; E4B 344 / 0, 127, 42). The values moved because the
+ * line did: the q4_0 output head is int4, a shape the parallel GEMV table has no row for, where the
+ * regular line's was int8.
+ *
+ * E2B (product graph): of the 277 linears, 276 (i4 g32) take a parallel GEMV row at M ≤ 8 and the
+ * i4 lm_head 262144×1536 falls to the sequential GEMV.
+ */
+const GEMMA4_E2B_GEMV = { variant: 276, reference: 1 } as const;
+/**
+ * The E2B QAT drafter: of its 68 linears (all i4 g32) only `post_projection` 1536×256 (twice) is in
+ * the parallel GEMV table — the other 66 (256×{1024,2048,3072}, {1024,2048}×256, lm_head 262144×256)
+ * fall to the sequential GEMV (the table has no drafter shapes; the census pins today's count).
  */
 const GEMMA4_E2B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
 /**
@@ -315,15 +326,23 @@ const GEMMA4_QAT_E4B_PACKED = { variant: 168 } as const;
 const GEMMA4_QAT_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
 
 /**
- * gemma4 E4B (product graph, 42 layers): all 344 linears (i4 + the i8 lm_head) take a parallel GEMV
- * row at M ≤ 8, RMS→add folds 127 times (decode M 1 / 4 / 8 and prefill M 32 / 768 alike) and
- * states-form attention runs ①' / ③' once each on the 42 layers. Derived 2026-10-30 from the
- * karume-gemma4 mirror with the same planning predicates as the QAT E4B rows (the same computation
- * reproduces E2B's 277 / 106 / 35 layers first). E4B ships no drafter.
+ * gemma4 E4B (product graph, 42 layers — the q4_0 mirror, derived with the E2B rows above): of the
+ * 344 linears, 343 (i4 g32) take a parallel GEMV row at M ≤ 8 and the i4 lm_head 262144×2560 falls
+ * to the sequential GEMV; RMS→add folds 127 times (decode M 1 / 4 / 8 and prefill M 32 / 768 alike)
+ * and states-form attention runs ①' / ③' once each on the 42 layers.
  */
-const GEMMA4_E4B_GEMV = { variant: 344, reference: 0 } as const;
+const GEMMA4_E4B_GEMV = { variant: 343, reference: 1 } as const;
 const GEMMA4_E4B_RMS_ADD = { variant: 127 } as const;
 const GEMMA4_E4B_STATE_PARALLEL = { variant: 84, reference: 0 } as const;
+/**
+ * The E4B QAT drafter (the regular E4B shipped none, so these columns are new): of its 68 linears
+ * (all i4 g32) only `post_projection` 2560×256 (twice) is in the parallel GEMV table — the other 66
+ * (256×{1024,2048,5120}, {1024,2048}×256, lm_head 262144×256) fall to the sequential GEMV. RMS→add
+ * folds 24 times and its 12 readonly attention nodes run ①' / ③' once each, as E2B's drafter.
+ */
+const GEMMA4_E4B_DRAFTER_GEMV = { variant: 2, reference: 66 } as const;
+const GEMMA4_E4B_DRAFTER_RMS_ADD = { variant: 24 } as const;
+const GEMMA4_E4B_DRAFTER_STATE_PARALLEL = { variant: 24, reference: 0 } as const;
 
 const E2B = ["e2b"] as const;
 const E4B = ["e4b"] as const;
@@ -382,7 +401,7 @@ const MOSS_DIT_SKIP22_LINEARS = { variant: 252, reference: 0 } as const;
  * 行の中身（相・席）は導出できた分だけ（未導出の相は書かない — ファイル冒頭）。
  */
 export const CENSUS_TABLE: readonly BundleCensusRow[] = [
-  // --- gemma4 E2B -----------------------------------------------------------
+  // --- gemma4 E2B (the q4_0 mirror, with its QAT drafter) -------------------
   {
     // e2e_gemma4_quant_test の `i4-gemvpar` 差し替え席 / 明示 sequential で ③ を戻した `i4-gemvpar`。
     family: "gemma4",
@@ -462,7 +481,7 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
       },
     },
   },
-  // --- gemma4 E4B (no drafter) ---------------------------------------------
+  // --- gemma4 E4B (the q4_0 mirror, with its QAT drafter) -------------------
   {
     // The distribution mirror's `i4-gemvpar`.
     family: "gemma4",
@@ -477,6 +496,12 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
         verify: {
           linearGemvReduce: GEMMA4_E4B_GEMV,
           stateAttentionReduce: GEMMA4_E4B_STATE_PARALLEL,
+        },
+      },
+      drafter: {
+        draft: {
+          linearGemvReduce: GEMMA4_E4B_DRAFTER_GEMV,
+          stateAttentionReduce: GEMMA4_E4B_DRAFTER_STATE_PARALLEL,
         },
       },
     },
@@ -495,6 +520,12 @@ export const CENSUS_TABLE: readonly BundleCensusRow[] = [
         prefill: { fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
         decode: { linearGemvReduce: GEMMA4_E4B_GEMV, fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
         verify: { linearGemvReduce: GEMMA4_E4B_GEMV, fuseRmsNormAdd: GEMMA4_E4B_RMS_ADD },
+      },
+      drafter: {
+        draft: {
+          linearGemvReduce: GEMMA4_E4B_DRAFTER_GEMV,
+          fuseRmsNormAdd: GEMMA4_E4B_DRAFTER_RMS_ADD,
+        },
       },
     },
   },

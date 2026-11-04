@@ -29,7 +29,8 @@
 // ## 資産
 //
 // 配布形ミラー `models/karume-gemma4/`（`karume/5`）。リポジトリ管理外なので、無い環境では
-// **明示 SKIP** する。
+// **明示 SKIP** する。The seat is the regular line's `bf16` preset — the checkpoint's own weights
+// with the PLE on the host (`fromAssets` takes every part of its container in RAM, about 9.3 GiB).
 //
 // NOTE: 系列出力（`outputs/series/gemma4-e2b-product/`）も `krm` を書くようになったが、この面は
 // 系列からは組めない — `fromAssets` が受けるのは**manifest が持つもの**（part 列のキー・
@@ -66,12 +67,10 @@ import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budg
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 /**
- * The seat these cases were written against: `i4-fast`, the regular distribution's default until
- * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
- * reading the int4 container (and its session options) their goldens and floors were taken on —
- * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ * The seat the goldens below were taken on: the regular line's `bf16` preset (its default and,
+ * since 2026-11-04, its one preset). Named so a later default does not move the goldens.
  */
-const INT4_SEAT = { quant: "i4-fast" } as const;
+const BF16_SEAT = { quant: "bf16" } as const;
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
@@ -96,7 +95,10 @@ const STOP_TOKENS = [1, 106, 50];
 
 /**
  * 検収ケース。`prompt` はフィクスチャ（`gemma4-chat.json`）のケース名で、`expected` は
- * **この経路で採った温度 0 の出力**である（2026-08-31・RTX 3080 Ti）。
+ * **この経路で採った温度 0 の出力**である — re-collected 2026-11-04 on the RTX 3080 Ti (Node +
+ * Dawn) when the gate moved from the regular `i4-fast` seat to `bf16` (a new target: the int4
+ * seat leaves the regular line). `single-user` is unchanged (9 tokens); `japanese` was
+ * "2023年時点で、およそ1,400万人です。" in 18 tokens on `i4-fast` (2026-08-31).
  *
  * MUST: 期待値を「実行結果で上書きして緑にする」ことをしない — 割れたら、まず
  * `e2e_gemma4_product_test.ts` の交差 parity（torch との突合）が緑かどうかを見る。あちらが
@@ -115,8 +117,8 @@ const CASES = [
     fixture: "japanese",
     maxNewTokens: 24,
     // 多ターン（system + user + assistant + user）の 4 通目への応答。
-    expected: "2023年時点で、およそ1,400万人です。",
-    stop: { reason: "eos", token: 106, tokens: 18 },
+    expected: "2023年時点の東京の人口は約1,400万人です。",
+    stop: { reason: "eos", token: 106, tokens: 20 },
   },
 ] as const;
 
@@ -157,7 +159,7 @@ if (!AVAILABLE) {
 const openPipeline = async (options: PipelineOptions = {}): Promise<Pipeline> =>
   await Pipeline.fromAssets(
     {
-      ...(await gemma4MirrorAssets(MIRROR_DIR, INT4_SEAT)),
+      ...(await gemma4MirrorAssets(MIRROR_DIR, BF16_SEAT)),
       // 宣言は配布形のものではなく**この門が固定した値**を使う（chunk 長・容量・rope の既定が
       // ミラー側で動いても、golden を採ったときと同じ形で回す）。
       config: {
@@ -171,7 +173,7 @@ const openPipeline = async (options: PipelineOptions = {}): Promise<Pipeline> =>
     {
       // 予算は索引から導く（= PLE 全量常駐 → 範囲をまたぐ会話でも読み直しゼロ）。定数で書くと
       // 資産世代で block 幅が変われば別の本数を意味してしまう — helper の doc。
-      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
+      maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, BF16_SEAT),
       ...options,
     },
   );

@@ -17,9 +17,9 @@
 //    NOTE: 門は `speculative: "always"`（ゲート無しの常時投機）で回す — 床も厳密一致も「常に
 //    投機」の契約だからである。既定の自己採算ゲート（段 4-B ④・`speculative: true`）は最後の
 //    step が別に見る（列の一致だけが門で、落ちた step 数は壁時計依存なのでログのみ）。
-// ② **既定席の同一性**（`fromPretrained` の既定 = 配布形の既定 quant `i4-fast`〈GEMV parallel +
-//    RMS→add 融合 + attention `"parallel-fused"` — 3 つとも quant の宣言〉）… ①と同じ 3 ケースを
-//    既定席で回し、
+// ② **既定席の同一性**（the fused-parallel seat `i4-fast`〈GEMV parallel + RMS→add 融合 +
+//    attention `"parallel-fused"` — 3 つとも quant の宣言〉, named because the q4_0 line's default is
+//    the reference seat `i4`）… ①と同じ 3 ケースをその席で回し、
 //    投機 / 非投機の token 列が一致する（相違 0）ことを門にする。自己採算ゲート付き
 //    （`speculative: true`）の列が always と一致することも同じ席で門にする — ゲートは壁時計で
 //    M=1 と M=4 を切り替えるので、その選択が出力を変えないこと（= 実用層のデバイス内決定性）は
@@ -42,8 +42,10 @@
 //
 // ## 資産
 //
-// 配布形ミラー `models/karume-gemma4/`（drafter 込み）と the drafter goldens in the test-asset
-// root, `goldens/gemma4-e2b-drafter/`（prompt と torch 継続列 — ADR 0139 decision 2）。どちらも
+// The q4_0 QAT line's mirror `models/karume-gemma4-qat/` (E2B with its int4 QAT drafter — the
+// `gemma4` pipeline's int4 seats since the regular line ships `bf16` alone, 2026-11-04) and the QAT
+// drafter goldens in the test-asset root, `goldens/gemma4-e2b-qat-drafter/`（prompt と torch 継続列 —
+// ADR 0139 decision 2）。どちらも
 // リポジトリ管理外で、without the mirror every case SKIPs explicitly. The goldens follow ADR 0139's
 // fetched rule: a golden absent from a complete fetch of the pinned test-asset dataset FAILs the
 // cases that read it (the dataset at the pin lacks it); without a complete fetch those cases SKIP
@@ -72,6 +74,7 @@ import { ropeInputs, type RopeSpec } from "../../models/src/gemma/rope.ts";
 import { GEMMA4_DRAFT_STEPS } from "../../models/src/gemma/speculative.ts";
 import type { SamplerSpec } from "../../models/src/generation/sampler.ts";
 import {
+  GEMMA4_QAT_MIRROR,
   mirrorAvailable,
   openGemma4Ple,
   openMirrorComponent,
@@ -88,20 +91,19 @@ import {
   allResidentPleBytesOfMirror,
 } from "../../models/tests/helpers/ple-budget.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+const MIRROR_DIR = GEMMA4_QAT_MIRROR;
 /**
- * The seat these cases were written against: `i4-fast`, the regular distribution's default until
- * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
- * reading the int4 container (and its session options) their goldens and floors were taken on —
- * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ * The seat these cases read: the q4_0 line's fused-parallel `i4-fast` over its E2B (the mirror's
+ * default model) and its QAT drafter — the seat the regular line's `i4-fast` was before the regular
+ * line went `bf16`-only (2026-11-04). Named because the line's default is the reference `i4`.
  */
 const INT4_SEAT = { quant: "i4-fast" } as const;
-const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");
+const GOLDEN_ROOT = goldenDir("gemma4-e2b-qat-drafter");
 
 /** SKIP 時にそのまま貼れる組み立てコマンド（段 2 の門と同文）。 */
 const ASSEMBLE_COMMAND =
-  "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
-  "（drafter 系列と golden は … python -m gemma4.export_drafter）";
+  "cd tools/export-recipes && uv run python dist.py --pipeline gemma4-qat" +
+  "（drafter 系列と golden は … python -m gemma4.export_drafter_qat）";
 
 /** golden のケース（正本は `export_drafter.py` の GOLDEN_CASES）。 */
 const CASES = ["short-en", "readme-recipes", "readme-exporter"] as const;
@@ -119,6 +121,11 @@ const MAX_NEW_TOKENS = 200;
  * 2.010 / 2.140 token/cycle・2026-09-08・RTX 3080 Ti）の**下**に置いた回帰検出線で、drafter の質か
  * 受理判定が退行すると割れる（golden 側の teacher forcing の値 2.125 / 2.110 とは別量）。
  * `short-en`（25 token の短文）は 1 ケースぶんの分散が大きすぎるのでログだけ（門は置かない）。
+ *
+ * Re-collected 2026-11-04 on the RTX 3080 Ti (Node + Dawn) when the gate moved from the regular
+ * `i4-fast` + int8 drafter to the q4_0 `i4-fast` + QAT drafter (a new target): 2.095 / 2.117
+ * token/cycle on the README cases (short-en 1.605, log only). The same rule as the first floor —
+ * below the smaller measurement, rounded down to one decimal — gives 1.9 again, so the value stays.
  *
  * NOTE: 基準は **RTX 3080 Ti / Vulkan バックエンド**の実測である。①は `"sequential"` 席でも
  * 縮約の**実行順**までは固定しない（grid-stride の分割が device の限界値で変わる）ので、別 GPU /
@@ -316,7 +323,8 @@ const commonPrefix = (left: readonly number[], right: readonly number[]): number
  *
  * MUST: 実測（2026-09-08 の 3 ケースは 200/200 一致）に合わせない。i4 の target は torch と
  * ビット同値ではないので、いずれ長い列の途中で割れうる — 床は「別の列へ乗り換えた」級だけを
- * 拾う位置に置く。
+ * 拾う位置に置く。Re-measured 2026-11-04 on the new target (q4_0 E2B against its QAT drafter
+ * golden, whose continuation is the torch QAT target's): 200 / 200 on all 3 cases, so 16 stays.
  */
 const GOLDEN_PREFIX_FLOOR = 16;
 
@@ -1059,7 +1067,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       }
     }
 
-    it("linear→SRQ指定は通常版のMTP verify行0/decode一致を保つ", async () => {
+    it("linear→SRQ requested keeps the MTP verify row 0 / decode u32 identity", async () => {
       const { mismatches, left, right } = compare(
         await measure("parallel", "parallel", true, true),
       );

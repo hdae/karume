@@ -32,8 +32,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /** QAT E2B decode 計画で packed になる SRQ の本数（e2e_*_fusion_counts_test.ts と同じ値）。 */
 const DECODE_PACKED = 70;
 
-/** The mirror each family (= manifest pipeline name) is read from. */
-const MIRRORS = { gemma4: "karume-gemma4", "gemma4-qat": "karume-gemma4-qat-mobile" } as const;
+/**
+ * The mirror each family (= manifest pipeline name) is read from. Pipeline `gemma4`'s int4 presets
+ * are the q4_0 QAT line's (`karume-gemma4-qat` — same pipeline, an `i4` E2B with its QAT drafter):
+ * the regular line ships `bf16` alone (2026-11-04), so it has no quant seat left to swap here.
+ */
+const MIRRORS = { gemma4: "karume-gemma4-qat", "gemma4-qat": "karume-gemma4-qat-mobile" } as const;
 
 for (const family of ["gemma4", "gemma4-qat"] as const) {
   const root = new URL(`../../../models/${MIRRORS[family]}/`, import.meta.url);

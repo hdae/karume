@@ -42,12 +42,14 @@
 // ## 資産
 //
 // The container is the distribution mirror's `model` component (`models/karume-gemma4/`, model
-// e2b, quant i4 — weights and PLE assets in one container; byte-identical to the product series),
-// opened through the manifest (ADR 0139 decision 1); the expected lists are the decode series'
-// greedy goldens in the test-asset root (`goldens/gemma4-e2b-decode/`, decision 2). Both are
-// outside git; without the mirror ①〜⑤ SKIP explicitly. The goldens follow ADR 0139's fetched rule:
-// one absent from a complete fetch of the pinned test-asset dataset FAILs ①〜⑤ (the dataset at the
-// pin lacks it); without a complete fetch ①〜⑤ SKIP with the missing files and
+// e2b, quant bf16 — the regular line's one preset since 2026-11-04: the checkpoint's own weights
+// and its bf16 PLE assets in one container; byte-identical to the bf16 product series), opened
+// through the manifest (ADR 0139 decision 1); the expected lists are that series' own greedy
+// goldens in the test-asset root (`goldens/gemma4-e2b-product-bf16/`, decision 2 — the same 3
+// cases × 16 steps on the same prompts as the decode series' goldens the int4 seat read before).
+// Both are outside git; without the mirror ①〜⑤ SKIP explicitly. The goldens follow ADR 0139's
+// fetched rule: one absent from a complete fetch of the pinned test-asset dataset FAILs ①〜⑤ (the
+// dataset at the pin lacks it); without a complete fetch ①〜⑤ SKIP with the missing files and
 // `node tools/test-assets/fetch.ts` in the title. ⑥だけは drafter 入りの配布形ミラー `models/karume-gemma4/` を使う（投機の
 // 2 系統を同じ pipeline で回すため）— ミラーが無い環境では⑥だけを明示 SKIP する。
 
@@ -104,15 +106,16 @@ import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
 
 /**
- * The mirror seat ①〜⑤ read: e2b with the i4 weights. MUST: name the quant — the manifest's
- * default (`i4-fast`) carries other session options, while the session below is built with the
- * options this gate always used (none), so the token lists it checks stay those of the i4 seat.
+ * The mirror seat ①〜⑤ read: e2b with the bf16 weights. MUST: name the quant — the session below
+ * is built with the options this gate always used (none, the reference summation order the `bf16`
+ * preset declares too), so the token lists it checks stay those of the named seat whatever the
+ * manifest's default becomes.
  */
-const PRODUCT_CHOICE = { model: "e2b", quant: "i4" } as const;
+const PRODUCT_CHOICE = { model: "e2b", quant: "bf16" } as const;
 /** The component key, which is also the container's graph name (container-v1 §2.1). */
 const MODEL_GRAPH = "model";
-/** The decode series' greedy goldens (the expected lists). */
-const GOLDEN_ROOT = goldenDir("gemma4-e2b-decode");
+/** The bf16 product series' greedy goldens (the expected lists). */
+const GOLDEN_ROOT = goldenDir("gemma4-e2b-product-bf16");
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
@@ -124,6 +127,11 @@ const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
  *
  * MUST: 停止添字は手で固定する（段 2 の門と同文）— golden から導くと「集合が痩せても添字も
  * 一緒に動く」形になり、③が恒真化する。
+ *
+ * The indices were re-read by hand on 2026-11-04 from the bf16 series' goldens when the gate moved
+ * there from the int4 seat (a new target): capital-en [9079, 236761, 106, …], capital-ja
+ * [31414, 3652, 236924, 106, …] and context-en [9079, 236761, 106, …] first meet the stop set at
+ * 2 / 3 / 2 — the indices the decode series' goldens had.
  */
 const EXPECTED_CASES = [
   { name: "capital-en", firstStop: 2 },
@@ -186,12 +194,10 @@ const VOCAB = 262144;
 /** The distribution mirror: ①〜⑤ read its product container, ⑥ its drafter pipeline. */
 const MIRROR_DIR = mirrorRoot("karume-gemma4");
 /**
- * The seat these cases were written against: `i4-fast`, the regular distribution's default until
- * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
- * reading the int4 container (and its session options) their goldens and floors were taken on —
- * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ * The seat ⑥ loads: the regular line's `bf16` preset with its int8 drafter (the same seat as
+ * ①〜⑤). Named so a later default does not move it.
  */
-const INT4_SEAT = { quant: "i4-fast" } as const;
+const BF16_SEAT = { quant: "bf16" } as const;
 
 const exists = (url: URL): boolean => {
   try {
@@ -593,10 +599,13 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 // 「元が X で進む → 分岐が Y で**同じ位置**を上書き → 元が Z で X の行を読む」で、共有のバグが
 // あると Z の列が変わる（複製漏れは Y の列が変わる）。基準は fork を使わない同じ操作列から作る。
 //
-// NOTE: 「流し直した結果とのビット一致」は保証する門が無いので見ない。ゲートつきの系統は、
-// レーンの機で投機⑤（`e2e_gemma4_speculative_test.ts` の u32 門）が緑であることを前提にする —
-// ゲートは壁時計で M=1 と M=4 を選ぶので、門が赤の device では基準と分岐の列が割れうる
-// （ADR 0066 追記 2026-10-11 の決定性の節）。
+// NOTE: 「流し直した結果とのビット一致」は保証する門が無いので見ない。The gated system relies on
+// decode (M=1) and verify (M=4) giving the same tokens — the gate picks M=1 or M=4 by wall clock,
+// so on a device where the two differ the baseline and fork lists can split (ADR 0066 addendum
+// 2026-10-11, the determinism section). On the `bf16` preset read here (the reference summation
+// order) that premise is checked by `e2e_gemma4_bf16_mirror_test.ts` ③ (a speculative greedy turn
+// equals the plain one); the u32 gate of `e2e_gemma4_speculative_test.ts` ⑤ covers the q4_0 line's
+// int4 seats.
 
 /**
  * drafter 入りの `karume/5` ミラーか（⑥の前提 — 投機の 2 系統を回す）。
@@ -673,9 +682,9 @@ describe.skipIf(!MIRROR_WITH_DRAFTER || !GPU_AVAILABLE)(
     beforeAll(async () => {
       const started = performance.now();
       loaded = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
-        ...INT4_SEAT,
+        ...BF16_SEAT,
         speculative: { k: GEMMA4_DRAFT_STEPS },
-        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, BF16_SEAT),
       });
       console.log(
         `[e2e] gemma4 sequence ⑥: pipeline ロード ${(performance.now() - started).toFixed(0)}ms`,

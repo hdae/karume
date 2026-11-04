@@ -17,8 +17,10 @@
 //
 // ## 資産と経路
 //
-// 配布形ミラー `models/karume-gemma4/` を `nodeDirectory` で直読みする（HTTP も永続キャッシュ
-// も要らない — ADR 0086）。ミラーが無い環境では**明示 SKIP**。
+// The q4_0 QAT line's mirror `models/karume-gemma4-qat/` (E2B, its `i4-fast` seat — the `gemma4`
+// pipeline's int4 seats since the regular line ships `bf16` alone, 2026-11-04), read directly
+// through `nodeDirectory` (no HTTP, no persistent cache — ADR 0086). Without the mirror the cases
+// SKIP explicitly.
 
 import { isNotFound, readTextFile } from "@karume/test-support/fs";
 import { assert, assertEquals } from "@std/assert";
@@ -27,19 +29,18 @@ import { beforeAll, describe, it } from "vite-plus/test";
 import { Pipeline } from "../../models/gemma.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { allResidentPleBytesOfMirror } from "../../models/tests/helpers/ple-budget.ts";
-import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
+import { GEMMA4_QAT_MIRROR, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 
-const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
+const MIRROR_DIR = GEMMA4_QAT_MIRROR;
 /**
- * The seat these cases were written against: `i4-fast`, the regular distribution's default until
- * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
- * reading the int4 container (and its session options) their goldens and floors were taken on —
- * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ * The seat these cases read: the q4_0 line's `i4-fast` (E2B is the mirror's default model), the
+ * fused-parallel seat the regular line's `i4-fast` used to be. Named because the line's default is
+ * the reference seat `i4`; the reducers below are passed explicitly either way.
  */
 const INT4_SEAT = { quant: "i4-fast" } as const;
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
-const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
+const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4-qat";
 
 /**
  * 比べる 2 つの縮約順。**両方を明示的に渡す**（省略時の実効〈quant 宣言 → 参照経路〉は census の
@@ -84,7 +85,7 @@ const AVAILABLE = ((): boolean => {
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 配布形ミラー models/karume-gemma4/ が無いため ③PV 縮約順の A/B を SKIP する。` +
+    `[karume] 配布形ミラー models/karume-gemma4-qat/ が無いため ③PV 縮約順の A/B を SKIP する。` +
       `組み立て: ${ASSEMBLE_COMMAND}`,
   );
 }

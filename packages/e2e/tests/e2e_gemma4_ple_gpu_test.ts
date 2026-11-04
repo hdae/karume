@@ -21,15 +21,18 @@
  * other spelling, `gemma4-e2b-qat-product`, and is not read here) and the
  * probe from the test-asset root (`goldens/gemma4-qat-e2b-product/ple.probe.safetensors` —
  * ADR 0139 decisions 1 and 2); ③ reads the mirrors `models/karume-gemma4-qat-mobile/` and
- * `models/karume-gemma4/`. 無い環境では**明示 SKIP** する（ADR 0005）。The probe follows ADR 0139's
- * fetched rule: absent from a complete fetch of the pinned test-asset dataset it FAILs ①② (the
+ * `models/karume-gemma4-qat/` (the q4_0 line — the regular gemma pipeline's int4 seats since the
+ * regular line ships `bf16` alone, 2026-11-04). 無い環境では**明示 SKIP** する（ADR 0005）。
+ * The probe follows ADR 0139's fetched rule: absent from a complete fetch of the pinned test-asset dataset it FAILs ①② (the
  * dataset at the pin lacks it); without a complete fetch ①② SKIP with the reason in the title.
  *
- * ## 通常 Gemma 4（i8 の PLE）は device 次第
+ * ## The regular gemma pipeline's PLE depends on the device
  *
- * 単一束縛なので、i8 の 2.19GiB が `maxStorageBufferBindingSize` に収まらない device では
- * この席そのものが使えない。③はその場合「不足を名乗って fail loudly する」ことを見る
- * （黙ってホスト経路へ退避しないことが席の契約である）。
+ * One binding holds the values, so on a device whose `maxStorageBufferBindingSize` is below the
+ * q4_0 E2B's grouped int4 values (schema 4, about 1.09 GiB) the seat cannot be used. ③ then checks
+ * that it fails loudly naming the shortfall (not falling back to the host path is the seat's
+ * contract). The regular line's `bf16` PLE (4.70 GB) has its own case in
+ * `e2e_gemma4_bf16_mirror_test.ts` ④.
  */
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -56,12 +59,11 @@ import {
  */
 const PRODUCT_ROOT = goldenDir("gemma4-qat-e2b-product");
 const QAT_ROOT = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
-const GEMMA_ROOT = new URL("../../../models/karume-gemma4/", import.meta.url);
+/** The q4_0 QAT line's mirror — the regular gemma pipeline's int4 seats (E2B is its default model). */
+const GEMMA_ROOT = new URL("../../../models/karume-gemma4-qat/", import.meta.url);
 /**
- * The seat these cases were written against: `i4-fast`, the regular distribution's default until
- * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
- * reading the int4 container (and its session options) their goldens and floors were taken on —
- * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ * The seat the regular-pipeline case reads: the q4_0 line's `i4-fast`, the fused-parallel seat the
+ * case ran on the regular line before (named because the line's default is the reference `i4`).
  */
 const INT4_SEAT = { quant: "i4-fast" } as const;
 const PLE_PROBE_FILE = "ple.probe.safetensors";
@@ -111,7 +113,7 @@ if (!QAT_PRESENT) {
 }
 if (!GEMMA_PRESENT) {
   console.warn(
-    "[karume] models/karume-gemma4/ is absent (or not karume/5), so the regular Gemma 4 E2B " +
+    "[karume] models/karume-gemma4-qat/ is absent (or not karume/5), so the gemma pipeline's E2B " +
       "PLE GPU-resident generation-parity case SKIPs (assemble it with dist.py in " +
       "tools/export-recipes)",
   );
@@ -243,7 +245,7 @@ for (const model of ["e2b", "e4b"] as const) {
 }
 
 test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
-  "PLE GPU 常駐: 通常 Gemma 4 E2B は載れば parity・載らなければ不足を名乗る（実GPU）",
+  "PLE GPU-resident: the gemma pipeline's q4_0 E2B matches the host where it fits and names the shortfall elsewhere (real GPU)",
   async () => {
     const source = nodeDirectory(GEMMA_ROOT);
     // 索引は配布形ミラーの `model` 容器の資産（ADR 0109 決定 4）— 開くのは part 0 と索引だけ。

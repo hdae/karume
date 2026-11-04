@@ -14,9 +14,15 @@
 // ② コンテナの形（GPU 不要）… 入力 6 本（順序込み）/ 出口 3 本 / external スロット 4 本が
 //    target と同名同形 / 共有 initializer 1 本が target の initializer へ解決できる
 // ③ **draft の一致**（実 GPU）… 3 ケース × 200 サイクル × 3 段 = 1,800 本の draft token が、
-//    torch drafter の golden と **99% 以上**一致する。karume 側の hidden は i4 の target が出した
+//    torch drafter の golden と **99% 以上**一致する。karume 側の hidden は bf16 の target が出した
 //    もの（golden の hidden は f32 の代理 target）なので、ビット一致は求められない — 一致率の
-//    門である。target の token 列は golden の継続列で teacher forcing する
+//    門である。target の token 列は golden の継続列で teacher forcing する。
+//    NOTE: the golden's proxy target is still the int4-rounded product the regular `i4` seats
+//    shipped (`export_drafter.write_goldens`); the seat this file opens is `bf16` since 2026-11-04,
+//    the drafter's one target. Re-taking the golden against the bf16 target is the recipe's
+//    follow-up (the drafter recipe still pairs with the int4 product); until then ③ is red under
+//    KARUME_UPSTREAM_PARITY=1 — measured 2026-11-04 on the RTX 3080 Ti: 1051 / 1800 = 58.4 % on
+//    `bf16`, 1800 / 1800 on the `i4-fast` seat the golden was taken for. The floor is not moved.
 // ④ 寿命（実 GPU）… 借り手が生きている間は貸し手 context も貸し手 Session も dispose できず、
 //    順序（借り手 → 貸し手）どおりなら通る
 //
@@ -25,13 +31,14 @@
 //
 // ## 資産
 //
-// 配布形ミラー `models/karume-gemma4/`（`dist.py --pipeline gemma4` が組む — drafter 込み）と
+// 配布形ミラー `models/karume-gemma4/`（`dist.py --pipeline gemma4` が組む — drafter 込み・その
+// `bf16` preset — the int8 drafter borrows the bf16 target's table）と
 // the drafter goldens in the test-asset root, `goldens/gemma4-e2b-drafter/` (ADR 0139 decision 2)。
-// どちらもリポジトリ管理外で、ミラーが無い環境では**明示 SKIP** する。The goldens are also read by
-// the default-lane cases of `e2e_gemma4_speculative_test.ts`, so their completeness case below runs
-// in the default lane under ADR 0139's fetched rule: a golden absent from a complete fetch of the
-// pinned test-asset dataset FAILs (the dataset at the pin lacks it); without a complete fetch the
-// case SKIPs explicitly (the assets gate is red then).
+// どちらもリポジトリ管理外で、ミラーが無い環境では**明示 SKIP** する。Their completeness case below
+// runs in the default lane under ADR 0139's fetched rule: a golden absent from a complete fetch of
+// the pinned test-asset dataset FAILs (the dataset at the pin lacks it); without a complete fetch the
+// case SKIPs explicitly (the assets gate is red then). (`e2e_gemma4_speculative_test.ts` reads the
+// q4_0 QAT drafter's goldens since 2026-11-04, so ③ is the only reader of these.)
 
 import {
   isNotFound,
@@ -93,12 +100,10 @@ import {
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 /**
- * The seat these cases were written against: `i4-fast`, the regular distribution's default until
- * the original-weights preset `bf16` became the default (2026-11-04). Named so the cases keep
- * reading the int4 container (and its session options) their goldens and floors were taken on —
- * the `bf16` preset has its own gates (`e2e_gemma4_bf16_mirror_test.ts`).
+ * The seat these cases read: the regular line's `bf16` preset (its default and, since 2026-11-04,
+ * its one preset — the int8 drafter's only target). Named so a later default does not move them.
  */
-const INT4_SEAT = { quant: "i4-fast" } as const;
+const BF16_SEAT = { quant: "bf16" } as const;
 const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");
 
 /** SKIP 時にそのまま貼れる組み立てコマンド。 */
@@ -184,10 +189,10 @@ const mirrorManifest = (): Manifest => {
 };
 
 /**
- * 依存資産の完全性（欠落を SKIP に畳まない）。The goldens are read by ③ here and by the default-lane
- * cases of `e2e_gemma4_speculative_test.ts`, so this case follows ADR 0139's fetched rule: a golden
- * absent from a complete fetch of the pin is a defect of the dataset at the pin and FAILs; without a
- * complete fetch the case SKIPs with the reason in its title (the assets gate is red then).
+ * 依存資産の完全性（欠落を SKIP に畳まない）。The goldens are read by ③ here; this case follows
+ * ADR 0139's fetched rule: a golden absent from a complete fetch of the pin is a defect of the
+ * dataset at the pin and FAILs; without a complete fetch the case SKIPs with the reason in its title
+ * (the assets gate is red then).
  */
 const MISSING_AT_LOAD = missingGoldens(CASES.map(goldenPath));
 const GOLDENS_SKIP = MISSING_AT_LOAD.length > 0 && !testAssetsFetched();
@@ -217,13 +222,14 @@ test.skipIf(!MIRROR_PRESENT)(
   () => {
     const entry = mirrorManifest().models[mirrorManifest().defaultModel];
     assertEquals(Object.keys(entry.weights).sort(), [DRAFTER, MODEL], "weights の役割");
-    const quant = entry.quants[INT4_SEAT.quant];
-    // 完全写像（parse が保証する）— target は混成（埋め込み i8 + linear i4）の "i4"、drafter は
-    // **i8 単一**（linear まで i8 — i4 g32 に落とすと受理率が 1〜3 割落ちる・ADR 0096 追記）。
+    const quant = entry.quants[BF16_SEAT.quant];
+    // A complete mapping (the parse guarantees it): the target is the checkpoint's own "bf16", the
+    // drafter **int8 throughout** (its linears too — int4 g32 drops the acceptance by 10–30 %, ADR
+    // 0096 addendum).
     assertEquals(Object.keys(quant.weights).sort(), [DRAFTER, MODEL], "quant の weights 写像");
-    assertEquals(quant.weights[MODEL], "i4", "target の dtype ラベル");
+    assertEquals(quant.weights[MODEL], "bf16", "target の dtype ラベル");
     assertEquals(quant.weights[DRAFTER], "i8", "drafter の dtype ラベル");
-    // requiredLimits は席に 1 つ（i8 は target の埋め込みと同じ席なので、宣言は増えない）。
+    // One requiredLimits per seat (the bf16 target's buffers bound it; the drafter adds none).
     assert(quant.requiredLimits !== undefined, "既定 quant が requiredLimits を宣言していない");
   },
 );
@@ -256,7 +262,7 @@ test.skipIf(!MIRROR_PRESENT)(
   async () => {
     // `openGemma4Ple` は `readGemma4PleIndex`（索引 × 容器の資産の全件列挙）を通す — drafter を
     // 足しても足さなくても、PLE は `model` 容器の中だけで閉じる（旧 `deferred` の突合の後継）。
-    const { index } = await openGemma4Ple(MIRROR_DIR, INT4_SEAT);
+    const { index } = await openGemma4Ple(MIRROR_DIR, BF16_SEAT);
     assertEquals(index.tokens, VOCAB, "索引の行数（= 主 embedding の vocab）");
     assert(index.values.blocks.length > 1, "values の block が 1 本（vocab レンジ分割が無い）");
   },
@@ -266,8 +272,8 @@ test.skipIf(!MIRROR_PRESENT)(
 // ② コンテナの形（GPU 不要）
 // ---------------------------------------------------------------------------
 
-const targetComponent = () => openMirrorComponent(MIRROR_DIR, MODEL, INT4_SEAT);
-const drafterComponent = () => openMirrorComponent(MIRROR_DIR, DRAFTER, INT4_SEAT);
+const targetComponent = () => openMirrorComponent(MIRROR_DIR, MODEL, BF16_SEAT);
+const drafterComponent = () => openMirrorComponent(MIRROR_DIR, DRAFTER, BF16_SEAT);
 
 /** ミラーの `pipelineConfig`（RoPE の宣言と容量の出どころ）。 */
 const pipelineConfig = () => {
@@ -452,8 +458,8 @@ const openDrafterPair = async (): Promise<DrafterPair> => {
   const targetOpened = await targetComponent();
   const drafterOpened = await drafterComponent();
   const gpu = await acquireGpu();
-  // ③PV は並列縮約で回す — 通常版の配布席（`i4-gemvpar` の `"parallel"`・`i4-fast` の
-  // `"parallel-fused"` も加算順は同じ — ADR 0102）の decode と同じ縮約順にする。
+  // ③PV は並列縮約で回す — the order the parallel presets decode with (`i4-gemvpar`'s
+  // `"parallel"`; `i4-fast`'s `"parallel-fused"` adds in the same order — ADR 0102).
   const sessionOptions = { stateAttentionReduce: "parallel" } as const;
   const target: Session = await targetOpened.createSession(gpu, sessionOptions);
   let drafterSession: Session;
@@ -551,7 +557,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
 
     beforeAll(async () => {
       config = pipelineConfig();
-      const { index, openBlock } = await openGemma4Ple(MIRROR_DIR, INT4_SEAT);
+      const { index, openBlock } = await openGemma4Ple(MIRROR_DIR, BF16_SEAT);
       ple = createGemma4Ple({
         index,
         openBlock,
@@ -753,9 +759,9 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
 
       const started = performance.now();
       pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
-        ...INT4_SEAT,
+        ...BF16_SEAT,
         speculative: { k: GEMMA4_DRAFT_STEPS },
-        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, INT4_SEAT),
+        maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, BF16_SEAT),
       });
       console.log(
         `[e2e] gemma4 drafter pipeline: 投機ありのロード ${(performance.now() - started).toFixed(
