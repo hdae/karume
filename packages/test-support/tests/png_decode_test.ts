@@ -1,14 +1,17 @@
-// テスト専用 PNG デコーダ（`@karume/test-support/png-decode`）の**受理域外 fail loudly** の門。
+// Checks that the test-only PNG decoder (`@karume/test-support/png-decode`) **fails loudly outside
+// the accepted range**.
 //
-// あのデコーダは「8bit / truecolor RGB(2) / 非インタレース / 全スキャンラインの filter type が
-// None の 1 形だけを受け、外れたら例外にする」と宣言している（対応していない経路を黙って
-// 近似したまま実画像 e2e が緑になるのを防ぐため）。ところが唯一の利用者（e2e の実画像テスト 3 本と verify-diff）は
-// `encodePng` が書いた正常な PNG しか渡さないので、**拒否経路が 1 本も実行されていなかった**。
+// That decoder declares "it accepts only the one form of 8-bit / truecolor RGB(2) /
+// non-interlaced / filter type None on every scanline, and throws on anything else" (so that
+// real-image e2e cannot go green while an unsupported path is silently approximated). Yet its only
+// users (the 3 real-image e2e tests and verify-diff) pass only well-formed PNGs written by
+// `encodePng`, so **not one rejection path was being executed**.
 //
-// MUST: フィクスチャは models の `encodePng` を import して作らない（依存方向が逆）。ここは
-// `CompressionStream("deflate")` で最小の encoder を持ち、正しい形を 1 箇所に置いて異常系は
-// 1 点だけ壊す（helpers/safetensors.ts と同じ規律）。
-// NOTE: チャンク CRC はデコーダが検証しないので 0 を書く。
+// MUST: the fixtures are not built by importing `encodePng` from models (the dependency would point
+// the wrong way). This file keeps a minimal encoder on `CompressionStream("deflate")`, puts the
+// correct form in one place, and each failure case breaks exactly one point (the same discipline as
+// helpers/safetensors.ts).
+// NOTE: the decoder does not verify chunk CRCs, so 0 is written.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertRejects } from "@std/assert";
@@ -16,7 +19,7 @@ import { decodePng } from "@karume/test-support/png-decode";
 
 const SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-/** zlib（RFC1950）へ圧縮する — デコーダ側の `DecompressionStream("deflate")` の逆。 */
+/** Compresses to zlib (RFC1950) — inverse of the decoder's `DecompressionStream("deflate")`. */
 const deflate = async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> => {
   const source = new ReadableStream<BufferSource>({
     start(controller) {
@@ -28,7 +31,7 @@ const deflate = async (bytes: Uint8Array<ArrayBuffer>): Promise<Uint8Array<Array
   return new Uint8Array(await new Response(packed).arrayBuffer());
 };
 
-/** `[u32 長][型 4][データ][crc 4]` の 1 チャンク（crc は 0 固定）。 */
+/** One `[u32 length][type 4][data][crc 4]` chunk (crc fixed at 0). */
 const chunk = (type: string, data: Uint8Array): Uint8Array<ArrayBuffer> => {
   const out = new Uint8Array(12 + data.length);
   new DataView(out.buffer).setUint32(0, data.length);
@@ -50,7 +53,10 @@ const concat = (parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> => {
 const WIDTH = 4;
 const HEIGHT = 3;
 
-/** 位置ごとに違う既知画素（行 / 列 / チャネルの取り違えが必ず値に出る）。 */
+/**
+ * Known pixels that differ per position (a row / column / channel mix-up always shows in the
+ * values).
+ */
 const PIXELS: Uint8Array<ArrayBuffer> = (() => {
   const data = new Uint8Array(HEIGHT * WIDTH * 3);
   for (let y = 0; y < HEIGHT; y += 1) {
@@ -64,7 +70,7 @@ const PIXELS: Uint8Array<ArrayBuffer> = (() => {
   return data;
 })();
 
-/** IHDR の 13 バイト（欄はケースごとに差し替える）。 */
+/** The 13 bytes of IHDR (fields are overridden per case). */
 const ihdrBytes = (
   overrides: {
     readonly height?: number;
@@ -84,7 +90,7 @@ const ihdrBytes = (
   return ihdr;
 };
 
-/** 全行の filter type を `filter` にした生スキャンライン。 */
+/** Raw scanlines with the filter type of every row set to `filter`. */
 const scanlines = (filter: number): Uint8Array<ArrayBuffer> => {
   const stride = 1 + WIDTH * 3;
   const raw = new Uint8Array(HEIGHT * stride);
@@ -102,7 +108,7 @@ type PngOptions = {
   readonly interlace?: number;
   readonly omitIhdr?: boolean;
   readonly omitIdat?: boolean;
-  /** IDAT を 2 チャンクへ割る（PNG 仕様が許す形 — 連結経路）。 */
+  /** Splits IDAT into 2 chunks (a form the PNG spec allows — the concatenation path). */
   readonly splitIdat?: boolean;
 };
 
@@ -119,25 +125,25 @@ const buildPng = async (options: PngOptions = {}): Promise<Uint8Array<ArrayBuffe
   ]);
 };
 
-test("decodePng: encodePng が書く 1 形（8bit RGB / 非インタレース / filter None）を読める", async () => {
-  const decoded = await decodePng(await buildPng(), "正常系");
+test("decodePng: reads the one form encodePng writes (8-bit RGB / non-interlaced / filter None)", async () => {
+  const decoded = await decodePng(await buildPng(), "well-formed");
   assertEquals(decoded.width, WIDTH);
   assertEquals(decoded.height, HEIGHT);
   assertEquals([...decoded.data], [...PIXELS]);
 });
 
-test("decodePng: IDAT が複数チャンクに割れていても連結して同じ画素を返す", async () => {
-  const decoded = await decodePng(await buildPng({ splitIdat: true }), "複数 IDAT");
+test("decodePng: concatenates IDAT split over several chunks and returns the same pixels", async () => {
+  const decoded = await decodePng(await buildPng({ splitIdat: true }), "multiple IDAT");
   assertEquals([...decoded.data], [...PIXELS]);
 });
 
-test("decodePng: PNG でないバイト列をシグネチャで落とす", async () => {
+test("decodePng: rejects bytes that are not a PNG by the signature", async () => {
   const broken = await buildPng();
   broken[3] = 0x00;
-  await assertRejects(() => decodePng(broken, "壊れたシグネチャ"), Error, "not a PNG signature");
+  await assertRejects(() => decodePng(broken, "broken signature"), Error, "not a PNG signature");
 });
 
-test("decodePng: 受理しない IHDR（color type 6 / interlace 1）を落とす", async () => {
+test("decodePng: rejects an IHDR it does not accept (color type 6 / interlace 1)", async () => {
   const rgba = await buildPng({ colorType: 6 });
   await assertRejects(
     () => decodePng(rgba, "RGBA"),
@@ -152,32 +158,41 @@ test("decodePng: 受理しない IHDR（color type 6 / interlace 1）を落と�
   );
 });
 
-test("decodePng: None 以外の行 filter を落とす（黙って近似しない）", async () => {
+test("decodePng: rejects a row filter other than None (does not silently approximate)", async () => {
   const subFiltered = await buildPng({ filter: 1 });
   const error = await assertRejects(
-    () => decodePng(subFiltered, "Sub フィルタ"),
+    () => decodePng(subFiltered, "Sub filter"),
     Error,
     "filter type of row 0 is 1",
   );
   assertEquals(error.message.includes("None(0)"), true, error.message);
 });
 
-test("decodePng: IHDR / IDAT の欠落をそれぞれの帰属で落とす", async () => {
+test("decodePng: rejects a missing IHDR / IDAT, each with its own attribution", async () => {
   const noIhdr = await buildPng({ omitIhdr: true });
-  await assertRejects(() => decodePng(noIhdr, "IHDR 欠落"), Error, "no IHDR");
+  await assertRejects(() => decodePng(noIhdr, "missing IHDR"), Error, "no IHDR");
   const noIdat = await buildPng({ omitIdat: true });
-  await assertRejects(() => decodePng(noIdat, "IDAT 欠落"), Error, "no IDAT");
+  await assertRejects(() => decodePng(noIdat, "missing IDAT"), Error, "no IDAT");
 });
 
-test("decodePng: チャンク宣言長がファイル末尾を越える形を落とす", async () => {
+test("decodePng: rejects a chunk whose declared length runs past the end of the file", async () => {
   const bytes = await buildPng();
-  // IDAT は シグネチャ 8 + IHDR チャンク 25 の直後。その長さ欄を巨大な値へ書き換える。
+  // IDAT comes right after signature 8 + IHDR chunk 25. Overwrite its length field with a huge
+  // value.
   new DataView(bytes.buffer).setUint32(8 + 25, 0xffff);
-  await assertRejects(() => decodePng(bytes, "長さ超過"), Error, "runs past the end of the file");
+  await assertRejects(
+    () => decodePng(bytes, "length overrun"),
+    Error,
+    "runs past the end of the file",
+  );
 });
 
-test("decodePng: 展開後のバイト数が宣言した高さと食い違う形を落とす", async () => {
-  // IHDR の height だけを +1 する（画素は 3 行ぶんしか無い）
+test("decodePng: rejects a byte count after inflating that disagrees with the declared height", async () => {
+  // Only IHDR's height is +1 (there are pixels for only 3 rows)
   const tallerHeader = await buildPng({ height: HEIGHT + 1 });
-  await assertRejects(() => decodePng(tallerHeader, "高さ不一致"), Error, "bytes after inflating");
+  await assertRejects(
+    () => decodePng(tallerHeader, "height mismatch"),
+    Error,
+    "bytes after inflating",
+  );
 });

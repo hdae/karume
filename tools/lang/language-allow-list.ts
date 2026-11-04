@@ -152,7 +152,6 @@ export const ALLOW_LIST: readonly Allowance[] = [
   { path: "packages/hub/tests/", why: TEST_COMMENTS, until: "0.15.x" },
   { path: "packages/models/tests/", why: TEST_COMMENTS, until: "0.15.x" },
   { path: "packages/e2e/tests/", why: TEST_COMMENTS, until: "0.15.x" },
-  { path: "packages/test-support/tests/", why: TEST_COMMENTS, until: "0.15.x" },
   {
     path: "tools/export-recipes/",
     why: "the per-model export recipes, their tests and READMEs (ADR 0130 staging: 0.15.x)",

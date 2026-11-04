@@ -1,8 +1,9 @@
-// 使い捨ての疑似 HF サーバの門（実 GPU も実資産も要らない — 127.0.0.1 の使い捨てポートと
-// 数バイトのダミー part だけ）。
+// Checks for the throwaway fake HF server (needs neither a real GPU nor real assets — only a
+// throwaway port on 127.0.0.1 and dummy parts of a few bytes).
 //
-// 唯一の消費者（`packages/models/tests/e2e_gemma4_pretrained_test.ts`）は実 GPU + 実資産が要る
-// ので、パス門・配信表・起動時検査はここで縛る。観測はステータスコードと文言の部分一致。
+// The only consumer (`packages/models/tests/e2e_gemma4_pretrained_test.ts`) needs a real GPU + real
+// assets, so the path check, the serving table and the startup validation are pinned here. What is
+// observed is the status code and a substring of the message.
 
 import { makeTempDir, mkdir, remove, writeFile, writeTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -10,7 +11,7 @@ import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { serveLocalDist } from "@karume/test-support/local-dist-server";
 
 const encoder = new TextEncoder();
-/** サーバが名乗る主リポと固定 SHA（`local-dist-server.ts` の綴り）。 */
+/** The main repo and the fixed SHA the server reports (spelled as in `local-dist-server.ts`). */
 const REPO = "karume-local/dist";
 const SHA = "0".repeat(40);
 const CROSS_REPO = "someone/shared";
@@ -19,9 +20,12 @@ const PART0_PATH = "net/model.f16-00001-of-00002.krm";
 const PART1_PATH = "net/model.f16-00002-of-00002.krm";
 const CROSS_PATH = "text_encoder/model.safetensors";
 
-/** コンテナのヘッダ長（container-v1 §1）。part 0 は「ヘッダ + 2 文書ちょうど」。 */
+/** Container header length (container-v1 §1). Part 0 is exactly "header + the 2 documents". */
 const HEADER_BYTES = 24;
-/** 合成 descriptor の 2 文書の長さ（中身は配られるだけ — 長さの整合が manifest の門）。 */
+/**
+ * Lengths of the 2 documents of the synthetic descriptor (their content is only served — the
+ * manifest check is on lengths).
+ */
 const GRAPH_BYTES = 10;
 const MODEL_BYTES = 12;
 
@@ -38,7 +42,10 @@ const fileRef = async (path: string, bytes: Uint8Array<ArrayBuffer>): Promise<Js
   sha256: await sha256Hex(bytes),
 });
 
-/** `<root>/dist` に配布形を、`<root>/shared` に越境ミラーを置く（隣接同名ミラーの配置）。 */
+/**
+ * Puts the distribution in `<root>/dist` and the cross-repo mirror in `<root>/shared` (the sibling
+ * same-name mirror layout).
+ */
 const buildDist = async (
   root: string,
   options: { readonly cross?: readonly string[]; readonly mirror?: boolean } = {},
@@ -108,7 +115,7 @@ const withRoot = async (fn: (root: string) => Promise<void>): Promise<void> => {
   }
 };
 
-/** 本文まで読み切る（読み残すとテストのリソース検査に引っかかる）。 */
+/** Reads the body to the end (a body left unread trips the test's resource check). */
 const get = async (
   url: string,
 ): Promise<{ status: number; body: string; length: string | null }> => {
@@ -117,7 +124,7 @@ const get = async (
   return { status: response.status, body: await response.text(), length };
 };
 
-test("serveLocalDist: revision 解決は 40 桁の固定 SHA を返す", async () => {
+test("serveLocalDist: revision resolution returns the fixed 40-digit SHA", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root);
     await using server = await serveLocalDist(dir);
@@ -128,7 +135,7 @@ test("serveLocalDist: revision 解決は 40 桁の固定 SHA を返す", async (
   });
 });
 
-test("serveLocalDist: resolve は 200 で返し content-length が実ファイル長と一致する", async () => {
+test("serveLocalDist: resolve returns 200 and content-length matches the real file length", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root);
     await using server = await serveLocalDist(dir);
@@ -140,7 +147,7 @@ test("serveLocalDist: resolve は 200 で返し content-length が実ファイ�
   });
 });
 
-test("serveLocalDist: 配布形の外へ出る path は 404（`..` / 先頭 / / 空セグメント）", async () => {
+test("serveLocalDist: a path that leaves the distribution is 404 (`..` / leading / / empty segment)", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root);
     await using server = await serveLocalDist(dir);
@@ -152,12 +159,12 @@ test("serveLocalDist: 配布形の外へ出る path は 404（`..` / 先頭 / / 
       "net%2F%2Fmodel.f16-00002-of-00002.krm",
     ]) {
       const { status } = await get(`${hub}/${REPO}/resolve/${SHA}/${spelled}`);
-      assertEquals(status, 404, `${spelled} が 404 でない`);
+      assertEquals(status, 404, `${spelled} is not 404`);
     }
   });
 });
 
-test("serveLocalDist: revision が宣言と違えば 404、未知の repo も 404", async () => {
+test("serveLocalDist: a revision other than the declared one is 404, and so is an unknown repo", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root);
     await using server = await serveLocalDist(dir);
@@ -168,7 +175,7 @@ test("serveLocalDist: revision が宣言と違えば 404、未知の repo も 40
   });
 });
 
-test("serveLocalDist: 越境参照の revision が 1 リポで割れていたら起動時に落ちる", async () => {
+test("serveLocalDist: fails at startup when cross-repo references to one repo disagree on the revision", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root, {
       cross: [CROSS_REVISION, "e".repeat(40)],
@@ -182,7 +189,7 @@ test("serveLocalDist: 越境参照の revision が 1 リポで割れていたら
   });
 });
 
-test("serveLocalDist: 越境参照のミラーが無ければ起動時に落ちる（実行中の 404 にしない）", async () => {
+test("serveLocalDist: fails at startup when a cross-repo reference has no mirror (not a 404 at run time)", async () => {
   await withRoot(async (root) => {
     const dir = await buildDist(root, { cross: [CROSS_REVISION] });
     const error = assertThrows(
