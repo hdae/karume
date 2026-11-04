@@ -76,6 +76,14 @@ ALL_CODEPOINTS = [cp for cp in range(0x110000) if not 0xD800 <= cp <= 0xDFFF]
 FTFY_VERSION = "6.3.1"
 UNIDATA_VERSION = "16.0.0"
 
+#: The sha256 of the UTF-8 of the JS translation of `BADNESS_RE` (`emit_js` — the asset's
+#: `badness`). MUST: the same value as `FTFY_BADNESS_SHA256` in
+#: `packages/models/src/wan/text/prompt-clean.ts` (`tests/test_prompt_clean.py` compares the two),
+#: which refuses to run any other expression from the asset. Checking it here makes a changed
+#: translation (an ftfy bump, a change to `_emit`) fail at the writer instead of first showing up
+#: as a red TS test. When the translation changes on purpose, update both values together.
+FTFY_BADNESS_SHA256 = "7da149647fdaad8c293f44706c67b5649a6f76593cbcf9f23d9613680466312e"
+
 #: ftfy の `TextFixerConfig.max_decode_length`（区切りの最大コードポイント数）。
 MAX_DECODE_LENGTH = 1_000_000
 
@@ -363,6 +371,14 @@ class PromptCleanTables:
     badness: list[list[Term]]
 
     def to_json(self) -> dict[str, Any]:
+        badness = emit_js(self.badness)
+        digest = hashlib.sha256(badness.encode("utf-8")).hexdigest()
+        if digest != FTFY_BADNESS_SHA256:
+            raise ValueError(
+                f"badness: the JS translation of BADNESS_RE has sha256 {digest}, not the pinned"
+                f" {FTFY_BADNESS_SHA256} — the TS reader would refuse the asset"
+                " (update FTFY_BADNESS_SHA256 here and in prompt-clean.ts together)"
+            )
         return {
             "ligatures": [[cp, text] for cp, text in sorted(self.ligatures.items())],
             "width": [[cp, text] for cp, text in sorted(self.width.items())],
@@ -374,7 +390,7 @@ class PromptCleanTables:
             "stripSpace": self.strip_space,
             "collapseSpace": self.collapse_space,
             # JS の正規表現ソース（`new RegExp(source, "u")`）。
-            "badness": emit_js(self.badness),
+            "badness": badness,
         }
 
 

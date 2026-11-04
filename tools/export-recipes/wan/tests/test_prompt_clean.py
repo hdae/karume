@@ -7,9 +7,11 @@ ftfy / regex / diffusers が無い環境（`wan` グループを同期してい�
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import html
 import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +87,37 @@ class TestBadnessTranslation:
         ]
 
         assert len(dots) == 1
+
+
+#: The TS mirror that pins the same sha256 (from the repository root).
+TS_PROMPT_CLEAN = (
+    Path(__file__).resolve().parents[4] / "packages/models/src/wan/text/prompt-clean.ts"
+)
+
+
+class TestTheBadnessPin:
+    def test_the_writer_pins_the_value_the_ts_reader_pins(self):
+        """One value in two languages — a bump on one side only would ship an asset the reader
+        refuses (or a writer check that guards nothing)."""
+        pinned = re.findall(
+            r'^const FTFY_BADNESS_SHA256 = "([0-9a-f]{64})";$',
+            TS_PROMPT_CLEAN.read_text(encoding="utf-8"),
+            re.MULTILINE,
+        )
+
+        assert pinned == [pc.FTFY_BADNESS_SHA256]
+
+    def test_the_writer_refuses_a_translation_other_than_the_pinned_one(self, tables):
+        """A changed translation fails at the writer, not first as a red TS test."""
+        changed = dataclasses.replace(tables, badness=tables.badness[:-1])
+
+        with pytest.raises(ValueError, match="not the pinned"):
+            changed.to_json()
+
+    def test_the_current_translation_is_the_pinned_one(self, tables):
+        source = tables.to_json()["badness"]
+
+        assert hashlib.sha256(source.encode("utf-8")).hexdigest() == pc.FTFY_BADNESS_SHA256
 
 
 class TestTables:
