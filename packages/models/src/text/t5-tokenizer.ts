@@ -28,7 +28,7 @@ import {
   assertUniqueLines,
   asString,
   asVocabId,
-  parseAddedTokens,
+  parseAddedTokensInVocab,
 } from "./asset-gates.ts";
 import { toCodePoints } from "./code-points.ts";
 import { type CodeRanges, inCodeRanges, parseCodeRanges } from "./code-ranges.ts";
@@ -225,6 +225,8 @@ export class T5UnigramTokenizer {
  *
  * MUST: `minScore` / `maxTokenLength` are derived from **the whole vocabulary** (the unknown-node
  * weight and the search width).
+ * MUST: the added tokens are matched against the vocabulary table ({@link parseAddedTokensInVocab}
+ * — the reason is in its doc).
  */
 export const parseT5Tables = (raw: unknown, label: string): T5Tables => {
   const obj = asRecord(raw, label);
@@ -251,7 +253,7 @@ export const parseT5Tables = (raw: unknown, label: string): T5Tables => {
     maxTokenLength,
     unkId: asVocabId(obj["unkId"], `${label}.unkId`, tokens.length),
     eosId: asVocabId(obj["eosId"], `${label}.eosId`, tokens.length),
-    addedTokens: parseAddedTokens(obj["addedTokens"], `${label}.addedTokens`),
+    addedTokens: parseAddedTokensInVocab(obj["addedTokens"], `${label}.addedTokens`, vocab),
     space: parseCodeRanges(obj["space"], `${label}.space`),
     maxLength: asPositiveInteger(obj["maxLength"], `${label}.maxLength`),
   };

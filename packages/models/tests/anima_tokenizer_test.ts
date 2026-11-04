@@ -567,6 +567,58 @@ test("createTokenizers: バイト列（manifest の tokenizer / tokenizer_2）�
   );
 });
 
+test("createTokenizers: the T5 side's added tokens must be vocabulary rows (below the row count, and the row of the same spelling)", () => {
+  // Unlike Qwen2 above, every added token of the T5 family is a row of its vocabulary table, and
+  // encode pushes the mapped id into the graph input as is — an id past the table surfaces only as
+  // the OOB of the embedding gather, and a mismatched row silently encodes another token.
+  const encode = (value: unknown): Uint8Array<ArrayBuffer> =>
+    new TextEncoder().encode(JSON.stringify(value));
+  const qwen2Json = {
+    vocabText: "a\nb\nab",
+    vocabCount: 3,
+    mergesText: "a b",
+    mergesCount: 1,
+    addedTokens: [],
+    classes: { letter: [[0x61, 0x7a]], number: [], space: [[0x20, 0x20]] },
+    caseFold: [],
+    nfcSegments: [],
+    maxLength: 8,
+  };
+  const t5Json = (addedTokens: readonly [string, number][]) => ({
+    vocabText: "<pad>\n</s>\n<unk>\n▁\na\nb",
+    scores: [0, 0, 0, -1, -1, -2],
+    unkId: 2,
+    eosId: 1,
+    addedTokens,
+    space: [[0x20, 0x20]],
+    normalizer: { single: [], multi: [], extend: [], breakAfter: [], prepend: [] },
+    maxLength: 8,
+  });
+  assertThrows(
+    () => createTokenizers(encode(qwen2Json), encode(t5Json([["<x>", 6]]))),
+    Error,
+    'tokenizer_2.addedTokens: "<x>" has id 6, which is >= the vocabulary row count 6',
+  );
+  assertThrows(
+    () => createTokenizers(encode(qwen2Json), encode(t5Json([["</s>", 2]]))),
+    Error,
+    'tokenizer_2.addedTokens: "</s>" has id 2, which disagrees with vocabulary row 1',
+  );
+  // Control: a matching row, and a spelling the vocabulary does not hold, below the row count.
+  assertEquals(
+    createTokenizers(
+      encode(qwen2Json),
+      encode(
+        t5Json([
+          ["</s>", 1],
+          ["<x>", 5],
+        ]),
+      ),
+    ).maxLength,
+    8,
+  );
+});
+
 // ---- 資産の値域門（外部境界）-------------------------------------------------
 //
 // `fromPretrained(ref)` は任意の repo を指せるので、資産 JSON は信用できない外部入力。

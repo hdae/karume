@@ -25,7 +25,7 @@ import {
   assertUniqueLines,
   asString,
   asVocabId,
-  parseAddedTokens,
+  parseAddedTokensInVocab,
 } from "../../text/asset-gates.ts";
 import { assertEncodableText, toCodePoints } from "../../text/code-points.ts";
 import { type UnigramModel, unigramTokenize, type UnigramVocabEntry } from "../../text/unigram.ts";
@@ -158,41 +158,6 @@ const asByteBaseId = (value: unknown, label: string, tokens: readonly string[]):
 };
 
 /**
- * Reads the added tokens (spelling split out whole before the vocabulary → id) and matches them
- * against the vocabulary table.
- *
- * MUST: an id is below the vocabulary row count. The shared {@link parseAddedTokens} checks only
- * the i32 range (anima's Qwen2 legitimately numbers tokens outside its vocabulary table — the shared
- * side is not narrowed), but Irodori's added tokens are all rows of the vocabulary table, and encode
- * pushes the mapped values into the graph input as they are. An out-of-range id that gets through
- * does not surface until the OOB of the embedding gather (non-finite — ADR 0061).
- * MUST: if the vocabulary has a row with the same spelling, the id equals that row number. On a
- * mismatch, only the spellings split out as added tokens point at a different row than the
- * vocabulary table, a silent wrong value (it passes with matching shape and range).
- */
-const parseIrodoriAddedTokens = (
-  raw: unknown,
-  label: string,
-  vocab: ReadonlyMap<string, UnigramVocabEntry>,
-): Map<string, number> => {
-  const added = parseAddedTokens(raw, label);
-  for (const [token, id] of added) {
-    if (id >= vocab.size) {
-      throw new Error(
-        `${label}: ${JSON.stringify(token)} has id ${id}, which is >= the vocabulary row count ${vocab.size}`,
-      );
-    }
-    const row = vocab.get(token)?.id;
-    if (row !== undefined && row !== id) {
-      throw new Error(
-        `${label}: ${JSON.stringify(token)} has id ${id}, which disagrees with vocabulary row ${row}`,
-      );
-    }
-  }
-  return added;
-};
-
-/**
  * Asset JSON (the exporter's `tokenizer.json`) → the asset table. It is an external boundary, so the
  * structure is checked before use.
  *
@@ -206,7 +171,7 @@ const parseIrodoriAddedTokens = (
  * MUST: `byteBaseId` is not a single id, so {@link asVocabId} is not enough — the whole run of 256
  * consecutive ids must be inside the vocabulary ({@link asByteBaseId} — the reason is in its doc).
  * MUST: the added tokens are matched against the vocabulary table too
- * ({@link parseIrodoriAddedTokens} — the reason is in its doc).
+ * ({@link parseAddedTokensInVocab} — the reason is in its doc).
  */
 export const parseIrodoriTokenizerAsset = (
   raw: unknown,
@@ -240,6 +205,6 @@ export const parseIrodoriTokenizerAsset = (
     byteBaseId: asByteBaseId(obj["byteBaseId"], `${label}.byteBaseId`, tokens),
     bosId: asVocabId(obj["bosId"], `${label}.bosId`, tokens.length),
     padId: asVocabId(obj["padId"], `${label}.padId`, tokens.length),
-    addedTokens: parseIrodoriAddedTokens(obj["addedTokens"], `${label}.addedTokens`, vocab),
+    addedTokens: parseAddedTokensInVocab(obj["addedTokens"], `${label}.addedTokens`, vocab),
   };
 };

@@ -168,3 +168,38 @@ export const parseAddedTokens = (raw: unknown, label: string): Map<string, numbe
   }
   return out;
 };
+
+/**
+ * Added vocabulary whose every token is a row of the vocabulary table (Irodori and the T5 family —
+ * anima's T5 and Wan's umT5): {@link parseAddedTokens} plus the match against that table.
+ *
+ * MUST: an id is below the vocabulary row count. The shared {@link parseAddedTokens} checks only
+ * the i32 range (anima's Qwen2 legitimately numbers tokens outside its vocabulary table — the shared
+ * side is not narrowed), but these families' added tokens are all rows of the vocabulary table, and
+ * encode pushes the mapped values into the graph input as they are. An out-of-range id that gets
+ * through does not surface until the OOB of the embedding gather (non-finite — ADR 0061).
+ * MUST: if the vocabulary has a row with the same spelling, the id equals that row number. On a
+ * mismatch, only the spellings split out as added tokens point at a different row than the
+ * vocabulary table, a silent wrong value (it passes with matching shape and range).
+ */
+export const parseAddedTokensInVocab = (
+  raw: unknown,
+  label: string,
+  vocab: ReadonlyMap<string, { readonly id: number }>,
+): Map<string, number> => {
+  const added = parseAddedTokens(raw, label);
+  for (const [token, id] of added) {
+    if (id >= vocab.size) {
+      throw new Error(
+        `${label}: ${JSON.stringify(token)} has id ${id}, which is >= the vocabulary row count ${vocab.size}`,
+      );
+    }
+    const row = vocab.get(token)?.id;
+    if (row !== undefined && row !== id) {
+      throw new Error(
+        `${label}: ${JSON.stringify(token)} has id ${id}, which disagrees with vocabulary row ${row}`,
+      );
+    }
+  }
+  return added;
+};

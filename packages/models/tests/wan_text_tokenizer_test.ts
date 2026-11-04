@@ -369,6 +369,19 @@ test("parseWanTokenizerAsset: 語彙の値域門は T5 の共通層と同じ（�
   );
 });
 
+test("parseWanTokenizerAsset: an added token must be a vocabulary row (below the row count, and the row of the same spelling)", () => {
+  assertThrows(
+    () => parseWanTokenizerAsset(minimalAsset({ addedTokens: [["<x>", 6]] })),
+    Error,
+    'tokenizer.addedTokens: "<x>" has id 6, which is >= the vocabulary row count 6',
+  );
+  assertThrows(
+    () => parseWanTokenizerAsset(minimalAsset({ addedTokens: [["<unk>", 2]] })),
+    Error,
+    'tokenizer.addedTokens: "<unk>" has id 2, which disagrees with vocabulary row 3',
+  );
+});
+
 // ---- 実資産（全語彙）での突合 -------------------------------------------------
 
 test.skipIf(mirrorAsset === undefined)(

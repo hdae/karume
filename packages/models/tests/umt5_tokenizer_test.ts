@@ -291,6 +291,16 @@ test("parseUmt5TokenizerAsset: 壊れた表は落とす（入力起因ではな�
     ],
     ["最大長が無い", { maxLength: undefined }, "maxLength"],
     ["eos が語彙の外", { eosId: 6 }, "eosId"],
+    [
+      "added token id past the vocabulary",
+      { addedTokens: [["<x>", 6]] },
+      "which is >= the vocabulary row count 6",
+    ],
+    [
+      "added token id disagrees with its vocabulary row",
+      { addedTokens: [["<s>", 3]] },
+      "which disagrees with vocabulary row 2",
+    ],
   ];
   for (const [label, patch, message] of rejected) {
     const error = assertThrows(
