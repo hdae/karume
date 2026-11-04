@@ -149,7 +149,9 @@ only", under three conditions:
   resolved open point on 2026-10-17: Node has no Cache API, so `@karume/hub/node` also holds
   `nodeCacheStorage`, a file-backed `CacheStorage` for the fetch layer that writes local bytes —
   `packages/hub/node.ts`; source and cache semantics stay in the main module and the fetch layer.
-  ADR 0127 decision 2 itself still reads "holds only how to read local bytes").
+  ADR 0127 decision 2 itself still reads "holds only how to read local bytes" *(corrected
+  2026-11-04: ADR 0127's addendum of 2026-10-29 amends decision 2 to "holds only how to read and
+  write local bytes" — the directory source and, on Node, `nodeCacheStorage`)*).
 
 Another runtime gets the same carve-out under these conditions (`@karume/hub/<runtime>`; main module
 and models unchanged) — `@karume/hub/node` (`nodeDirectory`, ADR 0127 decision 2).

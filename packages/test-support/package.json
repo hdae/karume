@@ -2,7 +2,7 @@
   "name": "@karume/test-support",
   "version": "0.0.0",
   "private": true,
-  "description": "Node test harness for the Karume workspace: Dawn (WebGPU) injection, Deno-shaped test and fs helpers.",
+  "description": "Node test harness for the Karume workspace: Dawn (WebGPU) injection, Deno-shaped fs helpers, the lane table, the module graph and the test-asset pin.",
   "license": "MIT",
   "type": "module",
   "exports": {

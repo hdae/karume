@@ -1,9 +1,17 @@
 # @karume/e2e
 
-Private workspace package: the real-weight end-to-end tests of the Karume packages. Every test here
-needs local model assets (`models/` distribution mirrors, `outputs/series/` exporter output,
-`inputs/`) and a GPU; the all-skip gates (`KARUME_ALLOW_NO_ASSETS`, `KARUME_ALLOW_NO_DISTRIBUTION`,
-`KARUME_ALLOW_NO_GPU`) make a machine without them fail loudly instead of passing empty.
+Private workspace package: the real-weight end-to-end tests of the Karume packages. The
+real-weight tests need local model assets (`models/` distribution mirrors, `outputs/series/`
+exporter output, `inputs/`) and a GPU; the all-skip gates (`KARUME_ALLOW_NO_ASSETS`,
+`KARUME_ALLOW_NO_DISTRIBUTION`, `KARUME_ALLOW_NO_GPU`) make a machine without them fail loudly
+instead of passing empty. Two kinds of file here need less:
+
+- The three gates that run in the core lane (`CORE_E2E_TESTS` in
+  `packages/runtime/tests/verify_lanes_test.ts`) need no GPU and no weights:
+  `e2e_ab_gate_test.ts` judges synthetic inputs, `e2e_assets_gate_test.ts` checks that the asset
+  roots are complete, and `e2e_session_options_mirror_test.ts` reads only the mirrors' manifests.
+- The `*_host*_test.ts` files compare host-side code with goldens from the local assets and need
+  no GPU.
 
 The tests are grouped into lanes by model family (`packages/test-support/src/lanes.ts`); a lane is
 run with

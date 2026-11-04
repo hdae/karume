@@ -195,8 +195,8 @@ review.
 
 **(superseded by the ruling of 2026-10-04 (4) and by ADR 0128 decision 1 on 2026-10-17: the default is
 the practical preset `f16+dit8-a8-attn8-s16` — `WAN_DEFAULT_QUANT` in
-`tools/export-recipes/wan/distribution.py:343`; devices without dp4a get a warning, ADR 0128
-decision 5.)**
+`tools/export-recipes/wan/distribution.py:343` *(corrected 2026-11-04: now `:440`)*; devices
+without dp4a get a warning, ADR 0128 decision 5.)**
 
 ### 7. The public API is only the existing `quant` option
 

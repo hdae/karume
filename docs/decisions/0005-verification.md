@@ -25,8 +25,12 @@ Node + Dawn*).
    (ADR [0129](0129-test-layout-and-lanes.md) decision 3) *(re-graded 2026-10-18 to SHOULD: ruling 5a)*.
 4. **Real-browser acceptance lane**, run by hand; it MAY be automated *(re-graded 2026-10-18 to MAY:
    the browser is now the primary target and the `examples/` harness left the tree with ADR 0127
-   decision 5; its new home is an ADR 0127 open point)*. Dawn / wgpu differences (rounding,
-   features) are caught here.
+   decision 5; its new home is an ADR 0127 open point)* *(corrected 2026-11-04: ADR 0127's addendum
+   of 2026-10-29 closed that open point and leaves the home to this ADR, which MAY name the
+   playground — `apps/playground`, its `/kernel-check` page and model pages; until it does, the
+   home is an open point here. The release runbook §1 already runs the `/kernel-check` page in
+   Chrome for releases that change the subgroup variants or the state-attention rewrites)*.
+   Dawn / wgpu differences (rounding, features) are caught here.
 
 ### Rules (inherited from the prototype)
 

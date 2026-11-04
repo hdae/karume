@@ -11,7 +11,9 @@
 Karume is a **general-purpose WebGPU neural-network inference runtime that runs on both Deno and the
 browser** *(superseded by ADR 0127 decisions 3 and 6 on 2026-10-18: browser and Node, importable
 from Deno; Deno numerics best effort from 0.15)*. It is published on JSR as `@karume/runtime` (npm
-in addition is open — ADR 0127 Open points). Models come from PyTorch (`torch.export`).
+in addition is open — ADR 0127 Open points) *(settled 2026-10-28 by the ADR 0127 addendum of that
+date: JSR only; Node applications install through JSR's npm compatibility endpoint, and npm can be
+added in a later release with a build step)*. Models come from PyTorch (`torch.export`).
 
 - **Independent of the prototype** (the earlier experimental project): its code and types are never
   imported, only read and ported. This project carries out the move to JSR / Deno that the
