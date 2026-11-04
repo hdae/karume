@@ -97,7 +97,7 @@ const IMAGE_CHANNELS = 3;
 export const MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES = 256 * 2 ** 20;
 
 /** The Session options (and estimate options) of `vae_decoder_attn`; the other two take none. */
-const ATTENTION_OPTIONS = Object.freeze({
+const ATTENTION_OPTIONS = /* @__PURE__ */ Object.freeze({
   attentionRowBlockMaxBytes: MOSS_VAE_ATTENTION_ROW_BLOCK_BYTES,
 });
 

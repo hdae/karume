@@ -25,7 +25,10 @@ export const DEFAULT_CHAT_DIALECT: ChatDialect = "gemma4";
  * with the default template (a model prompted in another model's dialect still generates text, so
  * nothing else would notice).
  */
-export const CHAT_DIALECTS: readonly ChatDialect[] = Object.freeze(["gemma4", "gemma4-unified"]);
+export const CHAT_DIALECTS: readonly ChatDialect[] = /* @__PURE__ */ Object.freeze([
+  "gemma4",
+  "gemma4-unified",
+]);
 
 /**
  * Type guard for {@link CHAT_DIALECTS}. Both entries of a dialect check with it and fail loudly on

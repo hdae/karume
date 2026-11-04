@@ -103,7 +103,7 @@ export type SamplerType = (typeof SAMPLER_TYPES)[number];
  * accepted set of every later pipeline (both the manifest side and the request side) would change
  * silently.
  */
-export const SAMPLER_TYPES = Object.freeze(["euler", "dpmpp-2m"] as const);
+export const SAMPLER_TYPES = /* @__PURE__ */ Object.freeze(["euler", "dpmpp-2m"] as const);
 
 /**
  * Value when `scheduler.type` is omitted.

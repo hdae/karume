@@ -100,3 +100,33 @@ force:
   Tree-shaking through a namespace was measured within 7 B of the flat barrel (ADR 0136). The
   `sideEffects: false` point above is still not verified; the cost it would remove (every family's
   source table in a barrel import) is filed in the backlog.
+
+## Addendum (2026-11-04) — §4: no `sideEffects` flag through JSR; pure annotations instead
+
+- The "not verified" point of §4 is settled: **JSR's npm compatibility layer does not carry
+  `sideEffects`**. The `package.json` of the published 0.16.0 tarball
+  (`https://npm.jsr.io/~/11/@jsr/karume__models/0.16.0.tgz`, `_jsr_revision` 11) holds exactly
+  `name`, `version`, `homepage`, `type`, `dependencies`, `exports` and `_jsr_revision`; JSR's
+  generator declares no other field (`NpmPackageJson` in `api/src/npm/types.rs` of `jsr-io/jsr`,
+  built in `api/src/npm/tarball.rs`, read on 2026-11-04), and its documentation
+  (`https://jsr.io/docs/npm-compatibility`) only says that `exports` is taken from `jsr.json` /
+  `deno.json`. With no slot for the field in the generated file, the flag in
+  `packages/models/package.json` would reach workspace consumers only.
+- Instead, the invariant of §4 is made visible to a bundler in the source: a module-scope expression
+  a bundler cannot prove free of side effects is a `/* @__PURE__ */` call — the frozen tables keep
+  `Object.freeze` with the annotation, an array spread became `concat`, and the object spread of
+  `KARUME_SOURCES` sits in an annotated arrow call. This works for every consumer (the npm layer,
+  JSR imports through a bundler, the workspace) without a package flag. JSR's emit keeps comments
+  (`remove_comments: false` in `api/src/npm/emit.rs`), and Deno's emit of the same files was seen to
+  keep the annotations.
+- Measured with Rolldown 1.2.13 (Vite+ 1.2.0), minified, `@karume/*` external: `encodeWav` from the
+  barrel went from 3,587 B (1,769 B gzip) to 1,152 B (638 B), against 1,108 B (611 B) from its
+  module — the 44 B left are the two bare imports of the external runtime and hub; a bare barrel
+  import went from 2,469 B to those 44 B; a family through its namespace is within 6 B of its
+  subpath. The check is `packages/models/tests/models_barrel_tree_shaking_test.ts` (a bare barrel
+  import bundles to nothing; `encodeWav` costs the same through the barrel).
+- Not covered: esbuild 0.25.12, whose tree-shaking is more conservative, still keeps about 3.9 KB of
+  a bare barrel import (unused derived constants); and a bare import of the `@karume/runtime` barrel
+  keeps about 160 KB under Rolldown, a separate matter of that package.
+- `KARUME_SOURCES` now spells its type from the family tables: JSR's generated declaration of the
+  bare spread was `{}` in 0.16.0.

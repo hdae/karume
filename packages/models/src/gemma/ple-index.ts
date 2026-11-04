@@ -185,19 +185,22 @@ export const gemma4PleTables = (
         ["scales", index.scales],
       ];
 
-const INDEX_KEYS: readonly string[] = [
+// `concat` rather than array spread: a pure annotation applies to a call only, and a bundler keeps
+// an unannotated spread (it runs an iterator) in every barrel import (ADR 0037 §4 addendum 2026-11-04).
+const INDEX_KEYS: readonly string[] = /* @__PURE__ */ [
   "schema",
   "storage",
   "tokens",
   "layers",
   "dim",
   "embedScale",
-  ...TABLE_NAMES,
-];
+].concat(TABLE_NAMES);
 /** Schema 4 spells exactly one key more than schema 3. */
-const GROUPED_INDEX_KEYS: readonly string[] = [...INDEX_KEYS, "groupSize"];
+const GROUPED_INDEX_KEYS: readonly string[] = /* @__PURE__ */ INDEX_KEYS.concat("groupSize");
 /** Schema 5 spells no `scales` (and no `groupSize`). */
-const FLOAT_INDEX_KEYS: readonly string[] = INDEX_KEYS.filter((key) => key !== "scales");
+const FLOAT_INDEX_KEYS: readonly string[] = /* @__PURE__ */ INDEX_KEYS.filter(
+  (key) => key !== "scales",
+);
 const TABLE_KEYS: readonly string[] = ["rowBytes", "blocks"];
 const BLOCK_KEYS: readonly string[] = ["asset", "start", "stop"];
 

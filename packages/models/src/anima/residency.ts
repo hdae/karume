@@ -66,7 +66,7 @@ import { HEADROOM_MARGIN_BYTES } from "../session/headroom-margin.ts";
  * `SAMPLER_TYPES`) — the public surface stays thin (ADR 0008), so the list is added as the
  * same frozen list once a consumer that enumerates the choices (CLI / UI) appears.
  */
-const ANIMA_RESIDENCIES = Object.freeze(["per-stage", "transformer"] as const);
+const ANIMA_RESIDENCIES = /* @__PURE__ */ Object.freeze(["per-stage", "transformer"] as const);
 
 /**
  * Whether the DiT Session is kept after a generate.

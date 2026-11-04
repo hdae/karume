@@ -45,10 +45,12 @@ const MIN_DURATION_FRAMES = 2;
 
 const CLASS_COUNT = LIPSYNC_CLASSES.length;
 const classId = (label: (typeof LIPSYNC_CLASSES)[number]): number => LIPSYNC_CLASSES.indexOf(label);
-const CONS_ID = classId("cons");
-const PAU_ID = classId("pau");
+const CONS_ID = /* @__PURE__ */ classId("cons");
+const PAU_ID = /* @__PURE__ */ classId("pau");
 /** The partners cons may be absorbed into **forward** (vowels and the moraic nasal). */
-const VOWEL_OR_N: readonly number[] = (["a", "i", "u", "e", "o", "N"] as const).map(classId);
+const VOWEL_OR_N: readonly number[] = /* @__PURE__ */ (["a", "i", "u", "e", "o", "N"] as const).map(
+  classId,
+);
 
 /**
  * A run of the class sequence `[classId, start, end]` (start / end are in the unit of the caller's

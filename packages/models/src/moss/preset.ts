@@ -59,11 +59,14 @@ export type MossPreset = {
   readonly dit: MossDitKnobs;
 };
 
-const PRESETS: Readonly<Record<MossPresetName, MossPreset>> = Object.freeze({
-  [MOSS_REFERENCE_PRESET]: Object.freeze({ name: MOSS_REFERENCE_PRESET, dit: Object.freeze({}) }),
-  [MOSS_PRACTICAL_PRESET]: Object.freeze({
+const PRESETS: Readonly<Record<MossPresetName, MossPreset>> = /* @__PURE__ */ Object.freeze({
+  [MOSS_REFERENCE_PRESET]: /* @__PURE__ */ Object.freeze({
+    name: MOSS_REFERENCE_PRESET,
+    dit: /* @__PURE__ */ Object.freeze({}),
+  }),
+  [MOSS_PRACTICAL_PRESET]: /* @__PURE__ */ Object.freeze({
     name: MOSS_PRACTICAL_PRESET,
-    dit: Object.freeze({
+    dit: /* @__PURE__ */ Object.freeze({
       linearCompute: "a8",
       attentionCompute: "a8",
       attentionScoreStorage: "none",
@@ -72,7 +75,7 @@ const PRESETS: Readonly<Record<MossPresetName, MossPreset>> = Object.freeze({
 });
 
 /** Every preset name, the reference preset first. */
-export const MOSS_PRESET_NAMES: readonly MossPresetName[] = Object.freeze([
+export const MOSS_PRESET_NAMES: readonly MossPresetName[] = /* @__PURE__ */ Object.freeze([
   MOSS_REFERENCE_PRESET,
   MOSS_PRACTICAL_PRESET,
 ]);

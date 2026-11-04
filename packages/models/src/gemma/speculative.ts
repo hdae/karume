@@ -71,7 +71,11 @@ const HIDDEN_INPUT = "hidden";
  * of `DrafterWrapper.forward`) and the reading side claim the same list. An asset whose order alone
  * is off passes silently as long as inputs are looked up by name.
  */
-const DRAFTER_INPUTS: readonly string[] = [TOKEN_INPUT, HIDDEN_INPUT, ...gemma4RopeInputNames()];
+// `concat` rather than spread so that the whole initializer is an annotatable call (ADR 0037 §4
+// addendum 2026-11-04).
+const DRAFTER_INPUTS: readonly string[] = /* @__PURE__ */ [TOKEN_INPUT, HIDDEN_INPUT].concat(
+  /* @__PURE__ */ gemma4RopeInputNames(),
+);
 
 /**
  * What running one drafter needs.

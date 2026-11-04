@@ -532,7 +532,9 @@ export type PipelineOptions = {
  * every pipeline built afterwards chooses its physical row count (`chunkBuckets` assumes ascending
  * order and takes the first match).
  */
-export const CHUNK_BUCKETS: readonly number[] = Object.freeze([4, 8, 32, 64, 128, 256]);
+export const CHUNK_BUCKETS: readonly number[] = /* @__PURE__ */ Object.freeze([
+  4, 8, 32, 64, 128, 256,
+]);
 
 /**
  * Trims the default buckets to those that fit the chosen `chunkLength`.
