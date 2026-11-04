@@ -129,6 +129,7 @@ class TestTwelveBPins:
 
     def test_the_cached_snapshots_match_the_pins(self) -> None:
         """The real hub cache (needs both snapshots)."""
+        pytest.importorskip("huggingface_hub")
         pins = sources.HUB_PINS["12b"]
         weights_dir, tokenizer_dir = sources.checkpoint_dir("12b"), sources.tokenizer_dir("12b")
         if not all((path / "config.json").is_file() for path in (weights_dir, tokenizer_dir)):
@@ -141,6 +142,7 @@ class TestTwelveBPins:
     def test_the_qat_snapshot_s_own_tokenizer_fails_the_tokenizer_pin(self) -> None:
         """Reading the tokenizer next to the weights is the slip the second source exists for
         (needs the QAT snapshot)."""
+        pytest.importorskip("huggingface_hub")
         weights_dir = sources.checkpoint_dir("12b")
         if not (weights_dir / "tokenizer.json").is_file():
             pytest.skip(f"12B's QAT snapshot is not in the hub cache ({weights_dir})")
@@ -278,6 +280,7 @@ class TestQatPins:
         )
 
     def test_the_regular_line_keeps_its_hand_placed_checkpoints(self) -> None:
+        pytest.importorskip("huggingface_hub")
         assert "e2b" not in sources.HUB_PINS and "e4b" not in sources.HUB_PINS
         assert sources.checkpoint_dir("e2b") != sources.qat_checkpoint_dir("e2b")
 
@@ -288,6 +291,7 @@ class TestQatPins:
     @pytest.mark.parametrize("model", ["e2b", "e4b"])
     def test_the_cached_snapshots_match_the_pins(self, model: str) -> None:
         """The real hub cache (needs both snapshots)."""
+        pytest.importorskip("huggingface_hub")
         weights_dir, tokenizer_dir = (
             sources.qat_checkpoint_dir(model),
             sources.qat_tokenizer_dir(model),
@@ -352,6 +356,7 @@ class TestQatDrafterPins:
 
     def test_the_cached_12b_snapshot_matches_the_pin(self) -> None:
         """The real hub cache (needs the snapshot)."""
+        pytest.importorskip("huggingface_hub")
         directory = sources.qat_drafter_dir("12b")
         if not (directory / "config.json").is_file():
             pytest.skip(f"12B's QAT drafter is not in the hub cache ({directory})")

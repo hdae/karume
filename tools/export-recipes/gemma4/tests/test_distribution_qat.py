@@ -573,6 +573,7 @@ class TestQatNaming:
     def test_the_series_are_the_writers(
         self, tmp_path: Path, model: str, product: str, tokenizer: str
     ) -> None:
+        pytest.importorskip("huggingface_hub")
         sources = gemma4_qat_q4_0_sources(tmp_path, model)
 
         assert sources.product == tmp_path / product

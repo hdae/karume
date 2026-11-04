@@ -220,6 +220,7 @@ class TestThePins:
     @pytest.mark.parametrize("model", ["e2b", "e4b", "12b"])
     def test_the_cached_snapshot_matches_the_pin(self, model: str) -> None:
         """The real hub cache (needs the snapshot)."""
+        pytest.importorskip("huggingface_hub")
         directory = sources.qat_drafter_dir(model)
         if not (directory / "config.json").is_file():
             pytest.skip(f"{model}'s QAT drafter is not in the hub cache ({directory})")
@@ -230,6 +231,7 @@ class TestThePins:
     def test_every_drafter_weight_of_the_pinned_snapshot_is_on_the_grid(self, model: str) -> None:
         """The fact the i4 storage rests on, on the real checkpoint: every rank-2 tensor but the
         unused sparse-head centroids recovers its q4_0 grid (needs the snapshot)."""
+        pytest.importorskip("huggingface_hub")
         from safetensors import safe_open
 
         path = sources.qat_drafter_dir(model) / "model.safetensors"
@@ -707,6 +709,7 @@ class TestTheCommandLine:
         assert "--model" in capsys.readouterr().err
 
     def test_the_defaults_are_the_pinned_sources_and_the_qat_lender(self) -> None:
+        pytest.importorskip("huggingface_hub")
         options = gx.resolve_series_args(qd.build_parser().parse_args(["--model", "e4b"]))
 
         assert options["model_dir"] == sources.qat_checkpoint_dir("e4b")
@@ -720,6 +723,7 @@ class TestTheCommandLine:
     def test_every_option_is_a_keyword_of_the_export(self) -> None:
         """`main` hands the options to `export_series` by name — a knob it does not take would
         fail only at the end of the parse of a real run."""
+        pytest.importorskip("huggingface_hub")
         options = gx.resolve_series_args(qd.build_parser().parse_args([]))
         options.pop("model_dir")
         options.pop("out")

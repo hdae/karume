@@ -105,6 +105,7 @@ class TestPerModelSeries:
         difference they are there for. A 12B case is a merge 12B dropped (12B splits more); an E4B
         case is a merge E2B dropped (E4B splits less)."""
         tokenizers = pytest.importorskip("tokenizers")
+        pytest.importorskip("huggingface_hub")
         upstream = sources.tokenizer_dir(model) / "tokenizer.json"
         other = tokenizer.asset_path(joined_by)
         if not upstream.is_file() or not other.is_file():
