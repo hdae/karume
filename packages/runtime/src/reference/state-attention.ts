@@ -300,9 +300,10 @@ export type StateAppendRefInput = {
 export const referenceStateAppend = (input: StateAppendRefInput): RefTensor => {
   const { kvPlanes, chunkRows, depth, capacity, window, past, query } = input;
   assertPastAndWindow("state_append", past, window);
-  if (kvPlanes < 1 || chunkRows < 1 || depth < 1 || capacity < 1) {
+  // MUST: an integer check before the range comparison (the reason at assertShape — NaN passes `< 1`).
+  if ([kvPlanes, chunkRows, depth, capacity].some((dim) => !Number.isSafeInteger(dim) || dim < 1)) {
     throw new ReferenceOpError(
-      `state_append shape is not positive (B·Hkv=${kvPlanes} M=${chunkRows} D=${depth} C=${capacity})`,
+      `state_append shape is not all positive integers (B·Hkv=${kvPlanes} M=${chunkRows} D=${depth} C=${capacity})`,
     );
   }
   assertQuery(query, chunkRows);
@@ -367,9 +368,12 @@ export const referenceStateAttentionReadonly = (
 ): RefTensor => {
   const { batch, heads, kvHeads, depth, capacity, window, past } = input;
   assertPastAndWindow("readonly", past, window);
-  if (batch < 1 || heads < 1 || kvHeads < 1 || depth < 1 || capacity < 1) {
+  // MUST: an integer check before the range comparison (the reason at assertShape — NaN passes `< 1`).
+  if (
+    [batch, heads, kvHeads, depth, capacity].some((dim) => !Number.isSafeInteger(dim) || dim < 1)
+  ) {
     throw new ReferenceOpError(
-      `readonly shape is not positive (B=${batch} H=${heads} Hkv=${kvHeads} D=${depth} C=${capacity})`,
+      `readonly shape is not all positive integers (B=${batch} H=${heads} Hkv=${kvHeads} D=${depth} C=${capacity})`,
     );
   }
   if (heads % kvHeads !== 0) {
