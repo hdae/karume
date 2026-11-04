@@ -1,5 +1,5 @@
 /**
- * Wan2.1 の DiT（S 形グラフ）の**移植の門**（実 GPU・ADR 0118 段 2 — 決定 3 / 8）。
+ * **Port check** of the Wan2.1 DiT (S-shaped graph) (real GPU; ADR 0118 step 2 — decisions 3 / 8).
  *
  * The exported IR (the f16 transformer of the local distribution mirror `models/karume-wan2.1/` — opened through its
  * manifest, ADR 0139 decision 1) runs on the karume runtime, and the latents after the host unpatchify
@@ -12,55 +12,67 @@
  * written by `cd tools/export-recipes && uv run --group wan --inexact python -m wan.export_dit`, whose docstring
  * holds their content and the case table). Two per case:
  *
- * - `io.<case>` — グラフの入力（`input.*`）と、パッチ後の torch CPU の出力（`output.0`）
- * - `reference.<case>` — 上流の素の forward の入力の潜在・timestep・出力（`[1,16,F,H,W]`）・各ブロックの出力
+ * - `io.<case>` — the graph inputs (`input.*`) and the torch CPU output after patching (`output.0`)
+ * - `reference.<case>` — the input latents, the timestep, the output (`[1,16,F,H,W]`) and each block's output of
+ *   upstream's plain forward
  *
- * パッチ後の eager は全ケースで上流と**ビット一致**（export 台本の `[eager]` 行 — patch 埋め込みの Linear 化も
- * この機の torch CPU では一致した）なので、ここで見る差はそのまま「GPU で回した IR」と「上流」の差。
+ * The patched eager run is **bit-identical** to upstream in every case (the `[eager]` lines of the export script — the
+ * patch embedding turned into a Linear also matched on this machine's torch CPU), so the difference seen here is
+ * exactly the difference between "the IR run on the GPU" and "upstream".
  *
- * ## 帯（決定 8・追記 2026-10-02 の「帯の決定と受入れを分ける」）
+ * ## Bands (decision 8; the addendum 2026-10-02 "separate the band decision from the acceptance")
  *
- * 指標はケースごとの**比** = 最大絶対差 ÷ 参照の最大絶対値（決定 8 の目安の形）。{@link DIT_RATIO_BAND} は
- * `band` 6 ケースの最悪の比の約 5 倍で決め、`accept` 3 ケース（`band` と seed が違う未見の入力）で受け入れる。
- * `growth` 2 ケース（S = 768）は S に対する伸びの記録で、帯の門には入れない（実寸の帯は段 3 / 段 8 が S ごとに
- * 独立に導く — 決定 8）。故障注入 4 件（RoPE の h / w の取り違え・unpatchify の並びの取り違え・timestep の
- * cos / sin の前後反転・timestep の 1 ずれ）が受入れケースで帯の外へ出ることも門にする。
+ * The metric is the per-case **ratio** = max absolute difference ÷ the reference's max absolute value (the form of
+ * decision 8's guideline). {@link DIT_RATIO_BAND} is set at about 5 × the worst ratio of the 6 `band` cases and
+ * accepted on the 3 `accept` cases (unseen inputs with seeds different from `band`). The 2 `growth` cases (S = 768)
+ * record the growth with S and are not part of the band check (the full-size bands are derived independently per S by
+ * steps 3 / 8 — decision 8). The check also requires that the 4 fault injections (swapped RoPE h / w, swapped
+ * unpatchify order, the timestep's cos / sin reversed, the timestep off by 1) fall outside the band on the acceptance
+ * cases.
  *
- * MUST: `accept` の結果を見て `band` のケースを変えない（帯の決定と受入れの独立が崩れる — ケースの正本は
- * `wan/export_dit.py` の `CASES`）。受入れが帯を外れたら、帯を広げずに原因を調べる。
+ * MUST: do not change the `band` cases after seeing the `accept` results (that would break the independence of the band
+ * decision and the acceptance — the canonical cases are `CASES` of `wan/export_dit.py`). If the acceptance falls
+ * outside the band, investigate the cause instead of widening the band.
  *
- * ## 実寸（ADR 0118 段 3 / 段 8 — 832×480・33 フレームの S = 14,040 と 81 フレームの S = 32,760）
+ * ## Full size (ADR 0118 steps 3 / 8 — 832×480, S = 14,040 for 33 frames and S = 32,760 for 81 frames)
  *
- * 実寸の 1 forward を 3 本のテストで見る。指標は S = 192 と違い**正規化した比**（GPU の誤差 ÷ CPU f32 の参照
- * 自身の誤差 — {@link normalizedRatio}）で、帯 {@link DIT_FULL_NORMALIZED_BAND} は S ごとの表。どの S の帯も
- * 他の S の帯を持ち込まず、その S の `full-band` 6 ケースで独立に決め、`full-accept` 2 ケース（別 seed）で
- * 受け入れる（決定 8 の外挿）。誤差の基準は**活性も f64 で回した上流**（`reference.<case>` の `output.f64` —
- * 重みは同じ f16 丸め）。
+ * One full-size forward is checked by 3 tests. Unlike S = 192, the metric is the **normalized ratio** (the GPU error ÷
+ * the error of the CPU f32 reference itself — {@link normalizedRatio}), and the band {@link DIT_FULL_NORMALIZED_BAND}
+ * is a table per S. No S's band brings in another S's band: each is decided independently on that S's 6 `full-band`
+ * cases and accepted on the 2 `full-accept` cases (other seeds) (decision 8's extrapolation). The error baseline is
+ * **upstream run with f64 activations too** (`output.f64` of `reference.<case>` — the weights are the same f16
+ * rounding).
  *
- * - 計測モード（`gpuTiming`）の照合: S ごとに Session を張り直し、行ブロックの枚数（device の束縛上限から導いた
- *   期待値 — {@link expectedRowBlocks}）と、1 submit ごとの GPU 時間の最大 ≤ {@link SUBMIT_GPU_LIMIT_MS}（最初の
- *   run の裏付け前のチャンクを含む — runtime の `ChunkBudgetStats.submitGpuTime`）を門にし、受入れケースで故障注入 4 件が帯の外へ出ること
- *   （timestep の 1 ずれは帯の {@link SUBTLE_FAULT_MARGIN} 倍以上）も見る。帯の門は max ベースの r で、
- *   p99.99 ベースの r（{@link quantileRatio}）は記録だけ（指標 r の弱点 — 最大は裾の 1 要素で決まる — を
- *   分布で見るため。ADR 0118 追記 2026-10-02「段 3 の結果 — 帯の床と指標 r の弱点」）。
- * - 通常モード（計測なし）: S ごとに所要（壁時計）を記録する。計測モードは 1 dispatch = 1 pass で所要が
- *   変わりうる。出力は計測モードの同じケースの出力と Uint32 で一致することを門にする（チャンクの切れ目は
- *   値を動かさない — {@link measuredTokens}）。
+ * - Comparison in measuring mode (`gpuTiming`): the Session is rebuilt per S; the number of row blocks (the expected
+ *   value derived from the device's binding limit — {@link expectedRowBlocks}) and the maximum GPU time per submit ≤
+ *   {@link SUBMIT_GPU_LIMIT_MS} (including the first run's chunks issued before measured evidence existed —
+ *   `ChunkBudgetStats.submitGpuTime` of the runtime) are checks, and it also checks that the 4 fault injections fall
+ *   outside the band on the acceptance cases (the timestep off by 1 at least {@link SUBTLE_FAULT_MARGIN} × the band).
+ *   The band check uses the max-based r; the p99.99-based r ({@link quantileRatio}) is only recorded (to see the
+ *   weakness of the metric r — the maximum is decided by a single element of the tail — through the distribution; ADR
+ *   0118 addendum 2026-10-02 "result of step 3 — the band's floor and the weakness of the metric r").
+ * - Normal mode (no measurement): the time (wall clock) is recorded per S. In measuring mode 1 dispatch = 1 pass, so
+ *   the time can differ. The check is that the output equals the measuring-mode output of the same case as Uint32
+ *   (chunk boundaries do not move values — {@link measuredTokens}).
  *
- * ## i8 系列（ADR 0120 段 3 / 段 4 — the mirror's int8 transformer and `goldens/wan2.1-t2v-1.3b-i8-dyn/transformer/`）
+ * ## i8 series (ADR 0120 steps 3 / 4 — the mirror's int8 transformer and `goldens/wan2.1-t2v-1.3b-i8-dyn/transformer/`)
  *
  * The series the same recipe writes with `--dtype i8` (307 linears int8 per-channel, bias / norm upstream's f32) is
  * checked by the same gates, with the int8 container and the int8 goldens in place of the f16 ones.
  *
- * - **参照席 `f16+dit8`（`session` 空）の r 門**（段 3）: f16 席の実寸と同じ 1 本（{@link registerNormalizedRatioGate}）を、
- *   S = 192 の組（9 本 — S = 128 の受入れ 1 本を含む）と S = 14,040（8 本・計測モード）で回す。i8 系列は全ケースが
- *   f64 の参照（`output.f64` — i8 の fake-quant 重みで採った値）を持つので、S = 192 の組も r で見る。帯は組ごとに
- *   決定用 6 本の最悪 × 5（{@link I8_NORMALIZED_BAND} — 未導出の間は r と帯の候補を出して赤）。故障注入は f16 席と
- *   同じ 4 件に、i8 に固有の 1 件（linear 1 本の scale を 2 倍 — {@link scaledScaleContainer}）を足す。S = 32,760 の
- *   golden は持たない（ADR 0120 決定 3）。io の入力は f16 系列とバイト同一なのでケース名は共通。
- * - **実用席 `f16+dit8-a8-attn8-s16` の時間と確保**（段 4 — 記録 + 計測モードの 1 submit の門）: 束は配布形の
- *   manifest の席から引く（束の正本は manifest — ADR 0110 決定 1）。入力は f16 系列の `io.*`（S = 32,760 は f16 系列に
- *   しか無い・入力は席に依らない）。数値の門は自機 A/B 門（`e2e_wan_ab_test.ts`）が持ち、ここでは見ない。
+ * - **r check of the reference partner `f16+dit8` (empty `session`)** (step 3): the same implementation as the f16
+ *   preset's full size ({@link registerNormalizedRatioGate}), run on the S = 192 group (9 cases — including the 1 S =
+ *   128 acceptance case) and on S = 14,040 (8 cases, measuring mode). Every case of the i8 series has an f64 reference
+ *   (`output.f64` — values taken with the i8 fake-quant weights), so the S = 192 group is also checked by r. The band
+ *   per group is the worst of the 6 deciding cases × 5 ({@link I8_NORMALIZED_BAND} — while not yet derived, it prints r
+ *   and the band candidate and goes red). The fault injections are the same 4 as for the f16 preset plus 1 specific to
+ *   i8 (the scale of one linear doubled — {@link scaledScaleContainer}). There is no S = 32,760 golden (ADR 0120
+ *   decision 3). The io inputs are byte-identical to the f16 series, so the case names are shared.
+ * - **Time and allocation of the practical preset `f16+dit8-a8-attn8-s16`** (step 4 — a record + the 1-submit check of
+ *   measuring mode): the bundle is taken from the distribution manifest's preset (the manifest is canonical for the
+ *   bundle — ADR 0110 decision 1). The inputs are the f16 series' `io.*` (S = 32,760 exists only in the f16 series;
+ *   the inputs do not depend on the preset). The numeric check belongs to the self A/B check (`e2e_wan_ab_test.ts`) and
+ *   is not done here.
  *
  * Without the mirror, the goldens a case reads or a GPU the case SKIPs explicitly, naming what is missing (ADR 0005). A
  * golden set present only in part is a FAIL, not a SKIP (the completeness tests below).
@@ -129,55 +141,61 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
- * GPU（B570・f16 席）の DiT 1 forward と上流（CPU f32）の差の許容（比 = 最大絶対差 ÷ 参照の最大絶対値・
- * unpatchify 後の潜在）。
+ * Tolerance on the difference between one DiT forward on the GPU (B570, f16 preset) and upstream (CPU f32) (ratio = max
+ * absolute difference ÷ the reference's max absolute value, latents after unpatchify).
  *
- * 実測（2026-10-02・`deno-intel-graphics-bmg-g21`・`atol = rtol = 0` の素の突合）:
+ * Measured (2026-10-02, `deno-intel-graphics-bmg-g21`, a plain comparison with `atol = rtol = 0`):
  *
- * | 役割   | ケース                | 格子 F'·H'·W' | 最大絶対差 | 参照の最大絶対値 | 比（io）     | 比（TS の proj） |
- * | ------ | --------------------- | ------------- | ---------- | ---------------- | ------------ | ---------------- |
- * | band   | `band-s00192-t0999`   | 3·8·8         | 2.694e-5   | 4.024            | 6.70e-6      | 9.30e-6          |
- * | band   | `band-s00192-t0750`   | 2·8·12        | 5.460e-5   | 5.468            | 9.98e-6      | 1.20e-5          |
- * | band   | `band-s00192-t0500`   | 3·8·8         | 6.363e-5   | 3.569            | 1.78e-5      | 1.67e-5          |
- * | band   | `band-s00192-t0250`   | 1·8·24        | 2.694e-5   | 5.321            | 5.06e-6      | 4.70e-6          |
- * | band   | `band-s00192-t0600`   | 2·8·12        | 5.406e-5   | 5.594            | 9.66e-6      | 1.03e-5          |
- * | band   | `band-s00192-t0113`   | 3·8·8         | 8.273e-5   | 4.321            | **1.91e-5**  | 1.62e-5          |
- * | accept | `accept-s00192-t0600` | 2·8·12        | 3.247e-4   | 5.242            | 6.19e-5      | 4.81e-5          |
- * | accept | `accept-s00128-t0030` | 4·4·8         | 3.101e-5   | 4.784            | 6.48e-6      | 5.97e-6          |
- * | accept | `accept-s00192-t0400` | 2·12·8        | 6.151e-5   | 6.234            | 9.87e-6      | 9.87e-6          |
- * | growth | `growth-s00768-t0999` | 3·16·16       | 5.892e-5   | 4.426            | 1.33e-5      | 1.30e-5          |
- * | growth | `growth-s00768-t0500` | 3·16·16       | 4.804e-5   | 4.874            | 9.86e-6      | 8.98e-6          |
+ * | Role   | Case                  | Grid F'·H'·W' | Max abs diff | Reference max abs | Ratio (io)   | Ratio (TS proj)  |
+ * | ------ | --------------------- | ------------- | ------------ | ----------------- | ------------ | ---------------- |
+ * | band   | `band-s00192-t0999`   | 3·8·8         | 2.694e-5     | 4.024             | 6.70e-6      | 9.30e-6          |
+ * | band   | `band-s00192-t0750`   | 2·8·12        | 5.460e-5     | 5.468             | 9.98e-6      | 1.20e-5          |
+ * | band   | `band-s00192-t0500`   | 3·8·8         | 6.363e-5     | 3.569             | 1.78e-5      | 1.67e-5          |
+ * | band   | `band-s00192-t0250`   | 1·8·24        | 2.694e-5     | 5.321             | 5.06e-6      | 4.70e-6          |
+ * | band   | `band-s00192-t0600`   | 2·8·12        | 5.406e-5     | 5.594             | 9.66e-6      | 1.03e-5          |
+ * | band   | `band-s00192-t0113`   | 3·8·8         | 8.273e-5     | 4.321             | **1.91e-5**  | 1.62e-5          |
+ * | accept | `accept-s00192-t0600` | 2·8·12        | 3.247e-4     | 5.242             | 6.19e-5      | 4.81e-5          |
+ * | accept | `accept-s00128-t0030` | 4·4·8         | 3.101e-5     | 4.784             | 6.48e-6      | 5.97e-6          |
+ * | accept | `accept-s00192-t0400` | 2·12·8        | 6.151e-5     | 6.234             | 9.87e-6      | 9.87e-6          |
+ * | growth | `growth-s00768-t0999` | 3·16·16       | 5.892e-5     | 4.426             | 1.33e-5      | 1.30e-5          |
+ * | growth | `growth-s00768-t0500` | 3·16·16       | 4.804e-5     | 4.874             | 9.86e-6      | 8.98e-6          |
  *
- * 「比（io）」は golden の torch の `timesteps_proj` を入れた値（最大絶対差の列もこちら）、「比（TS の proj）」は
- * ホストの `timestepsProj` を入れた値。
+ * "Ratio (io)" is the value with the golden's torch `timesteps_proj` fed in (the max-abs-diff column is from it too),
+ * "Ratio (TS proj)" the value with the host's `timestepsProj` fed in.
  *
- * 受入れケースの故障注入の比（RoPE の h / w・unpatchify の並び・cos / sin 反転・**timestep の 1 ずれ**）:
- * `accept-s00192-t0600` 4.03e-1 / 1.28 / 2.88e-1 / **9.18e-3**・`accept-s00128-t0030` 1.06e-1 / 1.43 / 3.95e-1 /
- * **6.91e-3**・`accept-s00192-t0400` 2.48e-1 / 1.32 / 2.79e-1 / **1.93e-3**。
+ * Ratios of the fault injections on the acceptance cases (RoPE h / w, unpatchify order, cos / sin reversed, **the
+ * timestep off by 1**): `accept-s00192-t0600` 4.03e-1 / 1.28 / 2.88e-1 / **9.18e-3**, `accept-s00128-t0030` 1.06e-1 /
+ * 1.43 / 3.95e-1 / **6.91e-3**, `accept-s00192-t0400` 2.48e-1 / 1.32 / 2.79e-1 / **1.93e-3**.
  *
- * 帯 9.6e-5 は band の最悪の比 1.915e-5（`band-s00192-t0113` の io）の約 5.0 倍。受入れの最悪 6.19e-5 は帯の
- * 0.64 倍。微妙な故障（timestep の 1 ずれ）の最小 1.93e-3 は帯の約 20 倍で、O(1) の故障 3 件は 3〜4 桁上に出る。
+ * The band 9.6e-5 is about 5.0 × the worst band-case ratio 1.915e-5 (io of `band-s00192-t0113`). The worst acceptance
+ * value 6.19e-5 is 0.64 × the band. The smallest subtle fault (the timestep off by 1) 1.93e-3 is about 20 × the band,
+ * and the 3 O(1) faults land 3–4 orders of magnitude above it.
  *
- * 絶対差でなく比で見る理由: 旧帯（絶対 atol 3.2e-4 = 当時の決定用 4 ケースの最悪 6.36e-5 × 5）を、検証の未見
- * ケース（今の `accept-s00192-t0600`）が 3.247e-4 で超えた。超えたのは 12,288 要素中 1 要素で、比は 6.2e-5。
- * 最大絶対差は裾の 1 要素で決まり参照の振れ幅（3.6〜6.2）ごと動くので、振れ幅で割った比の方が入力をまたいで
- * 揃う。しかも当時は決定用のケースを受入れの結果を見て足していたので、決定と受入れの独立も崩れていた。
+ * Why a ratio rather than an absolute difference: the old band (absolute atol 3.2e-4 = the worst 6.36e-5 of the then 4
+ * deciding cases × 5) was exceeded by an unseen validation case (today's `accept-s00192-t0600`) at 3.247e-4. What
+ * exceeded it was 1 element out of 12,288, and the ratio was 6.2e-5. The max absolute difference is decided by a
+ * single tail element and moves with the reference's range (3.6–6.2), so the ratio divided by the range is more
+ * consistent across inputs. Moreover, deciding cases had been added back then after seeing the acceptance results,
+ * which also broke the independence of decision and acceptance.
  *
- * 決定用を 1 ケースにしない理由（実測）: t = 999 の 1 ケースで決めた帯を、t = 500 の未見ケースが 1.6 倍
- * 超えた。移植の誤りではなく入力の感度で、根拠は 2 つ:
- * ① パッチ後の eager は上流とビット一致（GPU と eager の差 = GPU と上流の差 — export 台本の `[eager]` 行）。
- * ② CPU の eager でも、中ほどの timestep は `timesteps_proj` の 1e-5 級の揺れを出力で約 4 倍に増幅する
- *    （t = 999 は 0.2 倍）。GPU の丸めの差も同じ増幅を受ける。
- * そこで決定用は timestep を参照の設定の列（999 → 60）の全域に散らし、seed と格子も変えた 6 ケースにした。
+ * Why not a single deciding case (measured): a band decided on one t = 999 case was exceeded 1.6 × by an unseen t =
+ * 500 case. Not a porting error but input sensitivity, on 2 grounds:
+ * ① the patched eager run is bit-identical to upstream (the GPU vs eager difference = the GPU vs upstream difference —
+ *    the `[eager]` lines of the export script).
+ * ② even in the CPU eager run, a mid-range timestep amplifies the 1e-5-order wobble of `timesteps_proj` about 4 × in
+ *    the output (0.2 × at t = 999). The GPU's rounding difference is amplified the same way.
+ * So the deciding cases became 6 cases with timesteps spread over the whole range of the reference's schedule (999 →
+ * 60), with different seeds and grids as well.
  *
- * 層の向き（計測用グラフ・各ブロックの出力の 最大絶対差 / 参照の最大絶対値・11 ケース × 30 ブロック）: 6e-6〜
- * 1.6e-4 の範囲で上下し、層数に対して単調には伸びない（ケースごとの最大は `band-s00192-t0500` の 18 層目
- * 1.54e-4・`growth-s00768-t0999` の 25 層目 1.25e-4 など。多くは後ろの層で 1e-5 級へ戻る）。S = 192 → 768
- * でも最終出力の比は伸びていない。
+ * Per-layer trend (measurement graph; max absolute difference / the reference's max absolute value of each block's
+ * output; 11 cases × 30 blocks): it goes up and down within 6e-6 to 1.6e-4 and does not grow monotonically with depth
+ * (per-case maxima such as 1.54e-4 at layer 18 of `band-s00192-t0500` and 1.25e-4 at layer 25 of
+ * `growth-s00768-t0999`; most return to the 1e-5 order in the later layers). Going from S = 192 to 768 does not grow
+ * the ratio of the final output either.
  */
 const DIT_RATIO_BAND = 9.6e-5;
 
-/** Wan2.1 T2V 1.3B の patch（`(1,2,2)`・潜在 16 チャネル — transformer の config）。 */
+/** Patch of Wan2.1 T2V 1.3B (`(1,2,2)`, 16 latent channels — the transformer's config). */
 const WAN_GEOMETRY: WanPatchGeometry = {
   channels: 16,
   patchFrames: 1,
@@ -191,7 +209,7 @@ const SERIES_NAME = "wan2.1-t2v-1.3b-f16-dyn";
 const COMPONENT = "transformer";
 const GOLDEN_DIR = new URL(`${COMPONENT}/`, goldenDir(SERIES_NAME));
 const GRAPH = COMPONENT;
-/** 資産の名前（`wan/export_dit.py` の `ROPE_BASE_ASSET`）。 */
+/** Name of the asset (`ROPE_BASE_ASSET` of `wan/export_dit.py`). */
 const ROPE_BASE_ASSET = "rope_base";
 
 /** The command that fetches the goldens into the local test-asset root (ADR 0139 decision 3). */
@@ -208,8 +226,9 @@ const MISSING_GOLDENS = FETCHED
 type CaseRole = "band" | "accept" | "growth";
 
 /**
- * 生成されているはずのケース。**列挙結果ではなくここで固定する**（生成を一部だけ流した環境でテストが
- * 黙って消える形にしない）。正本は `wan/export_dit.py` の `CASES`。
+ * The cases that must have been generated. **Pinned here rather than enumerated** (so that tests do not silently
+ * disappear in an environment where only part of the generation ran). The canonical list is `CASES` of
+ * `wan/export_dit.py`.
  */
 const CASES: readonly { readonly name: string; readonly role: CaseRole }[] = [
   { name: "band-s00192-t0999", role: "band" },
@@ -228,24 +247,26 @@ const CASES: readonly { readonly name: string; readonly role: CaseRole }[] = [
 type FullRole = "full-band" | "full-accept";
 
 /**
- * 実寸の S（潜在 `[16,F',60,104]` → S = F'·30·52）: 33 フレーム（F' = 9・ADR 0118 段 3）の 14,040 と
- * 81 フレーム（F' = 21・段 8）の 32,760。
+ * The full-size S (latents `[16,F',60,104]` → S = F'·30·52): 14,040 for 33 frames (F' = 9, ADR 0118 step 3) and 32,760
+ * for 81 frames (F' = 21, step 8).
  */
 type FullTokens = 14040 | 32760;
 
 /**
- * GPU テストで回す S の順。確保が最大の S = 32,760 を先に置く（理由は S = 192 より前に実寸を置くのと同じ —
- * B570 では前の確保の残りが後ろの大きな確保を OOM にしうるので、大きい方を空の device で回す）。
+ * The order of S in the GPU tests. The S = 32,760 with the largest allocation comes first (for the same reason the full
+ * size comes before S = 192 — on the B570 what is left of an earlier allocation can push a later large one into OOM,
+ * so the larger one runs on an empty device).
  */
 const FULL_TOKENS_ORDER: readonly FullTokens[] = [32760, 14040];
 
 /**
- * 実寸のケース。正本は `wan/export_dit.py` の `CASES`。S ごとに `full-band` 6 本は
- * {@link DIT_FULL_NORMALIZED_BAND} のその S の行の決定用で timestep を 999〈seed 2 本〉/ 750 / 500 / 250 / 113 に
- * 散らし、`full-accept` 2 本は受入れ用（seed は段 2 のどのケースとも、決定用と受入れの間でも別）。並びは
- * {@link FULL_TOKENS_ORDER} と同じく S = 32,760 が先。
+ * The full-size cases. The canonical list is `CASES` of `wan/export_dit.py`. Per S, the 6 `full-band` cases are the
+ * deciding cases of that S's row of {@link DIT_FULL_NORMALIZED_BAND}, with timesteps spread over 999 (2 seeds) / 750 /
+ * 500 / 250 / 113, and the 2 `full-accept` cases are for acceptance (their seeds differ from every step 2 case and
+ * between deciding and acceptance cases). As in {@link FULL_TOKENS_ORDER}, S = 32,760 comes first.
  *
- * MUST: 受入れの結果を見て決定用のケースを足し引きしない（帯の決定と受入れの独立が崩れる）。
+ * MUST: do not add or remove deciding cases after seeing the acceptance results (that would break the independence of
+ * the band decision and the acceptance).
  */
 const FULL_CASES: readonly {
   readonly name: string;
@@ -271,7 +292,8 @@ const FULL_CASES: readonly {
 ];
 
 /**
- * S ごとのケース（{@link FULL_TOKENS_ORDER} の順）。`normalModeCase` は通常モードで回す 1 本（S ごとの先頭）。
+ * Cases per S (in the order of {@link FULL_TOKENS_ORDER}). `normalModeCase` is the one case run in normal mode (the
+ * first of each S).
  */
 const FULL_CASES_BY_TOKENS = FULL_TOKENS_ORDER.map((tokens) => {
   const cases = FULL_CASES.filter((spec) => spec.tokens === tokens);
@@ -279,36 +301,38 @@ const FULL_CASES_BY_TOKENS = FULL_TOKENS_ORDER.map((tokens) => {
 });
 
 /**
- * 実寸のケースの `reference.<case>` が持つ f64 の参照（上流の素の forward を活性も f64 で回した出力を f32 へ
- * 丸めた値 — `wan/export_dit.py` の `REFERENCE_F64_KEY`）。
+ * The f64 reference held by `reference.<case>` of the full-size cases (the output of upstream's plain forward run with
+ * f64 activations too, rounded to f32 — `REFERENCE_F64_KEY` of `wan/export_dit.py`).
  *
- * f32 へ丸めた差は要素ごとに 2⁻²⁴·|x| 以下で、比にして 6e-8 以下。これが正規化の分母（CPU f32 の参照の f64 に
- * 対する比 — {@link referenceErrorOf}）を動かす割合は分母の最小で決まる（実測は
- * {@link DIT_FULL_NORMALIZED_BAND} の表と results.json）:
+ * The difference of the rounding to f32 is at most 2⁻²⁴·|x| per element, at most 6e-8 as a ratio. How much it moves the
+ * normalization's denominator (the ratio of the CPU f32 reference against f64 — {@link referenceErrorOf}) is decided
+ * by the smallest denominator (measured values in the table of {@link DIT_FULL_NORMALIZED_BAND} and in results.json):
  *
- * - 決定用（`full-band`）だけ: S = 14,040 の最小 3.72e-6（`t0250`）で 2% 未満・S = 32,760 の最小 2.07e-6
- *   （`t0999-2`）で約 2.9%
- * - 受入れを含めると: 最小 1.83e-6（`full-accept-s14040-t0600`）で約 3.3%
+ * - deciding cases (`full-band`) only: below 2% at the S = 14,040 minimum 3.72e-6 (`t0250`), about 2.9% at the S =
+ *   32,760 minimum 2.07e-6 (`t0999-2`)
+ * - including acceptance: about 3.3% at the minimum 1.83e-6 (`full-accept-s14040-t0600`)
  *
- * r が数 % 動いても判定の向きは変わらない（判定が帯と最も近いのは S = 32,760 の t0600 の timestep の 1 ずれで
- * 帯の 2.65 倍。そのケースの分母は 6.77e-6 なので、動きは 1% 未満）。
+ * A shift of a few % in r does not change the direction of a verdict (the verdict closest to the band is the timestep
+ * off by 1 of S = 32,760 t0600 at 2.65 × the band; that case's denominator is 6.77e-6, so the shift is below 1%).
  */
 const REFERENCE_F64_KEY = "output.f64";
 
 /**
- * 実寸の GPU（B570・f16 席）の 1 forward の誤差の許容（S ごとの表）。指標は**正規化した比**
- * （{@link normalizedRatio}）:
+ * Tolerance on the error of one full-size forward on the GPU (B570, f16 preset) (a table per S). The metric is the
+ * **normalized ratio** ({@link normalizedRatio}):
  *
  *   r = (max|GPU − f64| ÷ max|f64|) ÷ (max|CPU f32 − f64| ÷ max|f64|)
  *
- * = 「GPU の誤差が、同じ入力で CPU f32 の参照（上流の素の forward・CPU torch f32）自身が出す誤差の何倍か」。
- * f64 は活性も f64 で回した上流（重みは同じ f16 丸め — `output.f64`）、CPU f32 は `output`。どの S の帯も S = 192
- * や他の S の帯を持ち込まず、その S の `full-band` 6 ケースの最悪の r × 5 で独立に決める（ADR 0118 決定 8 の外挿）。
+ * = "how many times the error that the CPU f32 reference (upstream's plain forward, CPU torch f32) itself makes on the
+ * same input the GPU error is". f64 is upstream run with f64 activations too (the weights are the same f16 rounding —
+ * `output.f64`), CPU f32 is `output`. No S's band brings in S = 192 or another S's band: each is decided independently
+ * as the worst r of that S's 6 `full-band` cases × 5 (ADR 0118 decision 8's extrapolation).
  *
- * S = 32,760 の実測（2026-10-03・`deno-intel-graphics-bmg-g21`・ADR 0118 段 8）。帯の式（`full-band` 6 本の最悪
- * r × 5）は実測の前に ADR の追記で固定し、`full-accept` の r は同じ走行で出たが帯の決定には使っていない:
+ * Measured at S = 32,760 (2026-10-03, `deno-intel-graphics-bmg-g21`, ADR 0118 step 8). The band formula (worst r of
+ * the 6 `full-band` cases × 5) was fixed by an ADR addendum before the measurement; the `full-accept` r came out in
+ * the same run but was not used to decide the band:
  *
- * | ケース                     | GPU / f64 | CPU f32 / f64 | r        |
+ * | Case                       | GPU / f64 | CPU f32 / f64 | r        |
  * | -------------------------- | --------- | ------------- | -------- |
  * | `full-band-s32760-t0999`   | 4.81e-5   | 2.32e-6       | **20.8** |
  * | `full-band-s32760-t0999-2` | 2.53e-5   | 2.07e-6       | 12.2     |
@@ -317,15 +341,17 @@ const REFERENCE_F64_KEY = "output.f64";
  * | `full-band-s32760-t0250`   | 2.30e-5   | 4.14e-6       | 5.56     |
  * | `full-band-s32760-t0113`   | 3.10e-5   | 7.86e-6       | 3.94     |
  *
- * 帯 104 = 最悪 20.8（`full-band-s32760-t0999`）× 5。受入れ 2 本は r 13.1（t0999）/ 4.89（t0600）で帯の内。故障注入の
- * r（RoPE の h / w・unpatchify の並び・cos / sin 反転・timestep の 1 ずれ）は t0999 で 5.65e4 / 3.44e5 / 1.72e5 /
- * 1.91e4、t0600 で 3.07e4 / 2.12e5 / 2.12e4 / **276**（帯の 2.65 倍 ≥ {@link SUBTLE_FAULT_MARGIN}）。4 件とも帯の外。
- * S = 14,040 より r の最悪が大きい（14.9 → 20.8）のは t = 999 の 1 本で、他の 5 本は同程度（3.9〜12.2）。
+ * Band 104 = the worst 20.8 (`full-band-s32760-t0999`) × 5. The 2 acceptance cases have r 13.1 (t0999) / 4.89 (t0600),
+ * inside the band. The fault injections' r (RoPE h / w, unpatchify order, cos / sin reversed, the timestep off by 1)
+ * are 5.65e4 / 3.44e5 / 1.72e5 / 1.91e4 at t0999 and 3.07e4 / 2.12e5 / 2.12e4 / **276** at t0600 (2.65 × the band ≥
+ * {@link SUBTLE_FAULT_MARGIN}). All 4 are outside the band. The worst r being larger than at S = 14,040 (14.9 → 20.8)
+ * is due to the one t = 999 case; the other 5 are similar (3.9–12.2).
  *
- * S = 14,040 の実測（2026-10-02・`deno-intel-graphics-bmg-g21`・`atol = rtol = 0` の素の突合）。帯は受入れ 2 ケース
- * （seed 777006 / 777007）を生成する前に、決定用 6 ケースだけから決めた:
+ * Measured at S = 14,040 (2026-10-02, `deno-intel-graphics-bmg-g21`, a plain comparison with `atol = rtol = 0`). The
+ * band was decided from the 6 deciding cases alone, before the 2 acceptance cases (seeds 777006 / 777007) were
+ * generated:
  *
- * | ケース                     | GPU / f64  | CPU f32 / f64 | GPU / CPU f32 | r          |
+ * | Case                       | GPU / f64  | CPU f32 / f64 | GPU / CPU f32 | r          |
  * | -------------------------- | ---------- | ------------- | ------------- | ---------- |
  * | `full-band-s14040-t0999`   | 2.120e-3   | 1.421e-4      | 1.978e-3      | **14.9**   |
  * | `full-band-s14040-t0999-2` | 4.053e-5   | 5.562e-6      | 3.908e-5      | 7.29       |
@@ -334,61 +360,76 @@ const REFERENCE_F64_KEY = "output.f64";
  * | `full-band-s14040-t0250`   | 9.844e-6   | 3.724e-6      | 9.486e-6      | 2.64       |
  * | `full-band-s14040-t0113`   | 8.921e-6   | 5.592e-6      | 9.277e-6      | 1.60       |
  *
- * 各列は「最大絶対差 ÷ 参照の最大絶対値」（左 3 列の参照はそれぞれ f64 / f64 / CPU f32）。帯 75 = 最悪 14.92
- * （`full-band-s14040-t0999`）× 5 = 74.6 を有効数字 2 桁へ切り上げた値。
+ * Each column is "max absolute difference ÷ the reference's max absolute value" (the references of the left 3 columns
+ * are f64 / f64 / CPU f32 respectively). Band 75 = the worst 14.92 (`full-band-s14040-t0999`) × 5 = 74.6, rounded up
+ * to 2 significant digits.
  *
- * 正規化する理由: 比そのもの（GPU / f64）は入力で 240 倍動く（t = 113 の 8.9e-6 〜 t = 999 の 2.1e-3・同じ
- * t = 999 でも seed で 52 倍）。動いているのは入力による丸めの増幅で、CPU f32 の参照も同じだけ f64 から離れる
- * （同じ入力なら f32 のどの実装にも掛かる）。比の最悪 × 5 で帯を決めると 1.1e-2 になり、微妙な故障（timestep の
- * 1 ずれ — t = 600 で比 1.77e-3）まで帯の内に入った。CPU f32 の誤差で割れば増幅が打ち消され、r は 1.6〜15 に
- * 収まる（比の 240 倍の幅が 9 倍になる）。
+ * Why normalize: the ratio itself (GPU / f64) moves 240 × across inputs (8.9e-6 at t = 113 to 2.1e-3 at t = 999; 52 ×
+ * by seed even at the same t = 999). What moves is the input's amplification of rounding, and the CPU f32 reference
+ * moves away from f64 by just as much (on the same input it applies to any f32 implementation). Deciding the band as
+ * the worst ratio × 5 gives 1.1e-2, which let even a subtle fault (the timestep off by 1 — ratio 1.77e-3 at t = 600)
+ * inside the band. Dividing by the CPU f32 error cancels the amplification, and r stays within 1.6–15 (the 240 × spread
+ * of the ratio becomes 9 ×).
  *
- * r が 1 を超える理由（2026-10-02 の帰属・誤りではなく精度差）: 層ごとの比の伸びの形は GPU と CPU f32 で同じで、
- * 峰も同じ層。op ごとの局所誤差（ブロック 0 / 28 の op の出口を GPU の値を入力にして f64 と比べた値・
- * `full-band-s14040-t0999` / `t0113`）では linear（GEMM）が CPU f32 の 4〜7 倍、FFN（down は K = 8960）が 11〜14 倍。
- * GEMM の K 縮約（K 昇順・1 本の f32 累積 — src/kernels/gemm.ts）を CPU で逐次の fma として再現すると GPU の出力と
- * ビット一致する（block 0 / 28 の to_v・to_out・512 行）。norm・残差は 1 倍で、block 28 の SDPA は GPU の方が
- * 小さい（0.8 倍）。手当て（縮約順の変更は全系列の sha256 と生成物に響く）は別の裁定。
+ * Why r exceeds 1 (the attribution of 2026-10-02 — a precision difference, not an error): the shape of the per-layer
+ * ratio growth is the same on the GPU and on CPU f32, with the peak at the same layer. In the per-op local errors (the
+ * outputs of the ops of blocks 0 / 28, with the GPU values as inputs, compared with f64; `full-band-s14040-t0999` /
+ * `t0113`), linear (GEMM) is 4–7 × CPU f32 and the FFN (down with K = 8960) 11–14 ×. Reproducing the GEMM's K reduction
+ * (K ascending, a single f32 accumulator — src/kernels/gemm.ts) on the CPU as sequential fma is bit-identical to the
+ * GPU output (to_v and to_out of blocks 0 / 28, 512 rows). Norms and residuals are 1 ×, and block 28's SDPA is smaller
+ * on the GPU (0.8 ×). A remedy (changing the reduction order affects the sha256 and the outputs of every series) is a
+ * separate ruling.
  *
- * MUST: `full-accept` の結果を見てこの値も、`full-band` のケースも、指標も変えない（受入れの seed は指標を
- * 決めた後に新しくした — `wan/export_dit.py` の docstring）。受入れが帯を外れたら、帯を広げずに原因を調べる。
+ * MUST: do not change this value, the `full-band` cases or the metric after seeing the `full-accept` results (the
+ * acceptance seeds were renewed after the metric was decided — the docstring of `wan/export_dit.py`). If the
+ * acceptance falls outside the band, investigate the cause instead of widening the band.
  *
- * NOTE（2026-10-02・受入れの結果 — 帯を決めた後に生成して回した）:
+ * NOTE (2026-10-02, the acceptance results — generated and run after the band was decided):
  *
- * | ケース                     | GPU / f64 | CPU f32 / f64 | GPU / CPU f32 | r    | r（TS の proj） |
+ * | Case                       | GPU / f64 | CPU f32 / f64 | GPU / CPU f32 | r    | r (TS proj)     |
  * | -------------------------- | --------- | ------------- | ------------- | ---- | --------------- |
  * | `full-accept-s14040-t0999` | 2.00e-5   | 6.82e-6       | 2.49e-5       | 2.93 | 3.27            |
  * | `full-accept-s14040-t0600` | 8.45e-6   | 1.83e-6       | 8.70e-6       | 4.60 | 4.50            |
  *
- * どちらも帯の内。故障注入の r（RoPE の h / w・unpatchify の並び・cos / sin 反転・timestep の 1 ずれ）は t0999 で
- * 3.25e4 / 2.05e5 / 6.44e4 / 6.04e3（timestep の 1 ずれは帯の 80.5 倍）、t0600 で 3.24e4 / 6.65e5 / 3.62e4 / **332**
- * （比 6.09e-4・帯の **4.42 倍**）。4 件とも帯の外。timestep の 1 ずれの余裕は最小 4.42 倍で、
- * {@link SUBTLE_FAULT_MARGIN}（2）を満たす。帯も指標も決定用も動かしていない。
+ * Both inside the band. The fault injections' r (RoPE h / w, unpatchify order, cos / sin reversed, the timestep off by
+ * 1) are 3.25e4 / 2.05e5 / 6.44e4 / 6.04e3 at t0999 (the timestep off by 1 at 80.5 × the band) and 3.24e4 / 6.65e5 /
+ * 3.62e4 / **332** at t0600 (ratio 6.09e-4, **4.42 ×** the band). All 4 are outside the band. The smallest margin of
+ * the timestep off by 1 is 4.42 ×, which satisfies {@link SUBTLE_FAULT_MARGIN} (2). Neither the band, the metric nor
+ * the deciding cases were moved.
  */
 const DIT_FULL_NORMALIZED_BAND: Readonly<Record<FullTokens, number>> = { 14040: 75, 32760: 104 };
 
 /**
- * 微妙な故障（timestep の 1 ずれ）が帯から離れているべき倍率（追記 2026-10-02 の「赤にならない注入は帯が広すぎる
- * 兆候」の実装）。帯の外に出るだけでは、帯の最悪 × 5 の余裕と故障の大きさが同じ桁になったときに気づけない。
- * 値は 2: 故障の大きさ自体が入力で 3 倍近く動く（t=600 の 2 seed で 1.77e-3 と 6.09e-4）ので、観測の最小 4.42 倍
- * （受入れ t0600）と 9.4 倍（独立検証の seed 888123）・80 倍（t0999）を下回る 2 倍を、帯の広がりを検出する床とする。
- * 最初に置いた 5 は ADR に無い見積りで、観測の後に 2 へ下げた（開示 — 帯・指標・決定用は動かしていない）。
+ * Factor by which a subtle fault (the timestep off by 1) must stay away from the band (the implementation of the
+ * addendum 2026-10-02 "an injection that does not turn red is a sign that the band is too wide"). Merely falling
+ * outside the band does not reveal when the margin of the band's worst × 5 and the size of the fault become the same
+ * order of magnitude. The value is 2: the size of the fault itself moves nearly 3 × with the input (1.77e-3 and
+ * 6.09e-4 for 2 seeds at t=600), so 2 ×, below the observed minimum of 4.42 × (acceptance t0600), 9.4 × (seed 888123 of
+ * an independent validation) and 80 × (t0999), is the floor that detects a widened band. The first value of 5 was an
+ * estimate not in the ADR and was lowered to 2 after the observation (disclosed — the band, the metric and the
+ * deciding cases did not move).
  */
 const SUBTLE_FAULT_MARGIN = 2;
 
-/** i8 系列（参照席 `f16+dit8` / 実用席の重み — ADR 0120 決定 2）— the folder of its goldens. */
+/**
+ * The i8 series (the weights of the reference partner `f16+dit8` / the practical preset — ADR 0120 decision 2) — the
+ * folder of its goldens.
+ */
 const I8_SERIES_NAME = "wan2.1-t2v-1.3b-i8-dyn";
 const I8_GOLDEN_DIR = new URL(`${COMPONENT}/`, goldenDir(I8_SERIES_NAME));
-/** i8 の参照席のケースの結果 ID と step 名の接頭辞（ケース名は f16 系列と共通なので席で分ける）。 */
+/**
+ * Prefix of the result IDs and step names of the i8 reference-partner cases (the case names are shared with the f16
+ * series, so they are separated by preset).
+ */
 const I8_ID_PREFIX = "f16+dit8/";
 
 /** The int8 container's graph name (the same weights key as the f16 one). */
 const i8Graph = (): string => COMPONENT;
 
 /**
- * i8 系列のケース（`wan/export_dit.py` の `series_cases("i8")` の鏡像 — S = 192 の組は f16 系列の `band` /
- * `accept`〈S = 128 の受入れ 1 本を含む〉、実寸は S = 14,040 の 8 本。`growth` と S = 32,760 は採らない — ADR 0120
- * 決定 3）。seed・timestep・有効長は f16 系列と同じ。
+ * The i8 series' cases (a mirror of `series_cases("i8")` of `wan/export_dit.py` — the S = 192 group is the f16 series'
+ * `band` / `accept` (including the 1 S = 128 acceptance case), the full size the 8 cases of S = 14,040. `growth` and S
+ * = 32,760 are not taken — ADR 0120 decision 3). Seeds, timesteps and valid lengths are the same as the f16 series.
  */
 const I8_SMALL_CASES: readonly GateCase[] = CASES.filter(({ role }) => role !== "growth").map(
   ({ name, role }) => ({ name, role, accept: role === "accept" }),
@@ -397,30 +438,34 @@ const I8_FULL_CASES: readonly GateCase[] = FULL_CASES.filter(({ tokens }) => tok
   ({ name, role }) => ({ name, role, accept: role === "full-accept" }),
 );
 
-/** i8 の参照席の組（S = 192 の組は S = 128 の受入れ 1 本を含む）。 */
+/** The groups of the i8 reference partner (the S = 192 group includes the 1 S = 128 acceptance case). */
 type I8Group = 192 | 14040;
 
 /**
- * 参照席 `f16+dit8`（i8 系列・`session` 空）の正規化した比 r の帯（組ごと — ADR 0120 決定 3）。導出規則は f16 席の
- * {@link DIT_FULL_NORMALIZED_BAND} と同じで、その組の決定用 6 本の最悪 r × 5。組どうし・f16 席の帯は持ち込まない
- * （ADR 0118 決定 8 の外挿）。S = 192 の組も r で見る — i8 系列は全ケースが f64 の参照を持つので、f16 席の S = 192 の
- * 比の帯（{@link DIT_RATIO_BAND}）とは指標が違う。
+ * Band of the normalized ratio r of the reference partner `f16+dit8` (i8 series, empty `session`) (per group — ADR 0120
+ * decision 3). The derivation rule is the same as the f16 preset's {@link DIT_FULL_NORMALIZED_BAND}: the worst r of the
+ * group's 6 deciding cases × 5. No band is brought in from another group or from the f16 preset (ADR 0118 decision 8's
+ * extrapolation). The S = 192 group is also checked by r — every case of the i8 series has an f64 reference, so the
+ * metric differs from the f16 preset's S = 192 ratio band ({@link DIT_RATIO_BAND}).
  *
- * `undefined` = 未導出: 門は各ケースの r と帯の候補（{@link registerBandCandidate}）を出して**赤で止まる**（通る値を
- * 仮置きして検出力の無い門を作らない）。GPU の実測の後に、実測の表と一緒にここへ書く。
+ * `undefined` = not yet derived: the check prints each case's r and the band candidate ({@link registerBandCandidate})
+ * and **stops red** (no check without detection power is made by putting in a value that passes). After the GPU
+ * measurement it is written here together with the measured table.
  *
- * MUST: 受入れの結果を見てこの値も決定用のケースも変えない（f16 席と同じ）。受入れが帯を外れたら、帯を広げずに
- * 原因を調べる。
+ * MUST: do not change this value or the deciding cases after seeing the acceptance results (the same as the f16
+ * preset). If the acceptance falls outside the band, investigate the cause instead of widening the band.
  *
- * 導出（2026-10-03・B570・計測モード〈S = 14,040〉/ 通常の device〈S = 192〉）:
+ * Derivation (2026-10-03, B570, measuring mode (S = 14,040) / normal device (S = 192)):
  *
- * | 組      | 決定用の r（t0999 / t0999-2 / t0750 / t0500 / t0250 / t0113） | 最悪  | × 5   | 帯 | 受入れの r              |
- * | ------- | ---------------------------------------------------------------- | ----- | ----- | -- | ----------------------- |
- * | 14,040  | 10.7 / 10.2 / 4.02 / 2.90 / 2.56 / 2.05                          | 10.7  | 53.5  | 54 | t0999 3.71 / t0600 4.64 |
- * | 192     | 2.59 / 2.83 / 3.66 / 4.12 / 3.30 + t0600 5.97                    | 5.97  | 29.9  | 30 | t0600 3.82 / t0400 3.43 |
+ * | Group   | Deciding r (t0999 / t0999-2 / t0750 / t0500 / t0250 / t0113)    | Worst | × 5   | Band | Acceptance r            |
+ * | ------- | ---------------------------------------------------------------- | ----- | ----- | ---- | ----------------------- |
+ * | 14,040  | 10.7 / 10.2 / 4.02 / 2.90 / 2.56 / 2.05                          | 10.7  | 53.5  | 54   | t0999 3.71 / t0600 4.64 |
+ * | 192     | 2.59 / 2.83 / 3.66 / 4.12 / 3.30 + t0600 5.97                    | 5.97  | 29.9  | 30   | t0600 3.82 / t0400 3.43 |
  *
- * scale × 2 の故障注入は r 1.66e+4〜4.45e+4（帯の 3 桁上）。f16 席の同じ S の帯は 75（S = 14,040）で、i8 の t0999 の r が
- * f16（14.9）より小さいのは分母（CPU f32 の誤差）が同じ桁で分子の最大が小さく出たため — 席の優劣ではない。
+ * The scale × 2 fault injection gives r 1.66e+4 to 4.45e+4 (3 orders of magnitude above the band). The f16 preset's
+ * band for the same S is 75 (S = 14,040); that the i8 t0999 r is smaller than f16's (14.9) is because the denominator
+ * (the CPU f32 error) is of the same order while the numerator's maximum came out smaller — not a ranking of the
+ * presets.
  */
 const I8_NORMALIZED_BAND: Readonly<Record<I8Group, number | undefined>> = {
   192: 30,
@@ -428,25 +473,30 @@ const I8_NORMALIZED_BAND: Readonly<Record<I8Group, number | undefined>> = {
 };
 
 /**
- * i8 に固有の故障注入で per-channel scale を 2 倍にする linear（{@link scaledScaleContainer}）。中ほどのブロックの
- * self-attention の V を選ぶ — q / k は直後の RMS norm（`norm_q` / `norm_k`）が倍率を打ち消して値に出ない。
- * 主張は「i8 の scale の取り違え（軸・値・束縛）を r の帯が掴める」こと（ADR 0120 検収 段 3）。
+ * The linear whose per-channel scale the i8-specific fault injection doubles ({@link scaledScaleContainer}). The V of
+ * the self-attention of a middle block is chosen — for q / k, the RMS norm right after them (`norm_q` / `norm_k`)
+ * cancels the factor so it never reaches the values. The claim is that "the r band catches an i8 scale mix-up (axis,
+ * value, binding)" (ADR 0120 acceptance, step 3).
  */
 const I8_SCALE_FAULT_WEIGHT = "blocks.15.attn1.to_v.weight";
 /** The scale-fault label in the it titles, the notes and the wrapping describe's title. */
-const I8_SCALE_FAULT_LABEL = `${I8_SCALE_FAULT_WEIGHT} の scale を 2 倍`;
+const I8_SCALE_FAULT_LABEL = `scale of ${I8_SCALE_FAULT_WEIGHT} doubled`;
 
-/** 配布形ミラー（the containers and the practical preset's bundle — `dist.py --pipeline wan` の出力先）。 */
+/**
+ * The distribution mirror (the containers and the practical preset's bundle — the output directory of
+ * `dist.py --pipeline wan`).
+ */
 const DIST_ROOT = WAN_DIST_ROOT;
-/** 配布形の Wan のモデル名（manifest の models のキー）。 */
+/** The distribution's Wan model name (the key of the manifest's models). */
 const DIST_MODEL = WAN_DIST_MODEL;
-/** 実用席（ADR 0120 決定 1）。 */
+/** The practical preset (ADR 0120 decision 1). */
 const PRACTICAL_QUANT = "f16+dit8-a8-attn8-s16";
 
 /**
- * 実用席の時間と確保を採る入力（S ごとに 1 本・f16 系列の `io.*`）。値は時間に効かないので、各ブロックの出力を
- * golden に持たない軽いケースを選ぶ（`full-band-s14040-t0999` の reference は 2.6 GB）。並びは確保が最大の
- * S = 32,760 を先に置く（{@link FULL_TOKENS_ORDER} と同じ理由）。
+ * Inputs for the practical preset's time and allocation (one per S, the f16 series' `io.*`). The values do not affect
+ * the time, so light cases whose goldens do not hold each block's output are chosen (the reference of
+ * `full-band-s14040-t0999` is 2.6 GB). The S = 32,760 with the largest allocation comes first (the same reason as
+ * {@link FULL_TOKENS_ORDER}).
  */
 const PRACTICAL_TIMING_CASES: readonly { readonly tokens: FullTokens; readonly name: string }[] = [
   { tokens: 32760, name: "full-band-s32760-t0999" },
@@ -454,30 +504,32 @@ const PRACTICAL_TIMING_CASES: readonly { readonly tokens: FullTokens; readonly n
 ];
 
 /**
- * 1 submit の GPU 実行の幅の上限（ADR 0118 決定 6 と追記 2026-10-02 — Linux xe の `job_timeout_ms`
- * 5,000 ms の 1/5。門は窓平均ではなく 1 本ずつの最大で、最初の run の裏付け前のチャンクも含む）。
+ * Upper limit on the GPU execution span of 1 submit (ADR 0118 decision 6 and the addendum 2026-10-02 — 1/5 of Linux
+ * xe's `job_timeout_ms` of 5,000 ms. The check is on the maximum of each single submit, not on a window mean, and it
+ * includes the first run's chunks issued before measured evidence existed).
  */
 const SUBMIT_GPU_LIMIT_MS = 1000;
 
-/** Wan2.1 T2V 1.3B の attention の head 数（transformer の config `num_attention_heads`）。 */
+/** Number of attention heads of Wan2.1 T2V 1.3B (`num_attention_heads` of the transformer's config). */
 const WAN_HEADS = 12;
-/** スコア行列 S の 1 要素の格納幅（既定の f32 格納）。 */
+/** Storage width of one element of the score matrix S (the default f32 storage). */
 const SCORE_BYTES = 4;
 
 /**
- * 実寸の self-attention の行ブロック枚数の期待値（ADR 0118 決定 6）。行ブロック（ADR 0060）はクエリ行を
- * 「1 枚のスコア S が束縛上限に収まる最小枚数」へ等分するので、device の束縛上限
- * （`maxStorageBufferBindingSize`）だけから runtime と独立に導ける:
+ * Expected number of row blocks of the full-size self-attention (ADR 0118 decision 6). Row blocks (ADR 0060) split the
+ * query rows evenly into "the smallest count at which one score block S fits within the binding limit", so the count
+ * can be derived independently of the runtime from the device's binding limit (`maxStorageBufferBindingSize`) alone:
  *
- *   1 枚の行数 = ⌊上限 ÷ (heads × S × 4 B)⌋・枚数 = ⌈S ÷ 1 枚の行数⌉
+ *   rows per block = ⌊limit ÷ (heads × S × 4 B)⌋, count = ⌈S ÷ rows per block⌉
  *
- * B570（束縛上限 {@link B570_STORAGE_BINDING_LIMIT}）では S = 14,040 が 5 枚（等分で 2,808 行）・S = 32,760 が
- * 24 枚 × 1,365 行（決定 6 の表 — 下の GPU 不要のテストがこの式で再現する）。
+ * On the B570 (binding limit {@link B570_STORAGE_BINDING_LIMIT}), S = 14,040 gives 5 blocks (2,808 rows each when split
+ * evenly) and S = 32,760 gives 24 blocks × 1,365 rows (the table of decision 6 — the GPU-free test below reproduces it
+ * with this formula).
  */
 const expectedRowBlocks = (tokens: number, bindingLimit: number): number =>
   Math.ceil(tokens / Math.floor(bindingLimit / (WAN_HEADS * tokens * SCORE_BYTES)));
 
-/** B570 の `maxStorageBufferBindingSize`（ADR 0118 決定 6 の表の前提）。 */
+/** `maxStorageBufferBindingSize` of the B570 (the premise of the table of ADR 0118 decision 6). */
 const B570_STORAGE_BINDING_LIMIT = 2_147_483_644;
 
 /**
@@ -512,7 +564,10 @@ const readBuffer = async (url: URL): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 };
 
-/** ファイルの有無（NotFound 以外は伝播させる — 権限エラーを「資産が無い」に読み替えない）。 */
+/**
+ * Whether the file exists (anything other than NotFound propagates — a permission error is not read as "the asset is
+ * missing").
+ */
 const filePresent = (url: URL): boolean => {
   try {
     return statSync(url).isFile;
@@ -522,13 +577,16 @@ const filePresent = (url: URL): boolean => {
   }
 };
 
-/** golden 2 本（`io.<case>` と `reference.<case>`）。`dir` is the goldens' component folder (the f16 one by default). */
+/**
+ * The 2 goldens (`io.<case>` and `reference.<case>`). `dir` is the goldens' component folder (the f16 one by default).
+ */
 const caseFiles = (name: string, dir: URL = GOLDEN_DIR): readonly URL[] => [
   new URL(`io.${name}.safetensors`, dir),
   new URL(`reference.${name}.safetensors`, dir),
 ];
 
-// 実寸のケースも同じ台本が同じ回に書く（一部だけある環境は完全性テストで FAIL にする）。
+// The same script writes the full-size cases in the same run as well (an environment with only part of them FAILs in
+// the completeness test).
 const MIRROR_PRESENT = mirrorPresent(DIST_ROOT);
 const goldensPresent = (names: readonly string[], dir: URL = GOLDEN_DIR): boolean =>
   names.every((name) => caseFiles(name, dir).every(filePresent));
@@ -558,9 +616,10 @@ if (!MIRROR_PRESENT) {
   );
 }
 
-// i8 系列も S = 192 の組と S = 14,040 の組を同じ台本が同じ回に書く。`--no-full` の書き出し（S = 14,040 を除く）は
-// 段の分割用の途中の席なので、揃うまで完全性テストが FAIL にする。r 門は組ごとに揃った組だけを回す（欠けは
-// 完全性テストの FAIL が言う）。
+// The same script also writes the i8 series' S = 192 group and S = 14,040 group in the same run. A `--no-full` export
+// (without S = 14,040) is an intermediate state for splitting the steps, so the completeness test FAILs until both are
+// present. The r check runs only the groups that are complete (what is missing is reported by the completeness test's
+// FAIL).
 const i8FilesOf = (cases: readonly GateCase[]): readonly URL[] =>
   cases.flatMap(({ name }) => caseFiles(name, I8_GOLDEN_DIR));
 const i8ExpectedFiles = i8FilesOf([...I8_SMALL_CASES, ...I8_FULL_CASES]);
@@ -569,7 +628,7 @@ const I8_SMALL_AVAILABLE = MIRROR_PRESENT && i8FilesOf(I8_SMALL_CASES).every(fil
 const I8_FULL_AVAILABLE = MIRROR_PRESENT && i8FilesOf(I8_FULL_CASES).every(filePresent);
 
 for (const [available, group] of [
-  [I8_SMALL_AVAILABLE, "S = 192 の組"],
+  [I8_SMALL_AVAILABLE, "the S = 192 group"],
   [I8_FULL_AVAILABLE, "S = 14,040"],
 ] as const) {
   if (available || !MIRROR_PRESENT) continue;
@@ -579,11 +638,14 @@ for (const [available, group] of [
   );
 }
 
-/** 配布形の manifest（実用席の束の正本 — 無ければ実用席の時間の記録を SKIP する）。 */
+/**
+ * The distribution manifest (canonical for the practical preset's bundle — without it the practical preset's time
+ * record SKIPs).
+ */
 const distManifestText = await readTextIfPresent(new URL("karume.json", DIST_ROOT));
 /**
- * 実用席の時間を採れる（入力 = the f16 goldens of {@link PRACTICAL_TIMING_CASES}・重み = the mirror's int8 transformer・
- * 束 = 配布形の manifest）。
+ * The practical preset's time can be taken (inputs = the f16 goldens of {@link PRACTICAL_TIMING_CASES}, weights = the
+ * mirror's int8 transformer, bundle = the distribution manifest).
  */
 const PRACTICAL_RUNNABLE =
   MIRROR_PRESENT &&
@@ -591,12 +653,15 @@ const PRACTICAL_RUNNABLE =
   goldensPresent(PRACTICAL_TIMING_CASES.map(({ name }) => name));
 
 /**
- * 実用席の実効 SessionOptions（配布形の manifest の席の `session` を家族の受理表で通した値 — 束の正本は
- * manifest の quant 席だけ・ADR 0110 決定 1。テストに束の値を書き写さない）。
+ * The practical preset's effective SessionOptions (the `session` of the distribution manifest's preset passed through
+ * the family's acceptance table — the manifest's quant preset alone is canonical for the bundle, ADR 0110 decision 1.
+ * The bundle's values are not copied into the test).
  */
 const practicalSessionOptions = (): SessionOptions => {
   if (distManifestText === undefined) {
-    throw new Error(`${DIST_ROOT.pathname}karume.json が無い（ignore の条件と食い違っている）`);
+    throw new Error(
+      `${DIST_ROOT.pathname}karume.json is missing (inconsistent with the skip condition)`,
+    );
   }
   const where = `wan ${DIST_MODEL}/${PRACTICAL_QUANT}`;
   const declared = quantOf(parseManifest(distManifestText), DIST_MODEL, PRACTICAL_QUANT).session;
@@ -605,17 +670,17 @@ const practicalSessionOptions = (): SessionOptions => {
 
 const viewOf = (file: SafetensorsFile, key: string, where: string) => {
   const view = file.tensors.get(key);
-  if (view === undefined) throw new Error(`${where}: '${key}' が無い`);
+  if (view === undefined) throw new Error(`${where}: no '${key}'`);
   return view;
 };
 
 const floatsOf = (file: SafetensorsFile, key: string, where: string): Float32Array<ArrayBuffer> => {
   const view = viewOf(file, key, where);
-  if (view.dtype !== "F32") throw new Error(`${where}: '${key}' が ${view.dtype}`);
+  if (view.dtype !== "F32") throw new Error(`${where}: '${key}' is ${view.dtype}`);
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
-/** 1 ケースぶんの golden（グラフ入力・上流の潜在形と timestep と出力）。 */
+/** The golden of one case (graph inputs; upstream's latent shape, timestep and output). */
 type Golden = {
   readonly io: SafetensorsFile;
   readonly reference: SafetensorsFile;
@@ -630,18 +695,18 @@ const loadGolden = async (name: string, dir: URL = GOLDEN_DIR): Promise<Golden> 
   const latents = viewOf(reference, "latents", name);
   const timestep = viewOf(reference, "timestep", name);
   if (timestep.dtype !== "I32" || latents.shape.length !== 5 || latents.shape[0] !== 1) {
-    throw new Error(`${name}: reference の latents / timestep の形が想定外`);
+    throw new Error(`${name}: unexpected shape of the reference's latents / timestep`);
   }
   return {
     io,
     reference,
-    // ホストの潜在はバッチ軸を持たない `[C,F,H,W]`（`src/wan/dit-tokens.ts`）。
+    // The host latents are `[C,F,H,W]` without a batch axis (`src/wan/dit-tokens.ts`).
     latentShape: latents.shape.slice(1),
     timestep: new Int32Array(reference.buffer, timestep.byteOffset, 1)[0],
   };
 };
 
-/** グラフ入力（io の `input.*` — 宣言の名前と shape をそのまま使う）。 */
+/** Graph inputs (`input.*` of io — the declared names and shapes are used as they are). */
 const graphInputs = (
   golden: Golden,
   inputs: readonly { readonly name: string }[],
@@ -661,7 +726,7 @@ const graphInputs = (
     }),
   );
 
-/** 最初にビットが割れる要素の添字（一致なら -1）。長さが違えば 0。 */
+/** Index of the first element whose bits differ (-1 when identical). 0 when the lengths differ. */
 const firstBitMismatch = (actual: Float32Array, expected: Float32Array): number => {
   if (actual.length !== expected.length) return 0;
   const left = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
@@ -677,7 +742,7 @@ type Difference = {
 };
 
 const difference = (actual: Float32Array, expected: Float32Array): Difference => {
-  assertEquals(actual.length, expected.length, "要素数");
+  assertEquals(actual.length, expected.length, "element count");
   let maxAbs = 0;
   let maxRel = 0;
   let referenceMaxAbs = 0;
@@ -694,12 +759,13 @@ const difference = (actual: Float32Array, expected: Float32Array): Difference =>
   return { maxAbs, maxRel, referenceMaxAbs, nonFinite };
 };
 
-/** 帯の指標（最大絶対差 ÷ 参照の最大絶対値 — {@link DIT_RATIO_BAND}）。 */
+/** The band metric (max absolute difference ÷ the reference's max absolute value — {@link DIT_RATIO_BAND}). */
 const ratioOf = (diff: Difference): number => diff.maxAbs / diff.referenceMaxAbs;
 
 /**
- * results.json の `tolerance` に載せる、このケースで比の帯と同値な絶対の帯（帯 × 参照の最大絶対値）。
- * 記録の形（`Measurement`）は絶対の帯しか持たないので、判定と同じ境界を絶対値へ写して残す。
+ * The absolute band equivalent to the ratio band for this case (band × the reference's max absolute value), put into
+ * `tolerance` of results.json. The record's shape (`Measurement`) holds only an absolute band, so the same boundary as
+ * the verdict is mapped to an absolute value and kept.
  */
 const recordedTolerance = (diff: Difference, band = DIT_RATIO_BAND) => ({
   atol: band * diff.referenceMaxAbs,
@@ -707,12 +773,13 @@ const recordedTolerance = (diff: Difference, band = DIT_RATIO_BAND) => ({
 });
 
 const formatDifference = (label: string, diff: Difference): string =>
-  `${label}: maxAbs ${diff.maxAbs.toExponential(3)} / 参照の最大絶対値 ` +
-  `${diff.referenceMaxAbs.toFixed(3)}（比 ${ratioOf(diff).toExponential(2)}）`;
+  `${label}: maxAbs ${diff.maxAbs.toExponential(3)} / reference max abs ` +
+  `${diff.referenceMaxAbs.toFixed(3)} (ratio ${ratioOf(diff).toExponential(2)})`;
 
 /**
- * 実寸の正規化の分母の元 = CPU f32 の参照（`output`）と f64 の参照（`output.f64`）の差。比が 0（f32 の参照が
- * f64 とビット一致）だと割れないので fail loudly にする。
+ * The source of the full-size normalization's denominator = the difference between the CPU f32 reference (`output`)
+ * and the f64 reference (`output.f64`). A ratio of 0 (the f32 reference bit-identical to f64) cannot divide, so it
+ * fails loudly.
  */
 const referenceErrorOf = (golden: Golden, name: string): Difference => {
   const diff = difference(
@@ -721,28 +788,28 @@ const referenceErrorOf = (golden: Golden, name: string): Difference => {
   );
   if (!(ratioOf(diff) > 0)) {
     throw new Error(
-      `${name}: CPU f32 の参照の f64 に対する比が ${ratioOf(diff)}（正規化できない）`,
+      `${name}: ratio of the CPU f32 reference against f64 is ${ratioOf(diff)} (cannot normalize)`,
     );
   }
   return diff;
 };
 
 /**
- * 正規化した比（{@link DIT_FULL_NORMALIZED_BAND}）= GPU の f64 に対する比 ÷ CPU f32 の参照の f64 に対する比
- * （`referenceRatio`）。
+ * Normalized ratio ({@link DIT_FULL_NORMALIZED_BAND}) = the GPU's ratio against f64 ÷ the CPU f32 reference's ratio
+ * against f64 (`referenceRatio`).
  */
 const normalizedRatio = (diff: Difference, referenceRatio: number): number =>
   ratioOf(diff) / referenceRatio;
 
 const formatNormalized = (label: string, diff: Difference, referenceRatio: number): string =>
-  `${formatDifference(label, diff)}・r ${normalizedRatio(diff, referenceRatio).toPrecision(3)}`;
+  `${formatDifference(label, diff)}, r ${normalizedRatio(diff, referenceRatio).toPrecision(3)}`;
 
-/** p99.99 ベースの r の分位（{@link quantileRatio}）。 */
+/** Quantile of the p99.99-based r ({@link quantileRatio}). */
 const RECORDED_QUANTILE = 0.9999;
 
-/** |actual − expected| の q 分位（最近順位法 — 昇順に並べた ceil(q·n) 番目）。 */
+/** q-quantile of |actual − expected| (nearest rank — the ceil(q·n)-th in ascending order). */
 const absErrorQuantile = (actual: Float32Array, expected: Float32Array, q: number): number => {
-  assertEquals(actual.length, expected.length, "要素数");
+  assertEquals(actual.length, expected.length, "element count");
   const errors = new Float64Array(expected.length);
   for (let index = 0; index < expected.length; index += 1) {
     errors[index] = Math.abs(actual[index] - expected[index]);
@@ -752,11 +819,13 @@ const absErrorQuantile = (actual: Float32Array, expected: Float32Array, q: numbe
 };
 
 /**
- * p99.99 ベースの r（= |GPU − f64| の p99.99 ÷ |CPU f32 の参照 − f64| の p99.99〈`referenceQuantile`〉）の
- * 記録の 1 行（results.json の note に載る）。
- * **記録だけ**で、門は max ベースの r（{@link normalizedRatio}）のまま。max の分母は外れ値 1 要素で決まり、
- * 分母が極端に小さい入力で r が暴れうる（ADR 0118 追記 2026-10-02「段 3 の結果 — 帯の床と指標 r の弱点」）
- * ので、置き換えるかを分布で判断する材料として残す。参照の最大絶対値での割り算は分子と分母で打ち消すので省く。
+ * One record line of the p99.99-based r (= p99.99 of |GPU − f64| ÷ p99.99 of |CPU f32 reference − f64|
+ * (`referenceQuantile`)) (it goes into the note of results.json).
+ * **A record only**; the check stays the max-based r ({@link normalizedRatio}). The max denominator is decided by a
+ * single outlier element, and r can swing on inputs with an extremely small denominator (ADR 0118 addendum 2026-10-02
+ * "result of step 3 — the band's floor and the weakness of the metric r"), so this is kept as material for deciding,
+ * from the distribution, whether to replace it. The division by the reference's max absolute value cancels between
+ * numerator and denominator, so it is omitted.
  */
 const quantileRatio = (
   label: string,
@@ -767,13 +836,13 @@ const quantileRatio = (
   const numerator = absErrorQuantile(actual, expected, RECORDED_QUANTILE);
   const ratio = numerator / referenceQuantile;
   const parts = [
-    `分子 ${numerator.toExponential(3)}`,
-    `分母 ${referenceQuantile.toExponential(3)}`,
+    `numerator ${numerator.toExponential(3)}`,
+    `denominator ${referenceQuantile.toExponential(3)}`,
   ];
-  return `${label}: p99.99 ベースの r ${ratio.toPrecision(3)}（記録だけ・${parts.join(" / ")}）`;
+  return `${label}: p99.99-based r ${ratio.toPrecision(3)} (record only, ${parts.join(" / ")})`;
 };
 
-/** 出口の最終次元を `(pt,ph,pw,c)` → `(c,pt,ph,pw)` と読み替える（unpatchify の並びの故障注入）。 */
+/** Reads the output's last dimension `(pt,ph,pw,c)` as `(c,pt,ph,pw)` (the fault injection of the unpatchify order). */
 const transposeTokenAxes = (
   tokens: Float32Array,
   geometry: WanPatchGeometry,
@@ -792,10 +861,10 @@ const transposeTokenAxes = (
   return out;
 };
 
-/** 容器の資産 `rope_base`（役割 `rope-base`）を読んで素表にする。 */
+/** Reads the container's asset `rope_base` (role `rope-base`) into the raw table. */
 const readRopeBase = async (opened: OpenedContainer): Promise<WanRopeBase> => {
   const reader = opened.asset(ROPE_BASE_ASSET);
-  assertEquals(reader.role, "rope-base", `資産 '${ROPE_BASE_ASSET}' の役割`);
+  assertEquals(reader.role, "rope-base", `role of asset '${ROPE_BASE_ASSET}'`);
   const bytes = await reader.read(0, reader.length);
   return parseWanRopeBase(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
@@ -804,7 +873,7 @@ const readRopeBase = async (opened: OpenedContainer): Promise<WanRopeBase> => {
 
 const results = openResults("wan-dit");
 
-// 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL。
+// Only a completely empty environment SKIPs as "not generated". If anything is present, what is missing FAILs.
 // Only a root with no f16 golden that is not a complete fetch SKIPs; the mirror's completeness is the distribution
 // gate's.
 test.skipIf(!ANY_PRESENT && !FETCHED)(
@@ -818,7 +887,8 @@ test.skipIf(!ANY_PRESENT && !FETCHED)(
   },
 );
 
-// 完全に空の環境だけ「生成していない」として SKIP。何か 1 つでもあれば欠けは FAIL（f16 系列と同じ規律）。
+// Only a completely empty environment SKIPs as "not generated". If anything is present, what is missing FAILs (the same
+// discipline as the f16 series).
 test.skipIf(!I8_ANY_PRESENT && !FETCHED)(
   "Wan DiT i8 goldens: the goldens of every int8 case (9 of the S = 192 group, 8 of S = 14,040) are present",
   () => {
@@ -830,7 +900,7 @@ test.skipIf(!I8_ANY_PRESENT && !FETCHED)(
   },
 );
 
-test("Wan DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限で ADR 0118 決定 6 の表（24 枚 / 5 枚）を再現する", () => {
+test("Wan DiT expected row blocks (no GPU): reproduces the table of ADR 0118 decision 6 (24 / 5 blocks) with the B570's binding limit", () => {
   assertEquals(
     FULL_TOKENS_ORDER.map((tokens) => expectedRowBlocks(tokens, B570_STORAGE_BINDING_LIMIT)),
     [24, 5],
@@ -838,10 +908,11 @@ test("Wan DiT 行ブロックの期待値（GPU 不要）: B570 の束縛上限�
 });
 
 test.skipIf(!ASSETS_AVAILABLE)(
-  "Wan DiT ホスト: patchify と資産 rope_base からの RoPE 表が golden の入力とビット一致する",
+  "Wan DiT host: patchify and the RoPE tables from the asset rope_base are bit-identical to the golden inputs",
   async () => {
     const base = await readRopeBase(await openWanComponent(COMPONENT, "f16"));
-    // 実寸（S = 14,040 / 32,760・非正方の格子 9·30·52 / 21·30·52）でもホストの並べ替えが torch とビット一致すること。
+    // The host reordering is bit-identical to torch at full size too (S = 14,040 / 32,760, non-square grids 9·30·52 /
+    // 21·30·52).
     for (const { name } of [...CASES, ...FULL_CASES]) {
       const golden = await loadGolden(name);
       const tokens = patchifyLatents(
@@ -870,17 +941,18 @@ test.skipIf(!ASSETS_AVAILABLE)(
 );
 
 /**
- * 計測モードの照合が出した出力（通常モードで回すケースだけ — ケース名 → unpatchify 前のトークン）。
+ * The outputs produced by the measuring-mode comparison (only for the cases run in normal mode — case name → tokens
+ * before unpatchify).
  *
- * 通常モードのテストがこれと Uint32 で突き合わせる。計測モードは 1 dispatch = 1 pass で、裏付け後のチャンクの
- * 切れ目も通常の実行と変わりうる。それでも値が 1 ビットも動かないこと（チャンクの切れ目は値を動かさない）を
- * 直接縛る。2 つのモードは device が違う（計測の feature の有無）ので、同時に載せず別のテストで順に回す。
+ * The normal-mode test compares with these as Uint32. In measuring mode 1 dispatch = 1 pass, and the chunk boundaries
+ * after measured evidence exists can also differ from a normal run. This directly pins that the values still do not
+ * move by a single bit (chunk boundaries do not move values). The 2 modes use different devices (with or without the
+ * measuring feature), so they are not loaded at once but run in turn in separate tests.
  *
- * MUST: 計測モードの照合を通常モードより前に登録する（Vitest は同じファイルのテストを登録順に回す）。計測モードを
- * 飛ばした回（`--filter` など）は通常モードに比べる相手が無いので、比較を黙って省かず落とす。
- *
- * NOTE: the default measured-mode case ({@link registerFullStructureGate}) fills this, so the Uint32 gate runs
- * without the opt-in parity cases.
+ * MUST: register the measuring-mode comparison before the normal mode (Vitest runs the tests of one file in
+ * registration order). A run that skipped the measuring mode (`--filter` and the like) leaves the normal mode nothing
+ * to compare with, so it fails instead of silently dropping the comparison. NOTE: the default measured-mode case
+ * ({@link registerFullStructureGate}) fills this, so the Uint32 gate runs without the opt-in parity cases.
  */
 const measuredTokens = new Map<string, Float32Array>();
 
@@ -894,24 +966,25 @@ const normalModeTokens = new Map<string, Float32Array<ArrayBuffer>>();
 
 const gib = (bytes: number): string => `${(bytes / 2 ** 30).toFixed(2)} GiB`;
 
-/** 実寸の 1 run の観測（所要と生きている確保 — 結果の note に載せる）。 */
+/** Observation of one full-size run (time and live allocations — put into the results note). */
 type FullRun = {
   readonly label: string;
   readonly wallMs: number;
   /**
-   * dispatch の pass の GPU 時間の合計（timestamp の生の単位 — ns への換算は {@link formatRun} が
-   * {@link TIMESTAMP_UNIT_NS} で行う）。計測が無効な device では undefined。
+   * Total GPU time of the dispatch passes (in raw timestamp units — {@link formatRun} converts to ns with
+   * {@link TIMESTAMP_UNIT_NS}). undefined on a device without measurement.
    */
   readonly gpuTicks: number | undefined;
   /**
-   * run の直後に生きている確保 = 重み + その run のアリーナ（中間・入力・readback staging）+ 保持中の
-   * slot backing（中間と入力）。readback staging（`MAP_READ`）も含む — B570 では VRAM の予算に数えられない
-   * 側に載る（2026-10-02 実測: STORAGE 9 GiB の後でも `MAP_READ` 3 GiB が取れた）ので別に出す。
+   * Allocations live right after the run = weights + that run's arena (intermediates, inputs, readback staging) + the
+   * slot backing held (intermediates and inputs). Readback staging (`MAP_READ`) is included — on the B570 it sits on
+   * the side not counted against the VRAM budget (measured 2026-10-02: 3 GiB of `MAP_READ` could still be allocated
+   * after 9 GiB of STORAGE), so it is shown separately.
    */
   readonly liveBytes: number;
-  /** そのうちの重み（initializer と params キャッシュ）。 */
+  /** Of which the weights (initializers and the params cache). */
   readonly weightBytes: number;
-  /** そのうちの readback staging（グラフ出力のバイト数の和）。 */
+  /** Of which the readback staging (the sum of the graph outputs' bytes). */
   readonly stagingBytes: number;
 };
 
@@ -933,20 +1006,20 @@ const observeRun = (
   stagingBytes,
 });
 
-/** `unitNs` は timestamp の 1 単位の ns（省くと GPU 時間を出さない — 計測なしの run）。 */
+/** `unitNs` is the ns of one timestamp unit (when omitted, no GPU time is shown — a run without measurement). */
 const formatRun = (run: FullRun, unitNs?: number): string =>
-  `${run.label}: 壁 ${(run.wallMs / 1000).toFixed(2)} s` +
+  `${run.label}: wall ${(run.wallMs / 1000).toFixed(2)} s` +
   (run.gpuTicks === undefined || unitNs === undefined
     ? ""
-    : `・GPU ${((run.gpuTicks * unitNs) / 1e9).toFixed(2)} s`) +
-  `・確保 ${gib(run.liveBytes)}（うち重み ${gib(run.weightBytes)}・readback staging ${gib(
+    : `, GPU ${((run.gpuTicks * unitNs) / 1e9).toFixed(2)} s`) +
+  `, allocated ${gib(run.liveBytes)} (weights ${gib(run.weightBytes)}, readback staging ${gib(
     run.stagingBytes,
-  )}）`;
+  )})`;
 
 /**
- * self-attention の行ブロック枚数（直近 run の `lastRunPipelines` の ①QK の dispatch 本数から）。行窓のキー
- * （`:rwa` — src/kernels/attention.ts の `attentionQkKey`）は層ごとにブロック枚数ぶん、行窓の無いキーは
- * cross-attention（N = 512 で 1 枚に収まる）で層ごとに 1 本。
+ * Number of self-attention row blocks (from the dispatch count of ①QK in `lastRunPipelines` of the latest run). Keys
+ * with a row window (`:rwa` — `attentionQkKey` of src/kernels/attention.ts) appear once per row block per layer; keys
+ * without a row window are the cross-attention (N = 512 fits in one block), once per layer.
  */
 const rowBlocksOf = (diagnostics: SessionDiagnostics): number => {
   const qk = (diagnostics.lastRunPipelines ?? []).filter(({ key }) =>
@@ -957,30 +1030,30 @@ const rowBlocksOf = (diagnostics: SessionDiagnostics): number => {
       .filter(({ key }) => key.includes(":rwa") === windowed)
       .reduce((total, { dispatchCount }) => total + dispatchCount, 0);
   const layers = count(false);
-  assert(layers > 0, "①QK の行窓の無い dispatch（cross-attention）が 1 本も無い");
+  assert(layers > 0, "no ①QK dispatch without a row window (cross-attention) at all");
   return count(true) / layers;
 };
 
-/** 1 submit の GPU 時間の観測を ms に直した記録（門は {@link SUBMIT_GPU_LIMIT_MS}）。 */
+/** Record of the observed GPU time per submit, converted to ms (the check is {@link SUBMIT_GPU_LIMIT_MS}). */
 const submitGpuNote = (
   diagnostics: SessionDiagnostics,
   unitNs: number,
 ): { readonly maxMs: number; readonly unbackedSubmits: number; readonly note: string } => {
   const budget = diagnostics.submit.chunkBudget;
   const observed = budget.submitGpuTime;
-  if (observed === undefined) throw new Error("計測モードなのに submit の GPU 時間が無い");
+  if (observed === undefined) throw new Error("measuring mode but no submit GPU time");
   const ms = (ns: number): string => `${((ns * unitNs) / 1e6).toFixed(1)} ms`;
   const note = [
-    `1 submit の GPU 時間の最大 ${ms(observed.maxNs)}（${observed.submits} 本）`,
-    `裏付け前 ${observed.unbackedSubmits} 本の最大 ${
+    `max GPU time per submit ${ms(observed.maxNs)} (${observed.submits} submits)`,
+    `max of the ${observed.unbackedSubmits} submits before evidence ${
       observed.maxUnbackedNs === undefined ? "—" : ms(observed.maxUnbackedNs)
     }`,
-    `単発 dispatch の最大 ${ms(observed.maxDispatchNs)}（${observed.maxDispatchKey ?? "—"}）`,
-    `窓平均の最大 ${budget.maxWindowMeanMs?.toFixed(1) ?? "—"} ms・推定の最大 ${
+    `max single dispatch ${ms(observed.maxDispatchNs)} (${observed.maxDispatchKey ?? "—"})`,
+    `max window mean ${budget.maxWindowMeanMs?.toFixed(1) ?? "—"} ms, max estimate ${
       budget.maxEstimatedMs?.toFixed(1) ?? "—"
-    } ms・予算超過 ${budget.overBudgetChunks} 本`,
-    `submit ${diagnostics.submit.submitCount} 本・dispatch ${diagnostics.submit.dispatchCount} 本`,
-  ].join("・");
+    } ms, ${budget.overBudgetChunks} over budget`,
+    `${diagnostics.submit.submitCount} submits, ${diagnostics.submit.dispatchCount} dispatches`,
+  ].join(", ");
   return {
     maxMs: (observed.maxNs * unitNs) / 1e6,
     unbackedSubmits: observed.unbackedSubmits,
@@ -988,7 +1061,7 @@ const submitGpuNote = (
   };
 };
 
-/** グラフ出力のバイト数の和（readback staging の大きさ）。 */
+/** Sum of the graph outputs' bytes (the size of the readback staging). */
 const outputBytes = (outputs: Readonly<Record<string, Tensor>>): number =>
   Object.values(outputs).reduce((total, tensor) => total + tensor.data.byteLength, 0);
 
@@ -1002,11 +1075,11 @@ const assertForwardStructure = (
   id: string,
 ): void => {
   const nonFinite = tokens.reduce((count, value) => count + (Number.isFinite(value) ? 0 : 1), 0);
-  assertEquals(nonFinite, 0, `${id}: 非有限`);
+  assertEquals(nonFinite, 0, `${id}: non-finite`);
   assertEquals(
     { ...diagnostics.lastRunFusions, ...EXPECTED_FUSIONS },
     diagnostics.lastRunFusions,
-    `${id}: 融合の件数（adaln / rope / silu）`,
+    `${id}: fusion counts (adaln / rope / silu)`,
   );
 };
 
@@ -1066,7 +1139,8 @@ const registerSessionScope = (
   afterAll(async () => {
     if (session === undefined) return;
     await session.dispose();
-    // 次の組の Session の確保の前に、この組の確保の解放を待つ（{@link settleReleases}）。
+    // Wait for this group's allocations to be released before the next group's Session allocates
+    // ({@link settleReleases}).
     await settleReleases(required(fixture, "gpu"));
   });
   return {
@@ -1102,16 +1176,19 @@ const registerSmallStructureGate = (
       const golden = await loadGolden(name, seriesDir);
       const outputs = await session.run(graphInputs(golden, prepared.graph.inputs, name));
       const tensor = outputs[prepared.graph.outputs[0]];
-      if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+      if (tensor.dtype !== "f32") throw new Error(`output is ${tensor.dtype}`);
       assertForwardStructure(tensor.data, session.diagnostics(), id);
     });
   }
 };
 
-/** {@link registerFullStructureGate} の入力（系列 root 1 つ × 実寸の S 1 つ）。 */
+/** Input of {@link registerFullStructureGate} (one series root × one full-size S). */
 type FullStructureSpec = {
   readonly seriesDir: URL;
-  /** 結果の ID・step 名・ログの接頭辞（f16 席は空・i8 の参照席は {@link I8_ID_PREFIX}）。 */
+  /**
+   * Prefix of the result IDs, step names and logs (empty for the f16 preset, {@link I8_ID_PREFIX} for the i8 reference
+   * partner).
+   */
   readonly idPrefix: string;
   readonly tokens: number;
   /** The case whose io inputs drive the two runs. */
@@ -1133,10 +1210,11 @@ type FullStructureSpec = {
 const registerFullStructureGate = (fixture: Fixture, spec: FullStructureSpec): void => {
   const { idPrefix, tokens, name } = spec;
   const id = `${idPrefix}${name}`;
-  it(`${idPrefix}S = ${tokens} の 1 submit の GPU 時間・所要・確保`, async () => {
+  it(`${idPrefix}S = ${tokens}: GPU time per submit, time, allocation`, async () => {
     const gpu = required(fixture, "gpu");
     const prepared = required(fixture, "prepared");
-    // 期待値の元は device が実際に許した束縛上限（runtime の行ブロックが見るのと同じ値）。
+    // The expected value comes from the binding limit the device actually granted (the same value the runtime's row
+    // blocks see).
     const bindingLimit = gpu.device.limits.maxStorageBufferBindingSize;
     const built = performance.now();
     const session = await prepared.createContainerSession(gpu);
@@ -1151,52 +1229,54 @@ const registerFullStructureGate = (fixture: Fixture, spec: FullStructureSpec): v
           assertEquals(
             wanTokenGrid(golden.latentShape, WAN_GEOMETRY).count,
             tokens,
-            `${id}: golden の S`,
+            `${id}: golden S`,
           );
           const inputs = graphInputs(golden, prepared.graph.inputs, name);
           const runs: FullRun[] = [];
           const rowBlocks: number[] = [];
-          for (const label of ["1 本目", "2 本目"]) {
+          for (const label of ["run 1", "run 2"]) {
             const started = performance.now();
             const outputs = await session.run(inputs);
             const wallMs = performance.now() - started;
             const tensor = outputs[prepared.graph.outputs[0]];
-            if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+            if (tensor.dtype !== "f32") throw new Error(`output is ${tensor.dtype}`);
             // Kept before any assertion so the normal-mode Uint32 gate still runs on a red run here.
             if (spec.keepMeasured && runs.length === 0) measuredTokens.set(name, tensor.data);
             const diagnostics = session.diagnostics();
             runs.push(observeRun(`${name} ${label}`, diagnostics, wallMs, outputBytes(outputs)));
             rowBlocks.push(rowBlocksOf(diagnostics));
-            // 次の run の確保（2 本目は slot backing の構築）の前に、この run の中間の解放を待つ。
+            // Wait for this run's intermediates to be released before the next run allocates (run 2 builds the slot
+            // backing).
             await settleReleases(gpu);
             assertForwardStructure(tensor.data, diagnostics, `${id} ${label}`);
           }
-          // 換算の表はこのステップでだけ引く（表に無い環境で落ちるのは時間門だけ）。
+          // The conversion table is looked up only in this step (in an environment missing from the table only the time
+          // check fails).
           const unitNs = timestampUnitNs(ENVIRONMENT.key);
           const submit = submitGpuNote(session.diagnostics(), unitNs);
           note = [
             submit.note,
-            `構築 ${(buildMs / 1000).toFixed(1)} s`,
+            `build ${(buildMs / 1000).toFixed(1)} s`,
             ...runs.map((observed) => formatRun(observed, unitNs)),
-            `行ブロック ${rowBlocks.join(" / ")} 枚`,
+            `row blocks ${rowBlocks.join(" / ")}`,
           ].join(" / ");
-          console.log(`[wan-dit] ${idPrefix}実寸 S = ${tokens} の計測モード: ${note}`);
+          console.log(`[wan-dit] ${idPrefix}full size S = ${tokens}, measuring mode: ${note}`);
           for (const [index, observed] of rowBlocks.entries()) {
             assertEquals(
               observed,
               expectedRowBlocks(tokens, bindingLimit),
-              `${id} ${runs[index].label}: self-attention の行ブロック枚数（束縛上限 ${bindingLimit} B）`,
+              `${id} ${runs[index].label}: number of self-attention row blocks (binding limit ${bindingLimit} B)`,
             );
           }
           assert(
             submit.unbackedSubmits > 0,
-            "最初の run の裏付け前のチャンク（initialChunkSize で据え置いた submit）を測れていない",
+            "the first run's chunks issued before measured evidence existed (submits held at initialChunkSize) were not measured",
           );
           assert(
             submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
-            `1 submit の GPU 時間の最大 ${submit.maxMs.toFixed(
+            `max GPU time per submit ${submit.maxMs.toFixed(
               1,
-            )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
+            )} ms exceeded ${SUBMIT_GPU_LIMIT_MS} ms`,
           );
           assertEquals(fixture.deviceLost, undefined, "device lost");
           return { status: "pass", note };
@@ -1204,36 +1284,42 @@ const registerFullStructureGate = (fixture: Fixture, spec: FullStructureSpec): v
       );
     } finally {
       await session.dispose();
-      // 次の組の Session の確保の前に、この組の確保の解放を待つ（{@link settleReleases}）。
+      // Wait for this group's allocations to be released before the next group's Session allocates
+      // ({@link settleReleases}).
       await settleReleases(gpu);
     }
   });
 };
 
-// 実寸（S = 32,760 / 14,040）のテストは、S = 192 の GPU テストより**前**に置く。B570 では破棄した device の確保が
-// 解放されないまま残り（{@link settleReleases}）、前のテストの残りが実寸の数 GiB の確保を OOM にしうる。
-// 実寸のテストは device を捨てる前に解放を待つので、後ろのテストへは残りを渡さない。同じ理由で確保が最大のものを
-// 先に回す: S = 32,760 → 14,040 の順（{@link FULL_TOKENS_ORDER}）で S ごとに Session を張り直す — 1 本の
-// Session で形を切り替えると、退役した slot backing が切り替えの run の後始末まで残り、2 つの S の backing が同時に載る
-// （runtime の `estimate.ts` — `peakAccountedBytes` の doc にある「退役から実際の destroy() までの窓」）。
+// The full-size tests (S = 32,760 / 14,040) are placed **before** the S = 192 GPU tests. On the B570 the allocations of
+// a destroyed device stay unreleased for a while ({@link settleReleases}), and what an earlier test left behind can
+// push the full size's allocations of several GiB into OOM. The full-size tests wait for the releases before dropping
+// the device, so they leave nothing to later tests. For the same reason the largest allocation runs first: in the order
+// S = 32,760 → 14,040 ({@link FULL_TOKENS_ORDER}), with the Session rebuilt per S — switching shapes on one Session
+// keeps the retired slot backing alive until the clean-up of the switching run, so the backings of 2 S values are
+// resident at once (the runtime's `estimate.ts` — "the window from retirement to the actual destroy()" in the doc of
+// `peakAccountedBytes`).
 
-/** {@link registerNormalizedRatioGate} の 1 ケース。 */
+/** One case of {@link registerNormalizedRatioGate}. */
 type GateCase = {
   readonly name: string;
-  /** step 名に出す役割（`full-band` / `band` …）。 */
+  /** The role shown in the step name (`full-band` / `band` …). */
   readonly role: string;
-  /** 受入れ（TS の timesteps_proj と故障注入を回す・帯の決定には使わない）。 */
+  /** Acceptance (runs the TS timesteps_proj and the fault injections; not used to decide the band). */
   readonly accept: boolean;
 };
 
-/** {@link registerNormalizedRatioGate} の入力（系列 root 1 つ × S の組 1 つ）。 */
+/** Input of {@link registerNormalizedRatioGate} (one series root × one group of S). */
 type GateSpec = {
-  /** golden の置き場（系列の部品ディレクトリ）。 */
+  /** Location of the goldens (the series' component directory). */
   readonly seriesDir: URL;
-  /** 結果の ID・step 名・ログの接頭辞（f16 席は空・i8 の参照席は {@link I8_ID_PREFIX}）。 */
+  /**
+   * Prefix of the result IDs, step names and logs (empty for the f16 preset, {@link I8_ID_PREFIX} for the i8 reference
+   * partner).
+   */
   readonly idPrefix: string;
   readonly cases: readonly GateCase[];
-  /** 正規化した比 r の帯。`undefined` = 未導出（r を記録して赤で止める）。 */
+  /** Band of the normalized ratio r. `undefined` = not yet derived (r is recorded and the check stops red). */
   readonly band: number | undefined;
   /**
    * Full-size groups only: the golden S each case must have. The row-block count and the per-submit
@@ -1242,16 +1328,21 @@ type GateSpec = {
   readonly tokens?: number;
 };
 
-/** 1 ケースの r（{@link registerBandCandidate} の材料 — 判定の前に積むので帯の外の回も残る）。 */
+/**
+ * One case's r (material for {@link registerBandCandidate} — pushed before the verdict, so runs outside the band are
+ * kept too).
+ */
 type CaseRatio = { readonly name: string; readonly accept: boolean; readonly ratio: number };
 
 /**
- * 正規化した比 r の門（ADR 0118 決定 8）を、系列 root 1 つ・S の組 1 つについて回す（Session を張って全ケースを
- * 回し、畳んで解放を待つ）。f16 席の実寸（S = 32,760 / 14,040）と i8 の参照席（S = 192 の組 / 14,040 — ADR 0120
- * 決定 3）が同じこの 1 本を通る — 「決定 8 と同じ r 門」を席ごとに別々に育てない。
+ * Runs the check of the normalized ratio r (ADR 0118 decision 8) for one series root and one group of S (builds a
+ * Session, runs every case, tears it down and waits for the release). The f16 preset's full size (S = 32,760 / 14,040)
+ * and the i8 reference partner (the S = 192 group / 14,040 — ADR 0120 decision 3) go through this same implementation —
+ * "the same r check as decision 8" is not grown separately per preset.
  *
- * 1 ケース: io の入力で 1 forward → f64 の参照に対する比を CPU f32 の参照自身の比で割った r を帯で判定する。受入れは
- * 加えて TS の timesteps_proj の入力と故障注入 4 件（{@link faultInjections}）。帯が未導出なら r を出して赤で止める。
+ * One case: 1 forward on the io inputs → r = the ratio against the f64 reference divided by the CPU f32 reference's own
+ * ratio, judged against the band. Acceptance cases additionally run the TS timesteps_proj input and the 4 fault
+ * injections ({@link faultInjections}). If the band is not yet derived, it prints r and stops red.
  * Full-size groups (`tokens`) also assert the golden S. Opt-in only (upstream parity); the
  * finiteness / fusion / row-block / submit-time checks run by default in
  * {@link registerFullStructureGate} and {@link registerSmallStructureGate}.
@@ -1259,20 +1350,20 @@ type CaseRatio = { readonly name: string; readonly accept: boolean; readonly rat
  * Registers one Session scope ({@link registerSessionScope}) and one it per case in the caller's
  * describe; the device, the prepared graph and the RoPE base come from the fixture.
  *
- * 返すのは r を出せたケースの r（帯の候補の材料）。
+ * Returns the r of the cases that produced one (material for the band candidate).
  * The returned list is filled by the its as they run (read it from an it registered after them).
  */
 const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly CaseRatio[] => {
   const { band, tokens: fullTokens, idPrefix } = spec;
-  /** 失敗文言の帯の呼び名（実寸の組は f16 席の既存の文言のまま）。 */
-  const bandLabel = fullTokens === undefined ? "帯" : "実寸の帯";
+  /** What the failure messages call the band (the full-size groups keep the f16 preset's existing wording). */
+  const bandLabel = fullTokens === undefined ? "band" : "full-size band";
   const ratios: CaseRatio[] = [];
   const scope = registerSessionScope(fixture);
   const run = async (inputs: Record<string, Tensor>): Promise<Float32Array<ArrayBuffer>> => {
     const outputs = await scope.session().run(inputs);
     const tensor = outputs[scope.prepared().graph.outputs[0]];
-    if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
-    // 次の run の確保（2 本目は slot backing の構築）の前に、この run の中間の解放を待つ。
+    if (tensor.dtype !== "f32") throw new Error(`output is ${tensor.dtype}`);
+    // Wait for this run's intermediates to be released before the next run allocates (run 2 builds the slot backing).
     await settleReleases(required(fixture, "gpu"));
     return tensor.data;
   };
@@ -1281,7 +1372,7 @@ const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly
     it(`${id}（${role}）`, async () => {
       const prepared = scope.prepared();
       const base = required(fixture, "base");
-      // 帯の外で落ちた回も、比と故障注入の記録を results.json に残す。
+      // Even a run that fails outside the band keeps the ratio and the fault-injection record in results.json.
       let caseNote = "";
       await runRecordedCase(
         results,
@@ -1295,18 +1386,20 @@ const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly
             assertEquals(
               wanTokenGrid(golden.latentShape, WAN_GEOMETRY).count,
               fullTokens,
-              `${id}: golden の S`,
+              `${id}: golden S`,
             );
           }
           const inputs = graphInputs(golden, prepared.graph.inputs, name);
-          // 誤差の基準は f64 の参照で、判定は CPU f32 の参照自身の誤差で正規化した比
-          // （{@link DIT_FULL_NORMALIZED_BAND} / {@link I8_NORMALIZED_BAND}）。GPU と CPU f32 の参照の差は記録だけ。
+          // The error baseline is the f64 reference, and the verdict uses the ratio normalized by the CPU f32
+          // reference's own error ({@link DIT_FULL_NORMALIZED_BAND} / {@link I8_NORMALIZED_BAND}). The GPU vs CPU f32
+          // reference difference is only recorded.
           const expected = floatsOf(golden.reference, REFERENCE_F64_KEY, name);
           const reference = floatsOf(golden.reference, "output", name);
           const referenceError = referenceErrorOf(golden, name);
           const referenceRatio = ratioOf(referenceError);
           const referenceQuantile = absErrorQuantile(reference, expected, RECORDED_QUANTILE);
-          // 帯が未導出の回は無限の帯として記録する（記録だけの欄と同じ書き方 — 判定は下で赤にする）。
+          // A run with the band not yet derived is recorded with an infinite band (the same form as the record-only
+          // fields — the verdict below turns it red).
           const toleranceOf = (diff: Difference) =>
             band === undefined
               ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
@@ -1340,17 +1433,21 @@ const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly
           );
           ratios.push({ name, accept, ratio: normalizedRatio(diff, referenceRatio) });
           const notes = [
-            formatNormalized("io の入力 / f64 参照", diff, referenceRatio),
-            formatDifference("CPU f32 参照 / f64 参照（正規化の分母）", referenceError),
-            formatDifference("io の入力 / CPU f32 参照（記録）", diffF32),
-            quantileRatio("io の入力 / f64 参照", latents, expected, referenceQuantile),
+            formatNormalized("io inputs / f64 reference", diff, referenceRatio),
+            formatDifference(
+              "CPU f32 reference / f64 reference (normalization denominator)",
+              referenceError,
+            ),
+            formatDifference("io inputs / CPU f32 reference (record)", diffF32),
+            quantileRatio("io inputs / f64 reference", latents, expected, referenceQuantile),
           ];
-          assertEquals(diff.nonFinite, 0, `${id}: 非有限`);
+          assertEquals(diff.nonFinite, 0, `${id}: non-finite`);
 
           let hostDiff: Difference | undefined;
           let faults: FaultResult[] = [];
           if (accept) {
-            // 製品の経路の入力（ホストの timesteps_proj）も同じ帯で受け入れる（S = 192 の照合と同じ形）。
+            // The product path's input (the host timesteps_proj) is accepted under the same band too (the same form as
+            // the S = 192 comparison).
             const width = viewOf(golden.io, "input.timesteps_proj", name).shape[1];
             const hostLatents = unpatchifyTokens(
               await run({
@@ -1373,9 +1470,9 @@ const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly
               stage: "karume",
             });
             notes.push(
-              formatNormalized("TS の timesteps_proj / f64 参照", hostDiff, referenceRatio),
+              formatNormalized("TS timesteps_proj / f64 reference", hostDiff, referenceRatio),
               quantileRatio(
-                "TS の timesteps_proj / f64 参照",
+                "TS timesteps_proj / f64 reference",
                 hostLatents,
                 expected,
                 referenceQuantile,
@@ -1385,59 +1482,59 @@ const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly
             notes.push(
               ...faults.map(
                 ({ note, ratio }) =>
-                  `${note}・r ${(ratio / referenceRatio).toPrecision(3)}（${
+                  `${note}, r ${(ratio / referenceRatio).toPrecision(3)} (${
                     band === undefined
-                      ? "帯は未導出"
-                      : `帯の ${(ratio / referenceRatio / band).toFixed(1)} 倍`
-                  }）`,
+                      ? "band not yet derived"
+                      : `${(ratio / referenceRatio / band).toFixed(1)} × the band`
+                  })`,
               ),
             );
           }
-          // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
+          // Emitted before the verdict (a run that fell outside the band keeps its ratio at hand too).
           caseNote = notes.join(" / ");
           console.log(`[wan-dit] ${id}: ${caseNote}`);
 
           if (band === undefined) {
             throw new Error(
-              `${id}: 帯が未導出（r ${normalizedRatio(diff, referenceRatio).toPrecision(
+              `${id}: band not yet derived (r ${normalizedRatio(diff, referenceRatio).toPrecision(
                 3,
-              )}）— 決定用の最悪 r × 5 を帯の定数へ書く（帯の候補は同じ組の最後の step が出す）`,
+              )}) — write the worst deciding r × 5 into the band constant (the last step of the same group prints the band candidate)`,
             );
           }
-          // 故障注入の判定を先に置く（受入れが帯の外でも、帯が故障を拾えるかは判定される）。
+          // The fault-injection verdicts come first (even when the acceptance falls outside the band, whether the band
+          // catches the faults is judged).
           for (const { label, ratio } of faults) {
             const normalized = ratio / referenceRatio;
             assert(
               normalized > band,
-              `${id}: 故障注入 ${label} の r ${normalized.toPrecision(
+              `${id}: fault injection ${label} r ${normalized.toPrecision(
                 3,
-              )} が${bandLabel} ${band} の内に収まった`,
+              )} stayed inside the ${bandLabel} ${band}`,
             );
           }
           if (accept) {
             const subtle = faults.find(({ label }) => label === TIMESTEP_OFF_BY_ONE);
             if (subtle === undefined) {
-              throw new Error(`${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が無い`);
+              throw new Error(`${id}: no fault injection ${TIMESTEP_OFF_BY_ONE}`);
             }
             const margin = subtle.ratio / referenceRatio / band;
             assert(
               margin >= SUBTLE_FAULT_MARGIN,
-              `${id}: 故障注入 ${TIMESTEP_OFF_BY_ONE} が${bandLabel}の ${margin.toFixed(
+              `${id}: fault injection ${TIMESTEP_OFF_BY_ONE} is at the ${bandLabel} × ${margin.toFixed(
                 2,
-              )} 倍（${SUBTLE_FAULT_MARGIN} 倍以上のはず — 帯が広すぎる兆候）`,
+              )} (should be at least ${SUBTLE_FAULT_MARGIN} × — a sign that the band is too wide)`,
             );
           }
           assert(
             normalizedRatio(diff, referenceRatio) <= band,
-            `${id}: ${notes[0]} が${bandLabel} ${band} の外`,
+            `${id}: ${notes[0]} outside the ${bandLabel} ${band}`,
           );
           if (hostDiff !== undefined) {
             assert(
               normalizedRatio(hostDiff, referenceRatio) <= band,
-              `${id}: TS の timesteps_proj の r ${normalizedRatio(
-                hostDiff,
-                referenceRatio,
-              ).toPrecision(3)} が${bandLabel} ${band} の外`,
+              `${id}: TS timesteps_proj r ${normalizedRatio(hostDiff, referenceRatio).toPrecision(
+                3,
+              )} outside the ${bandLabel} ${band}`,
             );
           }
           return { status: "pass", note: notes.join(" / ") };
@@ -1449,10 +1546,11 @@ const registerNormalizedRatioGate = (fixture: Fixture, spec: GateSpec): readonly
 };
 
 /**
- * 未導出の帯（`undefined`）の候補を出して赤で止める step。候補は導出規則（ADR 0118 決定 8 — その組の決定用の
- * 最悪 r × 5）どおりに決定用のケースだけから作る。受入れの r は並べて出すが候補には使わない（帯の決定と受入れの
- * 独立）。決定用のどれかが r を出す前に落ちた回は候補を出さない（欠けた最悪は最悪ではない）。帯が導出済みなら
- * 何もしない。
+ * A step that prints the candidate for a band not yet derived (`undefined`) and stops red. The candidate is made from
+ * the deciding cases alone, by the derivation rule (ADR 0118 decision 8 — the worst deciding r of the group × 5). The
+ * acceptance r are listed but not used for the candidate (independence of the band decision and the acceptance). A
+ * run where any deciding case failed before producing r prints no candidate (a worst with gaps is not the worst). Does
+ * nothing once the band is derived.
  * Registers that it in the caller's describe after the gate's its (`ratiosOf` reads the list
  * {@link registerNormalizedRatioGate} returned when the it runs); the band is a constant, so
  * whether the it exists is known at collection time.
@@ -1464,7 +1562,7 @@ const registerBandCandidate = (
   band: number | undefined,
 ): void => {
   if (band !== undefined) return;
-  it(`${label}: 帯の候補（未導出）`, () => {
+  it(`${label}: band candidate (not yet derived)`, () => {
     const ratios = ratiosOf();
     const expected = cases.filter(({ accept }) => !accept).length;
     const decided = ratios.filter(({ accept }) => !accept);
@@ -1472,27 +1570,28 @@ const registerBandCandidate = (
     const unit = 10 ** (Math.floor(Math.log10(worst * 5)) - 1);
     const candidate =
       decided.length === expected
-        ? `決定用 ${expected} 本の最悪 r ${worst.toPrecision(3)} × 5 = ${(worst * 5).toPrecision(
-            3,
-          )}` +
-          `（有効数字 2 桁へ切り上げ ${Number((Math.ceil((worst * 5) / unit) * unit).toPrecision(2))}）`
-        : `決定用 ${expected} 本のうち r が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
+        ? `worst r of the ${expected} deciding cases ${worst.toPrecision(3)} × 5 = ${(
+            worst * 5
+          ).toPrecision(3)}` +
+          ` (rounded up to 2 significant digits: ${Number((Math.ceil((worst * 5) / unit) * unit).toPrecision(2))})`
+        : `of the ${expected} deciding cases, ${decided.length} produced r — no candidate (investigate the failed cases first)`;
     const accepted = ratios
       .filter(({ accept }) => accept)
       .map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`);
     throw new Error(
-      `${label}: 帯が未導出 — ${candidate}。受入れの r（帯の決定に使わない）: ${
-        accepted.join(" / ") || "なし"
+      `${label}: band not yet derived — ${candidate}. Acceptance r (not used to decide the band): ${
+        accepted.join(" / ") || "none"
       }`,
     );
   });
 };
 
 /**
- * linear 1 本（`weight`）の per-channel scale を 2 倍にした供給面（i8 に固有の故障注入 — {@link I8_SCALE_FAULT_WEIGHT}）。
- * 容器のファイルは書き換えない: 取得した block（未検証の取得元なので sha256 の検証の後）の**写し**を 2 倍にして返す
- * （`BoundContainer.readBlock` の MUST — 返された器は書き換えない）。scale の payload は block の先頭からの f32 の列
- * （Session 構築が `subarray(0, payloadBytes)` で読む形）。
+ * A supply surface with the per-channel scale of one linear (`weight`) doubled (the i8-specific fault injection —
+ * {@link I8_SCALE_FAULT_WEIGHT}). The container file is not rewritten: a **copy** of the fetched block (after the
+ * sha256 verification, since it is an unverified source) is doubled and returned (the MUST of
+ * `BoundContainer.readBlock` — the returned buffer is not modified). The scale payload is an f32 sequence from the
+ * start of the block (the form Session construction reads with `subarray(0, payloadBytes)`).
  */
 const scaledScaleContainer = (
   opened: OpenedContainer,
@@ -1502,9 +1601,7 @@ const scaledScaleContainer = (
   const bound = Object.hasOwn(opened.graphs, graph) ? opened.graphs[graph] : undefined;
   const scale = bound?.supplies.get(weight)?.scale;
   if (scale === undefined) {
-    throw new Error(
-      `グラフ '${graph}' の '${weight}' に companion scale が無い（i8 の linear でない）`,
-    );
+    throw new Error(`graph '${graph}': '${weight}' has no companion scale (not an i8 linear)`);
   }
   return {
     graphs: opened.graphs,
@@ -1520,9 +1617,10 @@ const scaledScaleContainer = (
 };
 
 /**
- * i8 に固有の故障注入（{@link scaledScaleContainer}）で受入れケースを回し、r が帯の外へ出ることを門にする
- * （ADR 0120 検収 段 3）。Session は {@link registerNormalizedRatioGate} の Session を畳んだ後に別に張る（2 本を同時に
- * 載せない — 実寸で 2 本は B570 の予算を食う）。
+ * Runs the acceptance cases with the i8-specific fault injection ({@link scaledScaleContainer}) and checks that r falls
+ * outside the band (ADR 0120 acceptance, step 3). The Session is built separately after the Session of
+ * {@link registerNormalizedRatioGate} is torn down (the 2 are not resident at once — 2 at full size eat into the B570's
+ * budget).
  * Registers one Session scope on the scaled container ({@link registerSessionScope}) and one it
  * per accept case; the caller wraps it in its own describe, after the ratio gate's describe.
  */
@@ -1541,7 +1639,7 @@ const registerI8ScaleFault = (
   });
   for (const { name } of cases.filter(({ accept }) => accept)) {
     const id = `${I8_ID_PREFIX}${name}/scale-fault`;
-    it(`${id}（故障注入 ${label} → 帯の外）`, async () => {
+    it(`${id} (fault injection ${label} → outside the band)`, async () => {
       const gpu = required(fixture, "gpu");
       const prepared = scope.prepared();
       const session = scope.session();
@@ -1552,7 +1650,7 @@ const registerI8ScaleFault = (
         const referenceRatio = ratioOf(referenceErrorOf(golden, name));
         const outputs = await session.run(graphInputs(golden, prepared.graph.inputs, name));
         const tensor = outputs[prepared.graph.outputs[0]];
-        if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+        if (tensor.dtype !== "f32") throw new Error(`output is ${tensor.dtype}`);
         await settleReleases(gpu);
         const diff = difference(
           unpatchifyTokens(tensor.data, golden.latentShape, WAN_GEOMETRY),
@@ -1566,16 +1664,18 @@ const registerI8ScaleFault = (
           tolerance: { atol: Number.POSITIVE_INFINITY, rtol: 0 },
           stage: "karume",
         });
-        note = `${formatNormalized(`故障注入 ${label} / f64 参照`, diff, referenceRatio)}（${
-          band === undefined ? "帯は未導出" : `帯の ${(normalized / band).toFixed(1)} 倍`
+        note = `${formatNormalized(`fault injection ${label} / f64 reference`, diff, referenceRatio)}（${
+          band === undefined
+            ? "band not yet derived"
+            : `${(normalized / band).toFixed(1)} × the band`
         }）`;
         console.log(`[wan-dit] ${id}: ${note}`);
         if (band === undefined) {
-          throw new Error(`${id}: 帯が未導出（故障注入の r ${normalized}）`);
+          throw new Error(`${id}: band not yet derived (fault-injection r ${normalized})`);
         }
         assert(
           normalized > band,
-          `${id}: 故障注入 ${label} の r ${normalized.toPrecision(3)} が帯 ${band} の内に収まった`,
+          `${id}: fault injection ${label} r ${normalized.toPrecision(3)} stayed inside band ${band}`,
         );
         return { status: "pass", note };
       });
@@ -1596,25 +1696,26 @@ const registerI8ParityGroups = (fixture: Fixture, label: string, spec: GateSpec)
   describe(label, () => {
     ratios = registerNormalizedRatioGate(fixture, spec);
   });
-  describe(`${I8_ID_PREFIX}故障注入 ${I8_SCALE_FAULT_LABEL}`, () => {
+  describe(`${I8_ID_PREFIX}fault injection ${I8_SCALE_FAULT_LABEL}`, () => {
     registerI8ScaleFault(fixture, spec.cases, spec.band);
   });
   registerBandCandidate(label, spec.cases, () => ratios, spec.band);
 };
 
 describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
-  "Wan DiT 実寸 計測モード（実 GPU）: S = 32,760 / 14,040 の 1 forward の行ブロックは S ごとの枚数・" +
-    "融合の件数・非有限 0・1 submit の GPU 時間 ≤ 1 s",
+  "Wan DiT full size, measuring mode (real GPU): 1 forward at S = 32,760 / 14,040 has the per-S row-block count, " +
+    "fusion counts, 0 non-finite values, GPU time per submit ≤ 1 s",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "f16"), GRAPH);
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
-      // 計測モード（timestamp-query）: submit ごとの GPU 時間は既存の回収に相乗りして測る（新しい待ちを
-      // 足さない — runtime の `ChunkBudgetStats.submitGpuTime`）。計算は通常の実行と同じだが、1 dispatch
-      // = 1 pass になる分だけ窓の壁時計が変わる。チャンクの切れ目は壁時計の窓から学んだ推定で決まるので、
-      // 通常の実行と同じなのは裏付け前のチャンク（initialChunkSize）だけで、裏付けが付いた後（最初の窓を
-      // 閉じた後）の切れ目は変わりうる。
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
+      // Measuring mode (timestamp-query): the GPU time per submit is measured by piggybacking on the existing
+      // collection (no new waits — the runtime's `ChunkBudgetStats.submitGpuTime`). The computation is the same as a
+      // normal run, but the window's wall clock changes because 1 dispatch = 1 pass. Chunk boundaries are decided by
+      // estimates learned from wall-clock windows, so only the chunks before measured evidence exists
+      // (initialChunkSize) are the same as in a normal run; the boundaries after the evidence (after the first window
+      // closes) can differ.
       fixture.gpu = await acquireTestGpu({
         gpuTiming: true,
         onDeviceLost: (info) => {
@@ -1637,14 +1738,14 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
 );
 
 describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  "Wan DiT 実寸 照合（実 GPU・計測モード / diffusers CPU f64）: S = 32,760 / 14,040 の 1 forward が S ごとの" +
-    `実寸の帯の内・故障注入は帯の外${UPSTREAM_PARITY_OPT_IN}`,
+  "Wan DiT full size, comparison (real GPU, measuring mode / diffusers CPU f64): 1 forward at S = 32,760 / 14,040 is inside the per-S " +
+    `full-size band, fault injections are outside the band${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       const opened = await openWanComponent(COMPONENT, "f16");
       fixture.prepared = prepareContainer(opened, GRAPH);
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
       fixture.base = await readRopeBase(opened);
       // Same measured-mode device as the band derivation (ADR 0118 stage 3 / 8 measured there).
       fixture.gpu = await acquireTestGpu({ gpuTiming: true });
@@ -1667,13 +1768,14 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 );
 
 describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
-  "Wan DiT 実寸 通常モード（実 GPU・計測なし）: S ごと（32,760 / 14,040）の 1 forward の所要を記録する" +
-    "（計測モードの出力と Uint32 で一致・非有限 0）",
+  "Wan DiT full size, normal mode (real GPU, no measurement): records the time of 1 forward per S (32,760 / 14,040)" +
+    " (equal to the measuring-mode output as Uint32, 0 non-finite values)",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "f16"), GRAPH);
-      // 所要は計測を切った通常の実行で採る（ADR 0118 追記 2026-10-02 — 計測モードは 1 dispatch = 1 pass）。
+      // The time is taken from a normal run with measurement off (ADR 0118 addendum 2026-10-02 — measuring mode is 1
+      // dispatch = 1 pass).
       fixture.gpu = await acquireTestGpu({
         onDeviceLost: (info) => {
           fixture.deviceLost = `${info.reason}: ${info.message}`;
@@ -1682,7 +1784,8 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
     afterAll(() => releaseDevice(fixture));
-    // S ごとに Session を張り直す（理由は計測モードの照合と同じ — 2 つの S の backing を同時に載せない）。
+    // Rebuild the Session per S (for the same reason as the measuring-mode comparison — never 2 S backings resident at
+    // once).
     for (const { tokens: fullTokens, normalModeCase: name } of FULL_CASES_BY_TOKENS) {
       it(`S = ${fullTokens}`, async () => {
         const gpu = required(fixture, "gpu");
@@ -1696,14 +1799,15 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
             const inputs = graphInputs(golden, prepared.graph.inputs, name);
             const runs: FullRun[] = [];
             const produced: Float32Array<ArrayBuffer>[] = [];
-            // 1 本目は最初の run（パイプラインの生成と、裏付け前の initialChunkSize のチャンク）、2 本目は
-            // 2 回目以降の形（slot backing・時間予算で切ったチャンク）。生成の 1 ステップに近いのは 2 本目。
-            for (const label of ["1 本目", "2 本目"]) {
+            // Run 1 is the first run (pipeline creation and the initialChunkSize chunks before measured evidence), run
+            // 2 the shape of the second and later runs (slot backing, chunks cut by the time budget). Run 2 is the
+            // closer one to one generation step.
+            for (const label of ["run 1", "run 2"]) {
               const started = performance.now();
               const outputs = await session.run(inputs);
               const wallMs = performance.now() - started;
               const tensor = outputs[prepared.graph.outputs[0]];
-              if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+              if (tensor.dtype !== "f32") throw new Error(`output is ${tensor.dtype}`);
               produced.push(tensor.data);
               runs.push(observeRun(label, session.diagnostics(), wallMs, outputBytes(outputs)));
               await settleReleases(gpu);
@@ -1713,23 +1817,23 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
             normalModeTokens.set(name, tokens);
             const budget = session.diagnostics().submit.chunkBudget;
             const note = [
-              `構築 ${(buildMs / 1000).toFixed(1)} s`,
+              `build ${(buildMs / 1000).toFixed(1)} s`,
               ...runs.map((observed) => formatRun(observed)),
-              `窓平均の最大 ${
+              `max window mean ${
                 budget.maxWindowMeanMs?.toFixed(1) ?? "—"
-              } ms・予算超過 ${budget.overBudgetChunks} 本`,
+              } ms, ${budget.overBudgetChunks} over budget`,
             ].join(" / ");
-            console.log(`[wan-dit] 実寸 S = ${fullTokens} の通常モード: ${note}`);
+            console.log(`[wan-dit] full size S = ${fullTokens}, normal mode: ${note}`);
             assertEquals(
               tokens.reduce((count, value) => count + (Number.isFinite(value) ? 0 : 1), 0),
               0,
-              `${name}: 非有限`,
+              `${name}: non-finite`,
             );
             const measured = measuredTokens.get(name);
             if (measured === undefined) {
               throw new Error(
-                `${name}: 計測モードの照合の出力が無い（同じ回で計測モードの照合を先に回す — ` +
-                  "measuredTokens の MUST）",
+                `${name}: no output from the measuring-mode comparison (run the measuring-mode comparison first in the same run — ` +
+                  "the MUST of measuredTokens)",
               );
             }
             for (const [index, data] of produced.entries()) {
@@ -1737,8 +1841,8 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
               assertEquals(
                 firstBitMismatch(data, measured),
                 -1,
-                `${name}: 通常モードの ${label}が計測モードの出力と Uint32 で一致しない` +
-                  "（値は最初に割れる要素の添字）",
+                `${name}: normal-mode ${label} does not equal the measuring-mode output as Uint32` +
+                  " (the value is the index of the first differing element)",
               );
             }
             assertEquals(fixture.deviceLost, undefined, "device lost");
@@ -1754,7 +1858,7 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE)(
 );
 
 describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  "Wan DiT 実寸 通常モード（計測なし / diffusers CPU f64）: S ごと（32,760 / 14,040）の 1 forward が実寸の帯の内" +
+  "Wan DiT full size, normal mode (no measurement / diffusers CPU f64): 1 forward per S (32,760 / 14,040) is inside the full-size band" +
     UPSTREAM_PARITY_OPT_IN,
   () => {
     for (const { tokens: fullTokens, normalModeCase: name } of FULL_CASES_BY_TOKENS) {
@@ -1785,14 +1889,14 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
               tolerance: recordedTolerance(diff, fullBand * referenceRatio),
               stage: "karume",
             });
-            const note = formatNormalized("io の入力 / f64 参照", diff, referenceRatio);
-            console.log(`[wan-dit] 実寸 S = ${fullTokens} の通常モード: ${note}`);
-            assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+            const note = formatNormalized("io inputs / f64 reference", diff, referenceRatio);
+            console.log(`[wan-dit] full size S = ${fullTokens}, normal mode: ${note}`);
+            assertEquals(diff.nonFinite, 0, `${name}: non-finite`);
             assert(
               normalizedRatio(diff, referenceRatio) <= fullBand,
-              `${name}: 通常モードの r ${normalizedRatio(diff, referenceRatio).toPrecision(
+              `${name}: normal-mode r ${normalizedRatio(diff, referenceRatio).toPrecision(
                 3,
-              )} が実寸の帯 ${fullBand} の外`,
+              )} outside the full-size band ${fullBand}`,
             );
             return { status: "pass", note };
           },
@@ -1802,13 +1906,15 @@ describe.skipIf(!FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   },
 );
 
-// 実用席の時間と確保（ADR 0120 段 4）と i8 の参照席の r 門（段 3）は、f16 席の実寸の後・S = 192 の前に置く。並びは
-// 確保の大きい順（実用席の S = 32,760 → 14,040 → i8 の参照席の S = 14,040 → S = 192 の組）— 理由は f16 席の実寸を
-// 先に置くのと同じ（B570 の `destroy()` の遅れ・{@link settleReleases}）。
+// The practical preset's time and allocation (ADR 0120 step 4) and the i8 reference partner's r check (step 3) come
+// after the f16 preset's full size and before S = 192. The order is by allocation size (practical preset S = 32,760 →
+// 14,040 → i8 reference partner S = 14,040 → the S = 192 group) — for the same reason the f16 preset's full size comes
+// first (the B570's `destroy()` lag, {@link settleReleases}).
 
 /**
- * 実用席の 1 forward を 2 本回す（1 本目 = パイプラインの生成と裏付け前のチャンク・2 本目 = 生成の 1 パスに近い
- * 2 回目以降の形 — f16 席の通常モードと同じ並び）。
+ * Runs 2 forwards of the practical preset (run 1 = pipeline creation and the chunks before measured evidence, run 2 =
+ * the shape of the second and later runs, close to one generation pass — the same order as the f16 preset's normal
+ * mode).
  */
 const practicalRuns = async (
   session: Session,
@@ -1818,30 +1924,31 @@ const practicalRuns = async (
 ): Promise<{ readonly runs: readonly FullRun[]; readonly nonFinite: number }> => {
   const runs: FullRun[] = [];
   let nonFinite = 0;
-  for (const label of ["1 本目", "2 本目"]) {
+  for (const label of ["run 1", "run 2"]) {
     const started = performance.now();
     const outputs = await session.run(inputs);
     const wallMs = performance.now() - started;
     const tensor = outputs[output];
-    if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+    if (tensor.dtype !== "f32") throw new Error(`output is ${tensor.dtype}`);
     nonFinite += tensor.data.reduce((count, value) => count + (Number.isFinite(value) ? 0 : 1), 0);
     runs.push(observeRun(label, session.diagnostics(), wallMs, outputBytes(outputs)));
-    // 次の run の確保の前に、この run の中間の解放を待つ。
+    // Wait for this run's intermediates to be released before the next run allocates.
     await settleReleases(gpu);
   }
   return { runs, nonFinite };
 };
 
 describe.skipIf(!PRACTICAL_RUNNABLE || !GPU_AVAILABLE)(
-  `Wan DiT 実用席 ${PRACTICAL_QUANT}（実 GPU・計測モード）: S = 32,760 / 14,040 の 1 パスの GPU 時間を` +
-    "記録し、1 submit の GPU 時間 ≤ 1 s・非有限 0",
+  `Wan DiT practical preset ${PRACTICAL_QUANT} (real GPU, measuring mode): records the GPU time of 1 pass at S = 32,760 / 14,040` +
+    ", GPU time per submit ≤ 1 s, 0 non-finite values",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.options = practicalSessionOptions();
       fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "i8"), i8Graph());
-      // 計測モードの意味は f16 席の実寸の照合と同じ（1 dispatch = 1 pass — 壁時計は下の通常モードが採る）。1 submit の
-      // 門は a8 で dispatch が増える分（anima で 3,087 → 3,311 / step — ADR 0030）を席ごとに測り直す（ADR 0120 リスク 8）。
+      // Measuring mode means the same as in the f16 preset's full-size comparison (1 dispatch = 1 pass — the normal
+      // mode below takes the wall clock). The 1-submit check is re-measured per preset for the extra dispatches of a8
+      // (3,087 → 3,311 / step on anima — ADR 0030) (ADR 0120 risk 8).
       fixture.gpu = await acquireTestGpu({
         gpuTiming: true,
         onDeviceLost: (info) => {
@@ -1851,7 +1958,7 @@ describe.skipIf(!PRACTICAL_RUNNABLE || !GPU_AVAILABLE)(
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
     afterAll(() => releaseDevice(fixture));
-    // S ごとに Session を張り直す（2 つの S の backing を同時に載せない — f16 席の実寸と同じ）。
+    // Rebuild the Session per S (never 2 S backings resident at once — the same as the f16 preset's full size).
     for (const { tokens, name } of PRACTICAL_TIMING_CASES) {
       it(`${PRACTICAL_QUANT} S = ${tokens}`, async () => {
         const gpu = required(fixture, "gpu");
@@ -1877,24 +1984,24 @@ describe.skipIf(!PRACTICAL_RUNNABLE || !GPU_AVAILABLE)(
               const submit = submitGpuNote(session.diagnostics(), unitNs);
               note = [
                 submit.note,
-                `構築 ${(buildMs / 1000).toFixed(1)} s`,
+                `build ${(buildMs / 1000).toFixed(1)} s`,
                 ...runs.map((observed) => formatRun(observed, unitNs)),
-                `融合 ${JSON.stringify(session.diagnostics().lastRunFusions)}`,
-                `非有限 ${nonFinite}`,
+                `fusions ${JSON.stringify(session.diagnostics().lastRunFusions)}`,
+                `non-finite ${nonFinite}`,
               ].join(" / ");
               console.log(
-                `[wan-dit] 実用席 ${PRACTICAL_QUANT} S = ${tokens} の計測モード: ${note}`,
+                `[wan-dit] practical preset ${PRACTICAL_QUANT} S = ${tokens}, measuring mode: ${note}`,
               );
-              assertEquals(nonFinite, 0, `${name}: 非有限`);
+              assertEquals(nonFinite, 0, `${name}: non-finite`);
               assert(
                 submit.unbackedSubmits > 0,
-                "最初の run の裏付け前のチャンク（initialChunkSize で据え置いた submit）を測れていない",
+                "the first run's chunks issued before measured evidence existed (submits held at initialChunkSize) were not measured",
               );
               assert(
                 submit.maxMs <= SUBMIT_GPU_LIMIT_MS,
-                `1 submit の GPU 時間の最大 ${submit.maxMs.toFixed(
+                `max GPU time per submit ${submit.maxMs.toFixed(
                   1,
-                )} ms が ${SUBMIT_GPU_LIMIT_MS} ms を超えた`,
+                )} ms exceeded ${SUBMIT_GPU_LIMIT_MS} ms`,
               );
               assertEquals(fixture.deviceLost, undefined, "device lost");
               return { status: "pass", note };
@@ -1910,13 +2017,13 @@ describe.skipIf(!PRACTICAL_RUNNABLE || !GPU_AVAILABLE)(
 );
 
 describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE)(
-  "Wan DiT i8 参照席 f16+dit8（実 GPU・計測モード）: S = 14,040 の 1 forward の行ブロック・融合の件数・非有限 0・" +
-    "1 submit の GPU 時間 ≤ 1 s",
+  "Wan DiT i8 reference partner f16+dit8 (real GPU, measuring mode): 1 forward at S = 14,040 has the row blocks, fusion counts, 0 non-finite values, " +
+    "GPU time per submit ≤ 1 s",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "i8"), i8Graph());
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
       fixture.gpu = await acquireTestGpu({
         gpuTiming: true,
         onDeviceLost: (info) => {
@@ -1937,15 +2044,15 @@ describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE)(
 );
 
 describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  "Wan DiT i8 参照席 f16+dit8（実 GPU・計測モード / diffusers CPU f64）: S = 14,040 の 1 forward が r の帯の内・" +
-    `故障注入 5 件（f16 席と同じ 4 件 + scale の 2 倍）は帯の外${UPSTREAM_PARITY_OPT_IN}`,
+  "Wan DiT i8 reference partner f16+dit8 (real GPU, measuring mode / diffusers CPU f64): 1 forward at S = 14,040 is inside the r band, " +
+    `the 5 fault injections (the 4 of the f16 preset + the doubled scale) are outside the band${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.graph = i8Graph();
       fixture.opened = await openWanComponent(COMPONENT, "i8");
       fixture.prepared = prepareContainer(fixture.opened, fixture.graph);
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
       fixture.base = await readRopeBase(fixture.opened);
       // Same measured-mode device as the band derivation (I8_NORMALIZED_BAND: S = 14,040 measured there).
       fixture.gpu = await acquireTestGpu({ gpuTiming: true });
@@ -1963,38 +2070,38 @@ describe.skipIf(!I8_FULL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 );
 
 describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE)(
-  "Wan DiT i8 参照席 f16+dit8（実 GPU）: S = 192 の組の 1 forward の融合の件数・非有限 0",
+  "Wan DiT i8 reference partner f16+dit8 (real GPU): fusion counts and 0 non-finite values of 1 forward of the S = 192 group",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "i8"), i8Graph());
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
       fixture.gpu = await acquireTestGpu();
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
-    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    // Wait for the releases before dropping the device (leaves budget for later tests — {@link settleReleases}).
     afterAll(() => releaseDevice(fixture));
     registerSmallStructureGate(fixture, I8_GOLDEN_DIR, I8_ID_PREFIX, I8_SMALL_CASES);
   },
 );
 
 describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  "Wan DiT i8 参照席 f16+dit8（実 GPU / diffusers CPU f64）: S = 192 の組の 1 forward が r の帯の内・" +
-    `故障注入 5 件（f16 席と同じ 4 件 + scale の 2 倍）は帯の外${UPSTREAM_PARITY_OPT_IN}`,
+  "Wan DiT i8 reference partner f16+dit8 (real GPU / diffusers CPU f64): 1 forward of the S = 192 group is inside the r band, " +
+    `the 5 fault injections (the 4 of the f16 preset + the doubled scale) are outside the band${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.graph = i8Graph();
       fixture.opened = await openWanComponent(COMPONENT, "i8");
       fixture.prepared = prepareContainer(fixture.opened, fixture.graph);
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
       fixture.base = await readRopeBase(fixture.opened);
       fixture.gpu = await acquireTestGpu();
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
-    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    // Wait for the releases before dropping the device (leaves budget for later tests — {@link settleReleases}).
     afterAll(() => releaseDevice(fixture));
-    registerI8ParityGroups(fixture, `${I8_ID_PREFIX}S = 192 の組`, {
+    registerI8ParityGroups(fixture, `${I8_ID_PREFIX}S = 192 group`, {
       seriesDir: I8_GOLDEN_DIR,
       idPrefix: I8_ID_PREFIX,
       cases: I8_SMALL_CASES,
@@ -2004,40 +2111,40 @@ describe.skipIf(!I8_SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 );
 
 describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE)(
-  "Wan DiT S 形（実 GPU）: 全ケースの 1 forward の融合の件数・非有限 0",
+  "Wan DiT S shape (real GPU): fusion counts and 0 non-finite values of 1 forward of every case",
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       fixture.prepared = prepareContainer(await openWanComponent(COMPONENT, "f16"), GRAPH);
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
       fixture.gpu = await acquireTestGpu();
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
-    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    // Wait for the releases before dropping the device (leaves budget for later tests — {@link settleReleases}).
     afterAll(() => releaseDevice(fixture));
     registerSmallStructureGate(fixture, GOLDEN_DIR, "", CASES);
   },
 );
 
 describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  `Wan DiT 照合（実 GPU / diffusers CPU f32）: S 形の 1 forward が帯の内・故障注入は帯の外${UPSTREAM_PARITY_OPT_IN}`,
+  `Wan DiT comparison (real GPU / diffusers CPU f32): 1 forward of the S shape is inside the band, fault injections are outside the band${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const fixture: Fixture = {};
     beforeAll(async () => {
       const opened = await openWanComponent(COMPONENT, "f16");
       fixture.prepared = prepareContainer(opened, GRAPH);
-      assertEquals(fixture.prepared.graph.outputs.length, 1, "製品のグラフの出力は 1 本");
+      assertEquals(fixture.prepared.graph.outputs.length, 1, "the product graph has 1 output");
       fixture.base = await readRopeBase(opened);
       fixture.gpu = await acquireTestGpu();
       assertAdapterMatchesEnvironment(fixture.gpu);
     });
-    // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+    // Wait for the releases before dropping the device (leaves budget for later tests — {@link settleReleases}).
     afterAll(() => releaseDevice(fixture));
     const scope = registerSessionScope(fixture);
     const run = async (inputs: Record<string, Tensor>): Promise<Float32Array<ArrayBuffer>> => {
       const outputs = await scope.session().run(inputs);
       const tensor = outputs[scope.prepared().graph.outputs[0]];
-      if (tensor.dtype !== "f32") throw new Error(`出力が ${tensor.dtype}`);
+      if (tensor.dtype !== "f32") throw new Error(`output is ${tensor.dtype}`);
       return tensor.data;
     };
     for (const { name, role } of CASES) {
@@ -2058,12 +2165,13 @@ describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
             tolerance: recordedTolerance(diff),
             stage: "karume",
           });
-          const notes = [formatDifference("io の入力", diff)];
-          assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+          const notes = [formatDifference("io inputs", diff)];
+          assertEquals(diff.nonFinite, 0, `${name}: non-finite`);
 
-          // ホストの timesteps_proj（TS）で回した値（製品の経路の入力）も同じ比の帯で見る。入力そのものの
-          // 差（torch と TS の `exp` の 1 ULP — 最悪 3.05e-5）は `wan_dit_host_test.ts` の絶対 atol 1.5e-4 が
-          // 押さえる（値域が [-1, 1] の sin / cos なので絶対で足りる — 帯の指標を比に変えても据え置く）。
+          // The values run with the host timesteps_proj (TS) (the product path's input) are checked under the same
+          // ratio band too. The difference of the input itself (1 ULP of `exp` between torch and TS — worst 3.05e-5) is
+          // covered by the absolute atol 1.5e-4 of `wan_dit_host_test.ts` (sin / cos range over [-1, 1], so absolute is
+          // enough — kept as it is even though the band's metric became a ratio).
           const width = viewOf(golden.io, "input.timesteps_proj", name).shape[1];
           const hostTimestep = unpatchifyTokens(
             await run({
@@ -2085,30 +2193,31 @@ describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
             tolerance: recordedTolerance(hostDiff),
             stage: "karume",
           });
-          notes.push(formatDifference("TS の timesteps_proj", hostDiff));
+          notes.push(formatDifference("TS timesteps_proj", hostDiff));
           const faults =
             role === "accept"
               ? await faultInjections(golden, inputs, tokens, expected, run, base)
               : [];
           notes.push(...faults.map(({ note }) => note));
-          // 判定の前に出す（帯の外へ出た回も全ケースの比が手元に残る）。
+          // Emitted before the verdict (a run that fell outside the band keeps the ratios of every case at hand too).
           console.log(`[wan-dit] ${name}: ${notes.join(" / ")}`);
 
-          // 故障注入の判定を先に置く（受入れが帯の外でも、帯が故障を拾えるかは判定される）。
+          // The fault-injection verdicts come first (even when the acceptance falls outside the band, whether the band
+          // catches the faults is judged).
           for (const { label, ratio } of faults) {
             assert(
               ratio > DIT_RATIO_BAND,
-              `${name}: 故障注入 ${label} が帯 ${DIT_RATIO_BAND} の内に収まった`,
+              `${name}: fault injection ${label} stayed inside band ${DIT_RATIO_BAND}`,
             );
           }
           if (role !== "growth") {
             assert(
               ratioOf(diff) <= DIT_RATIO_BAND,
-              `${name}: ${notes[0]} が帯 ${DIT_RATIO_BAND} の外`,
+              `${name}: ${notes[0]} outside band ${DIT_RATIO_BAND}`,
             );
             assert(
               ratioOf(hostDiff) <= DIT_RATIO_BAND,
-              `${name}: ${notes[1]} が帯 ${DIT_RATIO_BAND} の外`,
+              `${name}: ${notes[1]} outside band ${DIT_RATIO_BAND}`,
             );
           }
           return { status: "pass", note: notes.join(" / ") };
@@ -2118,22 +2227,26 @@ describe.skipIf(!SMALL_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
   },
 );
 
-/** 故障注入 1 件の結果（判定は呼び手が全ケースの比を出してから行う）。 */
+/** Result of one fault injection (the caller judges after printing the ratios of every case). */
 type FaultResult = { readonly label: string; readonly ratio: number; readonly note: string };
 
-/** 微妙な故障の注入のラベル（実寸の照合が {@link SUBTLE_FAULT_MARGIN} の門で引く）。 */
-const TIMESTEP_OFF_BY_ONE = "timestep の 1 ずれ";
+/**
+ * Label of the subtle fault injection (the full-size comparison looks it up for the {@link SUBTLE_FAULT_MARGIN} check).
+ */
+const TIMESTEP_OFF_BY_ONE = "timestep off by 1";
 
 /**
- * 受入れケースの故障注入 4 件（追記 2026-10-02 — 帯が広すぎないことの裏取り）。どれも帯の外へ出ることを
- * 門にする（赤にならない注入があれば帯の決め方を見直す）。
+ * The 4 fault injections of the acceptance cases (addendum 2026-10-02 — evidence that the band is not too wide). Each
+ * must fall outside the band (if an injection does not turn red, revisit how the band is decided).
  *
- * - RoPE の h / w の取り違え（非正方の格子で表を組み違える — 正方では値が一致して見えない。なので受入れの格子は
- *   非正方であることを要求し、正方なら注入を黙って飛ばさず落とす — 4 件が 3 件に減ったまま緑にしない）
- * - unpatchify の並びの取り違え（出口を入口の並び `(c,pt,ph,pw)` で読む）
- * - timestep の cos / sin の前後反転
- * - **timestep の 1 ずれ**（`timesteps_proj` を t + 1 で組む — TS の `timestepsProj`）。上の 3 件は O(1) の差で
- *   帯がどこにあっても赤になるが、これは比 2e-3〜9e-3 の微妙な故障で、帯の上限側の根拠になる。
+ * - RoPE h / w swapped (building the tables wrongly on a non-square grid — on a square grid the values coincide and it
+ *   cannot be seen. So the acceptance grid is required to be non-square, and a square one fails instead of silently
+ *   skipping the injection — never green with 4 reduced to 3)
+ * - unpatchify order swapped (the output read in the input order `(c,pt,ph,pw)`)
+ * - the timestep's cos / sin reversed
+ * - **the timestep off by 1** (`timesteps_proj` built with t + 1 — TS's `timestepsProj`). The 3 above are O(1)
+ *   differences that turn red wherever the band is, but this is a subtle fault with a ratio of 2e-3 to 9e-3 and
+ *   grounds the upper side of the band.
  */
 const faultInjections = async (
   golden: Golden,
@@ -2153,21 +2266,21 @@ const faultInjections = async (
     results.push({
       label,
       ratio,
-      note: `故障注入 ${label}: maxAbs ${diff.maxAbs.toExponential(3)}（比 ${ratio.toExponential(
+      note: `fault injection ${label}: maxAbs ${diff.maxAbs.toExponential(3)} (ratio ${ratio.toExponential(
         2,
-      )}）`,
+      )})`,
     });
   };
 
   assert(
     grid.rows !== grid.cols,
-    `受入れケースの格子 ${grid.frames}·${grid.rows}·${grid.cols} が正方 — RoPE の h / w の取り違えが値に出ない` +
-      "（受入れには非正方の格子を選ぶ）",
+    `acceptance case grid ${grid.frames}·${grid.rows}·${grid.cols} is square — swapped RoPE h / w would not show in the values` +
+      " (choose a non-square grid for acceptance)",
   );
   const swapped = wanRopeTables(base, { ...grid, rows: grid.cols, cols: grid.rows });
   const shape = inputs.rope_cos.shape;
   measure(
-    "RoPE の h / w 取り違え",
+    "RoPE h / w swapped",
     unpatchify(
       await run({
         ...inputs,
@@ -2176,16 +2289,16 @@ const faultInjections = async (
       }),
     ),
   );
-  measure("unpatchify の並び", unpatchify(transposeTokenAxes(tokens, WAN_GEOMETRY)));
+  measure("unpatchify order", unpatchify(transposeTokenAxes(tokens, WAN_GEOMETRY)));
   const proj = inputs.timesteps_proj;
-  if (proj.dtype !== "f32") throw new Error(`timesteps_proj が ${proj.dtype}`);
+  if (proj.dtype !== "f32") throw new Error(`timesteps_proj is ${proj.dtype}`);
   const half = proj.data.length / 2;
   const flipped = Float32Array.from(
     { length: proj.data.length },
     (_, index) => proj.data[index < half ? half + index : index - half],
   );
   measure(
-    "timestep の cos / sin 反転",
+    "timestep cos / sin reversed",
     unpatchify(
       await run({ ...inputs, timesteps_proj: { dtype: "f32", shape: proj.shape, data: flipped } }),
     ),

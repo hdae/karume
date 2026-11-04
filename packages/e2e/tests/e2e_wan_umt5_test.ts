@@ -1,5 +1,5 @@
 /**
- * Wan2.1 の umT5（i8 系列のテキストエンコーダ）の**移植の門**（実 GPU・ADR 0119 段 10c — 決定 3 / 4 / 5 / 8）。
+ * The **port check** of Wan2.1's umT5 (the text encoder of the i8 series) (real GPU, ADR 0119 step 10c — decisions 3 / 4 / 5 / 8).
  *
  * The text_encoder container of the distribution mirror `models/karume-umt5-xxl/` (opened through its manifest —
  * ADR 0139 decision 1; int8 per-channel weights, f32 activations, inputs token ids `[1,L]` and the bucket table
@@ -12,17 +12,20 @@
  * wan.umt5_export reference`). Their content, reader, band and judgement are in `helpers/umt5-golden.ts` (shared with
  * the public `umt5.Encoder` e2e).
  *
- * ## 門
+ * ## Checks
  *
- * 1. **入力の両経路の一致**（GPU 不要）: golden の原文を TS のトークナイザ（`WanPromptEncoder` — 10a の資産）に
- *    通した id 列と、TS のバケット表（`buildUmt5RelativePositionBuckets`）が golden の入力と**ビット一致**。GPU の
- *    門はこの TS の入力（製品の経路）で回す。golden が今の容器から採られたこと（part 0 の sha256）も見る。
- * 2. **正規化比 r の帯**（決定 8 ①）: r = (max|GPU − f64| ÷ max|f64|) ÷ (max|CPU f32 − f64| ÷ max|f64|)（DiT の
- *    実寸の門と同じ指標 — `e2e_wan_dit_test.ts` の `DIT_FULL_NORMALIZED_BAND`）。帯は決定用 6 本の最悪 r × 5 を
- *    有効数字 2 桁へ切り上げた値で、受入れ 4 本は別に判定する（{@link UMT5_NORMALIZED_BAND}）。
- * 3. **故障注入**（受入れの 4 本で・帯の外へ出ること）: 相対位置の表を 1 ずらす・id 列の 1 トークンを別の id に・
- *    層 0 / 1 の相対位置の表の取り違え（容器の供給面で block を入れ替える — 別の Session）・i8 に固有の 1 件
- *    （中ほどの層の linear 1 本の per-channel scale を 2 倍 — {@link scaledScaleContainer}・別の Session）。
+ * 1. **Both input paths agree** (no GPU needed): the id sequence from passing the golden's source text through the TS
+ *    tokenizer (`WanPromptEncoder` — the asset of 10a) and the TS bucket table (`buildUmt5RelativePositionBuckets`)
+ *    are **bit-identical** to the golden's inputs. The GPU checks run on these TS inputs (the product path). It also
+ *    checks that the golden was taken from the current container (the part 0 sha256).
+ * 2. **The band of the normalized ratio r** (decision 8 ①): r = (max|GPU − f64| ÷ max|f64|) ÷ (max|CPU f32 − f64| ÷
+ *    max|f64|) (the same metric as the DiT's full-size check — `DIT_FULL_NORMALIZED_BAND` of `e2e_wan_dit_test.ts`).
+ *    The band is the worst r of the 6 band-setting cases × 5, rounded up to 2 significant digits; the 4 acceptance
+ *    cases are judged separately ({@link UMT5_NORMALIZED_BAND}).
+ * 3. **Fault injection** (on the 4 acceptance cases; each must leave the band): shifting the relative-position table by
+ *    1, replacing one token of the id sequence with another id, swapping the relative-position tables of layers 0 / 1
+ *    (blocks swapped in the container's supply — a separate Session), and one fault specific to i8 (doubling the
+ *    per-channel scale of one linear in a middle layer — {@link scaledScaleContainer}, a separate Session).
  *
  * Without the mirror, the goldens or a GPU the cases SKIP explicitly, naming what is missing (ADR 0005). A golden
  * set present only in part is a FAIL, not a SKIP (the completeness test).
@@ -107,11 +110,11 @@ import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-pari
 /** The distribution mirror (the default output of `dist.py --pipeline umt5`). */
 const DIST_ROOT = mirrorRoot("karume-umt5-xxl");
 const ASSEMBLE = "cd tools/export-recipes && uv run python dist.py --pipeline umt5";
-/** 席（明示 — 省略すると manifest の既定へ黙って移る。golden は i8 の重みから採った）。 */
+/** The preset (explicit — omitted, it silently moves to the manifest's default. The goldens were taken from the i8 weights). */
 const MIRROR_MODEL = "xxl";
 const MIRROR_QUANT = "i8";
 /**
- * manifest の部品名とトークナイザ資産のキー（`src/umt5/encoder.ts` と同じ綴り）。The component key is also the
+ * The manifest's component name and the tokenizer asset's key (spelled as in `src/umt5/encoder.ts`). The component key is also the
  * container's graph name (the manifest's weights key — container-v1 §2.1).
  */
 const TEXT_ENCODER = COMPONENT;
@@ -133,23 +136,24 @@ const openTextEncoder = async (): Promise<OpenedContainer> =>
 const WAN_MIRROR = mirrorRoot("karume-wan2.2");
 
 /**
- * 故障注入で取り違える 2 層の相対位置の表（層の添字の 1 ずれ — 先頭の 2 層）。容器の initializer 名は recipe の
- * `umt5_reference.layer_keys` と同じ綴り。
+ * The relative-position tables of the 2 layers the fault injection swaps (a layer index off by one — the first 2
+ * layers). The container's initializer names are spelled as in the recipe's `umt5_reference.layer_keys`.
  */
 const relativeBiasTable = (layer: number): string =>
   `encoder.block.${layer}.layer.0.SelfAttention.relative_attention_bias.weight`;
 const SWAPPED_TABLES: readonly [string, string] = [relativeBiasTable(0), relativeBiasTable(1)];
 
 /**
- * i8 に固有の故障注入で per-channel scale を倍にする linear（{@link scaledScaleContainer}）。24 層の中ほど（層 12）の
- * FFN の出口 `wo` を選ぶ: 出力は残差へ線形に足されるので、倍率 (1 + δ) はその層の FFN の寄与を δ だけずらす形で出て、
- * δ と r の関係が読める。q / k は避けた — umT5 は q / k の直後に norm もスケールも無く（上流
- * `UMT5Attention.forward` — `scores = q·kᵀ` に相対位置のバイアスを足して softmax）倍率は打ち消されないが、softmax の
- * 温度として非線形に効くので、微妙な水準で δ と r の関係が読みにくい（DiT が V を選んだ理由 — q / k の直後の
- * RMS norm — とは事情が違う）。
+ * The linear whose per-channel scale the i8-specific fault injection doubles ({@link scaledScaleContainer}). It is the
+ * FFN output `wo` in the middle of the 24 layers (layer 12): the output is added linearly to the residual, so a factor
+ * (1 + δ) shows up as shifting that layer's FFN contribution by δ, and the relation between δ and r is readable. q / k
+ * were avoided — umT5 has no norm or scale right after q / k (upstream `UMT5Attention.forward` — `scores = q·kᵀ` plus
+ * the relative-position bias, then softmax), so the factor is not cancelled, but it acts nonlinearly as a softmax
+ * temperature, which makes the relation between δ and r hard to read at subtle levels (a different situation from the
+ * reason the DiT chose V — the RMS norm right after q / k).
  */
 const I8_SCALE_FAULT_WEIGHT = "encoder.block.12.layer.1.DenseReluDense.wo.weight";
-/** 帯の外を門にする倍率（i8 の scale の取り違え — 軸・値・束縛 — の大きさ）。 */
+/** The factor that must land outside the band (the size of an i8 scale mix-up — axis, value, binding). */
 const GROSS_SCALE_FACTOR = 2;
 
 const DIST_PRESENT = mirrorPresent(DIST_ROOT);
@@ -191,7 +195,7 @@ const hex = (bytes: ArrayBuffer): string =>
   [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 
 /**
- * 容器の part 0（ヘッダ + 2 文書 — 全 block の sha256 を宣言する）の sha256（golden のメタと突き合わせる）. Hashed
+ * The sha256 of the container's part 0 (header + 2 documents — it declares the sha256 of every block), compared with the golden's metadata. Hashed
  * from the mirror's file, not taken from the manifest's declaration.
  */
 const containerPart0Sha256 = async (): Promise<string> => {
@@ -207,7 +211,7 @@ const containerPart0Sha256 = async (): Promise<string> => {
   return hex(await crypto.subtle.digest("SHA-256", await readFile(new URL(part0.path, DIST_ROOT))));
 };
 
-/** TS のトークナイザ（資産が無い回は ignore で SKIP 済み — ここへ来たら条件の食い違いとして落とす）。 */
+/** The TS tokenizer (a run without the asset has already SKIPped — reaching here without it fails as contradicting conditions). */
 const tokenizerEncoder = (): WanPromptEncoder => {
   if (tokenizerText === undefined) {
     throw new Error(`${WAN_MIRROR.pathname} is absent (contradicts the skip condition)`);
@@ -216,8 +220,9 @@ const tokenizerEncoder = (): WanPromptEncoder => {
 };
 
 /**
- * 製品の経路（TS のトークナイザ + TS のバケット表）でグラフ入力を作り、golden の入力（Python の経路）と
- * **ビット一致**することを見てから返す（門 1 — GPU の門は一致した入力でしか回さない）。
+ * Builds the graph inputs through the product path (TS tokenizer + TS bucket table) and returns them after checking
+ * that they are **bit-identical** to the golden's inputs (the Python path) (check 1 — the GPU checks run only on
+ * matching inputs).
  */
 const hostInputs = (encoder: WanPromptEncoder, golden: Golden, name: string) => {
   const ids = encoder.encode(golden.meta.prompt, name);
@@ -225,15 +230,19 @@ const hostInputs = (encoder: WanPromptEncoder, golden: Golden, name: string) => 
   assertEquals(
     at,
     -1,
-    `${name}: TS の id 列が golden と ${at} 番目で割れる（TS ${ids.length} 本）`,
+    `${name}: the TS id sequence diverges from the golden at index ${at} (TS has ${ids.length})`,
   );
   const buckets = buildUmt5RelativePositionBuckets(ids.length);
   const cell = firstMismatch(buckets.data, golden.buckets);
-  assertEquals(cell, -1, `${name}: TS のバケット表が golden と要素 ${cell} で割れる`);
+  assertEquals(
+    cell,
+    -1,
+    `${name}: the TS bucket table diverges from the golden at element ${cell}`,
+  );
   return { ids, buckets, inputs: umt5SessionInputs(ids, buckets) };
 };
 
-/** 相対位置の表を 1 ずらした表（`table'[i][j] = bucket(j + 1 − i)` — ホストの距離の 1 ずれの故障注入）。 */
+/** The relative-position table shifted by 1 (`table'[i][j] = bucket(j + 1 − i)` — fault injection of a host distance off by one). */
 const shiftedBuckets = (length: number): I32Tensor => {
   const wide = buildUmt5RelativePositionBuckets(length + 1);
   const data = new Int32Array(length * length);
@@ -245,22 +254,23 @@ const shiftedBuckets = (length: number): I32Tensor => {
 };
 
 /**
- * id 列の中ほどの 1 トークンを、同じ列の別の id に置き換えた列（語彙の内の id を使う — 範囲外の id で落ちる
- * 形ではなく、別の語として黙って通る形を注入する）。
+ * The id sequence with one token in the middle replaced by another id from the same sequence (an in-vocabulary id —
+ * injecting a fault that silently passes as a different word, not one that fails on an out-of-range id).
  */
 const replacedToken = (ids: Int32Array<ArrayBuffer>): Int32Array<ArrayBuffer> => {
   const at = Math.floor((ids.length - 1) / 2);
   const other = ids.find((id, index) => index < ids.length - 1 && id !== ids[at]);
-  if (other === undefined) throw new Error("置き換える別の id が列に無い");
+  if (other === undefined) throw new Error("the sequence has no other id to substitute");
   const replaced = ids.slice();
   replaced[at] = other;
   return replaced;
 };
 
 /**
- * 2 層の相対位置の表の block を入れ替えた供給面（故障注入 — 層の表の取り違え）。容器のファイルは書き換えず、
- * `readBlock` が返す block を入れ替える（どちらも sha256 の検証を通った本物の block — `BoundContainer.readBlock`
- * の MUST どおり、返された器は書き換えない）。
+ * A supply with the blocks of two layers' relative-position tables swapped (fault injection — a mix-up of the layer
+ * tables). The container's files are not rewritten; the blocks `readBlock` returns are swapped (both are genuine blocks
+ * that passed the sha256 verification — as the MUST of `BoundContainer.readBlock` requires, a returned buffer is not
+ * modified).
  */
 const swappedTablesContainer = (
   opened: OpenedContainer,
@@ -271,7 +281,7 @@ const swappedTablesContainer = (
   const blockOf = (weight: string): string => {
     const supply = bound?.supplies.get(weight);
     if (supply === undefined || supply.blocks.length !== 1 || supply.scale !== undefined) {
-      throw new Error(`グラフ '${graph}' の '${weight}' が丸ごと 1 block の F32 でない`);
+      throw new Error(`graph '${graph}': '${weight}' is not a whole single-block F32`);
     }
     return supply.blocks[0].id;
   };
@@ -286,10 +296,11 @@ const swappedTablesContainer = (
 };
 
 /**
- * linear 1 本（`weight`）の per-channel scale を `factor` 倍にした供給面（i8 に固有の故障注入 —
- * {@link I8_SCALE_FAULT_WEIGHT}・DiT の `scaledScaleContainer` に倍率の引数を足した形）。容器のファイルは書き換えない:
- * 取得した block（sha256 の検証の後）の**写し**を倍にして返す（`BoundContainer.readBlock` の MUST — 返された器は書き換え
- * ない）。scale の payload は block の先頭からの f32 の列（Session 構築が `subarray(0, payloadBytes)` で読む形）。
+ * A supply with the per-channel scale of one linear (`weight`) multiplied by `factor` (the i8-specific fault injection —
+ * {@link I8_SCALE_FAULT_WEIGHT}; the DiT's `scaledScaleContainer` with a factor argument added). The container's files are
+ * not rewritten: a **copy** of the fetched block (after the sha256 verification) is scaled and returned (the MUST of
+ * `BoundContainer.readBlock` — a returned buffer is not modified). The scale payload is an f32 sequence from the start of
+ * the block (as Session construction reads it with `subarray(0, payloadBytes)`).
  */
 const scaledScaleContainer = (
   opened: OpenedContainer,
@@ -300,9 +311,7 @@ const scaledScaleContainer = (
   const bound = Object.hasOwn(opened.graphs, graph) ? opened.graphs[graph] : undefined;
   const scale = bound?.supplies.get(weight)?.scale;
   if (scale === undefined) {
-    throw new Error(
-      `グラフ '${graph}' の '${weight}' に companion scale が無い（i8 の linear でない）`,
-    );
+    throw new Error(`graph '${graph}': '${weight}' has no companion scale (not an i8 linear)`);
   }
   return {
     graphs: opened.graphs,
@@ -319,7 +328,7 @@ const scaledScaleContainer = (
 
 const gib = (bytes: number): string => `${(bytes / 2 ** 30).toFixed(2)} GiB`;
 
-/** 1 forward の観測（壁時間と、run の直後に生きている確保）。 */
+/** The observation of one forward (the wall time and the allocations alive right after the run). */
 type Run = {
   readonly label: string;
   readonly wallMs: number;
@@ -337,13 +346,13 @@ const observeRun = (label: string, diagnostics: SessionDiagnostics, wallMs: numb
 });
 
 const formatRun = (run: Run): string =>
-  `${run.label}: 壁 ${(run.wallMs / 1000).toFixed(2)} s・確保 ${gib(
+  `${run.label}: wall ${(run.wallMs / 1000).toFixed(2)} s, allocated ${gib(
     run.weightBytes + run.arenaBytes + run.backingBytes,
-  )}（重み ${gib(run.weightBytes)}・アリーナ ${gib(run.arenaBytes)}・常駐 ${gib(
+  )} (weights ${gib(run.weightBytes)}, arena ${gib(run.arenaBytes)}, resident ${gib(
     run.backingBytes,
-  )}）`;
+  )})`;
 
-/** 1 forward を回して出力（f32 `[1, L, 4096]`）と観測を返す（次の run の前に解放を待つ）。 */
+/** Runs one forward and returns the output (f32 `[1, L, 4096]`) and the observation (waits for the releases before the next run). */
 const forward = async (
   session: Session,
   prepared: PreparedModel,
@@ -355,7 +364,7 @@ const forward = async (
   const outputs = await session.run(inputs);
   const wallMs = performance.now() - started;
   const output = outputs[prepared.graph.outputs[0]];
-  if (output.dtype !== "f32") throw new Error(`${label}: 出力が ${output.dtype}`);
+  if (output.dtype !== "f32") throw new Error(`${label}: the output is ${output.dtype}`);
   const run = observeRun(label, session.diagnostics(), wallMs);
   await settleReleases(gpu);
   return { output, run };
@@ -387,30 +396,31 @@ test.skipIf(!ANY_GOLDEN_PRESENT && !FETCHED)(
 );
 
 test.skipIf(!ASSETS_AVAILABLE || tokenizerText === undefined)(
-  "Wan umT5 ホスト（GPU 不要）: TS のトークナイザの id 列と TS のバケット表が golden の入力（Python の経路）と" +
-    "ビット一致し、golden が今の容器から採られている",
+  "Wan umT5 host (no GPU needed): the TS tokenizer's id sequence and the TS bucket table are bit-identical to " +
+    "the golden's inputs (the Python path), and the golden was taken from the current container",
   async () => {
     const encoder = tokenizerEncoder();
     const part0 = await containerPart0Sha256();
     for (const { name, role } of CASES) {
       const golden = await loadGolden(name);
-      assertEquals(golden.meta.role, role, `${name}: 役割`);
+      assertEquals(golden.meta.role, role, `${name}: role`);
       assertEquals(
         golden.meta.part0Sha256,
         part0,
-        `${name}: golden を採った容器（part 0 の sha256）が今の容器と違う — 生成し直す: ${GENERATE}`,
+        `${name}: the container the golden was taken from (part 0 sha256) differs from the current one — regenerate: ${GENERATE}`,
       );
       hostInputs(encoder, golden, name);
     }
   },
 );
 
-/** 1 ケースの r（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
+/** One case's r (material for the band candidate — recorded before the verdict, so runs outside the band are kept too). */
 type CaseRatio = { readonly name: string; readonly role: CaseRole; readonly ratio: number };
 
 /**
- * 未導出の帯の候補を出して赤で止める（決定用の最悪 r × 5 を有効数字 2 桁へ切り上げ — 受入れの r は並べるが
- * 候補には使わない）。決定用のどれかが r を出す前に落ちた回は候補を出さない（欠けた最悪は最悪ではない）。
+ * Prints a candidate for the not-yet-derived band and stops red (the worst r of the band-setting cases × 5, rounded
+ * up to 2 significant digits — the acceptance r values are listed but not used for the candidate). When any
+ * band-setting case failed before producing r, no candidate is given (a worst value with gaps is not the worst).
  */
 const bandCandidate = (ratios: readonly CaseRatio[]): string => {
   const expected = CASES.filter(({ role }) => role === "band").length;
@@ -419,22 +429,23 @@ const bandCandidate = (ratios: readonly CaseRatio[]): string => {
     ratios
       .filter(({ role }) => role === "accept")
       .map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`)
-      .join(" / ") || "なし";
+      .join(" / ") || "none";
   if (decided.length !== expected) {
     return (
-      `決定用 ${expected} 本のうち r が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）。` +
-      `受入れの r: ${accepted}`
+      `of the ${expected} band-setting cases only ${decided.length} produced r — no candidate (investigate the failed cases first). ` +
+      `Acceptance r: ${accepted}`
     );
   }
   const worst = Math.max(...decided.map(({ ratio }) => ratio));
   const unit = 10 ** (Math.floor(Math.log10(worst * 5)) - 1);
   const candidate = Number((Math.ceil((worst * 5) / unit) * unit).toPrecision(2));
   return (
-    `決定用 ${expected} 本（${decided
+    `worst r of the ${expected} band-setting cases (${decided
       .map(({ name, ratio }) => `${name} ${ratio.toPrecision(3)}`)
-      .join(" / ")}）の最悪 r ${worst.toPrecision(3)} × 5 = ${(worst * 5).toPrecision(
+      .join(" / ")}) ${worst.toPrecision(3)} × 5 = ${(worst * 5).toPrecision(
       3,
-    )}（有効数字 2 桁へ切り上げ ${candidate}）。` + `受入れの r（帯の決定に使わない）: ${accepted}`
+    )} (rounded up to 2 significant digits: ${candidate}). ` +
+    `Acceptance r (not used to set the band): ${accepted}`
   );
 };
 
@@ -455,9 +466,9 @@ describe.skipIf(!ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILAB
       assertEquals(
         prepared.graph.inputs.map(({ name }) => name),
         [INPUT_IDS_KEY, BUCKETS_KEY],
-        "グラフ入力",
+        "graph inputs",
       );
-      assertEquals(prepared.graph.outputs.length, 1, "グラフの出力は 1 本");
+      assertEquals(prepared.graph.outputs.length, 1, "the graph has one output");
       gpu = await acquireTestGpu({
         onDeviceLost: (info) => {
           deviceLost = `${info.reason}: ${info.message}`;
@@ -493,9 +504,9 @@ describe.skipIf(!ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILAB
           inputs,
           name,
         );
-        assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
+        assertEquals(output.shape, golden.outputShape, `${name}: output shape`);
         const nonFinite = output.data.filter((value) => !Number.isFinite(value)).length;
-        assertEquals(nonFinite, 0, `${name}: 非有限`);
+        assertEquals(nonFinite, 0, `${name}: non-finite`);
         assertEquals(deviceLost, undefined, "device lost");
       });
     }
@@ -527,8 +538,8 @@ const registerSessionScope = (
 describe.skipIf(
   !UPSTREAM_PARITY || !ASSETS_AVAILABLE || tokenizerText === undefined || !GPU_AVAILABLE,
 )(
-  "Wan umT5 移植の門（実 GPU / CPU 層逐次 f64）: TS の入力で回した 1 forward の正規化比 r が帯の内・故障注入 4 件は" +
-    "帯の外" +
+  "Wan umT5 port check (real GPU / CPU layer-by-layer f64): the normalized ratio r of one forward on the TS inputs is " +
+    "inside the band and the 4 fault injections are outside it" +
     UPSTREAM_PARITY_OPT_IN,
   () => {
     const band = UMT5_NORMALIZED_BAND;
@@ -550,9 +561,9 @@ describe.skipIf(
       assertEquals(
         prepared.graph.inputs.map(({ name }) => name),
         [INPUT_IDS_KEY, BUCKETS_KEY],
-        "グラフ入力",
+        "graph inputs",
       );
-      assertEquals(prepared.graph.outputs.length, 1, "グラフの出力は 1 本");
+      assertEquals(prepared.graph.outputs.length, 1, "the graph has one output");
       gpu = await acquireTestGpu({
         onDeviceLost: (info) => {
           deviceLost = `${info.reason}: ${info.message}`;
@@ -584,7 +595,7 @@ describe.skipIf(
               const { ids, inputs } = hostInputs(encoder, golden, name);
               const referenceRatio = referenceRatioOf(golden, name);
               const { output, run } = await forward(session(), prepared, device(), inputs, name);
-              assertEquals(output.shape, golden.outputShape, `${name}: 出力の形`);
+              assertEquals(output.shape, golden.outputShape, `${name}: output shape`);
               const diff = difference(output.data, golden.expected);
               const diffF32 = difference(output.data, golden.reference);
               const referenceDiff = difference(golden.reference, golden.expected);
@@ -596,7 +607,8 @@ describe.skipIf(
                   output: "output@f64-reference",
                   maxAbs: diff.maxAbs,
                   maxRel: diff.maxRel,
-                  // 判定と同じ境界を絶対値へ写す（未導出の回は無限の帯 — 判定は下で赤にする）。
+                  // Map the verdict's bound to an absolute value (an unbounded band while not derived — the verdict
+                  // below turns it red).
                   tolerance:
                     band === undefined
                       ? unbounded
@@ -620,18 +632,21 @@ describe.skipIf(
               );
               const notes = [
                 `L ${ids.length}`,
-                formatRatio("GPU / f64 参照", diff, referenceRatio),
-                `CPU f32 参照 / f64 参照（正規化の分母）: 比 ${referenceRatio.toExponential(3)}`,
+                formatRatio("GPU / f64 reference", diff, referenceRatio),
+                `CPU f32 reference / f64 reference (the normalization denominator): ratio ${referenceRatio.toExponential(3)}`,
                 formatRun(run),
               ];
-              assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+              assertEquals(diff.nonFinite, 0, `${name}: non-finite`);
 
               const faults: { label: string; ratio: number }[] = [];
               if (role === "accept") {
                 const injected: readonly (readonly [string, Umt5SessionInputs])[] = [
-                  ["相対位置の表を 1 ずらす", umt5SessionInputs(ids, shiftedBuckets(ids.length))],
                   [
-                    "id 列の中ほどの 1 トークンを別の id に",
+                    "relative-position table shifted by 1",
+                    umt5SessionInputs(ids, shiftedBuckets(ids.length)),
+                  ],
+                  [
+                    "one token in the middle of the id sequence replaced by another id",
                     umt5SessionInputs(
                       replacedToken(ids),
                       buildUmt5RelativePositionBuckets(ids.length),
@@ -648,10 +663,10 @@ describe.skipIf(
                   );
                   const faultDiff = difference(faultOutput.data, golden.expected);
                   faults.push({ label, ratio: ratioOf(faultDiff) / referenceRatio });
-                  notes.push(`故障注入 ${formatRatio(label, faultDiff, referenceRatio)}`);
+                  notes.push(`fault injection ${formatRatio(label, faultDiff, referenceRatio)}`);
                 }
               }
-              // 判定の前に出す（帯の外へ出た回も比が手元に残る）。
+              // Print before the verdict (a run outside the band keeps its ratio at hand too).
               caseNote = notes.join(" / ");
               console.log(`[wan-umt5] ${name}: ${caseNote}`);
               assertEquals(deviceLost, undefined, "device lost");
@@ -663,9 +678,9 @@ describe.skipIf(
       }
     });
 
-    const swapLabel = "層 0 / 1 の相対位置の表の取り違え";
-    // 本体の Session を畳んだ後に張る（2 本を同時に載せない — 重み 5.3 GiB × 2 は B570 の天井
-    // 9,600 MiB を越える）。
+    const swapLabel = "relative-position tables of layers 0 / 1 swapped";
+    // Built after the main Session is torn down (never two at once — 5.3 GiB of weights × 2 exceeds the B570's
+    // ceiling of 9,600 MiB).
     describe(`fault Session: ${swapLabel}`, () => {
       let swapped!: PreparedModel;
       beforeAll(() => {
@@ -674,7 +689,7 @@ describe.skipIf(
       const faultSession = registerSessionScope(() => swapped, device);
       for (const { name } of CASES.filter(({ role }) => role === "accept")) {
         const id = `${name}/table-swap`;
-        it(`${id}（故障注入 ${swapLabel} → 帯の外）`, async () => {
+        it(`${id} (fault injection ${swapLabel} → outside the band)`, async () => {
           let note = "";
           await runRecordedCase(results, { id, failureNote: () => note }, async () => {
             const golden = await loadGolden(name);
@@ -683,21 +698,24 @@ describe.skipIf(
             const { output } = await forward(faultSession(), swapped, device(), inputs, id);
             const faultDiff = difference(output.data, golden.expected);
             const ratio = ratioOf(faultDiff) / referenceRatio;
-            note = `故障注入 ${formatRatio(swapLabel, faultDiff, referenceRatio)}（${
-              band === undefined ? "帯は未導出" : `帯の ${(ratio / band).toFixed(1)} 倍`
-            }）`;
+            note = `fault injection ${formatRatio(swapLabel, faultDiff, referenceRatio)} (${
+              band === undefined
+                ? "band not derived yet"
+                : `${(ratio / band).toFixed(1)} × the band`
+            })`;
             console.log(`[wan-umt5] ${id}: ${note}`);
-            if (band === undefined) throw new Error(`${id}: 帯が未導出（故障注入の r ${ratio}）`);
-            assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の内に収まった`);
+            if (band === undefined)
+              throw new Error(`${id}: band not derived yet (fault-injection r ${ratio})`);
+            assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} stayed inside the band ${band}`);
             return { status: "pass", note };
           });
         });
       }
     });
 
-    // i8 に固有の故障注入（scale の倍率）。前の Session を畳んでから別の Session を張る
-    // （表の取り違えと同じ理由 — 2 本を同時に載せない）。
-    const label = `${I8_SCALE_FAULT_WEIGHT} の scale を ${GROSS_SCALE_FACTOR} 倍`;
+    // The i8-specific fault injection (a scale factor). The previous Session is torn down before the next one is
+    // built (the same reason as the table swap — never two at once).
+    const label = `scale of ${I8_SCALE_FAULT_WEIGHT} × ${GROSS_SCALE_FACTOR}`;
     describe(`fault Session: ${label}`, () => {
       let scaled!: PreparedModel;
       beforeAll(() => {
@@ -709,7 +727,7 @@ describe.skipIf(
       const scaledSession = registerSessionScope(() => scaled, device);
       for (const { name } of CASES.filter(({ role }) => role === "accept")) {
         const id = `${name}/scale-fault`;
-        it(`${id}（故障注入 ${label} → 帯の外）`, async () => {
+        it(`${id} (fault injection ${label} → outside the band)`, async () => {
           let note = "";
           await runRecordedCase(results, { id, failureNote: () => note }, async () => {
             const golden = await loadGolden(name);
@@ -718,15 +736,17 @@ describe.skipIf(
             const { output } = await forward(scaledSession(), scaled, device(), inputs, id);
             const faultDiff = difference(output.data, golden.expected);
             const ratio = ratioOf(faultDiff) / referenceRatio;
-            note = `故障注入 ${formatRatio(label, faultDiff, referenceRatio)}（${
-              band === undefined ? "帯は未導出" : `帯の ${(ratio / band).toPrecision(3)} 倍`
-            }）`;
+            note = `fault injection ${formatRatio(label, faultDiff, referenceRatio)} (${
+              band === undefined
+                ? "band not derived yet"
+                : `${(ratio / band).toPrecision(3)} × the band`
+            })`;
             console.log(`[wan-umt5] ${id}: ${note}`);
             assertEquals(deviceLost, undefined, "device lost");
             if (band === undefined) {
-              throw new Error(`${id}: 帯が未導出（故障注入の r ${ratio}）`);
+              throw new Error(`${id}: band not derived yet (fault-injection r ${ratio})`);
             }
-            assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} が帯 ${band} の内に収まった`);
+            assert(ratio > band, `${id}: r ${ratio.toPrecision(3)} stayed inside the band ${band}`);
             return { status: "pass", note };
           });
         });
@@ -734,37 +754,42 @@ describe.skipIf(
     });
 
     if (band === undefined) {
-      it("帯の候補（未導出）", () => {
-        throw new Error(`帯が未導出 — ${bandCandidate(ratios)}`);
+      it("band candidate (not derived yet)", () => {
+        throw new Error(`band not derived yet — ${bandCandidate(ratios)}`);
       });
     }
   },
 );
 
 /**
- * `umt5.Encoder`（`@karume/models/umt5`）の通しの e2e（実 GPU）— 配布形ミラー `models/karume-umt5-xxl` を
- * `fromPretrained(nodeDirectory(…))` で組み、Wan の umT5 の移植の門（`e2e_wan_umt5_test.ts`）と**同じ golden 10 本**を
- * **同じ判定**（正規化比 r が帯の内 — `helpers/umt5-golden.ts`）で見る。
+ * The end-to-end e2e of `umt5.Encoder` (`@karume/models/umt5`) (real GPU) — built over the distribution mirror
+ * `models/karume-umt5-xxl` with `fromPretrained(nodeDirectory(…))`, it checks **the same 10 goldens** as Wan's umT5 port
+ * check (`e2e_wan_umt5_test.ts`) with **the same verdict** (the normalized ratio r inside the band —
+ * `helpers/umt5-golden.ts`).
  *
- * 入力は golden のメタの `cleaned`（上流の前処理 `prompt_clean` の後の文字列）: golden の `input_ids` はこれを
- * transformers 5.14.1 に通した列で、単体の encoder は前処理をしない（Wan の前処理の後の文字列は単体のトークナイザの
- * 受理集合に入る — `umt5_tokenizer_test.ts`）。
+ * The input is the golden metadata's `cleaned` (the string after the upstream preprocessing `prompt_clean`): the
+ * golden's `input_ids` are that string passed through transformers 5.14.1, and the standalone encoder does no
+ * preprocessing (strings after Wan's preprocessing fall inside the set the standalone tokenizer accepts —
+ * `umt5_tokenizer_test.ts`).
  *
- * ## 門
+ * ## Checks
  *
- * 1. **ホスト（GPU 不要）**: ミラーのトークナイザ資産（manifest の `tokenizer` — hub が sha256 を照合して渡す）で組んだ
- *    トークナイザが、`cleaned` から golden の `input_ids` と**ビット一致**する列を出す。golden を採った容器の part 0 の
- *    sha256 が、ミラーの manifest が宣言する `text_encoder` の part 0 と同じ（= golden は配る重みから採った）。
- * 2. **実 GPU**: `tokenize(cleaned)` と `encode(cleaned).inputIds` が golden の `input_ids` と一致し、`hiddenStates`
- *    （`[L, 4096]`）の正規化比 r が帯の内・非有限 0（`judgeBand` — 故障注入は Wan の門が持つので、ここは渡さない）。
- * 3. **実 GPU**: 中断済みの signal は run の前に `signal.reason` を包まずに投げ、同じ encoder で次の `encode` が回る。
- *    `dispose` の後の `encode` は落ちる。
+ * 1. **Host (no GPU needed)**: the tokenizer built from the mirror's tokenizer asset (the manifest's `tokenizer` — the
+ *    hub verifies its sha256 before handing it over) produces from `cleaned` a sequence **bit-identical** to the
+ *    golden's `input_ids`. The part 0 sha256 of the container the golden was taken from equals the part 0 of the
+ *    `text_encoder` the mirror's manifest declares (= the golden was taken from the distributed weights).
+ * 2. **Real GPU**: `tokenize(cleaned)` and `encode(cleaned).inputIds` match the golden's `input_ids`, and the
+ *    normalized ratio r of `hiddenStates` (`[L, 4096]`) is inside the band with 0 non-finite values (`judgeBand` — the
+ *    fault injections belong to Wan's check, so none are passed here).
+ * 3. **Real GPU**: an already-aborted signal throws `signal.reason` unwrapped before the run, and the next `encode` on
+ *    the same encoder runs. `encode` after `dispose` fails.
  *
- * ミラー・golden・GPU のどれかが無い環境は明示 SKIP（ADR 0005）— ミラーごと無い形は門番 `distribution_gate_test.ts`、
- * golden の欠けは `e2e_wan_umt5_test.ts` の完全性テストが FAIL にする。
+ * An environment without the mirror, the goldens or a GPU SKIPs explicitly (ADR 0005) — a missing mirror as a whole is
+ * made a FAIL by the guard `distribution_gate_test.ts`, and missing goldens by the completeness test of
+ * `e2e_wan_umt5_test.ts`.
  */
 
-/** ミラーの選択（manifest の宣言 — 席は明示）。 */
+/** The mirror's selection (the manifest's declaration — the preset is explicit). */
 const loadMirror = async () => {
   const loaded = await loadManifest(nodeDirectory(DIST_ROOT));
   return {
@@ -773,15 +798,15 @@ const loadMirror = async () => {
   };
 };
 
-/** 1 ケースの入力（golden のメタの前処理の後の文字列）と、その golden の id 列との最初の食い違い。 */
+/** The first mismatch between one case's ids (from the string after the golden metadata's preprocessing) and the golden's id sequence. */
 const idsMismatch = (ids: Int32Array, golden: Golden): number => firstMismatch(ids, golden.ids);
 
 test.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT)(
-  "umT5 encoder ホスト（GPU 不要）: ミラーのトークナイザが golden の前処理の後の文字列から golden の id 列を出し、" +
-    "golden はミラーの text_encoder の part 0 から採られている",
+  "umT5 encoder host (no GPU needed): the mirror's tokenizer produces the golden's id sequence from the golden's " +
+    "preprocessed string, and the golden was taken from part 0 of the mirror's text_encoder",
   async () => {
     const { loaded, selection } = await loadMirror();
-    assert(Object.hasOwn(selection.assets, TOKENIZER), `ミラーに資産 '${TOKENIZER}' が無い`);
+    assert(Object.hasOwn(selection.assets, TOKENIZER), `the mirror has no asset '${TOKENIZER}'`);
     const assets = await fetchAssets(loaded, { [TOKENIZER]: selection.assets[TOKENIZER] });
     const tokenizer = new Umt5Tokenizer(
       parseUmt5TokenizerAsset(JSON.parse(new TextDecoder().decode(assets[TOKENIZER]))),
@@ -792,11 +817,15 @@ test.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT)(
       assertEquals(
         golden.meta.part0Sha256,
         part0,
-        `${name}: golden を採った容器（part 0 の sha256）がミラーの text_encoder と違う`,
+        `${name}: the container the golden was taken from (part 0 sha256) differs from the mirror's text_encoder`,
       );
       const ids = tokenizer.tokenize(golden.meta.cleaned, name);
       const at = idsMismatch(ids, golden);
-      assertEquals(at, -1, `${name}: id 列が golden と ${at} 番目で割れる（${ids.length} 本）`);
+      assertEquals(
+        at,
+        -1,
+        `${name}: the id sequence diverges from the golden at index ${at} (${ids.length} ids)`,
+      );
     }
   },
 );
@@ -860,24 +889,24 @@ describe.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE)(
         const golden = await loadGolden(name);
         const text = golden.meta.cleaned;
         const tokenized = encoder.tokenize(text);
-        assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize の id 列`);
+        assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize ids`);
 
         const encoding = await encoder.encode(text);
         assertEquals(idsMismatch(encoding.inputIds, golden), -1, `${name}: inputIds`);
         assertEquals(encoding.length, golden.ids.length, `${name}: length`);
         const [, rows, width] = golden.outputShape;
-        assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: 形`);
+        assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: shape`);
         const nonFinite = encoding.hiddenStates.filter((value) => !Number.isFinite(value)).length;
-        assertEquals(nonFinite, 0, `${name}: 非有限`);
+        assertEquals(nonFinite, 0, `${name}: non-finite`);
         assertEquals(mirror.deviceLost(), undefined, "device lost");
         await settleReleases(mirror.gpu());
       });
     }
 
-    it("中断済みの signal は run の前に reason をそのまま投げ、次の encode は回る", async () => {
+    it("an already-aborted signal throws its reason as is before the run, and the next encode runs", async () => {
       const encoder = mirror.encoder();
       const controller = new AbortController();
-      const reason = new Error("umt5-encoder: テストの中断");
+      const reason = new Error("umt5-encoder: test abort");
       controller.abort(reason);
       const error = await assertRejects(() =>
         encoder.encode("a cat", { signal: controller.signal }),
@@ -899,8 +928,8 @@ describe.skipIf(!DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE)(
 );
 
 describe.skipIf(!UPSTREAM_PARITY || !DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AVAILABLE)(
-  "umT5 encoder（実 GPU）: fromPretrained(nodeDirectory) で組み、golden 10 本の hiddenStates の正規化比 r が帯の内" +
-    "（Wan の umT5 の移植の門と同じ golden・同じ帯）・tokenize と inputIds が golden の id 列" +
+  "umT5 encoder (real GPU): built by fromPretrained(nodeDirectory), the normalized ratio r of hiddenStates for the 10 goldens " +
+    "is inside the band (the same goldens and band as Wan's umT5 port check), and tokenize and inputIds match the golden ids" +
     UPSTREAM_PARITY_OPT_IN,
   () => {
     const mirror = registerMirrorEncoder();
@@ -911,24 +940,24 @@ describe.skipIf(!UPSTREAM_PARITY || !DIST_PRESENT || !GOLDENS_PRESENT || !GPU_AV
         const golden = await loadGolden(name);
         const text = golden.meta.cleaned;
         const tokenized = encoder.tokenize(text);
-        assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize の id 列`);
+        assertEquals(idsMismatch(tokenized, golden), -1, `${name}: tokenize ids`);
 
         const encoding = await encoder.encode(text);
         assertEquals(idsMismatch(encoding.inputIds, golden), -1, `${name}: inputIds`);
         assertEquals(encoding.length, golden.ids.length, `${name}: length`);
         const [, rows, width] = golden.outputShape;
-        assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: 形`);
+        assertEquals([encoding.length, encoding.hiddenSize], [rows, width], `${name}: shape`);
         const diff = difference(encoding.hiddenStates, golden.expected);
         const referenceRatio = referenceRatioOf(golden, name);
         const ratio = ratioOf(diff) / referenceRatio;
         console.log(
           `[umt5-encoder] ${name}: L ${encoding.length} / ${formatRatio(
-            "GPU / f64 参照",
+            "GPU / f64 reference",
             diff,
             referenceRatio,
           )}`,
         );
-        assertEquals(diff.nonFinite, 0, `${name}: 非有限`);
+        assertEquals(diff.nonFinite, 0, `${name}: non-finite`);
         assertEquals(mirror.deviceLost(), undefined, "device lost");
         judgeBand(UMT5_NORMALIZED_BAND, name, ratio, []);
         await settleReleases(mirror.gpu());

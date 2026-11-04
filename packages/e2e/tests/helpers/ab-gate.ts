@@ -1,12 +1,15 @@
 /**
- * 自機 A/B 門（ADR 0110 決定 5）の**純関数部**。GPU も FS も触らない — 実 GPU の門
- * （`e2e_anima_ab_test.ts` / `e2e_irodori_ab_test.ts` / `e2e_sbv2_ab_test.ts`）は観測点の
- * 配列と census を採るところまでを持ち、「何を赤にするか」はここの 1 本に寄せる（家族ごとに
- * 判定の順と文面が割れない）。振る舞いは `e2e_ab_gate_test.ts`（core レーン）が固定する。
+ * The **pure-function part** of the self A/B check (ADR 0110 decision 5). It touches neither the
+ * GPU nor the file system — the real-GPU checks (`e2e_anima_ab_test.ts` / `e2e_irodori_ab_test.ts` /
+ * `e2e_sbv2_ab_test.ts`) own everything up to capturing the observation-point arrays and the census,
+ * and "what turns red" is gathered into this one module (so the order and wording of the verdicts
+ * do not diverge between families). `e2e_ab_gate_test.ts` (core lane) pins the behaviour.
  *
- * 比較相手は**同じ機の参照層**（同じ重み・`session` が空の席）で、torch golden は使わない。
- * 同機の参照層は決定的なので対照側の雑音は 0 — 束のノブが丸ごと Session に届かなかったとき、
- * 実用席の観測点は参照席と**1 bit も違わない**。床の最小要件はこの一点である（決定 5-2）。
+ * The comparison partner is **the reference path on the same machine** (same weights, the preset
+ * with an empty `session`); no torch golden is used. The reference path on the same machine is
+ * deterministic, so the control side has zero noise — when none of the bundle's knobs reach the
+ * Session, the practical preset's observation point **does not differ from the reference partner's
+ * by a single bit**. This one point is the minimum requirement of the floor (decision 5-2).
  */
 
 import type { GpuFeaturesSpec, SessionSpec } from "@karume/hub";
@@ -22,26 +25,27 @@ import {
 import type { Comparison } from "../../../runtime/tests/helpers/results.ts";
 
 /**
- * 帯（ADR 0110 決定 4 / 5 — 宣言であって環境キー別の行ではない・`KARUME_REFERENCE` で書き換え
- * ない）。指標は観測点の相対 RMS（{@link relRms}）。
+ * The band (ADR 0110 decisions 4 / 5 — a declaration, not a row per environment key; not rewritten
+ * by `KARUME_REFERENCE`). The metric is the observation point's relative RMS ({@link relRms}).
  *
- * - `floor` — 1 bit 以上違う（決定 5-2 の MUST — {@link judgeAb} が帯と無関係に常に見る）に
- *   **加えて**置く下限。束の一部だけが落ちた形を数値で掴めると実測で示せたときだけ 0 より上に
- *   置く（掴めないならノブ単位の縮退は census が持つ — 決定 5-1）。
- * - `ceiling` — 崩壊上限（決定 5-3 — 観測点の実測 × 2 程度）。
+ * - `floor` — a lower bound set **in addition to** "differs by at least one bit" (the MUST of
+ *   decision 5-2 — {@link judgeAb} always checks it regardless of the band). It is set above 0 only
+ *   when measurements show it can numerically catch a bundle of which only part dropped out
+ *   (otherwise the census owns per-knob fallbacks — decision 5-1).
+ * - `ceiling` — the collapse bound (decision 5-3 — about 2 × the observation point's measurement).
  */
 export type AbBand = { readonly floor: number; readonly ceiling: number };
 
-/** 観測点 1 つぶんの A/B の実測。 */
+/** The A/B measurement of one observation point. */
 export type AbMeasurement = {
-  /** ‖p − r‖₂ / ‖r‖₂（{@link relRms}）。 */
+  /** ‖p − r‖₂ / ‖r‖₂ ({@link relRms}). */
   readonly relRms: number;
   readonly maxAbs: number;
-  /** 実用席と参照席の観測点がビット単位で同一か（床の判定材料）。 */
+  /** Whether the observation points of the practical preset and the reference partner are bit-identical (input to the floor verdict). */
   readonly identical: boolean;
 };
 
-/** {@link referencePartnerOf} が読む manifest の部分（`Manifest` はこれに代入できる）。 */
+/** The part of the manifest {@link referencePartnerOf} reads (a `Manifest` is assignable to it). */
 export type QuantTable = {
   readonly models: Readonly<
     Record<
@@ -64,19 +68,19 @@ export type QuantTable = {
 
 type QuantEntry = QuantTable["models"][string]["quants"][string];
 
-/** model / quant の宣言を引く（無ければ fail loudly — あるものを並べる）。 */
+/** Looks up the model / quant declaration (fails loudly when absent, listing what exists). */
 export const quantOf = (manifest: QuantTable, model: string, quant: string): QuantEntry => {
   if (!Object.hasOwn(manifest.models, model)) {
     throw new Error(
-      `manifest に model '${model}' が無い（あるもの: ${Object.keys(manifest.models).join(
+      `the manifest has no model '${model}' (available: ${Object.keys(manifest.models).join(
         " / ",
-      )}）`,
+      )})`,
     );
   }
   const { quants } = manifest.models[model];
   if (!Object.hasOwn(quants, quant)) {
     throw new Error(
-      `model '${model}' に quant '${quant}' が無い（あるもの: ${Object.keys(quants).join(" / ")}）`,
+      `model '${model}' has no quant '${quant}' (available: ${Object.keys(quants).join(" / ")})`,
     );
   }
   return quants[quant];
@@ -93,7 +97,7 @@ const sameWeights = (
   );
 };
 
-/** 要求が立っている feature 名（`shaderF16: false` は要求していないのと同じ）。 */
+/** The feature names that are required (`shaderF16: false` is the same as not requiring it). */
 const requiredFeatures = (features: GpuFeaturesSpec | undefined): ReadonlySet<string> =>
   new Set(
     Object.entries(features ?? {})
@@ -102,20 +106,25 @@ const requiredFeatures = (features: GpuFeaturesSpec | undefined): ReadonlySet<st
   );
 
 /**
- * 実用席の**参照席**（同じ `weights` 写像・`session` が空・参照席の `gpuFeatures` の要求が
- * 実用席の要求の部分集合、がちょうど 1 つ）を manifest から導く。
+ * Derives the **reference partner** of a practical preset from the manifest (the single preset with
+ * the same `weights` mapping, an empty `session`, and `gpuFeatures` requirements that are a subset
+ * of the practical preset's — there must be exactly one).
  *
- * 部分集合にするのは、実用席だけが要る feature（`f16-c16` の shader-f16）を参照席が持たない形を
- * 対にするため（反証 verify/A2 §4-3 — 「同じ」では `f16-c16 ↔ f16` が候補 0 になる）。逆向き
- * （参照席だけが feature を要る）は、実用席が取る device で参照席が組めないので対にしない。
+ * A subset, so that a practical preset needing a feature the partner does not (shader-f16 of
+ * `f16-c16`) still pairs (refutation verify/A2 §4-3 — with "equal", `f16-c16 ↔ f16` has zero
+ * candidates). The reverse (only the partner needs a feature) is not paired, because the partner
+ * cannot be built on the device the practical preset gets.
  *
- * MUST: 候補 0 / 2 以上は throw する。0 は「実用席に参照層の対照が配られていない」、2 以上は
- * 「どちらと比べたかで床の意味が変わる」— どちらも黙って 1 つを選ぶと門の主張が曖昧になる。
+ * MUST: zero or two or more candidates throw. Zero means "no reference-path control is distributed
+ * for the practical preset"; two or more means "the floor's meaning depends on which one was
+ * compared" — silently picking one in either case would make the check's claim ambiguous.
  */
 export const referencePartnerOf = (manifest: QuantTable, model: string, quant: string): string => {
   const practical = quantOf(manifest, model, quant);
   if (Object.keys(practical.session).length === 0) {
-    throw new Error(`quant '${quant}' は session が空（参照席）— A/B の実用席にならない`);
+    throw new Error(
+      `quant '${quant}' has an empty session (a reference partner) — it cannot be the practical side of an A/B`,
+    );
   }
   const practicalFeatures = requiredFeatures(practical.gpuFeatures);
   const { quants } = manifest.models[model];
@@ -132,9 +141,9 @@ export const referencePartnerOf = (manifest: QuantTable, model: string, quant: s
   });
   if (candidates.length !== 1) {
     throw new Error(
-      `quant '${quant}' の参照席（同じ weights・session が空・gpuFeatures ⊆ 実用席）が ` +
-        `${candidates.length} 個（${candidates.join(" / ") || "なし"}）— ちょうど 1 つでないと` +
-        "床の対照が決まらない",
+      `quant '${quant}': the reference partners (same weights, empty session, gpuFeatures ⊆ the practical preset's) number ` +
+        `${candidates.length} (${candidates.join(" / ") || "none"}) — without exactly one ` +
+        "the floor's control is undetermined",
     );
   }
   return candidates[0];
@@ -143,17 +152,17 @@ export const referencePartnerOf = (manifest: QuantTable, model: string, quant: s
 const assertSameLength = (practical: Float32Array, reference: Float32Array): void => {
   if (practical.length !== reference.length) {
     throw new Error(
-      `観測点の要素数が違う（実用席 ${practical.length} / 参照席 ${reference.length}）— ` +
-        "同じ入力で同じ観測点を採っていない",
+      `the observation points differ in element count (practical ${practical.length} / reference ${reference.length}) — ` +
+        "the same observation point was not captured from the same input",
     );
   }
 };
 
 /**
- * 相対 RMS ‖p − r‖₂ / ‖r‖₂（f64 で積む）。
+ * Relative RMS ‖p − r‖₂ / ‖r‖₂ (accumulated in f64).
  *
- * 非有限は伝播させる（NaN / ±Inf の要素・‖r‖₂ = 0 は非有限の値になる）— 判定は
- * {@link judgeAb} が上限側の失敗として扱う。
+ * Non-finite values propagate (NaN / ±Inf elements and ‖r‖₂ = 0 yield a non-finite value) —
+ * {@link judgeAb} treats them as a ceiling-side failure.
  */
 export const relRms = (practical: Float32Array, reference: Float32Array): number => {
   assertSameLength(practical, reference);
@@ -168,8 +177,9 @@ export const relRms = (practical: Float32Array, reference: Float32Array): number
 };
 
 /**
- * 全要素の最大絶対差。NaN の要素があれば NaN を返す（`>` の比較は NaN で常に偽なので、
- * 素朴に書くと NaN が 0 として素通りする — `helpers/irodori-assets.ts` の `worstDifference`）。
+ * The maximum absolute difference over all elements. Returns NaN when any element is NaN (a `>`
+ * comparison is always false for NaN, so a naive version lets NaN pass as 0 — see `worstDifference`
+ * in `helpers/irodori-assets.ts`).
  */
 export const maxAbs = (practical: Float32Array, reference: Float32Array): number => {
   assertSameLength(practical, reference);
@@ -185,7 +195,7 @@ export const maxAbs = (practical: Float32Array, reference: Float32Array): number
 const bitsOf = (values: Float32Array): Uint32Array =>
   new Uint32Array(values.buffer, values.byteOffset, values.length);
 
-/** ビット列が違う最初の添字と、違う要素の数（同一なら undefined）。 */
+/** The first index whose bits differ and the number of differing elements (undefined when identical). */
 const bitDifference = (
   left: Float32Array,
   right: Float32Array,
@@ -203,7 +213,7 @@ const bitDifference = (
   return first < 0 ? undefined : { first, count };
 };
 
-/** 観測点 1 つぶんの実測（{@link judgeAb} の入力）。 */
+/** The measurement of one observation point (the input of {@link judgeAb}). */
 export const measureAb = (practical: Float32Array, reference: Float32Array): AbMeasurement => ({
   relRms: relRms(practical, reference),
   maxAbs: maxAbs(practical, reference),
@@ -211,8 +221,8 @@ export const measureAb = (practical: Float32Array, reference: Float32Array): AbM
 });
 
 /**
- * デバイス内決定性（ADR 0110 決定 6 の MUST）の機械検査 — 同じ席・同じ入力・独立 2 Session の
- * 観測点がビット単位で同一であること。
+ * The automated check of on-device determinism (the MUST of ADR 0110 decision 6) — the observation
+ * points of two independent Sessions with the same preset and the same input are bit-identical.
  */
 export const assertBitIdentical = (
   first: Float32Array,
@@ -223,9 +233,9 @@ export const assertBitIdentical = (
   if (difference === undefined) return;
   const { first: at, count } = difference;
   throw new Error(
-    `${where}: 同じ席・同じ入力の 2 回がビット一致しない（決定性 MUST 違反 — ADR 0110 決定 6）\n` +
-      `  ${count} / ${first.length} 要素が違う。最初は ${at}: ${first[at]} / ${second[at]}\n` +
-      "  浮動小数の atomics・到着順の合流・キーに載らない実行時パラメータを疑う",
+    `${where}: two runs with the same preset and the same input are not bit-identical (violates the determinism MUST — ADR 0110 decision 6)\n` +
+      `  ${count} / ${first.length} elements differ. First at ${at}: ${first[at]} / ${second[at]}\n` +
+      "  suspect floating-point atomics, arrival-order merges, or runtime parameters missing from the key",
   );
 };
 
@@ -233,65 +243,70 @@ const format = (value: number): string =>
   Number.isFinite(value) ? value.toExponential(4) : String(value);
 
 /**
- * 1 観測点の A/B を判定する。赤の順は ① 非有限（上限側）② 1 bit も違わない（床 MUST）
- * ③ 帯が未導出 ④ 帯の床 ⑤ 帯の上限。
+ * Judges the A/B of one observation point. The red verdicts, in order: ① non-finite (ceiling side)
+ * ② not a single bit differs (floor MUST) ③ band not derived yet ④ the band's floor ⑤ the band's
+ * ceiling.
  *
- * MUST: ② は帯の有無に関係なく見る — 束全体の沈黙縮退（ノブが 1 つも Session に届かない）は
- * 帯を導く前から検出できるし、そこで緑にすると未導出の回が「届いていない」を隠す。
- * MUST: ③ は実測を文面に出して赤で止める（`e2e_irodori_ab_test.ts` の `MEASURED` と同じ流儀 —
- * 通る値を仮置きして検出力の無い門を増やさない）。
+ * MUST: ② is checked whether or not a band exists — a silent fallback of the whole bundle (not one
+ * knob reaches the Session) is detectable before any band is derived, and passing it there would let
+ * a run without a band hide "not reaching".
+ * MUST: ③ stops red with the measurement in the message (the same approach as `MEASURED` in
+ * `e2e_irodori_ab_test.ts` — no placeholder value that passes, which would add a check with no
+ * detection power).
  */
 export const judgeAb = (measured: AbMeasurement, band: AbBand | undefined, where: string): void => {
   const observed = describeAb(measured);
   if (!Number.isFinite(measured.relRms) || !Number.isFinite(measured.maxAbs)) {
     throw new Error(
-      `${where}: 上限側の失敗 — 非有限（${observed}）。観測点に NaN / Inf が出たか、参照席の` +
-        "観測点がゼロ（‖r‖₂ = 0）",
+      `${where}: ceiling-side failure — non-finite (${observed}). The observation point has NaN / Inf, or the reference partner's ` +
+        "observation point is zero (‖r‖₂ = 0)",
     );
   }
   if (measured.identical) {
     throw new Error(
-      `${where}: 床の失敗 — 実用席が参照席と 1 bit も違わない（束のノブが Session に届いて` +
-        "いない疑い — quant の session → SessionOptions → Session の配線か適格判定を見る）",
+      `${where}: floor failure — the practical preset does not differ from the reference partner by a single bit (the bundle's knobs ` +
+        "probably do not reach the Session — check the quant's session → SessionOptions → Session wiring or the eligibility checks)",
     );
   }
   if (band === undefined) {
     throw new Error(
-      `${where}: 帯が未導出（実測 ${observed}）— この実測から ADR 0110 決定 5 の規則で帯を導き、` +
-        "導出表と一緒にテストの定数へ書く",
+      `${where}: band not derived yet (measured ${observed}) — derive the band from this measurement by the rule of ADR 0110 decision 5 ` +
+        "and write it into the test's constants together with the derivation table",
     );
   }
   if (!(band.floor >= 0 && band.ceiling > band.floor && Number.isFinite(band.ceiling))) {
     throw new Error(
-      `${where}: 帯の宣言が壊れている（floor ${band.floor} / ceiling ${band.ceiling}）`,
+      `${where}: the band declaration is broken (floor ${band.floor} / ceiling ${band.ceiling})`,
     );
   }
   if (measured.relRms < band.floor) {
     throw new Error(
-      `${where}: 床の失敗 — ${observed} が床 ${band.floor} を下回った（束の一部のノブが落ちて` +
-        "差が縮んだ疑い — 差が小さいのは沈黙フォールバックの兆候で、良化ではない）",
+      `${where}: floor failure — ${observed} fell below the floor ${band.floor} (part of the bundle's knobs probably dropped ` +
+        "and the difference shrank — a small difference is a sign of a silent fallback, not an improvement)",
     );
   }
   if (measured.relRms > band.ceiling) {
     throw new Error(
-      `${where}: 上限の失敗 — ${observed} が上限 ${band.ceiling} を超えた（崩壊の検出）。帯を` +
-        "広げる前に、どのカーネルの数値が動いたかを op の門で確かめる",
+      `${where}: ceiling failure — ${observed} exceeded the ceiling ${band.ceiling} (collapse detected). Before widening ` +
+        "the band, confirm with the op checks which kernel's numbers moved",
     );
   }
 };
 
 /**
- * 観測点を 1 度採ったところで生成を打ち切る（購読側の throw が生成を落とす流儀 — anima /
- * irodori の `onEvent` の doc）。`run` は受け取った `capture` を観測点で呼ぶ。
+ * Aborts generation once the observation point has been captured (the convention that a throw in
+ * the subscriber aborts generation — the doc of `onEvent` in anima / irodori). `run` calls the
+ * `capture` it receives at the observation point.
  *
- * MUST: 打ち切りの印以外の例外はそのまま上げる（生成の失敗を「打ち切った」で隠さない）。
- * 観測点が 1 度も来ないまま生成が終わった回も落とす（step 1 に届かない設定で緑にしない）。
+ * MUST: any exception other than the abort marker is rethrown as is (a generation failure is not
+ * hidden as "aborted"). A run whose generation ends without ever reaching the observation point also
+ * fails (a configuration that never reaches step 1 does not go green).
  */
 export const captureThenAbort = async <T>(
   where: string,
   run: (capture: (value: T) => never) => Promise<unknown>,
 ): Promise<T> => {
-  const stop = new Error(`${where}: 観測点を採ったので生成を打ち切る`);
+  const stop = new Error(`${where}: observation point captured, aborting generation`);
   let captured: { readonly value: T } | undefined;
   try {
     await run((value) => {
@@ -302,7 +317,7 @@ export const captureThenAbort = async <T>(
     if (error !== stop) throw error;
   }
   if (captured === undefined) {
-    throw new Error(`${where}: 観測点が 1 度も来ないまま生成が終わった`);
+    throw new Error(`${where}: generation ended without ever reaching the observation point`);
   }
   return captured.value;
 };
@@ -317,14 +332,15 @@ const recordAt = (
 ): Record<string, unknown> => {
   const child = parent[key];
   if (!Object.hasOwn(parent, key) || !isRecord(child)) {
-    throw new Error(`${where}.${key}: オブジェクトでない / 無い`);
+    throw new Error(`${where}.${key}: missing or not an object`);
   }
   return child;
 };
 
 /**
- * 配布 JSON（`karume.json` の生の中身）の 1 席の `session` だけを差し替えた写しを返す
- * （故障注入用の一時 manifest — 重みも他の席も触らない）。元の値は書き換えない。
+ * Returns a copy of the distribution JSON (the raw content of `karume.json`) with only the `session`
+ * of one preset replaced (a temporary manifest for fault injection — neither the weights nor the
+ * other presets are touched). The original value is not modified.
  */
 export const overrideQuantSession = (
   raw: unknown,
@@ -332,7 +348,7 @@ export const overrideQuantSession = (
   quant: string,
   session: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> => {
-  if (!isRecord(raw)) throw new Error("manifest: オブジェクトでない");
+  if (!isRecord(raw)) throw new Error("manifest: not an object");
   const models = recordAt(raw, "models", "manifest");
   const entry = recordAt(models, model, "manifest.models");
   const quants = recordAt(entry, "quants", `manifest.models.${model}`);
@@ -346,12 +362,12 @@ export const overrideQuantSession = (
   };
 };
 
-/** census の網羅表の席名（`Object.keys` は string[] を返すので網羅表の型から取り直す）。 */
+/** The option names of the census table (`Object.keys` returns string[], so the type is taken from the table again). */
 const NUMERIC_SEATS = Object.keys(SEAT_REFERENCE) as readonly NumericSeat[];
 
 /**
- * 束の各ノブ（非参照値の席）の変種が走った dispatch 本数の 1 行表示（`linearCompute=a8 ×317 / …`）。
- * 決着の note とログに残す — 「効いた」の判定は `assertSeatsApplied` が持ち、ここは本数の記録だけ。
+ * A one-line summary of how many dispatches ran the variant of each bundle knob (options with a non-reference value) (`linearCompute=a8 ×317 / …`).
+ * Kept in the result's note and the log — the "took effect" verdict belongs to `assertSeatsApplied`; this only records counts.
  */
 export const describeBundleCensus = (
   rows: readonly CensusRow[],
@@ -364,13 +380,15 @@ export const describeBundleCensus = (
     const predicate = Object.hasOwn(signatures, String(value))
       ? signatures[String(value)]
       : undefined;
-    const count = predicate === undefined ? "述語なし" : String(countDispatches(rows, predicate));
+    const count =
+      predicate === undefined ? "no predicate" : String(countDispatches(rows, predicate));
     return [`${seat}=${String(value)} ×${count}`];
   }).join(" / ");
 
 /**
- * 結果の席（`results.json` の `comparisons`）へ積む 1 本。判定の**前**に積む — 赤の回も実測が
- * 決着に残る（帯を導く材料は割れた回にも要る）。
+ * One entry for the results (`comparisons` of `results.json`). It is recorded **before** the verdict
+ * — a red run also leaves its measurement in the result (the material for deriving a band is needed
+ * from failing runs too).
  */
 export const comparisonOf = (
   observation: { readonly output: string; readonly reference: string; readonly practical: string },
@@ -383,6 +401,6 @@ export const comparisonOf = (
   band: band === undefined ? undefined : { metric: "relRms", ...band },
 });
 
-/** 実測のログ表示（`relRMS 1.2345e-2 / maxAbs 3.1000e-1`）。 */
+/** The log form of a measurement (`relRMS 1.2345e-2 / maxAbs 3.1000e-1`). */
 export const describeAb = (measured: AbMeasurement): string =>
   `relRMS ${format(measured.relRms)} / maxAbs ${format(measured.maxAbs)}`;

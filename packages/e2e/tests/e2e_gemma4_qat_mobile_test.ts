@@ -1,4 +1,7 @@
-/** 固定 QAT の公開入口と共通会話層の結線を検収する。品質全般の検査ではない（ADR 0097）。 */
+/**
+ * Acceptance of the fixed QAT's public entry points and their wiring to the shared chat layer. Not
+ * a general quality check (ADR 0097).
+ */
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { gemma4MirrorAssets, mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
@@ -12,7 +15,8 @@ import {
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 const root = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
-// 無い機も旧 major が残っている機も明示 SKIP（helper の MUST — ADR 0109 決定 9）。
+// A machine without the mirror, or with an old major left in place, SKIPs explicitly (the
+// helper's MUST — ADR 0109 decision 9).
 const available = mirrorAvailable(root);
 if (!available) {
   console.warn(
@@ -21,7 +25,7 @@ if (!available) {
 }
 for (const model of ["e2b", "e4b"] as const) {
   describe.skipIf(!available || !GPU_AVAILABLE)(
-    `gemma4-qat-mobile ${model}: 公開入口・KV継続・中断復帰・解放（実GPU）`,
+    `gemma4-qat-mobile ${model}: public entry, KV continuation, recovery after abort, release (real GPU)`,
     () => {
       let abortOnDecode: AbortController | undefined;
       const states: { contextCount: number; residentBytes: number }[] = [];
@@ -63,14 +67,15 @@ for (const model of ["e2b", "e4b"] as const) {
         }
       });
 
-      it("EOS後はKVを継続し、全履歴の再描画と同じ応答を出す", async () => {
+      it("after EOS it continues the KV and gives the same reply as re-rendering the whole history", async () => {
         const chat = new ChatSession(host, {
           maxNewTokens: 8,
           sampler: { temperature: 0 },
         });
         try {
           const first = chat.send("What is 17 + 28? Reply with only the number.");
-          // 公式CPUの同じ短文でも45/EOS（researchのe2b/e4b-cpu-broad-reference）。
+          // The official CPU run of the same short prompt also gives 45/EOS (research's
+          // e2b/e4b-cpu-broad-reference).
           assertEquals(await first.text(), "45");
           assertEquals((await first.done).reason, "eos");
           const second = chat.send("What is 2 + 2? Reply with only the number.");
@@ -89,7 +94,7 @@ for (const model of ["e2b", "e4b"] as const) {
           await chat.dispose();
         }
       });
-      it("decode中断と反復の早期終了の後も生成できる", async () => {
+      it("still generates after a decode abort and an early exit from iteration", async () => {
         const chat = new ChatSession(host, {
           maxNewTokens: 32,
           sampler: { temperature: 0 },
@@ -140,22 +145,23 @@ for (const model of ["e2b", "e4b"] as const) {
           "4",
         );
       });
-      it("capacityの上書きが見積りへ降り、宣言の外は拒否する", () => {
-        // 数はリテラルで持たない（配布形を焼き直すと chunkLength / capacity が動く）。
+      it("a capacity override reaches the estimate, and values outside the declaration are rejected", () => {
+        // The numbers are not literals (re-baking the distribution moves chunkLength / capacity).
         const { chunkLength, capacity, maxPosition } = pipeline.program;
         const smaller = Math.floor(capacity / 2);
-        assert(smaller >= chunkLength, `capacity ${capacity} が半分に割れない`);
+        assert(smaller >= chunkLength, `capacity ${capacity} cannot be halved`);
         const implicit = pipeline.estimateSessionMemory();
         assertEquals(
           implicit,
           pipeline.estimateSessionMemory({ chunkLength, capacity }),
-          "既定引数が配布形の宣言を使っていない",
+          "the default arguments do not use the distribution's declaration",
         );
-        // 恒真でないことの対: 容量を減らせば state のバイト数は減る。
+        // The counterpart that shows this is not a tautology: less capacity means fewer state
+        // bytes.
         assert(
           pipeline.estimateSessionMemory({ capacity: smaller }).resident.stateBytes <
             implicit.resident.stateBytes,
-          "容量を減らしても state のバイト数が動かない",
+          "reducing the capacity does not move the state bytes",
         );
         assertThrows(
           () => pipeline.estimateSessionMemory({ capacity: chunkLength - 1 }),
@@ -168,9 +174,10 @@ for (const model of ["e2b", "e4b"] as const) {
           `capacity ${maxPosition + 1} exceeds maxPosition ${maxPosition}`,
         );
       });
-      it("chatのcapacityはsequenceへ降りる（既定へ黙って縮退しない）", async () => {
-        // 降ろし忘れは既定でも動くので**例外にならない** — 受理集合の外を渡して落ちることで
-        // 降りていることを見る。落ちるのは発行時ではなく最初の `next()`。
+      it("chat's capacity reaches the sequence (no silent fallback to the default)", async () => {
+        // Forgetting to pass it down still works with the default, so it **does not throw** — the
+        // check passes a value outside the accepted set and sees it fail, which shows it reached
+        // the sequence. The failure comes at the first `next()`, not at issue.
         const { chunkLength } = pipeline.program;
         const stream = pipeline.chat([{ role: "user", content: "hi" }], {
           maxNewTokens: 4,
@@ -182,9 +189,10 @@ for (const model of ["e2b", "e4b"] as const) {
           `capacity ${chunkLength - 1} is below chunkLength ${chunkLength}`,
         );
       });
-      it("同じ容量の会話を作り直してもstateが累積しない", () => {
+      it("re-creating a conversation of the same capacity does not accumulate state", () => {
         assert(states.length > 0);
-        // contextCount は現存数でなく累計。解放は同容量の residentBytes で検査する。
+        // contextCount is a running total, not the live count. The release is checked through the
+        // residentBytes of the same capacity.
         assert(states.at(-1)!.contextCount > states[0].contextCount);
         assertEquals(new Set(states.map((s) => s.residentBytes)).size, 1);
       });
@@ -193,25 +201,28 @@ for (const model of ["e2b", "e4b"] as const) {
 }
 
 /**
- * 取得済みバイト列から組む面（ADR 0097 追記 6 の公開入口のもう一方）。
+ * The surface that builds from already-fetched bytes (the other public entry point of ADR 0097
+ * addendum 6).
  *
- * `fromPretrained` の Session と同時に張ると重みが 2 重に常駐するので、別テストにして
- * 順に走らせる（Deno のテストは既定で直列）。
+ * Opening it at the same time as the `fromPretrained` Session would keep the weights resident
+ * twice, so it is a separate test run in order (Deno's tests run serially by default).
  */
 const qatAssets = (model: "e2b" | "e4b"): Promise<Assets> =>
-  // PLE も `model` 容器の中に在る（ADR 0109 決定 4）ので、渡すのは part 列と tokenizer だけ。
+  // The PLE lives inside the `model` container too (ADR 0109 decision 4), so only the parts and
+  // the tokenizer are passed.
   gemma4MirrorAssets(root, { model });
 
 for (const model of ["e2b", "e4b"] as const) {
   test.skipIf(!available || !GPU_AVAILABLE)(
-    `gemma4-qat-mobile ${model}: fromAssets も同じ構築と応答を通る（実GPU）`,
+    `gemma4-qat-mobile ${model}: fromAssets goes through the same build and reply (real GPU)`,
     async () => {
       const pipeline = await Pipeline.fromAssets(await qatAssets(model), {
         maxResidentPleBytes: 0,
       });
       try {
-        // model 名は manifest ではなくグラフと PLE の構成から判別される面なので、
-        // 同じ短文で fromPretrained と同じ応答になることを見る。
+        // On this surface the model name is identified from the graph and the PLE layout, not
+        // the manifest, so the check is that the same short prompt gives the same reply as
+        // fromPretrained.
         assertEquals(
           await pipeline
             .chat(

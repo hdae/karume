@@ -21,20 +21,24 @@ import {
 } from "../../runtime/tests/helpers/container-graph.ts";
 
 // ---------------------------------------------------------------------------
-// QAT E4B の製品グラフ（2026-09-26 追記・GPU 不要）
+// The QAT E4B product graph (added 2026-09-26, no GPU needed)
 // ---------------------------------------------------------------------------
 
 /**
- * 並列 GEMV の実測表（`PARALLEL_SHAPES`）は形の allowlist で、載っていない形は `parallel` を
- * 指定しても逐次 GEMV へ黙って縮退する（ADR 0058 決定 3）。E4B の行を足したので、配布ミラーの
- * **実際の** QAT E4B グラフ（part 0 = グラフ記述と束縛表だけ・重みの block は読まない）で、
- * 各 linear が計画上どのキーへ落ちるか（recipe-builder と同じ述語）を固定する。
- * 通常 E4B は配布ミラーがまだ無いので対象外。
+ * The parallel GEMV measurement table (`PARALLEL_SHAPES`) is an allowlist of shapes; a shape not
+ * on it silently falls back to the sequential GEMV even when `parallel` is requested (ADR 0058
+ * decision 3). E4B rows were added, so on the distribution mirror's **actual** QAT E4B graph
+ * (part 0 = only the graph description and the binding table; the weight blocks are not read)
+ * this pins which key each linear lands on in the plan (the same predicate as recipe-builder).
+ * The regular E4B has no distribution mirror yet, so it is not covered.
  */
 const QAT_ROOT = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
 const QAT_MANIFEST = new URL("karume.json", QAT_ROOT);
 
-/** 資産の有無（NotFound 以外は伝播 — マウント異常を SKIP に化かさない）。 */
+/**
+ * Whether the asset exists (anything but NotFound propagates — a mount fault does not become a
+ * SKIP).
+ */
 const exists = async (url: URL): Promise<boolean> => {
   try {
     await stat(url);
@@ -48,14 +52,17 @@ const exists = async (url: URL): Promise<boolean> => {
 const QAT_AVAILABLE = await exists(QAT_MANIFEST);
 if (!QAT_AVAILABLE) {
   console.warn(
-    `[karume] ${QAT_MANIFEST.pathname} が無いため QAT E4B の並列 GEMV 製品キー検査を SKIP する`,
+    `[karume] ${QAT_MANIFEST.pathname} is missing, so the QAT E4B parallel GEMV product key check is SKIPPED`,
   );
 }
 
-/** 並列 GEMV へ落ちない linear（逐次 GEMV / 行ブロック / prefill — ここでは区別しない）。 */
+/**
+ * A linear that does not land on the parallel GEMV (sequential GEMV / row block / prefill — not
+ * told apart here).
+ */
 const NOT_PARALLEL = "(not parallel)";
 
-/** decode 計画（物理行数 `rows`）の linear を、並列 GEMV のキー → 本数に畳む。 */
+/** Folds the linears of a decode plan (`rows` physical rows) into parallel GEMV key → count. */
 const planParallelKeys = (
   graph: IrGraph,
   rows: number,
@@ -103,15 +110,16 @@ const planParallelKeys = (
 };
 
 describe.skipIf(!QAT_AVAILABLE)(
-  "QAT E4B の製品グラフでの並列 GEMV の適用（計画・GPU 不要）",
+  "parallel GEMV on the QAT E4B product graph (plan, no GPU needed)",
   () => {
-    it("i2 の lm_head と f32 の per_layer_model_projection を除く全 linear が E4B の行に載る", async () => {
+    it("every linear except the i2 lm_head and the f32 per_layer_model_projection is on an E4B row", async () => {
       const manifest: ContainerManifest = JSON.parse(await readTextFile(QAT_MANIFEST));
       const head = containerPart0(manifest, "e4b", "model", "i4");
       const graph = await readContainerGraph(new URL(head.path, QAT_ROOT), "model");
-      // 本数の内訳（42 層・full 7 層）: i4 g512 l4 = q 35 + q(full) 7 + gate/up 84 /
-      // i4 g512 l32 = k/v 40 + k/v(full) 8 / i4 g2048 l32 = o 35 + down 42 / i4 g4096 l32 = o(full) 7 /
-      // i8 l32 = per_layer_input_gate 42 / i8 l4 = per_layer_projection 42 / 対象外 2。
+      // Breakdown of the counts (42 layers, 7 of them full): i4 g512 l4 = q 35 + q(full) 7 +
+      // gate/up 84 / i4 g512 l32 = k/v 40 + k/v(full) 8 / i4 g2048 l32 = o 35 + down 42 / i4 g4096
+      // l32 = o(full) 7 / i8 l32 = per_layer_input_gate 42 / i8 l4 = per_layer_projection 42 / not
+      // covered 2.
       const expected = Object.fromEntries(
         (
           [
@@ -128,10 +136,11 @@ describe.skipIf(!QAT_AVAILABLE)(
       for (const rows of [1, 4, 8]) {
         const { keys, packed } = planParallelKeys(graph, rows);
         assertEquals(keys, expected, `M=${rows}`);
-        // packed int8 活性（ADR 0105）の対象 = packedActivations の行（g2048 / g4096 の l32）。
+        // Packed int8 activations (ADR 0105) cover the packedActivations rows (l32 of g2048 /
+        // g4096).
         assertEquals(packed, 84, `M=${rows} packed`);
       }
-      // M>8 は並列 GEMV の対象外（ADR 0098 決定 2）。
+      // M>8 is outside the parallel GEMV (ADR 0098 decision 2).
       assertEquals(planParallelKeys(graph, 9), { keys: { [NOT_PARALLEL]: 344 }, packed: 0 });
     });
   },

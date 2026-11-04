@@ -1,17 +1,22 @@
 /**
- * gemma4-qat-mobile の **quant 席ごとの sha 参照行**（ADR 0106 / ADR 0110 決定 7）— 固定プロンプト 1 本の
- * greedy の token id 列が、この機の参照値と 1 token も違わないこと。
+ * gemma4-qat-mobile's **sha reference rows per quant preset** (ADR 0106 / ADR 0110 decision 7) —
+ * the greedy token id sequence of one fixed prompt does not differ by a single token from this
+ * machine's reference value.
  *
- * 走行・実物・決着の中身は `helpers/gemma-reference.ts` の 1 本（gemma4 と共有）。ここが持つのは
- * 置き場（fixture / 結果の席）と、manifest の model 名を QAT の選択軸へ絞る 1 本だけである。
+ * The run, the artifact and the settlement are the one path in `helpers/gemma-reference.ts`
+ * (shared with gemma4). This file holds only the places (the fixture / the results folder) and the
+ * one function that narrows the manifest's model names to the QAT selection axis.
  *
- * 席は固定表で持たず、ミラーの manifest から**全 model × 全 quant 席**を列挙する（`mirrorSeats`）。
- * 行のクラスも席の `session` から導く: `session` が空の席（`i4`）は参照行、非空の席
- * （`i4-gemvpar` / `i4-fast` など束のノブを持つもの）は実用行。配布形に席が増えれば行も増える。
+ * The presets are not held in a fixed table; **every model × every quant preset** is enumerated
+ * from the mirror's manifest (`mirrorSeats`). The row class is derived from the preset's `session`
+ * too: a preset with an empty `session` (`i4`) gives a reference-path row, one with a non-empty
+ * `session` (those that bundle knobs, such as `i4-gemvpar` / `i4-fast`) a practical-preset row.
+ * When the distribution gains a preset, it gains a row.
  *
- * 資産はミラー `models/karume-gemma4-qat-mobile/`（git 追跡外）。無い機・旧 major が残っている機は
- * 明示 SKIP（`helpers/gemma-mirror.ts` の `mirrorAvailable`）。ADR 0005 の「全 SKIP は明示
- * FAIL」門番は GPU アダプタの有無だけを見ており、この SKIP とは独立。
+ * The asset is the mirror `models/karume-gemma4-qat-mobile/` (untracked by git). A machine without
+ * it, or with an old major left in place, SKIPs explicitly (`mirrorAvailable` in
+ * `helpers/gemma-mirror.ts`). ADR 0005's "an all-SKIP run is an explicit FAIL" guard looks only at
+ * whether a GPU adapter exists and is independent of this SKIP.
  */
 
 import { test } from "vite-plus/test";
@@ -29,11 +34,17 @@ import {
 } from "../../models/tests/helpers/gemma-reference.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4-qat-mobile/", import.meta.url);
-/** token id 列の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。 */
+/**
+ * sha256 reference values of the token id sequence (rows per environment key —
+ * `runtime/tests/helpers/reference.ts`).
+ */
 const references = openReferences(
   new URL("../../models/tests/fixtures/references/gemma4-qat-mobile.json", import.meta.url),
 );
-/** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_gemma4-qat-mobile/` — 消して安全）。 */
+/**
+ * Where the artifacts and settlements go (`outputs/verify/<environment
+ * key>/<date>_gemma4-qat-mobile/` — safe to delete).
+ */
 const results = openResults("gemma4-qat-mobile");
 
 const AVAILABLE = mirrorAvailable(MIRROR_DIR);
@@ -45,33 +56,40 @@ if (!AVAILABLE) {
 }
 const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
 
-/** `gemma4QatMobile.Pipeline.fromPretrained` が受ける model（`gemma4QatMobile.FromPretrainedOptions.model`）。 */
+/**
+ * The models `gemma4QatMobile.Pipeline.fromPretrained` accepts
+ * (`gemma4QatMobile.FromPretrainedOptions.model`).
+ */
 const QAT_MODELS = ["e2b", "e4b"] as const;
 type QatModel = (typeof QAT_MODELS)[number];
 
 /**
- * manifest の model 名を QAT の選択軸へ絞る。知らない model は登録時に throw — 黙って外すと、
- * 配布形に増えた席の行が無いまま緑になる。
+ * Narrows the manifest's model names to the QAT selection axis. An unknown model throws at
+ * registration — dropping it silently would go green while a preset the distribution gained has no
+ * row.
  */
 const qatSeat = (seat: Seat): Seat<QatModel> => {
   const model = QAT_MODELS.find((known) => known === seat.model);
   if (model === undefined) {
     throw new Error(
-      `${MIRROR_DIR.pathname} の model '${seat.model}' は gemma4QatMobile.Pipeline の選択軸に無い` +
-        `（受けるもの: ${QAT_MODELS.join(" / ")}）`,
+      `${MIRROR_DIR.pathname}: model '${seat.model}' is not on gemma4QatMobile.Pipeline's selection axis` +
+        ` (accepted: ${QAT_MODELS.join(" / ")})`,
     );
   }
   return { ...seat, model };
 };
 
-/** 並べる席（ミラーの全 quant 席 — 行のクラスは `session` から導かれる。ミラーが無ければ空）。 */
+/**
+ * The presets to run (every quant preset of the mirror — the row class is derived from `session`;
+ * empty without the mirror).
+ */
 const SEATS: readonly Seat<QatModel>[] = mirrorSeats(MIRROR_DIR).map(qatSeat);
 
 for (const seat of SEATS) {
   const id = seatCaseId(seat);
   test.skipIf(!RUNNABLE || references.lacksReference(id))(
-    `gemma4-qat-mobile ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
-      "固定プロンプトの greedy の token id 列がこの機の参照値と一致する（実 GPU）",
+    `gemma4-qat-mobile ${id}（${seat.row === "reference" ? "reference-path row" : "practical-preset row"}）: ` +
+      "the greedy token id sequence of the fixed prompt matches this machine's reference value (real GPU)",
     () =>
       settleSeatReference({
         references,
@@ -82,8 +100,12 @@ for (const seat of SEATS) {
   );
 }
 
-/** この門が持つケース ID 全部（参照値が無いものを登録時に 1 度だけ知らせる）。 */
+/**
+ * Every case ID this check holds (those without a reference value are reported once, at
+ * registration).
+ */
 const CASE_IDS: readonly string[] = SEATS.map(seatCaseId);
 if (RUNNABLE) references.warnMissing(CASE_IDS);
-// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+// A guard so that "this environment has no reference value yet" is not a silent green (the same
+// approach as ADR 0005).
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

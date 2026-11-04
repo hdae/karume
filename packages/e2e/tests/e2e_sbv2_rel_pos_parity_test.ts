@@ -1,14 +1,16 @@
-// DeBERTa の相対位置の添字表について、**ホスト TS 生成器と Python 側生成器のバイト一致**を
-// 実データで固定する（ADR 0045 波 3 — flow / voice の `sbv2_relattn_parity_test.ts` と同じ責務）。
+// Pins, on real data, the **byte parity of the host TS generator and the Python generator** for
+// DeBERTa's relative-position index tables (ADR 0045 wave 3 — the same responsibility as
+// `sbv2_relattn_parity_test.ts` for flow / voice).
 //
-// text_encoder は表を焼き込まず**グラフ入力**で受ける。つまり実行時に表を作るのはホストで、
-// ゴールデンの表を作るのは Python（`patch_deberta.build_rel_pos_tables`）— 式が割れると
-// **shape は合ったまま値だけが誤る**（別の位置埋め込みを gather する）。しかも誤り方によっては
-// 「ホストとゴールデンが同じ誤りを共有して E2E がすり抜ける」ので、E2E とは別にここで両者を
-// 直接突き合わせる。
+// text_encoder does not bake the tables in but takes them as **graph inputs**. So at run time the
+// host builds the tables, while Python (`patch_deberta.build_rel_pos_tables`) builds the golden
+// ones — if the formulas diverge, **the shape still matches and only the values are wrong** (it
+// gathers different position embeddings). Worse, some kinds of error "are shared by the host and
+// the golden and slip through the E2E", so the two are compared directly here, apart from the E2E.
 //
-// 元の式は torch が **float32** で計算するが、ホストは float64。境界の ceil が一致することは
-// 実測命題なので（ADR 0045 波 3）、ここが実データでそれを縛る唯一の場所になる。
+// torch computes the original formula in **float32**, the host in float64. That the ceil at the
+// boundaries agrees is an empirical claim (ADR 0045 wave 3), so this is the only place that pins it
+// on real data.
 //
 // No GPU. Where the assets come from (ADR 0139): the golden tables are read from the test-asset
 // root, `goldenDir("deberta-i8")` = `outputs/test-assets/goldens/deberta-i8/sbv2-22layer/io.*`
@@ -56,7 +58,7 @@ const MIRROR_CHOICE = { model: "F1", quant: "i8" } as const;
 /** The graph name in the container = the manifest's weights key (container-v1 §2.1). */
 const GRAPH = "text_encoder";
 
-/** io に格納された表のテンソルキー（= グラフ入力名）。 */
+/** The tensor keys of the tables stored in io (= the graph input names). */
 const C2P_KEY = "input.c2p_pos";
 const P2C_KEY = "input.p2c_pos";
 
@@ -111,17 +113,17 @@ if (!MIRROR_PRESENT) {
   );
 }
 
-/** 要素ごとの厳密一致（添字表は i32 なので `Object.is` で十分に強い）。 */
+/** Exact element-wise equality (the index tables are i32, so `Object.is` is strong enough). */
 const assertSameElements = (
   actual: ArrayLike<number>,
   expected: ArrayLike<number>,
   where: string,
 ): void => {
-  assertEquals(actual.length, expected.length, `${where}: 要素数`);
+  assertEquals(actual.length, expected.length, `${where}: element count`);
   for (let index = 0; index < expected.length; index += 1) {
     if (!Object.is(actual[index], expected[index])) {
       throw new Error(
-        `${where}: 要素 ${index} が食い違う（TS=${actual[index]} / Python=${expected[index]}）`,
+        `${where}: element ${index} differs (TS=${actual[index]} / Python=${expected[index]})`,
       );
     }
   }
@@ -138,19 +140,19 @@ for (const ioFile of CASES) {
       );
       const c2pView = io.tensors.get(C2P_KEY);
       const p2cView = io.tensors.get(P2C_KEY);
-      assert(c2pView !== undefined && p2cView !== undefined, `${ioFile} に添字表の入力が無い`);
-      assertEquals(c2pView.dtype, "I32", `${C2P_KEY} の格納 dtype`);
-      assertEquals(p2cView.dtype, "I32", `${P2C_KEY} の格納 dtype`);
+      assert(c2pView !== undefined && p2cView !== undefined, `${ioFile} has no index-table input`);
+      assertEquals(c2pView.dtype, "I32", `${C2P_KEY} storage dtype`);
+      assertEquals(p2cView.dtype, "I32", `${P2C_KEY} storage dtype`);
 
-      // 実長はゴールデン側の shape から採る（TS 側で決め打つと、ケースが増えたときに
-      // 「同じ長さどうしを比べて常に緑」になる）。
-      assertEquals(c2pView.shape.length, 2, `${C2P_KEY} の rank`);
-      assertEquals(c2pView.shape, p2cView.shape, "2 本の表の shape");
+      // The actual length is taken from the golden's shape (fixing it on the TS side would, once
+      // cases are added, "compare equal lengths with each other and always be green").
+      assertEquals(c2pView.shape.length, 2, `${C2P_KEY} rank`);
+      assertEquals(c2pView.shape, p2cView.shape, "shape of the two tables");
       const [rows, columns] = c2pView.shape;
-      assertEquals(rows, columns, "相対位置表は正方（self-attention）");
+      assertEquals(rows, columns, "the relative-position table is square (self-attention)");
 
       const built = buildRelPosTables(rows, rule.positionBuckets, rule.maxPosition);
-      assertEquals(built.c2pPos.shape, [...c2pView.shape], `${ioFile}: c2p_pos の shape`);
+      assertEquals(built.c2pPos.shape, [...c2pView.shape], `${ioFile}: c2p_pos shape`);
       assertSameElements(
         built.c2pPos.data,
         new Int32Array(io.buffer, c2pView.byteOffset, c2pView.byteLength / 4),
@@ -168,20 +170,21 @@ for (const ioFile of CASES) {
 test.skipIf(!MIRROR_PRESENT)(
   "DeBERTa: no relative-position index table is baked into the container",
   async () => {
-    // 昇格が効いていれば、T で切り出す `sym_prefix_slice` は 1 本も残らない（残っていたら
-    // Tmax=512 の `[1,512,512]` を抱えたまま = 2MiB の死荷重）。値は正しいまま容量だけが
-    // 戻る類なので、E2E では捕まらない。
-    // グラフ記述は容器の part 0 にある（container-v1 §8）— 重みの block は 1 つも取らない。
+    // If the promotion took effect, no `sym_prefix_slice` that slices by T remains (one left
+    // means still carrying Tmax=512's `[1,512,512]` = 2 MiB of dead weight). This kind of fault
+    // only brings the size back while the values stay correct, so the E2E does not catch it.
+    // The graph descriptor is in part 0 of the container (container-v1 §8) — no weight block is
+    // read.
     const model = prepareContainer(
       await openSelectedContainer(await selectMirrorComponent(MIRROR_ROOT, GRAPH, MIRROR_CHOICE)),
       GRAPH,
     );
     const baked = model.graph.nodes.filter((node) => node.op === "sym_prefix_slice");
-    assertEquals(baked.length, 0, "焼き込み表（sym_prefix_slice）の本数");
+    assertEquals(baked.length, 0, "count of baked tables (sym_prefix_slice)");
     assertEquals(
       model.graph.inputs.map((input) => input.name),
       ["input_ids", "attention_mask", "c2p_pos", "p2c_pos"],
-      "グラフ入力の並び",
+      "order of the graph inputs",
     );
   },
 );

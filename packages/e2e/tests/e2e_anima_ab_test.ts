@@ -1,34 +1,44 @@
 /**
- * Anima の**自機 A/B 門**（実 GPU・ADR 0110 決定 5）。既定席 `f16+dit8-a8-attn8-s16`（実用層 —
- * `session` に linear a8 / attention a8 / S の f16 格納を束ねた席）を、**同じ機・同じ重み**で
- * `session` が空の参照席（manifest から導く — {@link referencePartnerOf}。今の配布形では
- * `f16+dit8`）と比べる。比較相手は同機の参照層で、torch golden は使わない。
+ * Anima's **self A/B check** (real GPU, ADR 0110 decision 5). It compares the default preset
+ * `f16+dit8-a8-attn8-s16` (practical tier — a preset whose `session` bundles linear a8, attention
+ * a8 and f16 storage of S) with the reference partner whose `session` is empty, **on the same
+ * machine with the same weights** (derived from the manifest — {@link referencePartnerOf};
+ * `f16+dit8` in the current distribution). The comparison partner is the reference tier on the same
+ * machine; no torch golden is used.
  *
- * 1 ケース（= 解像度 1 つ）の手順:
+ * The steps of one case (= one resolution):
  *
- * 1. 参照席の pipeline で **step 1 の latent**（席が最初に効いた直後 — 決定 5-4）を採り、購読側の
- *    throw で生成を打ち切る（`onEvent` の `copyLatents()`・{@link captureThenAbort}）。dispose。
- * 2. 実用席で同じことを **2 回**（独立の 2 pipeline）。
- * 3. 門を 3 つ掛ける（どれも赤なら決着は `fail`）:
- *    - **決定性**（決定 6 の MUST）— 実用席の 2 回の latent がビット一致する
- *      （{@link assertBitIdentical}）。赤にする故障注入: ②（2 回目だけ別 seed）。
- *    - **census**（決定 5-1 の MUST）— 実用席の transformer の run で、束の各ノブの変種が 1 本以上
- *      走っている（`assertSeatsApplied` — 期待は**元の配布形**の宣言）。本数は決着の note に残る。
- *      attention の a8 / s16 は全 dispatch で効いたこと（`assertAttentionSeatsComplete` — {@link CASES} の
- *      解像度は両辺が 32 px の倍数で、self のキー長が 4 の倍数 = 宣言どおりの経路を期待できる形）。
- *      赤にする故障注入: ③（`attentionCompute` だけ外した席）。
- *    - **帯**（決定 5-2 / 5-3）— relRMS が {@link CASES} の帯に入り、非有限が無く、参照席と
- *      1 bit 以上違う（{@link judgeAb}）。赤にする故障注入: ①（実用席の `session` を空にした
- *      manifest → 床）。
+ * 1. Take the **step 1 latent** with the reference partner's pipeline (right after the preset first
+ *    takes effect — decision 5-4) and stop the generation with a throw on the subscriber side
+ *    (`copyLatents()` in `onEvent`, {@link captureThenAbort}). Dispose.
+ * 2. Do the same with the practical preset **twice** (two independent pipelines).
+ * 3. Apply three checks (if any is red the outcome is `fail`):
+ *    - **Determinism** (the MUST of decision 6) — the two latents of the practical preset are
+ *      bit-identical ({@link assertBitIdentical}). The fault injection that turns it red: ② (a
+ *      different seed for the second run only).
+ *    - **Census** (the MUST of decision 5-1) — in the practical preset's transformer run, the
+ *      variant of every knob of the bundle runs at least once (`assertSeatsApplied` — the
+ *      expectation is the declaration of **the original distribution**). The counts stay in the
+ *      outcome's note. Attention a8 / s16 took effect on every dispatch
+ *      (`assertAttentionSeatsComplete` — the resolutions of {@link CASES} have both sides a
+ *      multiple of 32 px and a self-attention key length that is a multiple of 4, so the declared
+ *      route can be expected). The fault injection that turns it red: ③ (a preset with only
+ *      `attentionCompute` removed).
+ *    - **Band** (decisions 5-2 / 5-3) — relRMS falls in the band of {@link CASES}, there is no
+ *      non-finite value, and the output differs from the reference partner by at least 1 bit
+ *      ({@link judgeAb}). The fault injection that turns it red: ① (a manifest with the practical
+ *      preset's `session` emptied → floor).
  *
- * 最終出力（PNG）はここでは作らない — 実用行の sha 門（`e2e_anima_test.ts`）が持ち、帯にしない
- * （決定 5-4）。結果の席は `anima-ab`（`e2e_anima_test.ts` の `anima` と別 — 同じ系列名の 2 ファイルは
- * `results.json` を上書きし合う）。
+ * The final output (PNG) is not produced here — the sha check of the practical-preset rows
+ * (`e2e_anima_test.ts`) owns it, without a band (decision 5-4). The results directory is `anima-ab`
+ * (separate from `anima` of `e2e_anima_test.ts` — two files with the same series name overwrite
+ * each other's `results.json`).
  *
- * MUST: 資産は `models/karume-anima/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU 無し
- * 環境は理由を出して**明示 SKIP** する（ADR 0005）。取得は手元の配布形を取得元ハンドル
- * （`nodeDirectory`）で渡す — 故障注入は同じ配布形を symlink で借りた一時 manifest
- * （{@link withManifestOverride}）で、元の配布形は 1 バイトも書き換えない。
+ * MUST: the assets are `models/karume-anima/` (untracked; local assets of the real-GPU machine).
+ * Without them, and without a GPU, the cases **SKIP explicitly** with a reason (ADR 0005). The
+ * local distribution is passed as the source handle (`nodeDirectory`) — a fault injection uses a
+ * temporary manifest that borrows the same distribution through symlinks
+ * ({@link withManifestOverride}) and does not change a single byte of the original distribution.
  */
 
 import { test } from "vite-plus/test";
@@ -61,19 +71,28 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { withManifestOverride } from "../../models/tests/helpers/manifest-override.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
-/** 資産の置き場（リポ直下 `models/karume-anima/`）。 */
+/** Where the assets live (`models/karume-anima/` at the repository root). */
 const ASSETS_DIR = new URL("../../../models/karume-anima/", import.meta.url);
-/** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_anima-ab/` — 消して安全）。 */
+/**
+ * Where the measurements and outcomes go (`outputs/verify/<environment key>/<date>_anima-ab/` —
+ * safe to delete).
+ */
 const results = openResults("anima-ab");
 
-/** 対象のモデル（既定モデル — 帯はモデル × 席 × 解像度ごとの宣言なので明示する）。 */
+/**
+ * The model under test (the default model — a band is declared per model × preset × resolution, so
+ * it is stated explicitly).
+ */
 const MODEL = "anima-turbo-v1.1";
-/** 対象の実用席（既定席）。 */
+/** The practical preset under test (the default preset). */
 const PRACTICAL = "f16+dit8-a8-attn8-s16";
-/** 観測点の名前（`comparisons[].output`）。 */
+/** The name of the observation point (`comparisons[].output`). */
 const OBSERVATION = "step1-latent";
 
-/** 入力（`e2e_anima_test.ts` の sha 門と同じ — step 1 の sigma は steps で決まるので揃える）。 */
+/**
+ * The inputs (the same as the sha check of `e2e_anima_test.ts` — the step 1 sigma depends on steps,
+ * so they are kept equal).
+ */
 const PROMPT =
   "1girl, solo, long hair, blue eyes, school uniform, cherry blossoms, outdoors, " +
   "smile, upper body, masterpiece, best quality";
@@ -81,60 +100,71 @@ const STEPS = 8;
 const SEED = 42;
 
 /**
- * ケース（解像度）と帯。`band: undefined` = 未導出 — 門は実測を出して赤で止まる（ADR 0050 決定 4 の
- * 形。通る値を仮置きして検出力の無い門を増やさない）。
+ * The cases (resolutions) and their bands. `band: undefined` = not derived yet — the check prints
+ * the measurement and stops red (the form of ADR 0050 decision 4: no value that merely passes is
+ * filled in to add a check without detection power).
  *
- * 帯は**宣言**で、環境キー別の行にしない・`KARUME_REFERENCE` で書き換えない（ADR 0110 決定 4）。
- * 導出規則（決定 5 — 今の開発機は 1 台なので 1 台の実測から導く）:
+ * A band is a **declaration**: it is not a per-environment-key row and `KARUME_REFERENCE` does not
+ * rewrite it (ADR 0110 decision 4). The derivation rule (decision 5 — the development machine is a
+ * single one today, so the band comes from the measurement of one machine):
  *
- * - **上限** = 観測点の実測 relRMS × 2 程度（決定 5-3 — 前例は ADR 0028 の 1.6 倍・irodori の
- *   2.0 倍）。「実測の 5〜10 倍」は使わない（決定 4 の MUST NOT）。量子化席なので理論値との整合
- *   （a8 の丸め誤差 ≈ 層ごとの理論値と中央値 1.8% で一致 — ADR 0025）を表の備考に残す。
- * - **床** = 1 bit 以上違う（決定 5-2 の MUST — {@link judgeAb} が帯と無関係に常に見る）。
- *   `floor` をそれより上に置くのは、ノブ 1 つを外した一時 manifest の実測が**全部入りの実測より
- *   明確に小さい**と示せたときだけ（反証 verify/A2 §4-4 — 記録からは係数 0.35〜0.67 の幅しか
- *   言えない）。示せなければ `floor: 0` とし、ノブ単位の縮退は census に任せる（決定 5-1）。
+ * - **Ceiling** = about 2 × the measured relRMS at the observation point (decision 5-3 —
+ *   precedents: 1.6 × in ADR 0028, 2.0 × in irodori). "5 to 10 × the measurement" is not used (the
+ *   MUST NOT of decision 4). These are quantised presets, so the agreement with the theoretical
+ *   value (the a8 rounding error ≈ the per-layer theoretical value, matching at a median of 1.8% —
+ *   ADR 0025) is kept in the table's remarks.
+ * - **Floor** = differs by at least 1 bit (the MUST of decision 5-2 — {@link judgeAb} always checks
+ *   it, independently of the band). `floor` is set above that only when the measurement of a
+ *   temporary manifest with one knob removed can be shown to be **clearly smaller than the
+ *   measurement with everything on** (refutation verify/A2 §4-4 — the records only support a
+ *   coefficient range of 0.35 to 0.67). If that cannot be shown, `floor: 0`, and the per-knob
+ *   fallback is left to the census (decision 5-1).
  *
- * 導出表（2026-09-26・Intel Arc B570 / Deno・参照席 `f16+dit8`）:
+ * Derivation table (2026-09-26, Intel Arc B570 / Deno, reference partner `f16+dit8`):
  *
- * | ケース | 実測 relRMS | 実測 maxAbs | ③ の relRMS（attn 外し） | floor | ceiling | 採った日・機 |
- * | ------ | ----------- | ----------- | ------------------------ | ----- | ------- | ------------ |
- * | 1024   | 1.4294e-2   | 8.5310e-2   | —（512 でだけ測る）      | 0     | 3.0e-2  | 2026-09-26 B570 |
- * | 512    | 1.1899e-2   | 7.2329e-2   | 1.0758e-2（×0.90）       | 0     | 2.4e-2  | 2026-09-26 B570 |
+ * | Case | Measured relRMS | Measured maxAbs | relRMS of ③ (attn removed) | floor | ceiling | Taken on        |
+ * | ---- | --------------- | --------------- | -------------------------- | ----- | ------- | --------------- |
+ * | 1024 | 1.4294e-2       | 8.5310e-2       | — (measured at 512 only)   | 0     | 3.0e-2  | 2026-09-26 B570 |
+ * | 512  | 1.1899e-2       | 7.2329e-2       | 1.0758e-2 (×0.90)          | 0     | 2.4e-2  | 2026-09-26 B570 |
  *
- * 上限 = 実測 × 2 を有効数字 2 桁へ丸めた値。③（attentionCompute を外す）は全部入りの 0.90 倍で「明確に
- * 小さい」とは言えないので floor は 0（ノブ単位の縮退は census が持つ）。a8 の理論値（ADR 0025: 層ごとの
- * 丸め誤差の中央値 1.8%）と同じ桁で、w8a8 の step 1 判別帯（実測の 1.6 倍・ADR 0025 決定 6）と整合する。
+ * Ceiling = the measurement × 2 rounded to two significant digits. ③ (attentionCompute removed) is
+ * 0.90 × the measurement with everything on, which is not "clearly smaller", so the floor is 0 (the
+ * census owns the per-knob fallback). It is of the same order as the a8 theoretical value (ADR
+ * 0025: a median per-layer rounding error of 1.8%) and consistent with the w8a8 step 1
+ * discrimination band (1.6 × the measurement, ADR 0025 decision 6).
  */
 const CASES: readonly { readonly resolution: ImageSize; readonly band: AbBand | undefined }[] = [
   { resolution: { width: 1024, height: 1024 }, band: { floor: 0, ceiling: 3.0e-2 } },
   { resolution: { width: 512, height: 512 }, band: { floor: 0, ceiling: 2.4e-2 } },
 ];
 
-/** 故障注入を回す解像度（最短の 512 — 門の空振りを示すのに解像度は要らない）。 */
+/**
+ * The resolution that runs the fault injections (the shortest, 512 — showing that a check is not
+ * vacuous needs no particular resolution).
+ */
 const FAULT_CASE = CASES[1];
 
 const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR));
 if (manifestText === undefined) {
   console.warn(
-    `[karume] ${ASSETS_DIR.pathname} に karume.json が無いため Anima の自機 A/B 門を SKIP する` +
-      "（exporter の dist.py で焼く）",
+    `[karume] ${ASSETS_DIR.pathname} has no karume.json, so Anima's self A/B check SKIPs` +
+      " (bake it with the exporter's dist.py)",
   );
 }
 const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
 
 const readManifest = (): Manifest => parseManifest(manifestText as string);
 
-/** 1 run ぶんの観測（step 1 の latent と、そこまでの transformer の census）。 */
+/** The observation of one run (the step 1 latent and the transformer census up to it). */
 type Observation = {
   readonly latent: Float32Array<ArrayBuffer>;
   readonly census: readonly CensusRow[];
 };
 
 /**
- * `quant` の pipeline を組み、step 1 の latent を採って打ち切る（dispose まで — GPU も
- * pipeline が自前で取って返す）。census は transformer の run だけ（quant の `session` が効くのは
- * DiT の Session だけ — `anima/pipeline.ts` の `sessionOptions`）。
+ * Builds the pipeline of `quant`, takes the step 1 latent and stops (through dispose — the pipeline
+ * also acquires and releases the GPU itself). The census covers only the transformer runs (the
+ * quant's `session` applies only to the DiT's Session — `sessionOptions` in `anima/pipeline.ts`).
  */
 const observeStep1 = async (
   source: DistributionSource,
@@ -162,7 +192,7 @@ const observeStep1 = async (
       },
     }),
   );
-  return { latent, census: mergeCensus(runs, `${where} の transformer`) };
+  return { latent, census: mergeCensus(runs, `${where}: transformer`) };
 };
 
 const errorText = (cause: unknown): string =>
@@ -171,7 +201,7 @@ const errorText = (cause: unknown): string =>
 for (const { resolution, band } of CASES) {
   const id = `${PRACTICAL}-${formatResolution(resolution)}`;
   test.skipIf(!RUNNABLE)(
-    `e2e(実GPU): ${id} の step 1 latent が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
+    `e2e(real GPU): the step 1 latent of ${id} balances the reference partner on determinism, census and band (self A/B)`,
     async () => {
       await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
         const manifest = readManifest();
@@ -190,9 +220,13 @@ for (const { resolution, band } of CASES) {
           `[e2e] anima A/B ${id}: ${reference} → ${PRACTICAL} ${describeAb(measured)} ` +
             `/ census ${census}`,
         );
-        assertBitIdentical(first.latent, second.latent, `${id}: 実用席の 2 回`);
-        assertSeatsApplied(first.census, declared, `${id}: 実用席の transformer`);
-        assertAttentionSeatsComplete(first.census, declared, `${id}: 実用席の transformer`);
+        assertBitIdentical(first.latent, second.latent, `${id}: the two practical-preset runs`);
+        assertSeatsApplied(first.census, declared, `${id}: the practical preset's transformer`);
+        assertAttentionSeatsComplete(
+          first.census,
+          declared,
+          `${id}: the practical preset's transformer`,
+        );
         judgeAb(measured, band, id);
         return { status: "pass", note: `census ${census}` };
       });
@@ -200,13 +234,15 @@ for (const { resolution, band } of CASES) {
   );
 }
 
-// --- 故障注入（各門が空振りでないことの実証 — ADR 0110 決定 5-5）------------------
+// --- Fault injections (evidence that no check is vacuous — ADR 0110 decision 5-5)
+// ------------------
 //
-// どれも「門が赤になること」を assert する（緑 = 門が故障を見逃した）。一時 manifest は同じ配布形を
-// symlink で借り、実用席の `session` だけを差し替える。解像度は {@link FAULT_CASE} の 1 本だけ。
+// Each one asserts that a check turns red (green = the check missed the fault). The temporary
+// manifest borrows the same distribution through symlinks and replaces only the practical preset's
+// `session`. Only the one resolution of {@link FAULT_CASE} runs.
 
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
+  "e2e(real GPU): fault injection ① a manifest with the practical preset's session emptied is red on the floor",
   async () => {
     const { resolution, band } = FAULT_CASE;
     const id = `fault1-empty-session-${formatResolution(resolution)}`;
@@ -231,39 +267,41 @@ test.skipIf(!RUNNABLE)(
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(
         comparisonOf(
-          { output: OBSERVATION, reference, practical: `${PRACTICAL}（session 空）` },
+          { output: OBSERVATION, reference, practical: `${PRACTICAL} (empty session)` },
           measured,
           band,
         ),
       );
-      console.log(`[e2e] anima 故障注入 ① ${describeAb(measured)}`);
-      assertThrows(() => judgeAb(measured, band, id), Error, "床の失敗");
+      console.log(`[e2e] anima fault injection ① ${describeAb(measured)}`);
+      assertThrows(() => judgeAb(measured, band, id), Error, "floor failure");
     });
   },
 );
 
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
+  "e2e(real GPU): fault injection ② a different seed on the practical preset's second run turns the determinism check red",
   async () => {
     const { resolution } = FAULT_CASE;
     const source = nodeDirectory(ASSETS_DIR);
     const first = await observeStep1(source, PRACTICAL, resolution, SEED);
     const second = await observeStep1(source, PRACTICAL, resolution, SEED + 1);
     assertThrows(
-      () => assertBitIdentical(first.latent, second.latent, "故障注入 ②"),
+      () => assertBitIdentical(first.latent, second.latent, "fault injection ②"),
       Error,
-      "ビット一致しない",
+      "are not bit-identical",
     );
   },
 );
 
 /**
- * 故障注入 ③ — `attentionCompute` だけ外した席。census（元の配布形の宣言が期待）が赤になることを
- * assert する。帯の判定は**記録だけ**（ADR 0030 決定 5 の再演 — 積み重ねた席の後段の失効は数値で
- * 掴みにくい。帯が緑のままなら census が要ることの実証、赤なら床の係数 k を 0 より上に置く材料）。
+ * Fault injection ③ — a preset with only `attentionCompute` removed. Asserts that the census (whose
+ * expectation is the original distribution's declaration) turns red. The band verdict is **only
+ * recorded** (a rerun of ADR 0030 decision 5 — the loss of a later stage of stacked presets is hard
+ * to catch numerically. If the band stays green it shows the census is needed; if red, it is
+ * material for setting the floor coefficient k above 0).
  */
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 故障注入 ③ attentionCompute だけ外した席は census で赤になる（帯は記録）",
+  "e2e(real GPU): fault injection ③ a preset with only attentionCompute removed is red on the census (the band is recorded)",
   async () => {
     const { resolution, band } = FAULT_CASE;
     const id = `fault3-no-attention-a8-${formatResolution(resolution)}`;
@@ -290,24 +328,24 @@ test.skipIf(!RUNNABLE)(
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(
         comparisonOf(
-          { output: OBSERVATION, reference, practical: `${PRACTICAL}（attentionCompute 外し）` },
+          { output: OBSERVATION, reference, practical: `${PRACTICAL} (attentionCompute removed)` },
           measured,
           band,
         ),
       );
-      let bandVerdict = "緑";
+      let bandVerdict = "green";
       try {
         judgeAb(measured, band, id);
       } catch (cause) {
-        bandVerdict = `赤（${errorText(cause)}）`;
+        bandVerdict = `red (${errorText(cause)})`;
       }
-      console.log(`[e2e] anima 故障注入 ③ ${describeAb(measured)} / 帯 ${bandVerdict}`);
+      console.log(`[e2e] anima fault injection ③ ${describeAb(measured)} / band ${bandVerdict}`);
       assertThrows(
         () => assertSeatsApplied(faulty.census, declared, id),
         Error,
         "attentionCompute",
       );
-      return { status: "pass", note: `帯 ${bandVerdict}` };
+      return { status: "pass", note: `band ${bandVerdict}` };
     });
   },
 );

@@ -1,30 +1,34 @@
-// BiRefNet 系の**実画像**の門 —— TS 前処理層（`src/image/preprocess.ts`）と PNG 符号化
-// （`src/image/png.ts`）を通す 2 つの主張を持つ。
+// The **real-image** check of the BiRefNet family — it holds two claims that go through the TS
+// preprocessing layer (`src/image/preprocess.ts`) and PNG encoding (`src/image/png.ts`).
 //
-// ## この門が受け持つ主張と、runtime 側との分担
+// ## The claims this check holds, and the split with the runtime side
 //
-// もともとは `packages/runtime/tests/e2e_birefnet_test.ts` に同居していた（TS 前処理を通した
-// `pixel_values` で推論し、入力側と出力側を 1 本のテストで見ていた）。それを 2 つに割った
-// —— SigLIP2 で先に踏んだのと同じ形（`e2e_siglip2_image_preprocess_real_test.ts` 冒頭）:
+// It originally lived in `packages/runtime/tests/e2e_birefnet_test.ts` (it ran inference on the
+// `pixel_values` produced by the TS preprocessing, checking the input side and the output side in
+// one test). It was split in two — the same shape first met with SigLIP2 (the head of
+// `e2e_siglip2_image_preprocess_real_test.ts`):
 //
-//  ・**入力側（ここ）**: 「同じ PNG から Python と同じ `pixel_values` が出る」—— GPU も
-//    モデル本体（1 系列 964MB）も要らない、前処理層だけの純粋なパリティ。
-//  ・**output side**: the real-GPU fidelity on the golden `pixel_values` (the real-image golden
+//  - **Input side (here)**: "the same PNG yields the same `pixel_values` as Python" — a pure parity
+//    of the preprocessing layer alone, needing neither a GPU nor the model itself (964MB per
+//    series).
+//  - **output side**: the real-GPU fidelity on the golden `pixel_values` (the real-image golden
 //    cases of `e2e_birefnet_test.ts`). They are upstream parity and opt-in
 //    (`KARUME_UPSTREAM_PARITY=1`); the default lanes pin the output per environment by the
 //    sha256 rows of the discrimination below (ADR 0106).
 //
-// 「PNG を渡したら Python と同じマットが返る」という鎖の主張は、この 2 つの**合成**で持つ
-// （ここが入力差 ≤ {@link PIXEL_ATOL} を保証し、runtime 側がその入力での忠実度を保証する）。
-// 割った理由は依存方向 —— runtime のテストが models の実装を相対 import していた（逆向き）。
+// The chain claim "pass a PNG and get the same matte as Python" is held by **composing** the two
+// (this side guarantees an input difference ≤ {@link PIXEL_ATOL}, the runtime side guarantees the
+// fidelity on that input). The reason for the split is the dependency direction — the runtime tests
+// imported the models implementation by relative path (the wrong direction).
 //
-// ## 意味の判別と成果物 PNG はここに残る（golden を経由しない門だから）
+// ## The semantic discrimination and the PNG artifacts stay here (no golden involved)
 //
-// 顕著物体のある 2 枚の前景比が無い 2 枚を上回る、という**判別**は golden のテンソルを 1 本も
-// 読まない（読むのはモデル本体と PNG だけ）ので、割りようが無い。TS 前処理を通した入力のまま
-// **逐語で**こちらへ移した —— 「PNG を渡したら意味のあるマットが返る」という鎖の主張は、
-// 合成に頼らずここが直接持つ。マット PNG / 白地合成 PNG を書き出すのも同じ理由でここ
-// （`encodePng` は models の実装）。
+// The **discrimination** — the foreground ratio of the 2 images with a salient object exceeds that
+// of the 2 without — reads not a single golden tensor (it reads only the model itself and the
+// PNGs), so it cannot be split. It was moved here **verbatim**, with the input as it comes out of
+// the TS preprocessing — the chain claim "pass a PNG and get a meaningful matte" is held directly
+// here, without relying on composition. Writing the matte PNGs / the PNGs composited on white is
+// here for the same reason (`encodePng` is the models implementation).
 //
 // ## Assets (ADR 0139)
 //
@@ -39,8 +43,8 @@
 // assets gate is red then); absent from a complete fetch, it FAILs — the dataset at the pin lacks
 // it. An absent mirror SKIPs (the distribution gate owns that red). A partially missing golden set
 // also FAILs (the completeness test of `e2e_birefnet_test.ts` names it).
-// ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは
-// 独立。
+// The gate of ADR 0005's "all cases SKIP = explicit FAIL" looks only at *whether a GPU adapter
+// exists*, independently of this SKIP.
 
 import { isNotFound, readFile, statSync, writeFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -53,10 +57,11 @@ import {
 } from "@karume/runtime";
 import { normalizeToNchw, resizeRgb8 } from "../../models/src/image/preprocess.ts";
 import { encodePng } from "../../models/src/image/png.ts";
-// NOTE: PNG デコーダは karume 本体が持たない設計（preprocess.ts のモジュール doc —— 入口は
-// RGB8 の画素列）。テストが実画像を読むためだけの道具を runtime のテスト配下から借りる。
-// models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
-// （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
+// NOTE: karume itself is designed without a PNG decoder (the module doc of preprocess.ts — the
+// entry point is the RGB8 pixel sequence). A tool used only so that the tests can read real images
+// is borrowed from under the runtime tests. models → runtime is the **forward** dependency
+// direction, and both exclude `tests/` from publishing (`publish.exclude` in packages/*/deno.json),
+// so the published packages are unaffected.
 import { decodePng } from "@karume/test-support/png-decode";
 import {
   corpusDir,
@@ -84,33 +89,41 @@ import {
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 /**
- * 実画像ケースの**入力側**（TS 前処理 対 Python 前処理）の許容誤差。
+ * The tolerance of the **input side** of the real-image cases (TS preprocessing vs Python
+ * preprocessing).
  *
- * 実画像も系列も 1024² なので **resize は恒等**（`resizeRgb8` の台は scale 1 で重み 1 点に
- * 縮む）。残るのは正規化の畳み方の差だけ: TS は `(u8 − mean·255) / (std·255)` を 1 回で、
- * torch 側は同梱 `handler.py` の `ToTensor`（`u8 / 255`）→ `Normalize`（`(x − mean) / std`）で
- * **丸めが 1 回多い**。実測はこの差だけで、**4 系列 × 4 ケースとも maxAbs 4.768e-7**
- * （退役した `birefnet-hr-1024` を含む当時の 4 系列での実測。\|ref\| 上端 2.64 に対し 2 ulp。
- * f16 の 2 系列は入力の golden が f32 系列とビット一致する — 2026-09-26 の突合）。
+ * The real images and the series are both 1024², so **the resize is the identity** (the support of
+ * `resizeRgb8` shrinks to a single point of weight 1 at scale 1). What remains is only the
+ * difference in how the normalisation is folded: TS does `(u8 − mean·255) / (std·255)` in one step,
+ * while the torch side does `ToTensor` (`u8 / 255`) → `Normalize` (`(x − mean) / std`) of the
+ * bundled `handler.py` — **one more rounding**. The measurement shows only this difference,
+ * **maxAbs 4.768e-7 for all 4 series × 4 cases** (measured on the 4 series of the time, including
+ * the retired `birefnet-hr-1024`; 2 ulp against an \|ref\| upper end of 2.64. The input goldens of
+ * the 2 f16 series are bit-identical to those of the f32 series — compared on 2026-09-26).
  *
- * atol 1e-6 は実測 4.768e-7 の約 2.1 倍。
+ * atol 1e-6 is about 2.1 × the measured 4.768e-7.
  *
- * **これだけは系列で共有する**（runtime 側の出力 tolerance は共有しない）。ここが比べているのは
- * `pixel_values` を作る鎖だけで、両辺ともモデルの重みに 1 度も触っていない —— 同じ画像・同じ
- * 前処理定数・同じ寸法なので、系列ごとに測っても**同じ計算の同じ結果**にしかならない。
+ * **This one alone is shared across series** (the runtime side's output tolerances are not shared).
+ * What it compares is only the chain that produces `pixel_values`, and neither side ever touches
+ * the model's weights — same image, same preprocessing constants, same dimensions, so measuring per
+ * series can only give **the same result of the same computation**.
  *
- * この突合を出力側と分けて持つのは、落ちたときに前処理と推論のどちらが動いたのかを分ける
- * ため（出力側だけだと、統計の取り違えと実装バグが同じ「大きい maxAbs」に見える）。
- * 統計の取り違え（SigLIP2 の mean = std = 0.5 を当てる / RGB の順序違い）はここで
- * O(0.1)〜O(1) の差になり、4 桁以上上に出る。
+ * This comparison is kept apart from the output side so that, when it fails, it tells whether the
+ * preprocessing or the inference moved (with only the output side, a mix-up of the statistics and
+ * an implementation bug both look like the same "large maxAbs"). A mix-up of the statistics
+ * (applying SigLIP2's mean = std = 0.5 / a wrong RGB order) gives a difference of O(0.1) to O(1)
+ * here, four or more orders of magnitude above.
  *
- * NOTE: 判定は `|got − expected| ≤ atol`（rtol は 0 だった）に**非有限の不合格**を足したもの
- * —— runtime の `compareTensors` が rtol 0 で行う判定と同じ式で、NaN / ±Inf が「差 0」に化けて
- * 通る穴も同じように塞いである。
+ * NOTE: the verdict is `|got − expected| ≤ atol` (rtol was 0) plus **a failure on non-finite
+ * values** — the same formula as the runtime's `compareTensors` with rtol 0, closing the same hole
+ * where NaN / ±Inf would pass as "difference 0".
  */
 const PIXEL_ATOL = 1e-6;
 
-/** 実走する 1 系列（モデル × 解像度）。正本は runtime 側 e2e の `SERIES`。 */
+/**
+ * One series that runs (model × resolution). The source of truth is `SERIES` of the runtime-side
+ * e2e.
+ */
 type Series = {
   /**
    * The series name (`birefnet.export.default_out_dir`): the golden directory
@@ -127,16 +140,18 @@ const EXPORT_PREFIX =
   "cd tools/export-recipes && uv run --group birefnet python -m birefnet.export";
 
 /**
- * 実画像の golden を持つ系列（1024² だけ — 2048² は実画像 golden を採らない）。格納 dtype の f16 系列
- * （ADR 0113）も同じ判別と sha の参照値に掛ける。BiRefNet_HR は f16 系列だけ（上流の checkpoint が
- * f16 で、f32 系列は同じ値を広げただけなので退役 — ADR 0113 追記 2026-10-11。退役前の f32 系列の
- * sha の行は 2 環境 × 4 ケースとも f16 系列の行と完全一致していた）。
+ * The series with real-image goldens (1024² only — no real-image goldens are taken at 2048²). The
+ * f16 series of the storage dtype (ADR 0113) go through the same discrimination and sha reference
+ * values. BiRefNet_HR has only the f16 series (the upstream checkpoint is f16 and the f32 series
+ * merely widened the same values, so it was retired — ADR 0113 addendum 2026-10-11. Before
+ * retirement, the sha rows of the f32 series matched the f16 series' rows exactly in 2 environments
+ * × 4 cases).
  */
 const SERIES: readonly Series[] = [
   {
     name: "lucida-1024",
     mirror: { repo: "karume-lucida", model: "1024", quant: "f32" },
-    generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --real-images`,
+    generate: `${EXPORT_PREFIX} --model-dir <repo>/inputs/birefnet/lucida --real-images`,
   },
   {
     name: "birefnet-hr-1024-f16",
@@ -146,25 +161,34 @@ const SERIES: readonly Series[] = [
   {
     name: "lucida-1024-f16",
     mirror: { repo: "karume-lucida", model: "1024", quant: "f16" },
-    generate: `${EXPORT_PREFIX} --model-dir <リポ>/inputs/birefnet/lucida --dtype f16 --real-images`,
+    generate: `${EXPORT_PREFIX} --model-dir <repo>/inputs/birefnet/lucida --dtype f16 --real-images`,
   },
 ];
 
-/** The real-image corpus of the inputs (copies frozen by hand — the test-asset dataset's `corpus/anima/`). */
+/**
+ * The real-image corpus of the inputs (copies frozen by hand — the test-asset dataset's
+ * `corpus/anima/`).
+ */
 const CORPUS_DIR = corpusDir("anima");
 /** The command that fetches the goldens and the corpus (pasted into the skip warnings). */
 const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 /** The graph name in the container = the manifest's weights key (container-v1 §2.1). */
 const GRAPH = "matte";
-/** マット PNG と決着の置き場（`outputs/verify/<環境キー>/<日付>_birefnet/` — 消して安全）。 */
+/**
+ * Where the matte PNGs and the outcomes go (`outputs/verify/<environment key>/<date>_birefnet/` —
+ * safe to delete).
+ */
 const results = openResults("birefnet");
 /**
- * マット logits の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。
+ * The sha256 reference values of the matte logits (rows per environment key —
+ * `runtime/tests/helpers/reference.ts`).
  *
- * 実物は**グラフ出力そのもの**（sigmoid 前の logit `[1,1,H,W]` f32 を safetensors 1 本にした
- * もの — テンソル名 = グラフの出力名・metadata なし）。量子化前の出力なので、f32 のどこか 1 ビット
- * 動けば sha が動く。目視用のマット PNG / 白地合成 PNG は 8bit へ落とした後の像で、量子化境界を
- * またがない差を見逃す（加えて PNG の圧縮はランタイムの版で変わりうる）ので sha の対象にしない。
+ * The artifact is **the graph output itself** (the pre-sigmoid logit `[1,1,H,W]` f32 as one
+ * safetensors file — tensor name = the graph's output name, no metadata). It is the output before
+ * quantisation, so one bit moving anywhere in the f32 moves the sha. The matte PNG / the PNG
+ * composited on white for visual inspection are images reduced to 8 bit, which miss differences
+ * that do not cross a quantisation boundary (and PNG compression can change with the runtime's
+ * version), so they are not what the sha covers.
  */
 const references = openReferences(
   new URL("../../models/tests/fixtures/references/birefnet.json", import.meta.url),
@@ -185,21 +209,26 @@ const openMatte = async (series: Series): Promise<PreparedModel> => {
 };
 
 /**
- * 実物（目視用のマット PNG / 白地合成 PNG と、sha の対象のマット logits safetensors）の名前。
- * **系列名を前に付ける** — 同じ名前へ書くと、後に走った系列のマットが先の系列のものを黙って
- * 置き換える。`file` は種類と拡張子（`matte.png` / `cutout.png` / `matte.safetensors`）。
+ * The names of the artifacts (the matte PNG / the PNG composited on white for visual inspection,
+ * and the matte logits safetensors the sha covers). **The series name is prefixed** — written under
+ * the same name, the matte of the series that ran later would silently replace the earlier series'
+ * one. `file` is the kind and extension (`matte.png` / `cutout.png` / `matte.safetensors`).
  */
 const artifactName = (series: Series, caseName: string, file: string): string =>
   `${series.name}-${caseName}-${file}`;
 
-/** 参照値のケース ID（系列 × 画像 — 同じ画像でも系列が違えば別のマット）。 */
+/**
+ * The case ID of a reference value (series × image — the same image gives a different matte on
+ * another series).
+ */
 const referenceCaseId = (series: Series, caseName: string): string => `${series.name}/${caseName}`;
 
 /**
- * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。ケース名とファイル名の正本は
- * `birefnet/export.py` の `REAL_CASES`、画像そのもの（プロンプト / seed / 解像度）の正本は
- * `examples/anima/eval-images.ts`。**列挙結果ではなくここで固定する** — 列挙に頼ると、一部
- * だけ生成した環境でケースが黙って消えて「緑だが未検証」になる。
+ * The **real-image** cases (held only by an emit with `--real-images`). The source of truth for the
+ * case names and file names is `REAL_CASES` of `birefnet/export.py`; for the images themselves
+ * (prompt / seed / resolution), `examples/anima/eval-images.ts`. **They are pinned here, not
+ * enumerated** — relying on enumeration, cases silently vanish in an environment that generated
+ * only some of them and it becomes "green but unverified".
  */
 const REAL_CASES = [
   { name: "photo-portrait", file: "anima-default-1024x1024-defaultstep-seed42.png" },
@@ -209,34 +238,42 @@ const REAL_CASES = [
 ] as const;
 
 /**
- * 実画像の判別で見る 2 群（顕著物体 = 人物が写っている 2 枚 / 写っていない 2 枚）。正本は
- * `birefnet/export.py` の `REAL_PERSON_CASES` / `REAL_SCENE_CASES` で、あちらは torch 出力に、
- * こちらは**実 GPU 出力**に掛ける。
+ * The two groups the real-image discrimination looks at (salient object = the 2 images with a
+ * person / the 2 without). The source of truth is `REAL_PERSON_CASES` / `REAL_SCENE_CASES` of
+ * `birefnet/export.py`; there they are applied to the torch output, here to **the real-GPU
+ * output**.
  */
 const REAL_PERSON_CASES = ["photo-portrait", "photo-street"] as const;
 const REAL_SCENE_CASES = ["photo-landscape", "photo-corridor"] as const;
 
-/** golden の入力テンソルのキー（正本は `birefnet/export.py` の `INPUT_NAME`）。 */
+/**
+ * The key of the golden's input tensor (the source of truth is `INPUT_NAME` of
+ * `birefnet/export.py`).
+ */
 const PIXEL_INPUT_KEY = "input.pixel_values";
 
-/** 実画像 golden の `__metadata__` の欄（正本は `birefnet/export.py` の同名定数）。 */
+/**
+ * The `__metadata__` fields of a real-image golden (the source of truth is the constants of the
+ * same name in `birefnet/export.py`).
+ */
 const SOURCE_IMAGE_KEY = "source_image";
 const SOURCE_SHA256_KEY = "source_sha256";
 
 /**
- * 前処理の正規化定数（ImageNet 統計）。正本は同梱 `handler.py` の `ImagePreprocessor` で、
- * 写しは `birefnet/export.py` の `IMAGENET_MEAN` / `IMAGENET_STD`。**SigLIP2（mean = std =
- * 0.5）とは別の統計**なので共有しない — 取り違えは {@link PIXEL_ATOL} が落とす。
- * 2 系列で同じ統計なのは、Lucida が BiRefNet_HR の fine-tune で前処理を変えていないため
- * （上流モデルカードの利用例が同じ 3 段を綴っている）。
+ * The preprocessing normalisation constants (ImageNet statistics). The source of truth is
+ * `ImagePreprocessor` of the bundled `handler.py`; the copy is `IMAGENET_MEAN` / `IMAGENET_STD` of
+ * `birefnet/export.py`. **Different statistics from SigLIP2 (mean = std = 0.5)**, so they are not
+ * shared — {@link PIXEL_ATOL} catches a mix-up. The 2 series share the statistics because Lucida is
+ * a fine-tune of BiRefNet_HR that did not change the preprocessing (the usage example in the
+ * upstream model card spells out the same 3 steps).
  */
 const IMAGE_MEAN: readonly [number, number, number] = [0.485, 0.456, 0.406];
 const IMAGE_STD: readonly [number, number, number] = [0.229, 0.224, 0.225];
 
 /**
- * ファイルの存在。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
- * 実行されていない検証が SKIP として静かに緑になる。
+ * Whether a file exists.
+ * MUST: anything other than NotFound propagates — reading a permission error and the like as "no
+ * assets" would turn a verification that did not run into a quietly green SKIP.
  */
 const exists = (url: URL): boolean => {
   try {
@@ -250,13 +287,17 @@ const exists = (url: URL): boolean => {
 const goldenUrl = (series: Series, caseName: string): URL =>
   new URL(`${IO_PREFIX}${caseName}${IO_SUFFIX}`, goldenDir(series.name));
 
-/** 登録時点で必要なので同期で数える（`Deno.test` の ignore 判定に使う）。 */
+/**
+ * Counted synchronously because it is needed at registration (used for the `Deno.test` ignore
+ * decision).
+ */
 const goldenCount = (series: Series): number =>
   REAL_CASES.filter((entry) => exists(goldenUrl(series, entry.name))).length;
 
 /**
- * 実画像が 4 枚とも揃っているか（`corpus/anima/` は人手で凍結コピーした画像の席）。
- * MUST: NotFound 以外は伝播させる（`exists` と同じ理由）。
+ * Whether all 4 real images are present (`corpus/anima/` is the place of images copied and frozen
+ * by hand).
+ * MUST: anything other than NotFound propagates (the same reason as `exists`).
  */
 const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) =>
   exists(new URL(entry.file, CORPUS_DIR)),
@@ -293,18 +334,30 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 
-/** 実画像 1 枚のバイト列（decode 前 — sha256 の突合にも使うので生のまま持つ）。 */
+/**
+ * The bytes of one real image (before decode — kept raw because the sha256 comparison uses them
+ * too).
+ */
 const readImage = (file: string): Promise<Uint8Array<ArrayBuffer>> =>
   readFile(new URL(file, CORPUS_DIR));
 
-/** グラフ入力の静的次元（記号次元は無い — `birefnet/export.py` の `symbol_names=()`）。 */
+/**
+ * The static dimension of a graph input (there are no symbolic dimensions — `symbol_names=()` of
+ * `birefnet/export.py`).
+ */
 const staticDim = (parsed: PreparedModel, axis: number): number => {
   const dim = parsed.graph.inputs[0].shape[axis];
-  assert(typeof dim === "number", `pixel_values の軸 ${axis} が記号次元 '${String(dim)}'`);
+  assert(
+    typeof dim === "number",
+    `axis ${axis} of pixel_values is the symbolic dimension '${String(dim)}'`,
+  );
   return dim;
 };
 
-/** 前景（`logit > 0`）の面積比。判別（顕著物体の有無）はこの量の順序だけを見る。 */
+/**
+ * The area ratio of the foreground (`logit > 0`). The discrimination (salient object or not) looks
+ * only at the order of this quantity.
+ */
 const foregroundRatio = (logits: Float32Array): number => {
   let foreground = 0;
   for (let index = 0; index < logits.length; index += 1) {
@@ -313,7 +366,7 @@ const foregroundRatio = (logits: Float32Array): number => {
   return foreground / logits.length;
 };
 
-/** マットの α（`sigmoid` はホスト側の責務 — グラフは logit を出す）。 */
+/** The α of the matte (`sigmoid` is the host side's job — the graph outputs logits). */
 const alphaFromLogits = (logits: Float32Array): Float32Array => {
   const alpha = new Float32Array(logits.length);
   for (let index = 0; index < logits.length; index += 1) {
@@ -322,7 +375,7 @@ const alphaFromLogits = (logits: Float32Array): Float32Array => {
   return alpha;
 };
 
-/** グレースケール（α をそのまま明度に）の PNG バイト列。 */
+/** The PNG bytes of the grayscale (α taken as the lightness as is). */
 const matteToPng = (
   alpha: Float32Array,
   width: number,
@@ -339,7 +392,9 @@ const matteToPng = (
   return encodePng(rgba, width, height);
 };
 
-/** 前景を白地へ合成した PNG バイト列（背景抜きの見た目そのもの）。 */
+/**
+ * The PNG bytes of the foreground composited on white (the look of the background removal itself).
+ */
 const cutoutToPng = (
   image: { readonly data: Uint8Array; readonly width: number; readonly height: number },
   alpha: Float32Array,
@@ -355,7 +410,10 @@ const cutoutToPng = (
   return encodePng(rgba, image.width, image.height);
 };
 
-/** 実画像の群が揃った系列（参照門が数えるケースの範囲 — 登録時に同期で決まる）。 */
+/**
+ * The series whose real-image groups are complete (the range of cases the reference gate counts —
+ * decided synchronously at registration).
+ */
 const RUNNABLE_SERIES: Series[] = [];
 
 for (const series of SERIES) {
@@ -391,8 +449,8 @@ for (const series of SERIES) {
 
   for (const entry of REAL_CASES) {
     test.skipIf(!parityAvailable)(
-      `BiRefNet 実画像前処理パリティ: ${series.name} / ${entry.name}` +
-        "（TS の畳んだ正規化 対 handler.py の 2 段）" +
+      `BiRefNet real-image preprocessing parity: ${series.name} / ${entry.name}` +
+        " (TS's folded normalisation vs handler.py's two steps)" +
         (parityAvailable ? "" : NOT_FETCHED),
       async () => {
         assertAssetPresent(goldenUrl(series, entry.name));
@@ -403,29 +461,34 @@ for (const series of SERIES) {
         ]);
         const io = parseSafetensors(goldenBytes);
 
-        // ① golden を採った画像と、いま読んでいる画像が同一であること。**tolerance では
-        // 吸収されない差**（生成台本を回し直して golden を採り直していない）を、突合の前に
-        // 名指しで落とす。ここが緩むと「別の画像どうしを比べて緑」が成立しうる。
-        assertEquals(io.metadata.get(SOURCE_IMAGE_KEY), entry.file, "golden が指す元画像");
+        // ① The image the golden was taken from and the image read now are the same. **A
+        // difference no tolerance absorbs** (the generation script was rerun without retaking the
+        // goldens) is failed by name before the comparison. If this loosens, "green from comparing
+        // two different images" becomes possible.
+        assertEquals(
+          io.metadata.get(SOURCE_IMAGE_KEY),
+          entry.file,
+          "the source image the golden points to",
+        );
         assertEquals(
           io.metadata.get(SOURCE_SHA256_KEY),
           await sha256Hex(png),
-          `${entry.file} が golden を採った画像と違う（採り直す: ${series.generate}）`,
+          `${entry.file} differs from the image the golden was taken from (retake: ${series.generate})`,
         );
 
         const view = io.tensors.get(PIXEL_INPUT_KEY);
-        assert(view !== undefined, `${PIXEL_INPUT_KEY} が golden に無い`);
-        assertEquals(view.dtype, "F32", `${PIXEL_INPUT_KEY} の格納 dtype`);
-        assertEquals(view.shape.length, 4, `${PIXEL_INPUT_KEY} の階数`);
+        assert(view !== undefined, `${PIXEL_INPUT_KEY} is missing from the golden`);
+        assertEquals(view.dtype, "F32", `storage dtype of ${PIXEL_INPUT_KEY}`);
+        assertEquals(view.shape.length, 4, `rank of ${PIXEL_INPUT_KEY}`);
         const [batch, channels, height, width] = view.shape;
-        assertEquals([batch, channels], [1, 3], `${PIXEL_INPUT_KEY} の先頭 2 軸`);
+        assertEquals([batch, channels], [1, 3], `leading 2 axes of ${PIXEL_INPUT_KEY}`);
         const expected = new Float32Array(io.buffer, view.byteOffset, view.byteLength / 4);
 
-        // ② TS 側の経路（PNG decode → resize → 融合正規化）。
+        // ② The TS route (PNG decode → resize → fused normalisation).
         const decoded = await decodePng(png, entry.file);
         const got = normalizeToNchw(resizeRgb8(decoded, width, height), IMAGE_MEAN, IMAGE_STD);
 
-        assertEquals(got.length, expected.length, `${entry.name}: pixel_values の長さ`);
+        assertEquals(got.length, expected.length, `${entry.name}: length of pixel_values`);
         let maxAbs = 0;
         let worst = 0;
         let nonFinite = 0;
@@ -440,43 +503,53 @@ for (const series of SERIES) {
             worst = index;
           }
         }
-        // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
-        assertEquals(nonFinite, 0, `${entry.name}: pixel_values に非有限の標本`);
+        // MUST: NaN / ±Inf fail. A naive difference check lets NaN pass as "difference 0".
+        assertEquals(nonFinite, 0, `${entry.name}: non-finite samples in pixel_values`);
         assert(
           maxAbs <= PIXEL_ATOL,
-          `${series.name} / ${entry.name}: pixel_values の maxAbs=${maxAbs}` +
-            `（標本 ${worst}: ${got[worst]} 対 ${expected[worst]}）が ${PIXEL_ATOL} を超えた`,
+          `${series.name} / ${entry.name}: pixel_values maxAbs=${maxAbs}` +
+            ` (sample ${worst}: ${got[worst]} vs ${expected[worst]}) exceeds ${PIXEL_ATOL}`,
         );
       },
     );
   }
 
   test.skipIf(!discriminationAvailable || !GPU_AVAILABLE)(
-    `BiRefNet 実画像 判別: ${series.name} — 顕著物体のある 2 枚の前景比が無い 2 枚を` +
-      "上回る（マット PNG も書く）" +
+    `BiRefNet real-image discrimination: ${series.name} — the foreground ratio of the 2 images with a salient object exceeds that of the 2` +
+      " without (it also writes the matte PNGs)" +
       (imagesRunnable ? "" : NOT_FETCHED) +
       (mirror ? "" : MIRROR_ABSENT),
     async () => {
       for (const real of REAL_CASES) assertAssetPresent(new URL(real.file, CORPUS_DIR));
-      // 判別は**前景比の順序**だけを見る（閾値は置かない — `birefnet/export.py` の
-      // `_real_sanity` と同じ形で、あちらは torch 側に掛かっている）。一様に潰れた出力（全前景
-      // / 全背景）も入力非依存の出力も、両群の前景比が並ぶので落ちる。実測は人物側が
-      // BiRefNet_HR で 0.5512 / 0.1139・Lucida で 0.5545 / 0.1134、風景側はどちらも 0.005 未満。
+      // The discrimination looks only at **the order of the foreground ratios** (no threshold — the
+      // same form as `_real_sanity` of `birefnet/export.py`, which is applied on the torch side). A
+      // uniformly collapsed output (all foreground / all background) and an output independent of
+      // the input both fail, since the two groups' foreground ratios line up. Measured on the
+      // person side: 0.5512 / 0.1139 on BiRefNet_HR and 0.5545 / 0.1134 on Lucida; on the scene
+      // side under 0.005 on both.
       //
-      // 入力は**実画像を TS 前処理で通したもの**（golden の入力ではない）— 「PNG を渡したら
-      // 意味のあるマットが返る」ところまでを検査にする。ついでに α マットと白地合成を PNG で
-      // 書き出す（数値の門だけでは形が見えないため — 目視確認用の成果物で、sha の対象ではない）。
-      // sha の対象は量子化前の出力そのもの（マット logits の f32 safetensors — {@link references}）
-      // で、判別とは別の主張「同じ機で 1 ビットも動いていない」を言う。順序は 4 枚を回す →
-      // 判別 → 画像ごとに sha の決着を積む → 系列の決着を積む → sha の不一致を落とす（判別が
-      // 割れた出力から参照行を作らない）。
+      // The input is **the real image passed through the TS preprocessing** (not the golden's
+      // input) — the check goes as far as "pass a PNG and get a meaningful matte". Along the way it
+      // writes the α matte and the composite on white as PNGs (a numeric check alone does not show
+      // the shape — artifacts for visual inspection, not covered by the sha). The sha covers the
+      // output before quantisation itself (the f32 safetensors of the matte logits —
+      // {@link references}), and says something other than the discrimination: "not a single bit
+      // moved on the same machine". The order is: run the 4 images → discriminate → append the sha
+      // outcome per image → append the series outcome → fail on sha mismatches (no reference row is
+      // created from an output whose discrimination broke).
       const started = performance.now();
       const elapsedMs = (): number => Math.round(performance.now() - started);
-      /** 画像ごとの前景比（判別の材料。途中で落ちた回も、測れたぶんを note に残す）。 */
+      /**
+       * The foreground ratio per image (material for the discrimination; even a run that fails
+       * midway keeps what was measured in the note).
+       */
       const ratios = new Map<string, number>();
       const ratioNote = (): string =>
         [...ratios].map(([name, ratio]) => `${name} ${ratio.toFixed(4)}`).join(" / ");
-      /** sha が参照と食い違った画像（全画像の決着を積み終えてからまとめて落とす）。 */
+      /**
+       * The images whose sha disagreed with the reference (failed together after every image's
+       * outcome is appended).
+       */
       const mismatches: { readonly label: string; readonly settlement: ReferenceSettlement }[] = [];
       try {
         const parsed = await openMatte(series);
@@ -485,7 +558,7 @@ for (const series of SERIES) {
         const height = staticDim(parsed, 2);
         const inputName = parsed.graph.inputs[0].name;
 
-        /** 画像ごとの sha の実物（判別が通ってから突き合わせる）。 */
+        /** The per-image sha artifacts (compared after the discrimination passes). */
         const logits: {
           readonly caseId: string;
           readonly artifact: string;
@@ -494,12 +567,14 @@ for (const series of SERIES) {
         }[] = [];
         const gpu = await acquireGpu();
         try {
-          // マット logits の sha をこの機の行として書きうる経路なので、キーを採ったアダプタと
-          // 実行アダプタの同一性を先に見る（複数 GPU の機で取り違えると別の機の行になる）。
+          // This route can write the matte logits' sha as this machine's row, so first check that
+          // the adapter the key was taken from is the running adapter (mixing them up on a
+          // multi-GPU machine would make it another machine's row).
           assertAdapterMatchesEnvironment(gpu);
           const session = await parsed.createContainerSession(gpu);
           try {
-            // 4 枚を 1 Session で回す（重みは 964MB — 画像ごとに組み直す理由が無い）。
+            // Run the 4 images on one Session (the weights are 964MB — no reason to rebuild per
+            // image).
             for (const real of REAL_CASES) {
               const imageStarted = performance.now();
               const image = resizeRgb8(
@@ -513,8 +588,9 @@ for (const series of SERIES) {
                   [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
                 })
               )[outputName];
-              // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-              assert(output.dtype === "f32", `${real.name}: マットの dtype が ${output.dtype}`);
+              // Narrow by the discriminant (a cast to Float32Array would pass silently on a dtype
+              // drift).
+              assert(output.dtype === "f32", `${real.name}: the matte's dtype is ${output.dtype}`);
               ratios.set(real.name, foregroundRatio(output.data));
               logits.push({
                 caseId: referenceCaseId(series, real.name),
@@ -523,7 +599,7 @@ for (const series of SERIES) {
                 elapsedMs: Math.round(performance.now() - imageStarted),
               });
 
-              // 目視用の PNG（8bit へ落とした像 — sha の対象ではない）。
+              // The PNGs for visual inspection (images reduced to 8 bit — not covered by the sha).
               const alpha = alphaFromLogits(output.data);
               await writeFile(
                 results.artifact(artifactName(series, real.name, "matte.png")),
@@ -543,21 +619,22 @@ for (const series of SERIES) {
 
         const ratioOf = (name: string): number => {
           const ratio = ratios.get(name);
-          assert(ratio !== undefined, `${name} の前景比が無い`);
+          assert(ratio !== undefined, `no foreground ratio for ${name}`);
           return ratio;
         };
         for (const personCase of REAL_PERSON_CASES) {
           for (const sceneCase of REAL_SCENE_CASES) {
             assert(
               ratioOf(personCase) > ratioOf(sceneCase),
-              `前景比の順序が逆: ${personCase}=${ratioOf(personCase)} <=` +
+              `the foreground ratios are in the wrong order: ${personCase}=${ratioOf(personCase)} <=` +
                 ` ${sceneCase}=${ratioOf(sceneCase)}`,
             );
           }
         }
 
-        // 判別が通った出力だけを参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばし、
-        // 実測 sha を積む — settleOrObserve）。
+        // Only outputs whose discrimination passed are compared with the reference rows (in compare
+        // mode, without a row only the comparison is skipped and the measured sha is appended —
+        // settleOrObserve).
         for (const entry of logits) {
           const outcome = await settleOrObserve(references, results, {
             id: entry.caseId,
@@ -574,18 +651,20 @@ for (const series of SERIES) {
           }
         }
       } catch (cause) {
-        // 決着を残してから落とす（前景比が手元に無いと赤の読み解きが始められない。決着の無いまま
-        // 抜けると、同じ日の前回の走行の決着が席に居座る）。記録の I/O 失敗で元の例外を置き換えない
-        // （recordFailure）。
+        // Record the outcome before failing (without the foreground ratios at hand, reading the red
+        // cannot even start. Leaving without an outcome lets the outcome of the previous run of the
+        // same day stay in the results directory). An I/O failure of the record does not replace
+        // the original exception (recordFailure).
         await recordFailure(results, {
           id: series.name,
           status: "fail",
           elapsedMs: elapsedMs(),
-          note: `${ratioNote()} / 失敗: ${cause instanceof Error ? cause.message : String(cause)}`,
+          note: `${ratioNote()} / failure: ${cause instanceof Error ? cause.message : String(cause)}`,
         });
         throw cause;
       }
-      // sha の不一致は系列の決着にも出す（系列の行だけを読んでも赤が分かる）。
+      // A sha mismatch shows in the series outcome too (the red is visible from the series row
+      // alone).
       await results.record({
         id: series.name,
         status: mismatches.length === 0 ? "pass" : "fail",
@@ -593,13 +672,14 @@ for (const series of SERIES) {
         note:
           mismatches.length === 0
             ? ratioNote()
-            : `${ratioNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
+            : `${ratioNote()} / sha mismatch: ${mismatches.map(({ label }) => label).join(", ")}`,
       });
       console.log(
-        `[karume] BiRefNet のマットを ${results.dir.pathname} へ書いた` +
-          `（${series.name}-<ケース>-matte.safetensors / -matte.png / -cutout.png）`,
+        `[karume] wrote the BiRefNet mattes to ${results.dir.pathname}` +
+          ` (${series.name}-<case>-matte.safetensors / -matte.png / -cutout.png)`,
       );
-      // 決着は画像ごと・系列ごとに積み終えている（先に投げると実測 sha が結果に残らない）。
+      // The outcomes per image and per series are all appended already (throwing earlier would
+      // leave no measured sha in the results).
       assert(
         mismatches.length === 0,
         mismatches
@@ -610,12 +690,13 @@ for (const series of SERIES) {
   );
 }
 
-// GPU も資産も揃った系列だけが sha 門を走らせる（揃わない系列のケースは参照値の欠けとして
-// 数えない — 節ごと SKIP しているため）。
+// Only the series with both a GPU and the assets run the sha check (the cases of a series without
+// them are not counted as missing reference values — the whole section SKIPs).
 const RUNNABLE = GPU_AVAILABLE && RUNNABLE_SERIES.length > 0;
 const CASE_IDS: readonly string[] = RUNNABLE_SERIES.flatMap((series) =>
   REAL_CASES.map((entry) => referenceCaseId(series, entry.name)),
 );
 if (RUNNABLE) references.warnMissing(CASE_IDS);
-// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+// The gate that keeps "no reference value in this environment yet" from going silently green (the
+// same approach as ADR 0005).
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

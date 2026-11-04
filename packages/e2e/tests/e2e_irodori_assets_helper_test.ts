@@ -1,47 +1,51 @@
-// `tests/helpers/irodori-assets.ts` の比較子 `worstDifference` の挙動テスト。
+// Behaviour tests of `worstDifference`, the comparator of `tests/helpers/irodori-assets.ts`.
 //
-// この比較子は実 GPU E2E（`e2e_irodori_latent_test.ts` / `e2e_irodori_ab_test.ts`）の
-// tolerance 門が見る**唯一の数**で、資産も GPU も要る門の中に埋まっている。そのため比較子
-// 自身の退行は「門が緑のまま何も検出しない」形でしか出ない — ここが資産なしで踏める唯一の席。
+// This comparator is **the only number** the tolerance checks of the real-GPU E2E
+// (`e2e_irodori_latent_test.ts` / `e2e_irodori_ab_test.ts`) look at, and it is buried inside
+// checks that need both the assets and a GPU. A regression of the comparator itself would
+// therefore only show as "the check stays green and detects nothing" — this is the only place it
+// can be exercised without assets.
 
 import { test } from "vite-plus/test";
 import { assertEquals, assertThrows } from "@std/assert";
 import { worstDifference } from "./helpers/irodori-assets.ts";
 
-test("worstDifference: 最大絶対差とその位置を返す", () => {
+test("worstDifference: returns the maximum absolute difference and its position", () => {
   const actual = Float32Array.from([1, 2, 3, 4]);
   const golden = Float32Array.from([1, 2.5, 3, 4.25]);
   const { maxAbs, at } = worstDifference(actual, golden);
-  assertEquals(at, 1, "最悪の位置");
+  assertEquals(at, 1, "position of the worst");
   assertEquals(Math.round(maxAbs * 100) / 100, 0.5);
 });
 
-test("worstDifference: 要素数が違えば落とす", () => {
+test("worstDifference: fails when the element counts differ", () => {
   assertThrows(
     () => worstDifference(Float32Array.from([1]), Float32Array.from([1, 2])),
     Error,
-    "要素数が違う",
+    "element counts differ",
   );
 });
 
-test("worstDifference: 全要素 NaN を「差 0」として通さない", () => {
-  // 素朴な `difference > maxAbs` は NaN で常に偽なので、maxAbs は初期値 0 のまま返り
-  // 上流の `maxAbs > zAtol` が偽 = **全 NaN の latent が tolerance 門を通り抜ける**。
+test('worstDifference: does not pass all-NaN elements as "difference 0"', () => {
+  // A naive `difference > maxAbs` is always false for NaN, so maxAbs comes back at its initial 0
+  // and the upstream `maxAbs > zAtol` is false = **an all-NaN latent slips through the tolerance
+  // check**.
   const nan = Float32Array.from([NaN, NaN, NaN]);
   assertThrows(
     () => worstDifference(nan, Float32Array.from([0, 0, 0])),
     Error,
-    "非有限の標本が 3 個ある",
+    "3 non-finite samples",
   );
 });
 
-test("worstDifference: 有限標本に紛れた 1 個の非有限も落とす（位置を添える）", () => {
-  // 「有限 1 標本 + 残り NaN」で maxAbs が小さく出る形（判別帯の下限では捕まらない）。
+test("worstDifference: also fails on a single non-finite value among finite samples (with its position)", () => {
+  // The shape "1 finite sample + NaN for the rest" gives a small maxAbs (not caught by the lower
+  // bound of the discrimination band).
   const actual = Float32Array.from([0.1, Infinity, 0.2]);
   const error = assertThrows(
     () => worstDifference(actual, Float32Array.from([0.1, 0.1, 0.2])),
     Error,
-    "非有限の標本が 1 個ある",
+    "1 non-finite samples",
   );
-  assertEquals(error.message.includes("最初は 1"), true, error.message);
+  assertEquals(error.message.includes("first at 1"), true, error.message);
 });

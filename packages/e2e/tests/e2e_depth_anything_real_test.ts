@@ -1,5 +1,6 @@
-// Depth Anything V2 の**実画像**の門 —— TS 前処理層（`src/image/preprocess.ts`・**bicubic**）と
-// PNG 符号化（`src/image/png.ts`）を通す 2 つの主張を持つ。
+// The **real-image** checks of Depth Anything V2 — two claims that go through the TS
+// preprocessing layer (`src/image/preprocess.ts`, **bicubic**) and the PNG encoder
+// (`src/image/png.ts`).
 //
 // ## What this file asserts (after the 0.15 test triage)
 //
@@ -8,23 +9,25 @@
 // environment by the sha256 rows of the discrimination test below (ADR 0106), and the
 // asset-completeness gate moved here unchanged. What remains:
 //
-//  ・**input side**: the TS preprocessing (`src/image/preprocess.ts`, **bicubic**) yields the same
+//  - **input side**: the TS preprocessing (`src/image/preprocess.ts`, **bicubic**) yields the same
 //    `pixel_values` as `DPTImageProcessor` from the same PNG — no GPU and no model body (99 MB).
-//  ・**output side**: the real-image discrimination test runs the model on the GPU, asserts the
+//  - **output side**: the real-image discrimination test runs the model on the GPU, asserts the
 //    composition-level ordering of near and far regions, writes the depth PNGs and checks their
 //    sha256 rows.
 //
-// MUST: DA-V2 の resize は **bicubic**（`preprocessor_config.json` の `"resample": 3`）。
-// SigLIP2 / BiRefNet の bilinear（2）と**違う**ので、{@link IMAGE_FILTER} を渡さずに既定へ
-// 落ちると `pixel_values` が最大 0.59 ずれる（1 LSB = 0.0175 の 34 倍 — 実測）。取り違えは
-// 下のパリティ門が名指しで落とす。
+// MUST: DA-V2's resize is **bicubic** (`"resample": 3` in `preprocessor_config.json`). It
+// **differs** from SigLIP2 / BiRefNet's bilinear (2), so falling back to the default without
+// passing {@link IMAGE_FILTER} shifts `pixel_values` by up to 0.59 (34 times 1 LSB = 0.0175 —
+// measured). The parity check below fails such a mix-up by name.
 //
-// ## 意味の判別と成果物 PNG はここに残る（golden を経由しない門だから）
+// ## The semantic discrimination and the PNG artifacts stay here (no golden involved)
 //
-// 構図から言える近い領域 > 遠い領域、という**判別**は golden のテンソルを 1 本も読まない
-// （読むのはモデル本体と PNG だけ）ので、割りようが無い。TS 前処理を通した入力のまま**逐語で**
-// こちらへ移した —— 「PNG を渡したら意味のある深度が返る」という鎖の主張は、合成に頼らず
-// ここが直接持つ。深度 PNG を書き出すのも同じ理由でここ（`encodePng` は models の実装）。
+// The **discrimination** "a near region > a far region, as the composition shows" reads not a
+// single golden tensor (it reads only the model itself and the PNGs), so there is nothing to split
+// off. It was moved here **verbatim**, with the input still going through the TS preprocessing —
+// the chain claim "pass a PNG and a meaningful depth comes back" is held directly here, without
+// relying on synthetic images. Writing the depth PNGs is here for the same reason (`encodePng` is
+// the models implementation).
 //
 // ## Assets (ADR 0139)
 //
@@ -40,8 +43,8 @@
 // of the pin (the assets gate is red then); absent from a complete fetch, it FAILs — the dataset at
 // the pin lacks it. An absent mirror SKIPs (the distribution gate owns that red). **A partially
 // missing golden set = FAIL** (the completeness gate of this file names it).
-// ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは
-// 独立。
+// ADR 0005's "an all-SKIP run is an explicit FAIL" guard looks only at *whether a GPU adapter
+// exists* and is independent of this SKIP.
 
 import {
   type DirEntry,
@@ -65,10 +68,11 @@ import {
   resizeRgb8,
 } from "../../models/src/image/preprocess.ts";
 import { encodePng } from "../../models/src/image/png.ts";
-// NOTE: PNG デコーダは karume 本体が持たない設計（preprocess.ts のモジュール doc —— 入口は
-// RGB8 の画素列）。テストが実画像を読むためだけの道具を runtime のテスト配下から借りる。
-// models → runtime は**正方向**の依存で、かつ両者とも `tests/` は publish から除外される
-// （packages/*/deno.json の `publish.exclude`）ので、配布物には影響しない。
+// NOTE: by design karume itself has no PNG decoder (the module doc of preprocess.ts — the entry
+// point is RGB8 pixels). The tool used only for the test to read real images is borrowed from the
+// runtime's tests. models → runtime is a **forward** dependency, and both exclude `tests/` from
+// publishing (`publish.exclude` in packages/*/deno.json), so the published packages are not
+// affected.
 import { decodePng } from "@karume/test-support/png-decode";
 import {
   corpusDir,
@@ -96,43 +100,51 @@ import {
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 
 /**
- * 実画像ケースの**入力側**（TS 前処理 対 `DPTImageProcessor`）の許容誤差。
+ * The tolerance of the **input side** of the real-image cases (TS preprocessing vs
+ * `DPTImageProcessor`).
  *
- * 実画像は 1024² で系列は 518² なので、BiRefNet と違って **resize が恒等にならない**。残るのは
- * ①縮小の重み積算の精度（参照は f32 / こちらは f64）②パス間 uint8 丸めの境界、の 2 つで、
- * どちらも **uint8 の 1 LSB** に収まる。正規化後の 1 LSB は `1 / (std · 255)` で、最大は
- * 緑チャネルの `1 / (0.224 · 255) = 1.7507e-2`。実測は 4 ケースとも maxAbs **1.7507e-2**
- * ちょうど（= 1 LSB を 1 度も超えない）。
+ * The real images are 1024² and the series is 518², so unlike BiRefNet **the resize is not the
+ * identity**. Two things remain: ① the precision of accumulating the downscale weights (the
+ * reference uses f32, this side f64) and ② the boundaries of the uint8 rounding between passes;
+ * both stay within **1 uint8 LSB**. One LSB after normalisation is `1 / (std · 255)`, at most
+ * `1 / (0.224 · 255) = 1.7507e-2` on the green channel. Measured maxAbs is exactly **1.7507e-2**
+ * in all four cases (= never more than 1 LSB).
  *
- * atol 1.8e-2 は 1 LSB の約 1.03 倍。**2 LSB（3.5e-2）は通さない**幅に留めてある。
+ * atol 1.8e-2 is about 1.03 times 1 LSB. The width is kept so that **2 LSB (3.5e-2) does not
+ * pass**.
  *
- * 上限だけだと「全画素が 1 ずつずれる実装」（丸めの取り違え・フィルタの取り違えで偶然近い
- * 場合）が通るので、{@link PIXEL_MISMATCH_RATE_CAP} と対で使う。
+ * With only the upper bound, "an implementation that shifts every pixel by 1" (a rounding or filter
+ * mix-up that happens to land close) would pass, so it is used together with
+ * {@link PIXEL_MISMATCH_RATE_CAP}.
  *
- * この突合を出力側と分けて持つのは、落ちたときに前処理と推論のどちらが動いたのかを分ける
- * ため（出力側だけだと、統計の取り違えと実装バグが同じ「大きい maxAbs」に見える）。
- * 統計の取り違え（SigLIP2 の mean = std = 0.5 を当てる / RGB の順序違い）も、フィルタの
- * 取り違え（bilinear を当てる — 実測 maxAbs 0.593）も、ここで 1 桁以上上に出る。
+ * This comparison is kept apart from the output side so that a failure tells whether the
+ * preprocessing or the inference moved (with the output side alone, a statistics mix-up and an
+ * implementation bug look the same: "a large maxAbs"). A statistics mix-up (applying SigLIP2's
+ * mean = std = 0.5 / a different RGB order) and a filter mix-up (applying bilinear — measured
+ * maxAbs 0.593) both show up here at least an order of magnitude above.
  *
- * NOTE: 判定は `|got − expected| ≤ atol`（rtol は 0 だった）に**非有限の不合格**を足したもの
- * —— runtime の `compareTensors` が rtol 0 で行う判定と同じ式で、NaN / ±Inf が「差 0」に化けて
- * 通る穴も同じように塞いである。
+ * NOTE: the verdict is `|got − expected| ≤ atol` (rtol was 0) plus **a failure on non-finite
+ * values** — the same formula as the runtime's `compareTensors` with rtol 0, closing the same hole
+ * where NaN / ±Inf would pass as "difference 0".
  */
 const PIXEL_ATOL = 1.8e-2;
 
 /**
- * `pixel_values` が参照と食い違ってよい標本の割合（{@link PIXEL_ATOL} と対）。
+ * The fraction of samples of `pixel_values` allowed to disagree with the reference (paired with
+ * {@link PIXEL_ATOL}).
  *
- * 「食い違い」は差が {@link PIXEL_MISMATCH_EPSILON} を超えた標本。実測は 4 ケースで
- * 0.425% / 0.448% / 0.474% / 0.504%（各 804,972 標本）。上限 2% は実測最悪の約 4 倍。
+ * A "disagreement" is a sample whose difference exceeds {@link PIXEL_MISMATCH_EPSILON}. Measured
+ * over the four cases: 0.425% / 0.448% / 0.474% / 0.504% (804,972 samples each). The cap of 2% is
+ * about 4 times the measured worst case.
  */
 const PIXEL_MISMATCH_RATE_CAP = 0.02;
 
 /**
- * 「食い違い」と数える差の下限。uint8 の 1 LSB（1.75e-2）の 1/17 で、f32 の 1 ULP
- * （\|x\| ≈ 2 で 2.4e-7）の 4 桁上 — 丸めの最終ビットだけが違う標本を数えないための境目。
- * 参照は f32 で、こちらは f64 で積んでから f32 へ落とすので、値が一致していても最終ビットは
- * 半数近くで動く（実測: この下限を 0 にすると相違率が 50〜67% になる）。
+ * The smallest difference counted as a "disagreement". It is 1/17 of 1 uint8 LSB (1.75e-2) and
+ * four orders of magnitude above 1 f32 ULP (2.4e-7 at \|x\| ≈ 2) — the boundary that keeps samples
+ * differing only in the last rounding bit out of the count. The reference is f32 while this side
+ * accumulates in f64 and then drops to f32, so even with matching values the last bit moves in
+ * nearly half the samples (measured: with this floor at 0 the disagreement rate is 50–67%).
  */
 const PIXEL_MISMATCH_EPSILON = 1e-3;
 
@@ -142,7 +154,10 @@ const PIXEL_MISMATCH_EPSILON = 1e-3;
  */
 const SERIES_NAME = "depth-anything-v2-small-hf";
 
-/** SKIP 時にそのまま貼れる生成コマンド（実画像 golden まで含む形）。 */
+/**
+ * The generate command, ready to paste when the cases SKIP (the form that includes the real-image
+ * goldens).
+ */
 const GENERATE =
   "cd tools/export-recipes && uv run --group depth-anything-preprocess" +
   " python -m depth_anything.export --real-images";
@@ -167,26 +182,32 @@ const MODEL_GRAPH = "depth";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
-/** 深度の実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_depth-anything/` — 消して安全）。 */
+/**
+ * Where the depth artifacts and settlements go (`outputs/verify/<environment
+ * key>/<date>_depth-anything/` — safe to delete).
+ */
 const results = openResults("depth-anything");
 /**
- * 深度の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。ケース ID は
- * ケース名そのもの（系列は 1 本）。
+ * sha256 reference values of the depth (rows per environment key —
+ * `runtime/tests/helpers/reference.ts`). The case ID is the case name itself (there is one series).
  *
- * 実物は**グラフ出力そのもの**（深度 `[1,H,W]` f32 を safetensors 1 本にしたもの — テンソル名 =
- * グラフの出力名・metadata なし）。量子化前の出力なので、f32 のどこか 1 ビット動けば sha が動く。
- * 目視用の深度 PNG は min-max 正規化 → 疑似カラーの 8bit へ落とした像で、量子化境界をまたがない
- * 差を見逃す（加えて PNG の圧縮はランタイムの版で変わりうる）ので sha の対象にしない。
+ * The artifact is **the graph output itself** (the depth `[1,H,W]` f32 as one safetensors file —
+ * tensor name = the graph's output name, no metadata). It is the output before quantization, so
+ * any single bit moving anywhere in the f32 moves the sha. The depth PNG for viewing is an image
+ * reduced to 8-bit pseudo-colour after min-max normalisation; it misses differences that do not
+ * cross a quantization boundary (and PNG compression may change with the runtime version), so it
+ * is not hashed.
  */
 const references = openReferences(
   new URL("../../models/tests/fixtures/references/depth-anything.json", import.meta.url),
 );
 
 /**
- * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。ケース名とファイル名の正本は
- * `depth_anything/export.py` の `REAL_CASES`、画像そのもの（プロンプト / seed / 解像度）の
- * 正本は `examples/anima/eval-images.ts`。**列挙結果ではなくここで固定する** — 列挙に頼ると、
- * 一部だけ生成した環境でケースが黙って消えて「緑だが未検証」になる。
+ * The **real-image** cases (only an emit with `--real-images` has them). The source of truth for
+ * the case and file names is `REAL_CASES` in `depth_anything/export.py`; for the images themselves
+ * (prompt / seed / resolution) it is `examples/anima/eval-images.ts`. **Pinned here rather than
+ * taken from the listing** — relying on the listing, an environment that generated only part of
+ * them would lose cases silently and end up "green but unchecked".
  */
 const REAL_CASES = [
   { name: "photo-portrait", file: "anima-default-1024x1024-defaultstep-seed42.png" },
@@ -195,7 +216,7 @@ const REAL_CASES = [
   { name: "photo-street", file: "anima-default-1024x1024-defaultstep-seed45.png" },
 ] as const;
 
-/** 深度地図の相対矩形（0〜1 の比・上端 / 左端が 0）。 */
+/** A relative rectangle of the depth map (fractions 0–1; the top / left edge is 0). */
 type Region = {
   readonly label: string;
   readonly top: number;
@@ -205,16 +226,20 @@ type Region = {
 };
 
 /**
- * 実画像の判別で見る「近い領域 / 遠い領域」の対。正本は `depth_anything/export.py` の
- * `REAL_REGIONS` で、**あちらは torch 出力に、こちらは実 GPU 出力に同じ矩形を掛ける**
- * （矩形を変えるなら両方 — 片方だけ動かすと「両者一致」の主張が黙って別物になる）。
+ * The "near region / far region" pairs the real-image discrimination looks at. The source of truth
+ * is `REAL_REGIONS` in `depth_anything/export.py`; **that side applies the same rectangles to the
+ * torch output, this side to the real-GPU output** (change the rectangles on both — moving only one
+ * silently turns the claim "the two agree" into something else).
  *
- * 置いてあるのは構図から一意に言える対だけ:
+ * Only pairs the composition determines unambiguously are listed:
  *
- * - `photo-corridor` — 画面下端中央の**床**（カメラの足元）と、廊下の**消失点**
- * - `photo-street` — 中央の**人物**（胴〜脚）と、建物の上に抜ける**空**
- * - `photo-landscape` — 手前の**草地**と、奥の**山と空**
- * - `photo-portrait` — 画面下部の**被写体**（肩）と、左端の**背景**（遠景の並木）
+ * - `photo-corridor` — the **floor** at the bottom centre (at the camera's feet) and the corridor's
+ *   **vanishing point**
+ * - `photo-street` — the **person** in the centre (torso to legs) and the **sky** above the
+ *   buildings
+ * - `photo-landscape` — the **grass** in the foreground and the **mountains and sky** behind
+ * - `photo-portrait` — the **subject** at the bottom of the frame (shoulders) and the
+ *   **background** at the left edge (the distant row of trees)
  */
 const REAL_REGIONS: Readonly<Record<string, readonly [Region, Region]>> = {
   "photo-portrait": [
@@ -235,32 +260,39 @@ const REAL_REGIONS: Readonly<Record<string, readonly [Region, Region]>> = {
   ],
 };
 
-/** golden の入力テンソルのキー（正本は `depth_anything/export.py` の `INPUT_NAME`）。 */
+/**
+ * The key of the golden's input tensor (source of truth: `INPUT_NAME` in
+ * `depth_anything/export.py`).
+ */
 const PIXEL_INPUT_KEY = "input.pixel_values";
 
-/** 実画像 golden の `__metadata__` の欄（正本は `depth_anything/export.py` の同名定数）。 */
+/**
+ * Fields of the real-image golden's `__metadata__` (source of truth: the constants of the same name
+ * in `depth_anything/export.py`).
+ */
 const SOURCE_IMAGE_KEY = "source_image";
 const SOURCE_SHA256_KEY = "source_sha256";
 
 /**
- * 前処理の正規化定数（ImageNet 統計）。正本は同梱 `preprocessor_config.json` の `image_mean` /
- * `image_std` で、写しは `depth_anything/export.py` の `IMAGENET_MEAN` / `IMAGENET_STD`。
- * **SigLIP2（mean = std = 0.5）とは別の統計**なので共有しない。
+ * The preprocessing normalisation constants (ImageNet statistics). The source of truth is
+ * `image_mean` / `image_std` in the bundled `preprocessor_config.json`; the copy is
+ * `IMAGENET_MEAN` / `IMAGENET_STD` in `depth_anything/export.py`. **These are different statistics
+ * from SigLIP2 (mean = std = 0.5)**, so they are not shared.
  */
 const IMAGE_MEAN: readonly [number, number, number] = [0.485, 0.456, 0.406];
 const IMAGE_STD: readonly [number, number, number] = [0.229, 0.224, 0.225];
 
 /**
- * 補間フィルタ。`preprocessor_config.json` の `"resample": 3` = **PIL の定数で BICUBIC**
- * （`depth_anything.export.check_processor` が emit のたびに現物から実測する）。BiRefNet /
- * SigLIP2 の bilinear とは違う — モジュール docstring の MUST。
+ * The interpolation filter. `"resample": 3` in `preprocessor_config.json` = **BICUBIC as a PIL
+ * constant** (`depth_anything.export.check_processor` measures it from the real processor on every
+ * emit). It differs from BiRefNet / SigLIP2's bilinear — the MUST of the module docstring.
  */
 const IMAGE_FILTER: ResampleFilter = "bicubic";
 
 /**
- * ファイルの存在。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
- * 実行されていない検証が SKIP として静かに緑になる。
+ * Whether the file exists.
+ * MUST: anything but NotFound propagates — reading a permission error or the like as "no asset"
+ * would turn a check that never ran into a quiet green SKIP.
  */
 const exists = (url: URL): boolean => {
   try {
@@ -274,12 +306,16 @@ const exists = (url: URL): boolean => {
 const goldenUrl = (caseName: string): URL =>
   new URL(`${IO_PREFIX}${caseName}${IO_SUFFIX}`, GOLDEN_ROOT);
 
-/** 登録時点で必要なので同期で数える（`Deno.test` の ignore 判定に使う）。 */
+/**
+ * Counted synchronously because it is needed at registration (used for `Deno.test`'s ignore
+ * decision).
+ */
 const GOLDEN_COUNT = REAL_CASES.filter((entry) => exists(goldenUrl(entry.name))).length;
 
 /**
- * 実画像が 4 枚とも揃っているか（`corpus/anima/` は人手で凍結コピーした画像の席）。
- * MUST: NotFound 以外は伝播させる（`exists` と同じ理由）。
+ * Whether all four real images are present (`corpus/anima/` holds the images copied and frozen by
+ * hand).
+ * MUST: anything but NotFound propagates (the same reason as `exists`).
  */
 const IMAGES_PRESENT: boolean = REAL_CASES.every((entry) =>
   exists(new URL(entry.file, CORPUS_DIR)),
@@ -340,20 +376,30 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
 
-/** 実画像 1 枚のバイト列（decode 前 — sha256 の突合にも使うので生のまま持つ）。 */
+/**
+ * The bytes of one real image (before decoding — kept raw because the sha256 comparison uses them
+ * too).
+ */
 const readImage = (file: string): Promise<Uint8Array<ArrayBuffer>> =>
   readFile(new URL(file, CORPUS_DIR));
 
-/** グラフ入力の静的次元（記号次元は無い — `depth_anything/export.py` の `symbol_names=()`）。 */
+/**
+ * A static dimension of the graph input (there are no symbolic dimensions — `symbol_names=()` in
+ * `depth_anything/export.py`).
+ */
 const staticDim = (parsed: PreparedModel, axis: number): number => {
   const dim = parsed.graph.inputs[0].shape[axis];
-  assert(typeof dim === "number", `pixel_values の軸 ${axis} が記号次元 '${String(dim)}'`);
+  assert(
+    typeof dim === "number",
+    `axis ${axis} of pixel_values is the symbolic dimension '${String(dim)}'`,
+  );
   return dim;
 };
 
 /**
- * 実画像 1 枚を **TS 側の経路**で `pixel_values` にする（PNG decode → bicubic resize →
- * normalize）。通すのは models パッケージの前処理層そのもの — この鎖こそがこの門の主張。
+ * Turns one real image into `pixel_values` through **the TS path** (PNG decode → bicubic resize →
+ * normalize). What it goes through is the models package's preprocessing layer itself — this
+ * chain is exactly the claim of this check.
  */
 const preprocessImage = async (
   png: Uint8Array<ArrayBuffer>,
@@ -367,9 +413,12 @@ const preprocessImage = async (
     IMAGE_STD,
   );
 
-/** 参照と食い違う（差が {@link PIXEL_MISMATCH_EPSILON} を超える）標本の割合。 */
+/**
+ * The fraction of samples that disagree with the reference (difference above {@link
+ * PIXEL_MISMATCH_EPSILON}).
+ */
 const mismatchRate = (got: Float32Array, expected: Float32Array): number => {
-  assertEquals(got.length, expected.length, "pixel_values 長");
+  assertEquals(got.length, expected.length, "pixel_values length");
   let differing = 0;
   for (let index = 0; index < expected.length; index += 1) {
     if (Math.abs(got[index] - expected[index]) > PIXEL_MISMATCH_EPSILON) differing += 1;
@@ -377,7 +426,10 @@ const mismatchRate = (got: Float32Array, expected: Float32Array): number => {
   return differing / expected.length;
 };
 
-/** 相対矩形で切った深度の平均（判別はこの量の順序だけを見る）。 */
+/**
+ * The mean depth inside a relative rectangle (the discrimination looks only at the order of this
+ * quantity).
+ */
 const regionMean = (depth: Float32Array, size: number, region: Region): number => {
   const top = Math.trunc(region.top * size);
   const bottom = Math.trunc(region.bottom * size);
@@ -391,15 +443,17 @@ const regionMean = (depth: Float32Array, size: number, region: Region): number =
       count += 1;
     }
   }
-  assert(count > 0, `領域 ${region.label} が ${size}×${size} の地図で空になった`);
+  assert(count > 0, `region ${region.label} is empty on a ${size}×${size} map`);
   return sum / count;
 };
 
 /**
- * 深度用の疑似カラーマップ（遠 = 濃紺 → 近 = 淡黄）の節点。**グレースケールを採らない**のは、
- * 相対深度が遠景側に密集するため（実測: 空や消失点の平地は厳密に 0 で、値域の上端は被写体
- * だけが取る）。明度 1 本では遠景が黒へ潰れて「遠景に構造がある」のか「出力が死んでいる」の
- * かが目視で分けられない。門ではなく成果物なので、色の正確さより読みやすさを採る。
+ * The stops of the pseudo-colour map for depth (far = dark navy → near = pale yellow). **Greyscale
+ * is not used** because relative depth crowds on the far side (measured: the sky and the flat
+ * ground at the vanishing point are exactly 0, and only the subject reaches the top of the range).
+ * With lightness alone the far field crushes to black and the eye cannot tell "the far field has
+ * structure" from "the output is dead". This is an artifact, not a check, so readability wins over
+ * colour accuracy.
  */
 const DEPTH_COLORS: readonly (readonly [number, number, number])[] = [
   [12, 16, 48],
@@ -409,7 +463,7 @@ const DEPTH_COLORS: readonly (readonly [number, number, number])[] = [
   [252, 236, 160],
 ];
 
-/** 深度地図（min-max 正規化 → {@link DEPTH_COLORS} で着色）の PNG バイト列。 */
+/** The PNG bytes of a depth map (min-max normalised → coloured with {@link DEPTH_COLORS}). */
 const depthToPng = (depth: Float32Array, size: number): Promise<Uint8Array<ArrayBuffer>> => {
   let minimum = Infinity;
   let maximum = -Infinity;
@@ -508,22 +562,22 @@ test.skipIf(GOLDENS_MISSING)(
     assertEquals(
       FOUND_SYNTHETIC,
       [...SYNTHETIC_CASES],
-      `${GOLDEN_ROOT.pathname} の合成画像 golden ケース`,
+      `synthetic-image golden cases of ${GOLDEN_ROOT.pathname}`,
     );
     // Real-image goldens are optional but all-or-none (an emit with `--real-images` writes all 4).
     // Rounding a partial set to SKIP would let assets lost mid-regeneration pass silently.
     assert(
       FOUND_REAL.length === 0 || FOUND_REAL.length === REAL_CASES.length,
-      `${GOLDEN_ROOT.pathname} の実画像 golden が ${FOUND_REAL.length}/${REAL_CASES.length} 本` +
-        `（採り直す: ${GENERATE}）`,
+      `${GOLDEN_ROOT.pathname} has ${FOUND_REAL.length}/${REAL_CASES.length} real-image goldens` +
+        ` (re-take them: ${GENERATE})`,
     );
   },
 );
 
 for (const entry of REAL_CASES) {
   test.skipIf(!PARITY_AVAILABLE)(
-    `Depth Anything 実画像前処理パリティ: ${entry.name}` +
-      "（TS の bicubic + 畳んだ正規化 対 DPTImageProcessor）" +
+    `Depth Anything real-image preprocessing parity: ${entry.name}` +
+      " (TS bicubic + folded normalisation vs DPTImageProcessor)" +
       (PARITY_AVAILABLE ? "" : NOT_FETCHED),
     async () => {
       assertAssetPresent(goldenUrl(entry.name));
@@ -534,28 +588,33 @@ for (const entry of REAL_CASES) {
       ]);
       const io = parseSafetensors(goldenBytes);
 
-      // ① golden を採った画像と、いま読んでいる画像が同一であること。**tolerance では
-      // 吸収されない差**（生成台本を回し直して golden を採り直していない）を、突合の前に
-      // 名指しで落とす。ここが緩むと「別の画像どうしを比べて緑」が成立しうる。
-      assertEquals(io.metadata.get(SOURCE_IMAGE_KEY), entry.file, "golden が指す元画像");
+      // ① The image the golden was taken from is the image being read now. A **difference no
+      // tolerance absorbs** (the generation script was re-run without re-taking the golden) fails
+      // by name before the comparison. If this loosened, "green from comparing two different
+      // images" could happen.
+      assertEquals(
+        io.metadata.get(SOURCE_IMAGE_KEY),
+        entry.file,
+        "the source image the golden points to",
+      );
       assertEquals(
         io.metadata.get(SOURCE_SHA256_KEY),
         await sha256Hex(png),
-        `${entry.file} が golden を採った画像と違う（採り直す: ${GENERATE}）`,
+        `${entry.file} differs from the image the golden was taken from (re-take it: ${GENERATE})`,
       );
 
       const view = io.tensors.get(PIXEL_INPUT_KEY);
-      assert(view !== undefined, `${PIXEL_INPUT_KEY} が golden に無い`);
-      assertEquals(view.dtype, "F32", `${PIXEL_INPUT_KEY} の格納 dtype`);
-      assertEquals(view.shape.length, 4, `${PIXEL_INPUT_KEY} の階数`);
+      assert(view !== undefined, `${PIXEL_INPUT_KEY} is missing from the golden`);
+      assertEquals(view.dtype, "F32", `storage dtype of ${PIXEL_INPUT_KEY}`);
+      assertEquals(view.shape.length, 4, `rank of ${PIXEL_INPUT_KEY}`);
       const [batch, channels, height, width] = view.shape;
-      assertEquals([batch, channels], [1, 3], `${PIXEL_INPUT_KEY} の先頭 2 軸`);
+      assertEquals([batch, channels], [1, 3], `first 2 axes of ${PIXEL_INPUT_KEY}`);
       const expected = new Float32Array(io.buffer, view.byteOffset, view.byteLength / 4);
 
-      // ② TS 側の経路（PNG decode → bicubic resize → 融合正規化）。
+      // ② The TS path (PNG decode → bicubic resize → fused normalisation).
       const got = await preprocessImage(png, entry.file, width, height);
 
-      assertEquals(got.length, expected.length, `${entry.name}: pixel_values の長さ`);
+      assertEquals(got.length, expected.length, `${entry.name}: length of pixel_values`);
       let maxAbs = 0;
       let worst = 0;
       let nonFinite = 0;
@@ -570,66 +629,77 @@ for (const entry of REAL_CASES) {
           worst = index;
         }
       }
-      // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
-      assertEquals(nonFinite, 0, `${entry.name}: pixel_values に非有限の標本`);
+      // MUST: NaN / ±Inf fail. A naive difference check lets NaN pass as "difference 0".
+      assertEquals(nonFinite, 0, `${entry.name}: non-finite samples in pixel_values`);
       assert(
         maxAbs <= PIXEL_ATOL,
-        `${entry.name}: pixel_values の maxAbs=${maxAbs}` +
-          `（標本 ${worst}: ${got[worst]} 対 ${expected[worst]}）が ${PIXEL_ATOL} を超えた`,
+        `${entry.name}: pixel_values maxAbs=${maxAbs}` +
+          ` (sample ${worst}: ${got[worst]} vs ${expected[worst]}) exceeds ${PIXEL_ATOL}`,
       );
 
-      // ③ 上限だけだと「全画素が 1 ずつずれる実装」が通るので、相違率とも対で見る。
+      // ③ With only the upper bound, "an implementation that shifts every pixel by 1" would pass,
+      // so the disagreement rate is checked alongside.
       const rate = mismatchRate(got, expected);
       assert(
         rate <= PIXEL_MISMATCH_RATE_CAP,
-        `${entry.name} pixel_values の相違率 ${(rate * 100).toFixed(3)}%` +
-          `（上限 ${PIXEL_MISMATCH_RATE_CAP * 100}%）— 1 LSB 以内でも全面がずれるのは` +
-          "フィルタか丸めの取り違え",
+        `${entry.name} pixel_values disagreement rate ${(rate * 100).toFixed(3)}%` +
+          ` (cap ${PIXEL_MISMATCH_RATE_CAP * 100}%) — a shift over the whole image, even within 1 LSB, ` +
+          "is a filter or rounding mix-up",
       );
     },
   );
 }
 
 test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
-  "Depth Anything 実画像 判別: 構図から言える近い領域の深度が遠い領域を上回る" +
-    "（深度 PNG も書く）" +
+  "Depth Anything real-image discrimination: the depth of the near region the composition shows exceeds the far region" +
+    " (also writes the depth PNGs)" +
     (IMAGES_RUNNABLE ? "" : NOT_FETCHED) +
     (MIRROR_PRESENT ? "" : MIRROR_ABSENT),
   async () => {
     for (const real of REAL_CASES) assertAssetPresent(new URL(real.file, CORPUS_DIR));
-    // 判別は**領域平均の順序**だけを見る（閾値は置かない — `depth_anything/export.py` の
-    // `_real_sanity` と同じ形で、あちらは torch 側に掛かっている）。一様に潰れた出力も
-    // 入力非依存の出力も、上下反転も、両領域の平均が並ぶか逆転するので落ちる。実測は
-    // corridor 3.8544 / 0.2055・street 3.1659 / 0.0044・landscape 3.5228 / 0.0855・
-    // portrait 4.9632 / 0.2736（torch 側と 3 桁一致）。
+    // The discrimination looks only at **the order of the region means** (no threshold — the same
+    // form as `_real_sanity` in `depth_anything/export.py`, which applies it on the torch side). A
+    // uniformly collapsed output, an input-independent output and an upside-down one all fail,
+    // because the two region means tie or swap. Measured: corridor 3.8544 / 0.2055, street
+    // 3.1659 / 0.0044, landscape 3.5228 / 0.0855, portrait 4.9632 / 0.2736 (3 digits agree with
+    // the torch side).
     //
-    // 入力は**実画像を TS 前処理で通したもの**（golden の入力ではない）— 「PNG を渡したら
-    // 意味のある深度が返る」ところまでを検査にする。ついでに深度地図を PNG で書き出す
-    // （数値の門だけでは形が見えないため — 目視確認用の成果物で、sha の対象ではない）。sha の
-    // 対象は量子化前の出力そのもの（深度 `[1,H,W]` f32 の safetensors — {@link references}）で、
-    // 判別とは別の主張「同じ機で 1 ビットも動いていない」を言う。順序は 4 枚を回す → 判別 →
-    // 画像ごとに sha の決着を積む → 系列の決着を積む → sha の不一致を落とす（判別が割れた出力
-    // から参照行を作らない）。
+    // The input is **the real image passed through the TS preprocessing** (not the golden's
+    // input) — the check reaches as far as "pass a PNG and a meaningful depth comes back". The
+    // depth maps are written out as PNGs on the way (a numeric check alone does not show the
+    // shape — an artifact for viewing, not hashed). What is hashed is the output before
+    // quantization itself (the depth `[1,H,W]` f32 as safetensors — {@link references}), which
+    // makes a claim separate from the discrimination: "not a single bit moved on the same
+    // machine". The order is: run the four images → discriminate → record the sha settlement per
+    // image → record the series settlement → fail on sha mismatches (no reference row is made
+    // from an output whose discrimination split).
     const started = performance.now();
     const elapsedMs = (): number => Math.round(performance.now() - started);
-    /** 画像ごとの領域平均（判別の材料。途中で落ちた回も、測れたぶんを note に残す）。 */
+    /**
+     * The region means per image (the material of the discrimination; a run that fails midway still
+     * leaves what was measured in the note).
+     */
     const means = new Map<string, { near: number; far: number }>();
     const meansNote = (): string =>
       [...means]
         .map(([name, measured]) => `${name} ${measured.near.toFixed(4)}/${measured.far.toFixed(4)}`)
         .join(" / ");
-    /** sha が参照と食い違った画像（全画像の決着を積み終えてからまとめて落とす）。 */
+    /**
+     * The images whose sha disagreed with the reference (they fail together after every image's
+     * settlement is recorded).
+     */
     const mismatches: { readonly label: string; readonly settlement: ReferenceSettlement }[] = [];
     try {
       const parsed = await openDepth();
       const [outputName] = parsed.graph.outputs;
       const width = staticDim(parsed, 3);
       const height = staticDim(parsed, 2);
-      // 相対矩形も PNG も一辺だけで索く（正方でなければ黙って別の場所を測ってしまう）。
-      assertEquals(width, height, "領域の判別は正方形の地図を前提にする");
+      // The relative rectangles and the PNG both index by one side only (a non-square map would
+      // silently measure somewhere else).
+      assertEquals(width, height, "the region discrimination assumes a square map");
       const inputName = parsed.graph.inputs[0].name;
 
-      /** 画像ごとの sha の実物（判別が通ってから突き合わせる）。 */
+      /** The sha artifacts per image (compared once the discrimination passes). */
       const depths: {
         readonly caseId: string;
         readonly artifact: string;
@@ -638,12 +708,14 @@ test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
       }[] = [];
       const gpu = await acquireGpu();
       try {
-        // 深度の sha をこの機の行として書きうる経路なので、キーを採ったアダプタと
-        // 実行アダプタの同一性を先に見る（複数 GPU の機で取り違えると別の機の行になる）。
+        // This path may write the depth sha as this machine's row, so it first checks that the
+        // adapter the key was taken from is the one running (a mix-up on a multi-GPU machine
+        // would become another machine's row).
         assertAdapterMatchesEnvironment(gpu);
         const session = await parsed.createContainerSession(gpu);
         try {
-          // 4 枚を 1 Session で回す（重みは 99MB — 画像ごとに組み直す理由が無い）。
+          // The four images run on one Session (the weights are 99 MB — no reason to rebuild per
+          // image).
           for (const real of REAL_CASES) {
             const imageStarted = performance.now();
             const pixels = await preprocessImage(
@@ -657,9 +729,10 @@ test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
                 [inputName]: { dtype: "f32", shape: [1, 3, height, width], data: pixels },
               })
             )[outputName];
-            // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-            assert(output.dtype === "f32", `${real.name}: 深度の dtype が ${output.dtype}`);
-            assertEquals(output.shape, [1, height, width], `${real.name}: 深度地図の形`);
+            // Narrow by the discriminant (a cast to Float32Array would pass silently when the dtype
+            // is off).
+            assert(output.dtype === "f32", `${real.name}: the depth dtype is ${output.dtype}`);
+            assertEquals(output.shape, [1, height, width], `${real.name}: shape of the depth map`);
             const [near, far] = REAL_REGIONS[real.name];
             means.set(real.name, {
               near: regionMean(output.data, width, near),
@@ -671,7 +744,7 @@ test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
               bytes: f32ArtifactBytes(outputName, output.shape, output.data),
               elapsedMs: Math.round(performance.now() - imageStarted),
             });
-            // 目視用の PNG（min-max 正規化 → 疑似カラーの 8bit — sha の対象ではない）。
+            // The PNG for viewing (min-max normalisation → 8-bit pseudo-colour — not hashed).
             await writeFile(
               results.artifact(`${real.name}-depth.png`),
               await depthToPng(output.data, width),
@@ -686,17 +759,18 @@ test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
 
       for (const real of REAL_CASES) {
         const measured = means.get(real.name);
-        assert(measured !== undefined, `${real.name} の領域平均が無い`);
+        assert(measured !== undefined, `${real.name} has no region means`);
         const [near, far] = REAL_REGIONS[real.name];
         assert(
           measured.near > measured.far,
-          `${real.name} の近側 ${near.label} の深度平均 ${measured.near} が` +
-            ` 遠側 ${far.label} の ${measured.far} 以下 — 構図の遠近を当てられていない`,
+          `${real.name}: the near ${near.label} has mean depth ${measured.near}, which is` +
+            ` at most the far ${far.label}'s ${measured.far} — the composition's near and far are not recovered`,
         );
       }
 
-      // 判別が通った出力だけを参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばし、
-      // 実測 sha を積む — settleOrObserve）。
+      // Only outputs that passed the discrimination are compared with the reference rows (in
+      // compare mode without a row, only the comparison is skipped and the measured sha is
+      // recorded — settleOrObserve).
       for (const entry of depths) {
         const outcome = await settleOrObserve(references, results, {
           id: entry.caseId,
@@ -713,18 +787,20 @@ test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
         }
       }
     } catch (cause) {
-      // 決着を残してから落とす（領域平均が手元に無いと赤の読み解きが始められない。決着の無いまま
-      // 抜けると、同じ日の前回の走行の決着が席に居座る）。記録の I/O 失敗で元の例外を置き換えない
-      // （recordFailure）。
+      // Record the settlement before failing (without the region means at hand, reading the red
+      // cannot start; leaving without a settlement would leave the previous run of the same day's
+      // settlement in place). An I/O failure while recording does not replace the original
+      // exception (recordFailure).
       await recordFailure(results, {
         id: SERIES_NAME,
         status: "fail",
         elapsedMs: elapsedMs(),
-        note: `${meansNote()} / 失敗: ${cause instanceof Error ? cause.message : String(cause)}`,
+        note: `${meansNote()} / failure: ${cause instanceof Error ? cause.message : String(cause)}`,
       });
       throw cause;
     }
-    // sha の不一致は系列の決着にも出す（系列の行だけを読んでも赤が分かる）。
+    // sha mismatches also go into the series settlement (reading only the series row shows the
+    // red).
     await results.record({
       id: SERIES_NAME,
       status: mismatches.length === 0 ? "pass" : "fail",
@@ -732,13 +808,14 @@ test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
       note:
         mismatches.length === 0
           ? meansNote()
-          : `${meansNote()} / sha 不一致: ${mismatches.map(({ label }) => label).join(", ")}`,
+          : `${meansNote()} / sha mismatch: ${mismatches.map(({ label }) => label).join(", ")}`,
     });
     console.log(
-      `[karume] Depth Anything の深度を ${results.dir.pathname} へ書いた` +
-        "（<ケース>-depth.safetensors / -depth.png）",
+      `[karume] wrote the Depth Anything depths to ${results.dir.pathname}` +
+        " (<case>-depth.safetensors / -depth.png)",
     );
-    // 決着は画像ごと・系列ごとに積み終えている（先に投げると実測 sha が結果に残らない）。
+    // The settlements per image and per series are all recorded (throwing earlier would leave the
+    // measured sha out of the results).
     assert(
       mismatches.length === 0,
       mismatches
@@ -752,5 +829,6 @@ test.skipIf(!DISCRIMINATION_AVAILABLE || !GPU_AVAILABLE)(
 const RUNNABLE = DISCRIMINATION_AVAILABLE && GPU_AVAILABLE;
 const CASE_IDS: readonly string[] = REAL_CASES.map((entry) => entry.name);
 if (RUNNABLE) references.warnMissing(CASE_IDS);
-// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+// A guard so that "this environment has no reference value yet" is not a silent green (the same
+// approach as ADR 0005).
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

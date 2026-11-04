@@ -20,19 +20,19 @@ const minicpm5DecodeModel = () => seriesSource("minicpm5-1b-decode");
 const MINICPM5_DECODE_AVAILABLE = SERIES_CHECKS && (await exists(minicpm5DecodeModel().part0));
 if (SERIES_CHECKS && !MINICPM5_DECODE_AVAILABLE) {
   console.warn(
-    `[karume] ${minicpm5DecodeModel().part0.pathname} が無いため MiniCPM5 decode の融合ヒット数を` +
-      " SKIP する",
+    `[karume] ${minicpm5DecodeModel().part0.pathname} is missing, so the MiniCPM5 decode fusion` +
+      " hit counts are SKIPped",
   );
 }
 
 /**
- * MiniCPM5-1B decode（24 層 × q/k = 48 鎖・KV 共有なし）。gemma4 と違い**全鎖が M 非依存で
- * 適合する** — 同じ表引き RoPE でもここまで割れる、という gemma4 側の対照実証でもある
- * （片方だけ動いたら、どちらの発行形が変わったのかがこの対で割れる）。silu 24 は 24 層の
- * gate MLP。
+ * MiniCPM5-1B decode (24 layers × q/k = 48 chains, no KV sharing). Unlike gemma4, **every chain
+ * matches independently of M** — this is also the control for the gemma4 side, showing how far
+ * the same table-lookup RoPE can diverge (if only one of the two moves, the pair tells which
+ * emitted form changed). silu 24 is the gate MLP of the 24 layers.
  */
 test.skipIf(!MINICPM5_DECODE_AVAILABLE)(
-  `実資産の MiniCPM5 decode は rope 48 / silu 24 を掴む（M 非依存）${SERIES_CHECKS_OPT_IN}`,
+  `the real-asset MiniCPM5 decode catches rope 48 / silu 24 (independent of M)${SERIES_CHECKS_OPT_IN}`,
   async () => {
     const source = minicpm5DecodeModel();
     const graph = await readContainerGraph(source.part0, source.graph);

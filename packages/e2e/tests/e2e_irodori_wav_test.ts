@@ -1,65 +1,73 @@
 /**
- * Irodori の **WAV sha256 門**（実 GPU）。配布形 → `Pipeline.fromAssets` → `generate` →
- * `encodeWav` まで通し、出力 WAV の sha256 が参照値と**ビット一致**するかだけを見る
- * （SBV2 の `e2e_sbv2_wav_test.ts` / Anima の PNG 門と同じ哲学の Irodori 版）。
+ * Irodori's **WAV sha256 check** (real GPU). It goes all the way from the distribution through
+ * `Pipeline.fromAssets` → `generate` → `encodeWav` and looks only at whether the output WAV's
+ * sha256 is **bit-identical** to the reference value (Irodori's version of the same philosophy as
+ * SBV2's `e2e_sbv2_wav_test.ts` / Anima's PNG check).
  *
- * ## 既存の Irodori 門との分担（役割が違うので併存する）
+ * ## Split with the existing Irodori checks (they coexist because their roles differ)
  *
- * - latent 門（`e2e_irodori_latent_test.ts`）— **上流との一致**を見る。golden の初期ノイズを
- *   注入して z を tolerance 付きで突き合わせ、S と forward 数だけを完全一致で縛る。torch と
- *   WGSL の縮約順序差が構造的に残るので、そもそもビット一致は原理的に出ない。
- * - タイル同値門（`e2e_irodori_codec_test.ts`）— decode の**性能ノブが出力を変えない**こと。
- * - 参照前処理 parity 門（`e2e_irodori_reference_test.ts`）— 参照音声 → latent の鎖と上流の一致。
- * - **この門** — 上流は一切見ない。テキストから波形までの鎖ぜんぶ（内部 `Randn` の乱数列 /
- *   duration の S 決定 / Euler + CFG / 末尾トリム / codec タイル decode / 秒切り出し /
- *   `encodeWav` の量子化）を、**この実行環境での回帰検出器として 1 ビットで**縛る。上の 3 門が
- *   全部緑でも、ホストのグルー 1 行が変われば波形は動く — それを掴む最終門。
+ * - The latent check (`e2e_irodori_latent_test.ts`) — looks at **agreement with upstream**. It
+ *   injects the golden's initial noise, compares z within a tolerance, and pins only S and the
+ *   forward count exactly. The difference in reduction order between torch and WGSL remains
+ *   structurally, so bit identity is impossible in principle there.
+ * - The tile-equivalence check (`e2e_irodori_codec_test.ts`) — that decode's **performance knobs
+ *   do not change the output**.
+ * - The reference-preprocessing parity check (`e2e_irodori_reference_test.ts`) — agreement of the
+ *   reference audio → latent chain with upstream.
+ * - **This check** — does not look at upstream at all. It pins the whole chain from text to
+ *   waveform (the internal `Randn` random sequence / the duration's choice of S / Euler + CFG /
+ *   the tail trim / codec tile decode / the cut to seconds / `encodeWav`'s quantization) **to one
+ *   bit, as a regression detector in this execution environment**. Even with the 3 checks above
+ *   all green, one changed line of host glue moves the waveform — this is the final check that
+ *   catches it.
  *
- * ## MUST: 割れたら tolerance 化せず、原因を特定してから digest を更新する
+ * ## MUST: when it breaks, do not switch to a tolerance; find the cause before updating the digest
  *
- * 数値が 1 bit でも動いたら鎖のどこかが変わっている。**tolerance 化は禁止**で、赤のまま
- * 止めて差分（WAV バイト長 / サンプル数 / S / forward 数 / 実効ノブ / 先頭差分位置 / 実物の
- * WAV）を出す。
+ * If a value moves by even one bit, something in the chain changed. **Switching to a tolerance is
+ * forbidden**: stop red and print the differences (WAV byte length / sample count / S / forward
+ * count / effective knobs / first differing position / the WAV itself).
  *
- * ## 参照 digest は環境ごとの行で持つ（クロスデバイスのビット同一は保証しない）
+ * ## The reference digests are rows per environment (no bit identity across devices is promised)
  *
- * 参照値は `fixtures/references/irodori.json` に**環境キーごとの行**で入っている
- * （`helpers/reference.ts`）。この門が主張できるのは「その機で数値が動いていない」ことだけで、
- * 他バックエンド（Metal 等）で一致しないのは仕様 — その機序と別バックエンドでの健全性検証の
- * 作法（自己 A/B）は [limitations](../../../docs/limitations.md) の「sha256 参照門は参照環境
- * 専用」節にある。RTX 3080 Ti の行は 2026-08-12 に実測し、**別プロセスで 2 回**焼いて一致を
- * 確認したもの。
+ * The reference values are in `fixtures/references/irodori.json` as **rows per environment key**
+ * (`helpers/reference.ts`). All this check can claim is "the values did not move on that machine";
+ * not matching on other backends (Metal etc.) is by design — the mechanism and how to check
+ * soundness on another backend (self A/B) are in the "sha256 reference checks are specific to the
+ * reference environment" section of [limitations](../../../docs/limitations.md). The RTX 3080 Ti
+ * row was measured on 2026-08-12 and confirmed by baking it **twice in separate processes**.
  *
- * - **他の機の行を足す**のは `KARUME_REFERENCE=write`（既存の行には触らない）。
- * - **自分の機の行を焼き直す**のは `KARUME_REFERENCE=rewrite` だけで、「何が変わったのか」を
- *   先に言えたときに限る（旧→新はログに出る）。他環境の行は巻き込まない。
- * - 参照値を持たない機ではそのケースを**明示 SKIP** し、参照門（このファイルの末尾）が
- *   「参照が無いので全 SKIP」を赤で知らせる。
- * - 焼き直した後は**別プロセスで 2 回**走らせて一致を確認し、何が変わったのかをコミット
- *   メッセージに書く。
+ * - **Adding another machine's row** is `KARUME_REFERENCE=write` (existing rows are not touched).
+ * - **Re-baking your own machine's row** is `KARUME_REFERENCE=rewrite` only, and only once you can
+ *   say "what changed" first (old → new goes to the log). Other environments' rows are left alone.
+ * - On a machine with no reference value the case **SKIPs explicitly**, and the reference gate (at
+ *   the end of this file) reports "all SKIP for lack of references" in red.
+ * - After re-baking, run it **twice in separate processes** to confirm agreement, and write what
+ *   changed in the commit message.
  *
- * ## ケース 2 本
+ * ## Two cases
  *
- * - **voice-clone** — 参照音声 + caption 付き。`{ audio }` 経路（120 秒切り詰め → LUFS −16 →
- *   reflect pad → `codec_encoder`）を含む正本ケースで、CFG 3 本が立つ（100 forward / S 170 /
- *   6.80 秒の波形）。生成 + WAV 化に **13.5 秒**（参照環境・2026-08-12）。
- * - **no-ref** — 参照なし / caption なし。speaker のゼロ短絡と caption の CFG off が効く経路
- *   （60 forward / S 116 / 4.64 秒の波形）。**7.6 秒**。
+ * - **voice-clone** — with reference audio + caption. The canonical case, including the
+ *   `{ audio }` path (truncation to 120 s → LUFS −16 → reflect pad → `codec_encoder`), with all 3
+ *   CFG branches active (100 forwards / S 170 / a 6.80 s waveform). Generation + WAV encoding take
+ *   **13.5 s** (reference environment, 2026-08-12).
+ * - **no-ref** — no reference / no caption. The path where the speaker's zero short-circuit and the
+ *   caption's CFG off take effect (60 forwards / S 116 / a 4.64 s waveform). **7.6 s**.
  *
- * テスト 1 本ぶんの実時間は約 25 秒 — 上の 21 秒に、3.3GB の配布形を読んで `openContainer` する
- * ぶんが乗る（2 ケースは 1 本のパイプラインを共有してこれを 1 回に抑えている）。
+ * One test takes about 25 s of wall time — the 21 s above plus reading the 3.3 GB distribution and
+ * `openContainer` (the 2 cases share one pipeline to keep that to once).
  *
- * どちらも `initialNoise` は渡さない — 内部 `Randn` の決定論ごと縛るのがこの門の役目
- * （golden ノイズを注入する latent 門との一番の違い）。ノブも 1 つも渡さないので、実効値は
- * 配布形の `pipelineConfig` がそのまま（{@link REFERENCE_KNOBS} で drift を先に検査する）。
+ * Neither passes `initialNoise` — pinning the determinism of the internal `Randn` is this check's
+ * job (the main difference from the latent check, which injects the golden noise). No knob is
+ * passed either, so the effective values are the distribution's `pipelineConfig` as is (drift is
+ * checked first with {@link REFERENCE_KNOBS}).
  *
- * MUST: 資産は配布形 `models/karume-irodori-v4-small/` と参照音声
- * `inputs/irodori/v4-small/samples/clone_ref1.wav`（どちらも untracked・実 GPU 機のローカル
- * 資産）。欠けた環境と GPU 無し環境は理由を出して**明示 SKIP** する（テストを消して無音で
- * 緑にしない — ADR 0005）。
+ * MUST: the assets are the distribution `models/karume-irodori-v4-small/` and the reference audio
+ * `inputs/irodori/v4-small/samples/clone_ref1.wav` (both untracked, local assets of a real-GPU
+ * machine). Environments missing them and environments without a GPU **SKIP explicitly** with a
+ * reason (no deleting tests to go silently green — ADR 0005).
  *
- * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
- * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
+ * NOTE: only the tests use `Deno.readFile` for local reads. The package itself uses Web standard
+ * APIs only (a cross-cutting invariant), and `fromAssets` is a surface that only takes bytes.
  */
 
 import { readFile, writeFile } from "@karume/test-support/fs";
@@ -95,53 +103,63 @@ import {
   readTextIfPresent,
 } from "../../models/tests/helpers/read-if-present.ts";
 
-/** 配布形の置き場（`karume dist --pipeline irodori` の既定の出力先）。 */
+/** Where the distribution is (the default output of `karume dist --pipeline irodori`). */
 const ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import.meta.url);
-/** 参照音声（手置きの実資産 — 48kHz mono PCM16）。 */
+/** The reference audio (a hand-placed real asset — 48 kHz mono PCM16). */
 const REFERENCE_AUDIO = new URL(
   "../../../inputs/irodori/v4-small/samples/clone_ref1.wav",
   import.meta.url,
 );
-/** 参照 digest の席（環境キーごとの行 — 追跡対象）。 */
+/** Where the reference digests live (rows per environment key — tracked). */
 const references = openReferences(
   new URL("../../models/tests/fixtures/references/irodori.json", import.meta.url),
 );
-/** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_irodori/` — 消して安全）。 */
+/**
+ * Where the artifacts and verdicts go (`outputs/verify/<environment key>/<date>_irodori/` — safe to
+ * delete).
+ */
 const results = openResults("irodori");
 
-/** SKIP 時にそのまま貼れる生成コマンド。 */
+/** The generation command, ready to paste on a SKIP. */
 const DIST_COMMAND = "cd tools/exporter && uv run karume dist --pipeline irodori";
 
 const MODEL = "v4-small";
 const QUANT = "f32";
 
-/** `encodeWav` が書く RIFF ヘッダ長（先頭差分の位置をサンプル番号へ直すのに要る）。 */
+/**
+ * The length of the RIFF header `encodeWav` writes (needed to turn the first differing position
+ * into a sample index).
+ */
 const HEADER_BYTES = 44;
 
-/** 門 1 本ぶんの条件と参照値。 */
+/** The conditions and reference value of one check. */
 type WavCase = {
   readonly name: string;
-  /** ステップ名に出す「この 1 本で何を通しているか」。 */
+  /** "What this one exercises", shown in the step name. */
   readonly why: string;
   readonly text: string;
   readonly caption?: string;
-  /** 参照音声を `{ audio }` で渡すか（wav 経路 = LUFS 正規化 + `codec_encoder` を含めるか）。 */
+  /**
+   * Whether the reference audio is passed as `{ audio }` (whether the wav path = LUFS
+   * normalization + `codec_encoder` is included).
+   */
   readonly withReference: boolean;
   readonly seed: number;
 };
 
 /**
- * ケース 2 本。テキストと caption は full-loop golden の `meta.json` から借りている（同じ文で
- * 比べられるほうが、割れたときに latent 門の実測と突き合わせやすい）。ただし**この門は golden
- * を読まない** — 参照 digest は波形まで通した実測で、golden の生成条件とは独立に閉じる。
+ * Two cases. The text and caption are borrowed from the full-loop golden's `meta.json` (comparing
+ * the same sentences makes it easier to line up with the latent check's measurements when one
+ * breaks). But **this check does not read the golden** — the reference digest is a measurement
+ * taken all the way to the waveform, closed independently of the golden's generation conditions.
  *
- * `name` はそのまま参照値のケース ID（`fixtures/references/irodori.json` の鍵）であり、実物の
- * ファイル名でもある。
+ * `name` is the reference value's case ID as is (the key in `fixtures/references/irodori.json`), and
+ * also the artifact's file name.
  */
 const CASES: readonly WavCase[] = [
   {
     name: "voice-clone",
-    why: "参照音声 + caption あり（wav 経路 = LUFS 正規化 + codec_encoder 込み・CFG 3 本）",
+    why: "reference audio + caption (wav path = LUFS normalization + codec_encoder, 3 CFG branches)",
     text: "今日は近くの店まで歩いて行きました。とても良い天気でしたね。",
     caption:
       "若く元気な女性の声。カフェの店員のように、明るくハキハキとした少し高めのトーンで話している。",
@@ -150,7 +168,7 @@ const CASES: readonly WavCase[] = [
   },
   {
     name: "no-ref",
-    why: "参照なし / caption なし（speaker のゼロ短絡と caption の CFG off が効く経路）",
+    why: "no reference / no caption (the path where the speaker's zero short-circuit and the caption's CFG off take effect)",
     text: "本日はお越しいただき、誠にありがとうございます。",
     withReference: false,
     seed: 1235,
@@ -158,10 +176,12 @@ const CASES: readonly WavCase[] = [
 ];
 
 /**
- * 参照 digest を焼いたときの実効ノブ（配布形の `pipelineConfig` と一致するはず）。
+ * The effective knobs when the reference digests were baked (they should match the
+ * distribution's `pipelineConfig`).
  *
- * 波形を決める数だけを写す — サンプラ（`steps` / `initScale` / CFG の強さと区間）と、latent →
- * 波形の幾何（`frameRate` / `sampleRate` / `hopLength` / `codecHaloFrames`）。
+ * Only the numbers that decide the waveform are copied — the sampler (`steps` / `initScale` / CFG
+ * strength and interval) and the latent → waveform geometry (`frameRate` / `sampleRate` /
+ * `hopLength` / `codecHaloFrames`).
  */
 const REFERENCE_KNOBS = {
   steps: 40,
@@ -182,20 +202,21 @@ const referenceBytes = await readFileIfPresent(REFERENCE_AUDIO);
 const ASSETS_AVAILABLE = manifestText !== undefined && referenceBytes !== undefined;
 if (!ASSETS_AVAILABLE) {
   console.warn(
-    `[karume] Irodori の WAV sha256 門を SKIP する（配布形 ${ASSETS_DIR.pathname} と参照音声 ` +
-      `${REFERENCE_AUDIO.pathname} の両方が要る）。` +
+    `[karume] skipping Irodori's WAV sha256 check (it needs both the distribution ${ASSETS_DIR.pathname} and the reference audio ` +
+      `${REFERENCE_AUDIO.pathname}). ` +
       (manifestText === undefined
-        ? `生成: ${DIST_COMMAND}`
-        : "参照音声は手置きの実資産（docs/assets-layout.md の inputs 根）"),
+        ? `Generate: ${DIST_COMMAND}`
+        : "The reference audio is a hand-placed real asset (the inputs root of docs/assets-layout.md)"),
   );
 }
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 
-/** この門が持つケース ID 全部（登録時の警告と参照門が見る）。 */
+/** Every case ID of this check (seen by the registration warning and the reference gate). */
 const CASE_IDS: readonly string[] = CASES.map((item) => item.name);
 
-// この環境の参照値が無いケースは明示 SKIP する（作り方は警告が言う）。
+// Cases without a reference value for this environment SKIP explicitly (the warning says how to
+// make one).
 if (RUNNABLE) references.warnMissing(CASE_IDS);
 
 const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
@@ -208,13 +229,16 @@ const readManifest = (): Manifest => parseManifest(manifestText as string);
 const modelEntry = (manifest: Manifest): ModelEntry => {
   if (!Object.hasOwn(manifest.models, MODEL)) {
     throw new Error(
-      `配布形に model '${MODEL}' が無い（あるもの: ${manifest.available.models.join(" / ")}）`,
+      `the distribution has no model '${MODEL}' (present: ${manifest.available.models.join(" / ")})`,
     );
   }
   return manifest.models[MODEL];
 };
 
-/** 配布形が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない）。 */
+/**
+ * Reads the assets the distribution requires from local files (a local version of `fetchAssets` —
+ * it bypasses the fetch layer).
+ */
 const loadLocalAssets = async (
   manifest: Manifest,
 ): Promise<Record<string, Uint8Array<ArrayBuffer>>> => {
@@ -227,7 +251,8 @@ const loadLocalAssets = async (
     if (cached === undefined) byPath.set(ref.path, bytes);
     assets = { ...assets, [key]: bytes };
   };
-  // MUST: 長さ 0 の part も並べる（添字が容器の中の id — 飛ばすと以降が 1 つずつ繰り上がる）。
+  // MUST: zero-length parts are listed too (the index is the id inside the container — skipping
+  // one would shift every later one up by one).
   for (const name of Object.keys(selection.containers)) {
     const { parts } = selection.containers[name];
     for (const [index, ref] of parts.entries()) await read(`${name}[${index}]`, ref);
@@ -237,9 +262,11 @@ const loadLocalAssets = async (
 };
 
 /**
- * 門の**前提**を検査する（門そのものではない）。参照 digest は配布形の宣言どおりのノブで
- * 焼かれているので、宣言が動いた配布形に対しては「sha256 が違う」ではなく「条件が違う」と
- * 言って落とす（配布形を焼き直して digest が割れたとき、原因が資産側か実装側かを先に言う）。
+ * Checks the check's **preconditions** (not the check itself). The reference digests were baked
+ * with the knobs as the distribution declares them, so a distribution whose declaration moved
+ * fails with "the conditions differ" rather than "the sha256 differs" (when a re-baked distribution
+ * breaks the digest, it says first whether the cause is on the asset side or the implementation
+ * side).
  */
 const assertReferenceKnobs = (entry: ModelEntry): IrodoriPipelineConfig => {
   const config = parseIrodoriPipelineConfig(entry.pipelineConfig);
@@ -260,18 +287,21 @@ const assertReferenceKnobs = (entry: ModelEntry): IrodoriPipelineConfig => {
   check("codecHaloFrames", REFERENCE_KNOBS.codecHaloFrames, config.codecHaloFrames);
   if (drifted.length > 0) {
     throw new Error(
-      `配布形の pipelineConfig が参照 digest の生成条件と違う: ${drifted.join(" / ")}\n` +
-        "（門の前提が崩れている — 参照 sha256 を差し替えるのではなく、条件が変わった理由を先に確かめる）",
+      `the distribution's pipelineConfig differs from the reference digests' generation conditions: ${drifted.join(" / ")}\n` +
+        "(the check's preconditions broke — find out why the conditions changed first, instead of replacing the reference sha256)",
     );
   }
   return config;
 };
 
-/** 実効ノブの 1 行表示（突合が割れたときに「何を焼いたか」を報告へ残す）。 */
+/**
+ * A one-line rendering of the effective knobs (keeps "what was baked" in the report when the
+ * comparison breaks).
+ */
 const describeKnobs = (item: WavCase, config: IrodoriPipelineConfig): string =>
   `model ${MODEL} / quant ${QUANT} / seed ${item.seed} / text ${JSON.stringify(item.text)} / ` +
-  `caption ${JSON.stringify(item.caption ?? "")} / 参照音声 ${
-    item.withReference ? "あり" : "なし"
+  `caption ${JSON.stringify(item.caption ?? "")} / reference audio ${
+    item.withReference ? "yes" : "no"
   } / ` +
   `steps ${config.steps} / initScale ${config.initScale} / ` +
   `cfg ${config.cfgScales.text}/${config.cfgScales.speaker}/${config.cfgScales.caption} ` +
@@ -279,17 +309,19 @@ const describeKnobs = (item: WavCase, config: IrodoriPipelineConfig): string =>
   `${config.sampleRate}Hz / hop ${config.hopLength} / halo ${config.codecHaloFrames}`;
 
 /**
- * 参照 WAV の**実体**があれば置かれている場所（任意）。実物は走行のたびに結果の席へ残るので、
- * 突き合わせたい走行の WAV を `<ケース>-reference.wav` という名前で同じ席へ置けば、次の走行が
- * 先頭差分位置まで出す。門は sha256 だけで閉じており、ここは**その材料**でしかない。
+ * Where the reference WAV **file** is placed, if present (optional). Every run leaves its artifact
+ * in the results slot, so placing the WAV of the run to compare against in the same slot as
+ * `<case>-reference.wav` makes the next run print the first differing position too. The check is
+ * closed by the sha256 alone; this is only **material for it**.
  */
 const referenceWavPath = (item: WavCase): URL => results.artifact(`${item.name}-reference.wav`);
 
 /**
- * 参照 WAV の実体が手元にあれば**先頭差分位置と近傍値**まで出す。
+ * If the reference WAV file is at hand, prints **the first differing position and the
+ * neighbouring values** too.
  *
- * MUST: 実体の sha256 を確かめてから使う — 別の条件で焼かれた WAV を参照として差分を出すと、
- * 診断そのものが嘘になる。
+ * MUST: check the file's sha256 before using it — diffing against a WAV baked under other
+ * conditions would make the diagnosis itself a lie.
  */
 const describeFirstDifference = async (
   item: WavCase,
@@ -299,20 +331,20 @@ const describeFirstDifference = async (
   const path = referenceWavPath(item);
   const reference = await readFileIfPresent(path);
   if (reference === undefined) {
-    return `参照 WAV の実体が無い（${path.pathname}）— 先頭差分位置は出せない`;
+    return `no reference WAV file (${path.pathname}) — the first differing position cannot be shown`;
   }
   const sha = await sha256Hex(reference);
   if (sha !== expected) {
-    return `${path.pathname} は参照 WAV ではない（sha256 ${sha}）— 先頭差分位置は出せない`;
+    return `${path.pathname} is not the reference WAV (sha256 ${sha}) — the first differing position cannot be shown`;
   }
   const shared = Math.min(reference.length, actual.length);
   let at = 0;
   while (at < shared && reference[at] === actual[at]) at += 1;
   if (at === shared) {
-    return `先頭 ${shared} バイトは一致（長さだけが違う: 参照 ${reference.length} / 実測 ${actual.length}）`;
+    return `the first ${shared} bytes match (only the length differs: reference ${reference.length} / measured ${actual.length})`;
   }
   if (at < HEADER_BYTES) {
-    return `先頭差分は RIFF ヘッダ内（オフセット ${at}）: バイト ${reference[at]} → ${actual[at]}`;
+    return `the first difference is inside the RIFF header (offset ${at}): byte ${reference[at]} → ${actual[at]}`;
   }
   const i16 = (bytes: Uint8Array<ArrayBuffer>, sample: number): number =>
     new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getInt16(
@@ -327,14 +359,14 @@ const describeFirstDifference = async (
       `${index === sample ? "*" : ""}${index} ${i16(reference, index)} → ${i16(actual, index)}`,
     );
   }
-  return `先頭差分は サンプル ${sample}（オフセット ${at}）/ 近傍 i16 ${neighbours.join(" , ")}`;
+  return `the first difference is at sample ${sample} (offset ${at}) / neighbouring i16 ${neighbours.join(" , ")}`;
 };
 
 /**
- * 参照 sha と食い違ったときの報告。
+ * The report when the reference sha disagrees.
  *
- * MUST: ここで tolerance に逃げない。実物は結果の席（`outputs/verify/...`）に残っているので、
- * 人が聴き比べ・突き合わせできる形になっている。
+ * MUST: do not escape into a tolerance here. The artifact stays in the results slot
+ * (`outputs/verify/...`), in a form a person can listen to and compare.
  */
 const mismatchReport = async (
   item: WavCase,
@@ -345,39 +377,45 @@ const mismatchReport = async (
   actual: string,
   dumped: URL,
 ): Promise<string> =>
-  `${item.name}: 出力 WAV の sha256 が参照と一致しない\n` +
-  `  期待 ${expected}\n  実際 ${actual}\n` +
-  `  WAV ${wav.length} バイト / サンプル ${audio.data.length} / ${audio.sampleRate}Hz / ` +
+  `${item.name}: the output WAV's sha256 does not match the reference\n` +
+  `  expected ${expected}\n  actual ${actual}\n` +
+  `  WAV ${wav.length} bytes / samples ${audio.data.length} / ${audio.sampleRate}Hz / ` +
   `${(audio.data.length / audio.sampleRate).toFixed(3)}s / S ${audio.frames} / ` +
   `forwards ${audio.forwards}\n` +
-  `  実効ノブ ${describeKnobs(item, config)}\n` +
+  `  effective knobs ${describeKnobs(item, config)}\n` +
   `  ${await describeFirstDifference(item, expected, wav)}\n` +
-  `  実物 ${dumped.pathname}`;
+  `  artifact ${dumped.pathname}`;
 
 /**
- * 1 ケースを生成して digest を突き合わせる。
+ * Generates one case and compares its digest.
  *
- * `onEvent` を渡した呼びも**同じ参照値**（= 同じケース ID の行）で突き合わせる — 観測席が
- * 数値に 1 ビットも触っていないこと、そして常駐経路 / ホスト経路の出力が同一であることの
- * 直接証拠になる（下の onEvent 門）。結果 JSON では別のケースとして残す。
+ * A call with `onEvent` is also compared against **the same reference value** (= the row of the
+ * same case ID) — direct evidence that the observation hook does not touch a single bit of the
+ * values, and that the resident path and the host path give identical output (the onEvent check
+ * below). The results JSON keeps it as a separate case.
  *
- * MUST: 経路間のビット同一は**実測どうし**で突き合わせる（ADR 0106 決定 6 と同じ形）。
- * 共有する参照行だけに頼ると、`KARUME_REFERENCE=rewrite` の走行では通常経路の実測で行を
- * 焼き直してから `onEvent` 経路の実測で同じ行を上書きするだけになり、A≠B でも緑で終わる。
+ * MUST: bit identity between the paths is compared **measurement against measurement** (the same
+ * form as ADR 0106 decision 6). Relying only on the shared reference row, a
+ * `KARUME_REFERENCE=rewrite` run would just re-bake the row from the plain path's measurement and
+ * then overwrite the same row with the `onEvent` path's measurement, ending green even with A≠B.
  */
 const runCase = async (
   pipeline: Pipeline,
   config: IrodoriPipelineConfig,
   item: WavCase,
   reference: DecodedWav,
-  /** 観測席（`onEvent`）の呼びだけが持つ席。`twinSha` は通常経路の**実測** sha。 */
+  /**
+   * Present only on a call with the observation hook (`onEvent`). `twinSha` is the plain path's
+   * **measured** sha.
+   */
   observed?: {
     readonly onEvent: (event: GenerateEvent) => void;
     readonly twinSha: string;
   },
 ): Promise<{ readonly audio: GeneratedAudio; readonly sha: string }> => {
   const onEvent = observed?.onEvent;
-  // `initialNoise` もノブも渡さない — 内部 `Randn` と `pipelineConfig` の既定ごと縛る。
+  // Pass neither `initialNoise` nor knobs — pin the internal `Randn` and the `pipelineConfig`
+  // defaults as well.
   const request: GenerateRequest = {
     text: item.text,
     ...(item.caption === undefined ? {} : { caption: item.caption }),
@@ -391,7 +429,8 @@ const runCase = async (
   const actual = await sha256Hex(wav);
   const elapsedMs = performance.now() - started;
   const resultId = onEvent === undefined ? item.name : `${item.name}-onEvent`;
-  // 実物は成功・失敗を問わず毎回残す（次に割れたときの A/B の材料は、割れる前に要る）。
+  // Keep the artifact every time, pass or fail (the A/B material for the next break is needed
+  // before it breaks).
   const dumped = results.artifact(`${resultId}.wav`);
   await writeFile(dumped, wav);
   console.log(
@@ -401,11 +440,12 @@ const runCase = async (
       `forwards ${audio.forwards} / WAV ${wav.length}B / ` +
       `${(audio.data.length / audio.sampleRate).toFixed(2)}s / sha256 ${actual}`,
   );
-  // 経路間ビット同一（MUST）の判定は参照行を経由せず、通常経路の実測と直に比べる。
+  // The bit-identity decision between paths (MUST) does not go through the reference row; it
+  // compares directly with the plain path's measurement.
   const twinMismatch =
     observed !== undefined && observed.twinSha !== actual
-      ? `通常経路の WAV とビット同一でない（通常 ${observed.twinSha} / onEvent ${actual}）— ` +
-        "観測席が数値に触っているか、ホスト経路と常駐経路の出力が割れている"
+      ? `not bit-identical to the plain path's WAV (plain ${observed.twinSha} / onEvent ${actual}) — ` +
+        "the observation hook touches the values, or the host path and the resident path diverge"
       : undefined;
   const check = references.check(item.name, actual);
   announceCheck(item.name, check, actual);
@@ -427,33 +467,39 @@ const runCase = async (
 };
 
 describe.skipIf(!RUNNABLE)(
-  `e2e(実GPU): 配布形 ${MODEL} / quant ${QUANT} の WAV が参照 sha256 と一致する`,
+  `e2e (real GPU): the WAV of distribution ${MODEL} / quant ${QUANT} matches the reference sha256`,
   () => {
     let config: IrodoriPipelineConfig;
     let reference: DecodedWav;
-    // run 1 回ごとの観測。`lastRun`（アリーナ実績）の有無が「ホスト経路か常駐経路か」の
-    // **独立な証拠**になる — 常駐経路の `enqueue` はアリーナも計測窓も作らないので undefined。
+    // Observations per run. Whether `lastRun` (the arena record) is present is **independent
+    // evidence** of "host path or resident path" — the resident path's `enqueue` creates neither
+    // an arena nor a timing window, so it is undefined.
     const runs: { component: RunComponent; hasArena: boolean }[] = [];
-    // 3.3GB の資産を 2 度読まないよう、全ケースは 1 本のパイプラインを共有する。
+    // All cases share one pipeline so the 3.3 GB of assets are not read twice.
     let pipeline: Pipeline | undefined;
-    /** 通常経路の実測 sha（onEvent 経路との経路間ビット同一を、参照行を経由せずに見る相手）。 */
+    /**
+     * The plain path's measured sha (what the onEvent path's bit identity between paths is
+     * compared with, without going through the reference row).
+     */
     const plainSha = new Map<string, string>();
 
     // The its below run only after beforeAll succeeded; this narrows the shared pipeline.
     const opened = (): Pipeline => {
-      assert(pipeline !== undefined, "パイプラインが開いていない（beforeAll が失敗している）");
+      assert(pipeline !== undefined, "the pipeline is not open (beforeAll failed)");
       return pipeline;
     };
 
     beforeAll(async () => {
-      // 参照値を書きうる走行なので、キーを採ったアダプタと実行アダプタの同一性を先に見る。
+      // This run may write reference values, so first check that the adapter the key was taken
+      // from is the one running.
       await assertRunningAdapter();
       const manifest = readManifest();
-      // 門の前提を先に見る（実効ノブが動いていたら、生成する前に「条件が違う」と言う）。
+      // Check the preconditions first (if the effective knobs moved, say "the conditions differ"
+      // before generating).
       config = assertReferenceKnobs(modelEntry(manifest));
       const assets = await loadLocalAssets(manifest);
-      // 参照音声は 48kHz mono PCM16。周波数が配布形と違えば `generate` が fail loudly（リサンプル
-      // は持たない）ので、ここでは読むだけにする。
+      // The reference audio is 48 kHz mono PCM16. If its rate differs from the distribution,
+      // `generate` fails loudly (there is no resampling), so it is only read here.
       reference = decodeWav(referenceBytes as Uint8Array<ArrayBuffer>);
       pipeline = await Pipeline.fromAssets(
         { manifest, assets },
@@ -465,32 +511,36 @@ describe.skipIf(!RUNNABLE)(
         },
       );
     });
-    // [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+    // This also intends to check the release through [Symbol.asyncDispose] on this real-GPU path.
     // (Formerly `await using` around the body: it still runs after the last it has called dispose().)
     afterAll(() => pipeline?.[Symbol.asyncDispose]());
 
     for (const item of CASES) {
-      // この環境の参照値が無く、作るモードでもないケースは明示 SKIP する
-      // （理由と作り方は登録時の警告に出ている）。
+      // A case with no reference value for this environment, and not in a mode that makes one,
+      // SKIPs explicitly (the reason and how to make one are in the registration warning).
       it.skipIf(references.lacksReference(item.name))(`${item.name}: ${item.why}`, async () => {
         plainSha.set(item.name, (await runCase(opened(), config, item, reference)).sha);
       });
     }
 
-    // --- onEvent（生成イベントの観測席）------------------------------------
+    // --- onEvent (the observation hook for generation events) ----------------
     //
-    // 押さえるのは 4 点:
-    //  ① `onEvent` を渡すと DiT ループが**ホスト経路**へ切り替わる（常駐経路は 1 batch +
-    //     単一フェンスで途中を観測できない — ADR 0054）。証拠は診断側の `lastRun` の有無で、
-    //     イベントが届いたこと自体とは独立に採る。
-    //  ② それでも **WAV の sha256 は上の voice-clone と同じ値**（2 経路ビット同一の MUST が
-    //     公開 API から観測できる唯一の場所）。購読側は毎 step 写しを NaN で壊してすらいる。
-    //  ③ `denoise-step` は **step 単位**で `config.steps` 回（CFG の内側の forward 数ではない）。
-    //  ④ コールバックの throw が生成ごと落とす（step 粒度の中断手段）。
+    // Four points are pinned:
+    //  ① Passing `onEvent` switches the DiT loop to the **host path** (the resident path is one
+    //     batch + a single fence and cannot be observed midway — ADR 0054). The evidence is
+    //     whether the diagnostics have `lastRun`, taken independently of the events arriving.
+    //  ② Even so, **the WAV's sha256 is the same value as voice-clone above** (the only place
+    //     where the MUST of bit identity between the 2 paths is observable from the public API).
+    //     The subscriber even destroys its copy with NaN on every step.
+    //  ③ `denoise-step` fires `config.steps` times, **per step** (not the forward count inside
+    //     CFG).
+    //  ④ A throw from the callback takes the whole generation down (the means of aborting at step
+    //     granularity).
     const withEvents = CASES[0];
-    // sha の同一性がこの段の主張の半分なので、参照値が無い環境では丸ごと SKIP する。
+    // The sha identity is half of this stage's claim, so it SKIPs as a whole where there is no
+    // reference value.
     it.skipIf(references.lacksReference(withEvents.name))(
-      `onEvent: ホスト経路でも WAV sha が同一（step ${REFERENCE_KNOBS.steps} 回の発火）`,
+      `onEvent: the WAV sha is identical on the host path too (${REFERENCE_KNOBS.steps} step events)`,
       async () => {
         const log: string[] = [];
         const shapes = new Set<string>();
@@ -501,7 +551,7 @@ describe.skipIf(!RUNNABLE)(
         const twinSha = plainSha.get(withEvents.name);
         assert(
           twinSha !== undefined,
-          `通常経路の実測 sha が無い（${withEvents.name} の step が走っていない）`,
+          `no measured sha of the plain path (the ${withEvents.name} step did not run)`,
         );
         const { audio } = await runCase(opened(), config, withEvents, reference, {
           twinSha,
@@ -514,8 +564,9 @@ describe.skipIf(!RUNNABLE)(
             const snapshot = event.copyLatents();
             shapes.add(snapshot.shape.join("x"));
             lengths.add(snapshot.data.length);
-            // 写しを壊す。内部配列を渡していたら以後の step が NaN 汚染され、WAV sha が割れる
-            // （波形の非有限検査が先に落とす）。
+            // Destroy the copy. Had the internal array been handed out, later steps would be
+            // contaminated with NaN and the WAV sha would break (the waveform's non-finite check
+            // would fail first).
             snapshot.data.fill(Number.NaN);
             if (event.step === 1) {
               firstStep = event.copyLatents;
@@ -524,15 +575,16 @@ describe.skipIf(!RUNNABLE)(
           },
         });
 
-        // ① ホスト経路の証拠（dit の run が全てアリーナを通っている = `enqueue` ではない）。
+        // ① Evidence of the host path (every dit run goes through an arena = not `enqueue`).
         const ditRuns = runs.slice(before).filter((run) => run.component === "dit");
-        assertEquals(ditRuns.length, audio.forwards, "dit の run 数と forwards が合わない");
+        assertEquals(ditRuns.length, audio.forwards, "the dit run count does not match forwards");
         assertFalse(
           ditRuns.some((run) => !run.hasArena),
-          "dit の run に lastRun が無い = 常駐経路のまま（onEvent でホスト経路へ切り替わっていない）",
+          "a dit run has no lastRun = still the resident path (onEvent did not switch to the host path)",
         );
 
-        // ③ イベント列が実行構造と完全一致する（段の前後 + step 単位の発火）。
+        // ③ The event sequence matches the execution structure exactly (around each stage + one
+        // event per step).
         const schedule = tSchedule(config.steps, config.initScale);
         assertEquals(
           log,
@@ -549,7 +601,8 @@ describe.skipIf(!RUNNABLE)(
             "stage:speaker:end",
             "stage:duration:start",
             "stage:duration:end",
-            // 段 6'（条件側 K/V 射影 — ADR 0114）は生成 1 回だけ、`dit` の段の前で開いて閉じる。
+            // Stage 6' (the condition-side K/V projection — ADR 0114) opens and closes only once
+            // per generation, before the `dit` stage.
             "stage:dit-context:start",
             "stage:dit-context:end",
             "stage:dit:start",
@@ -561,28 +614,29 @@ describe.skipIf(!RUNNABLE)(
             "stage:codec-decoder:start",
             "stage:codec-decoder:end",
           ],
-          "イベント列が実行構造と合わない（段の前後 / step 数 / t の値）",
+          "the event sequence does not match the execution structure (around stages / step count / t values)",
         );
-        // CFG の内側は 1 step で 3 forward 走る — 発火は step 単位であって forward 単位ではない。
+        // Inside CFG one step runs 3 forwards — events fire per step, not per forward.
         assertFalse(
           audio.forwards <= config.steps,
-          `forwards ${audio.forwards} が steps ${config.steps} 以下（CFG が立っていない条件では` +
-            "「step 単位である」ことの証明にならない)",
+          `forwards ${audio.forwards} is at most steps ${config.steps} (without CFG active this does` +
+            ' not prove "per step")',
         );
 
-        // ② 途中潜在の形は `[frames, latentDim]`。
+        // ② The intermediate latents have the shape `[frames, latentDim]`.
         assertEquals(shapes, new Set([`${audio.frames}x${config.latentDim}`]));
         assertEquals(lengths, new Set([audio.frames * config.latentDim]));
-        // 生成が終わった後に呼んでも step 1 の値が返る（lazy だが束縛は作った時点）。
+        // Called after generation finished, it still returns step 1's values (lazy, but bound when
+        // created).
         assertEquals(
           Array.from((firstStep as () => { data: Float32Array<ArrayBuffer> })().data.slice(0, 8)),
           firstStepHead,
-          "生成後に呼んだ copyLatents が step 1 の値を返さない",
+          "copyLatents called after generation does not return step 1's values",
         );
       },
     );
 
-    it("onEvent: コールバックの throw は生成ごと落とす（step 粒度の中断）", async () => {
+    it("onEvent: a throw from the callback takes the whole generation down (abort at step granularity)", async () => {
       const seen: string[] = [];
       const abortAt = 2;
       await assertRejects(
@@ -597,42 +651,49 @@ describe.skipIf(!RUNNABLE)(
                   : `step:${event.step}`,
               );
               if (event.kind === "denoise-step" && event.step === abortAt) {
-                throw new Error("購読側で中断");
+                throw new Error("aborted by the subscriber");
               }
             },
           }),
         Error,
-        "購読側で中断",
+        "aborted by the subscriber",
       );
-      // 例外を握らないので DiT の段で止まる — codec は 1 度も開かない。
-      assertEquals(seen.at(-1), `step:${abortAt}`, "中断した step が最後のイベントでない");
-      assertFalse(seen.includes("stage:dit:end"), "中断したのに段が正常終了している");
+      // The exception is not swallowed, so it stops in the DiT stage — the codec never opens.
+      assertEquals(seen.at(-1), `step:${abortAt}`, "the aborted step is not the last event");
+      assertFalse(seen.includes("stage:dit:end"), "aborted, yet the stage ended normally");
       assertFalse(
         seen.some((entry) => entry.startsWith("stage:codec-decoder")),
-        "中断したのに codec decode へ入っている",
+        "aborted, yet codec decode was entered",
       );
-      // この後の `await using` の解放が、中断した生成の後でも正常に効くことの検査になる。
+      // This checks that the later `await using` release still works after an aborted
+      // generation.
     });
 
-    // --- dispose の直列化（flush-before-destroy）------------------------------
+    // --- Serialized dispose (flush-before-destroy) ----------------------------
     //
-    // `concurrency/serial.ts` は `serial_test.ts` が独立に縛っているが、`Pipeline` が
-    // その鎖へ正しく載っていることは公開面からしか見えない。**この step は最後に置く**
-    // （ここでパイプラインを解放するため）。
-    it("dispose は in-flight の完了を待ち、2 度目も同じ完了を返す", async () => {
+    // `serial_test.ts` pins `concurrency/serial.ts` on its own, but that `Pipeline` sits on that
+    // chain correctly is visible only from the public surface. **This step goes last** (it
+    // releases the pipeline).
+    it("dispose waits for the in-flight work to finish, and a second call returns the same completion", async () => {
       const pipeline = opened();
       const order: string[] = [];
       const running = pipeline.generate({ text: CASES[1].text, seed: CASES[1].seed }).then(() => {
         order.push("generate");
       });
       const disposal = pipeline.dispose();
-      assertStrictEquals(pipeline.dispose(), disposal, "2 度目の dispose が別の完了を返す");
+      assertStrictEquals(
+        pipeline.dispose(),
+        disposal,
+        "the second dispose returns a different completion",
+      );
       await Promise.all([running, disposal.then(() => order.push("dispose"))]);
-      // 破棄が先に解決すると、消費側は「解放済み」と見なして次へ進む（GPU はまだ生成中）。
+      // If the disposal resolved first, the consumer would treat it as "released" and move on
+      // (while the GPU is still generating).
       assertEquals(order, ["generate", "dispose"]);
 
-      // dispose 済みの判定は**鎖に入る前**（呼び出し時点）— 先行生成の決着を待たずに落ちる。
-      // `async` メソッドなので観測は reject（同期 throw にはならない）。
+      // The disposed check happens **before entering the chain** (at call time) — it fails
+      // without waiting for the earlier generation to settle. It is an `async` method, so what is
+      // observed is a rejection (not a synchronous throw).
       await assertRejects(
         () => pipeline.generate({ text: CASES[1].text }),
         Error,
@@ -647,6 +708,7 @@ describe.skipIf(!RUNNABLE)(
   },
 );
 
-// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
-// 数えるのは上の現役ケースだけ（廃止済みケースの行が残っていても緑にはしない）。
+// The guard that keeps "this environment has no reference values yet" from going silently green
+// (the same approach as ADR 0005). Only the live cases above are counted (rows of retired cases
+// left behind do not make it green).
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

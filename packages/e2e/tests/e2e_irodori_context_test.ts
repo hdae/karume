@@ -1,22 +1,27 @@
 /**
- * Irodori の**段 6'（条件側 K/V 射影 `dit_context` — ADR 0114）の門**（実 GPU）。
+ * Irodori's **check of stage 6' (the condition-side K/V projection `dit_context` — ADR 0114)**
+ * (real GPU).
  *
- * 押さえるのは 2 点:
+ * It pins 2 points:
  *
- * - **(a) 回る回数** — 生成 1 回で `dit_context` は 1 回だけ、`dit` は forward 本数ぶん回る。
- *   常駐経路（`enqueue`）とホスト経路（`run` — `onEvent` 購読）の両方で見る。ホイストが外れて
- *   forward ごとに回る形・前段が回らない形・2 経路のどちらかだけが別の回し方をする形を、数で
- *   捕まえる（WAV 門は数値が変わらない限り緑なので、ホイストの外れは見えない）。
- * - **(b) 検出力の確認（故障注入）** — `dit` へ渡る `context_k_0` と `context_v_0` を入れ替えると、
- *   生成 WAV の sha256 が差し替え無しの生成と**変わる**。変わらなければ、K / V の配線は WAV の
- *   sha256 門（`e2e_irodori_wav_test.ts`）から見えていない — 「グラフを割っても参照 sha が
- *   不変」を分割の正しさの証拠に使えなくなる。
+ * - **(a) Run counts** — in one generation `dit_context` runs exactly once and `dit` runs once per
+ *   forward. Checked on both the resident path (`enqueue`) and the host path (`run` — with an
+ *   `onEvent` subscription). The counts catch the shapes where the hoist came off and it runs per
+ *   forward, where the preceding stage does not run, and where only one of the 2 paths runs it a
+ *   different way (the WAV check stays green as long as the numbers do not change, so a hoist
+ *   coming off is invisible to it).
+ * - **(b) Confirming detection power (fault injection)** — swapping the `context_k_0` and
+ *   `context_v_0` passed to `dit` **changes** the sha256 of the generated WAV from that of the
+ *   unpatched generation. If it did not, the K / V wiring would be invisible to the WAV sha256 check
+ *   (`e2e_irodori_wav_test.ts`) — and "the reference sha is unchanged after splitting the graph"
+ *   could no longer serve as evidence that the split is correct.
  *
- * prototype の差し替えはこのテスト内だけで、必ず戻す（`e2e_irodori_cleanup_test.ts` と同じ
- * 作法 — 他ファイルは Deno の別 worker）。
+ * The prototype patches stay inside this test and are always restored (the same practice as
+ * `e2e_irodori_cleanup_test.ts` — other files run in separate Deno workers).
  *
- * MUST: 資産は `models/karume-irodori-v4-small/` の `i8` 席（untracked・実 GPU 機のローカル資産）。
- * 欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP** する（ADR 0005）。
+ * MUST: the assets are the `i8` seat of `models/karume-irodori-v4-small/` (untracked, local
+ * assets of the real-GPU machine). An environment missing them or without a GPU **SKIPs
+ * explicitly** with the generation command (ADR 0005).
  */
 
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
@@ -39,14 +44,15 @@ const QUANT = "i8";
 
 if (!hasQuantSeat(QUANT)) {
   console.warn(
-    `[karume] Irodori の dit_context 門の ${QUANT} 資産が無いため SKIP。生成: ${DIST_COMMAND}`,
+    `[karume] the ${QUANT} assets for Irodori's dit_context check are absent, so it SKIPs. Generate: ${DIST_COMMAND}`,
   );
 }
 const RUNNABLE = GPU_AVAILABLE && hasQuantSeat(QUANT);
 
 /**
- * 短く保つ要求 — `durationSeconds` で S を固定して `duration` を回さず、参照も caption も
- * 渡さない（text の CFG 1 本だけが立つので、forward 本数は step 数より多い）。
+ * A request kept short — `durationSeconds` fixes S so `duration` does not run, and neither a
+ * reference nor a caption is passed (only the text CFG is active, so the forward count exceeds the
+ * step count).
  */
 const REQUEST = {
   text: "こんにちは、これはテストです。",
@@ -54,7 +60,10 @@ const REQUEST = {
   durationSeconds: 1,
 } as const satisfies GenerateRequest;
 
-/** Session への呼び出し 1 本の種別（`dit` だけが `x_t` を、`dit_context` だけが `speaker_state` を受ける）。 */
+/**
+ * The kind of one call into a Session (only `dit` takes `x_t`, only `dit_context` takes
+ * `speaker_state`).
+ */
 const kindOf = (inputs: RunInputs): "context" | "dit" | undefined =>
   Object.hasOwn(inputs, "x_t")
     ? "dit"
@@ -70,7 +79,7 @@ const wavSha = async (pipeline: Pipeline): Promise<string> => {
 };
 
 describe.skipIf(!RUNNABLE)(
-  "e2e(実GPU): dit_context は生成 1 回に 1 回だけ回り、K / V の配線は WAV sha から見える",
+  "e2e (real GPU): dit_context runs exactly once per generation, and the K / V wiring is visible to the WAV sha",
   () => {
     const observed: RunComponent[] = [];
     let pipeline: Pipeline;
@@ -96,7 +105,7 @@ describe.skipIf(!RUNNABLE)(
     // Replaces the former `await using`: the pipeline is released after both its.
     afterAll(() => pipeline?.[Symbol.asyncDispose]());
 
-    it("(a) 回る回数 — 常駐経路とホスト経路の両方で dit_context 1 回・dit forward 本数", async () => {
+    it("(a) run counts — on both the resident path and the host path, dit_context once and dit once per forward", async () => {
       const calls: { run: Calls; enqueue: Calls } = {
         run: { context: 0, dit: 0 },
         enqueue: { context: 0, dit: 0 },
@@ -122,21 +131,27 @@ describe.skipIf(!RUNNABLE)(
           return enqueue.call(this, inputs, options);
         };
 
-        // 常駐経路（計測の無い device・onEvent 無し）— 前段も本体も enqueue だけで回る。
+        // The resident path (a device without timing, no onEvent) — both the preceding stage and
+        // the body run through enqueue only.
         reset();
         const resident = await pipeline.generateLatent(REQUEST);
-        assert(resident.forwards > 1, `forwards ${resident.forwards} では「1 回」と区別できない`);
+        assert(
+          resident.forwards > 1,
+          `forwards ${resident.forwards} cannot be told apart from "once"`,
+        );
         assertEquals(
           calls.enqueue,
           { context: 1, dit: resident.forwards },
-          "常駐経路の enqueue 数",
+          "enqueue count on the resident path",
         );
-        assertEquals(calls.run, { context: 0, dit: 0 }, "常駐経路で run が走った");
-        // 観測席（`onRunDiagnostics`）も同じ本数を名乗る — census はこの名乗りで部品を分ける。
+        assertEquals(calls.run, { context: 0, dit: 0 }, "run was called on the resident path");
+        // The observer (`onRunDiagnostics`) reports the same counts — the census splits components
+        // by these reports.
         assertEquals(observedCount("dit-context"), 1);
         assertEquals(observedCount("dit"), resident.forwards);
 
-        // ホスト経路（onEvent 購読）— 前段も本体も run で回り、段は dit の前で開いて閉じる。
+        // The host path (onEvent subscription) — both the preceding stage and the body run through
+        // run, and the stage opens and closes before dit.
         reset();
         const stages: string[] = [];
         const host = await pipeline.generateLatent({
@@ -145,24 +160,25 @@ describe.skipIf(!RUNNABLE)(
             if (event.kind === "stage") stages.push(`${event.component}:${event.at}`);
           },
         });
-        assertEquals(host.forwards, resident.forwards, "2 経路の forward 本数が違う");
-        assertEquals(calls.run, { context: 1, dit: host.forwards }, "ホスト経路の run 数");
-        assertEquals(calls.enqueue, { context: 0, dit: 0 }, "ホスト経路で enqueue が走った");
+        assertEquals(host.forwards, resident.forwards, "the 2 paths have different forward counts");
+        assertEquals(calls.run, { context: 1, dit: host.forwards }, "run count on the host path");
+        assertEquals(calls.enqueue, { context: 0, dit: 0 }, "enqueue was called on the host path");
         assertEquals(observedCount("dit-context"), 1);
         assertEquals(observedCount("dit"), host.forwards);
         const ditStart = stages.indexOf("dit:start");
         assertEquals(
           stages.slice(ditStart - 2, ditStart + 1),
           ["dit-context:start", "dit-context:end", "dit:start"],
-          `段の並びが違う（${stages.join(" / ")}）`,
+          `the stage order differs (${stages.join(" / ")})`,
         );
-        // 2 経路の出力はビット同一（`runDitLoopResident` の MUST — 段 6' の写し方の違いを含む）。
+        // The 2 paths' outputs are bit-identical (the MUST of `runDitLoopResident` — including the
+        // difference in how stage 6' is copied).
         const bytes = (data: Float32Array<ArrayBuffer>): Uint8Array<ArrayBuffer> =>
           new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         assertEquals(
           bytes(host.data),
           bytes(resident.data),
-          "常駐経路とホスト経路の latent がビット同一でない",
+          "the latents of the resident path and the host path are not bit-identical",
         );
       } finally {
         Session.prototype.run = run;
@@ -170,17 +186,22 @@ describe.skipIf(!RUNNABLE)(
       }
     });
 
-    it("(b) 故障注入 — context_k_0 と context_v_0 を入れ替えると WAV sha が変わる", async () => {
+    it("(b) fault injection — swapping context_k_0 and context_v_0 changes the WAV sha", async () => {
       const baseline = await wavSha(pipeline);
-      // 決定性が無いと「入れ替えで変わった」を読めないので、差し替え無しの 2 回を先に見る。
-      assertEquals(await wavSha(pipeline), baseline, "差し替え無しの生成 2 回の WAV が一致しない");
+      // Without determinism, "the swap changed it" cannot be read, so two unpatched runs are
+      // checked first.
+      assertEquals(
+        await wavSha(pipeline),
+        baseline,
+        "the WAVs of two unpatched generations differ",
+      );
       let swapped = 0;
       try {
         Session.prototype.enqueue = function (inputs, options) {
           if (kindOf(inputs) !== "dit") return enqueue.call(this, inputs, options);
           if (!Object.hasOwn(inputs, "context_k_0") || !Object.hasOwn(inputs, "context_v_0")) {
             throw new Error(
-              `dit の入力に context_k_0 / context_v_0 が無い（${Object.keys(inputs).join(", ")}）`,
+              `dit's inputs have no context_k_0 / context_v_0 (${Object.keys(inputs).join(", ")})`,
             );
           }
           swapped += 1;
@@ -195,11 +216,11 @@ describe.skipIf(!RUNNABLE)(
           );
         };
         const faulted = await wavSha(pipeline);
-        assert(swapped > 0, "dit の enqueue が 1 本も差し替わっていない（常駐経路を通っていない）");
+        assert(swapped > 0, "no dit enqueue was patched (it did not go through the resident path)");
         assertNotEquals(
           faulted,
           baseline,
-          "K / V を入れ替えても WAV が変わらない — WAV の sha256 門は条件側 K/V の配線を見ていない",
+          "swapping K / V does not change the WAV — the WAV sha256 check does not see the condition-side K/V wiring",
         );
       } finally {
         Session.prototype.enqueue = enqueue;

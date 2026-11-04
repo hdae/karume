@@ -1,75 +1,91 @@
-// 実重み DeBERTa-v2 の **w8a8 鏡像門**（実 GPU・ADR 0026 決定 3）。
+// The **w8a8 mirror check** of the real-weight DeBERTa-v2 (real GPU, ADR 0026 decision 3).
 //
-// `e2e_deberta_test.ts` が w8（i8 格納・f32 計算）を torch CPU の通常 golden `io.<case>` と突き
-// 合わせるのに対し、こちらは w8a8（`SessionOptions.linearCompute: "a8"` — 活性を per-token i8
-// へ落として整数内積で計算する）を、同じ入力で採った **torch 鏡像 golden `io-i8a8.<case>`**
-// （`--act-quant` — 数値の正本は exporter の `karume.act_quant`）と突き合わせる。2 つを別
-// ファイルに分けるのは期待値の系列が違うからで、片方の golden をもう片方の門で読むと活性量子化
-// ごと汚染される（鏡像側の prefix を分けてある理由と同じ — `deberta/export.py` の
-// `ACT_IO_PREFIX`）。
+// Where `e2e_deberta_test.ts` compares w8 (i8 storage, f32 compute) with the normal torch CPU
+// goldens `io.<case>`, this one compares w8a8 (`SessionOptions.linearCompute: "a8"` — the
+// activations are quantised to per-token i8 and computed with integer dot products) with **the
+// torch mirror goldens `io-i8a8.<case>`** taken on the same inputs (`--act-quant` — the numeric
+// source of truth is the exporter's `karume.act_quant`). The two are split into separate files
+// because their expected values are different series; reading one's goldens in the other's check
+// contaminates them with the activation quantisation as a whole (the same reason the mirror side
+// has its own prefix — `ACT_IO_PREFIX` of `deberta/export.py`).
 //
-// 対象は `outputs/series/deberta-i8/full-24layer/`（リポジトリ管理外 — `.gitignore` の
-// `outputs/`）。鏡像 io は同じ export の `--act-quant` で同じ席に書かれる。
+// The target is `outputs/series/deberta-i8/full-24layer/` (outside the repository — `outputs/` in
+// `.gitignore`). The mirror io is written into the same directory by `--act-quant` of the same
+// export.
 //
-// ## 検出力の置き場（ADR 0026「検出限界」）
+// ## Where the detection power sits (the "detection limit" of ADR 0026)
 //
-// 活性の丸めは不連続関数で、上流の 1e-5 級の差が丸め境界の ±1 段飛びを起こし、数層で飽和する。
-// GPU と torch 鏡像は深い層では「同じ分布の別標本」になり、末端層では f32 経路 vs 鏡像と
-// 区別がつかない（歴史値: i8a8 1.46 / f32 経路 1.33）。素直な「実測の 5〜10 倍」を全出力に
-// 掛けると f32 経路まで通して恒真化する。そこで検出力を 3 つに分けて置く:
+// Activation rounding is a discontinuous function: an upstream difference at the 1e-5 level causes
+// ±1-step jumps at rounding boundaries, which saturate within a few layers. In the deep layers the
+// GPU and the torch mirror become "different samples of the same distribution", and at the last
+// layer they cannot be told apart from the f32 route vs the mirror (historical values: i8a8 1.46 /
+// f32 route 1.33). Applying a plain "5 to 10 × the measurement" to every output would let the f32
+// route through as well and make it tautological. So the detection power is split into three:
 //
-// 1. **output.0 / output.1 の厳密 tolerance**（{@link STRICT_TOLERANCE}）— 判別帯が残るのは
-//    1 層目の出口だけ（歴史値: i8a8 5.72e-6 vs f32 経路 5.76e-2 = 10,058 倍）。
-//    `linearCompute` が黙って f32 経路へ落ちると差は 5.76e-2 級に**開く**ので、ここで落ちる。
-// 2. **パイプラインキーの census**（{@link EXPECTED_CENSUS}）— run が実際に i8a8 GEMM と
-//    `quantize_rows` を linear の本数ぶん回し、それ以外の linear カーネルを 1 回も回していない
-//    こと。1 が分布の話であるのに対し、こちらは実行そのものの直接観測。
-// 3. **output.2 以降の崩壊上限**（{@link COLLAPSE_CEILINGS}・判定は {@link judgeCollapse}）—
-//    数値パリティではなく、崩壊の検出だけを受け持つ。指標は出力ごとの相対 RMS 誤差
-//    ‖gpu − golden‖₂ / ‖golden‖₂ ≤ その出力の上限（output.2 の 0.020 〜 output.24 の 0.33）と、
-//    非有限 0（両側・全要素）。
-//    - 捕まえるもの（実 GPU の dump を壊して同じ判定に通した故障注入 — 4 ケース × output.2〜24
-//      の 92 出力の全てで赤）: 全要素 0（1.0）・符号反転（≈ 2.0）・1 要素だけの NaN / +Inf・
-//      全要素 × 2（1.00〜1.02）・全要素 × 1.5（0.50〜0.53）。
-//    - 捕まえないもの: 深い出力の × 1.25 の拡大（output.22〜24 の 12 出力のうち 11 が緑 — 92 出力の
-//      うち 81 が赤）、中間層の 1 要素の飛び、f32 経路への沈黙フォールバック（GPU f32 経路の dump は
-//      92 出力の全てで上限の内 — 0.016〜0.120）。これらは 1・2 と
-//      `tests/gpu_i8a8_test.ts` の atol=0 の数値契約が受け持つ（24 層は同じ形の同じパイプラインを
-//      回るので、浅い層の欠陥は 1 の output.1 にも出る）。
-//    - 上限の導き方: 出力ごとに、正当な標本（GPU a8・この機の CPU で採り直した torch 鏡像の
-//      別標本 6 本・鏡像の埋め込み出口に相対 ±2^-23 の乱数を入れた摂動アンサンブル各ケース 8 本）
-//      の最悪 × 2 を有効数字 2 桁で切り上げた値。標本の内訳と出力ごとの最悪・上限の表は ADR 0026 の
-//      追記（2026-10-07）。
-//    - maxAbs の atol 3 をやめた理由: atol 3 は ADR 0026 の**末端層（output.24）だけ**の歴史値
-//      1.46 の約 2 倍で、それを中間層まで maxAbs で掛けていた。中間層は外れ値チャネル
-//      （channel 686・\|ref\| 最大 28.8）の符号の分岐点で活性量子化の段の反転が 1 要素を大きく
-//      動かし、CPU の torch 鏡像の別標本どうしでも同じ 1 要素が 7.17 動く（RTX 3080 Ti の case2
-//      output.19 が 3.54 で赤になったのはこの形 — GPU の欠陥ではない）。
+// 1. **A strict tolerance on output.0 / output.1** ({@link STRICT_TOLERANCE}) — the only place a
+//    discrimination band remains is the exit of the first layer (historical values: i8a8 5.72e-6 vs
+//    f32 route 5.76e-2 = 10,058 ×). If `linearCompute` silently falls back to the f32 route, the
+//    difference **opens up** to the 5.76e-2 level and it fails here.
+// 2. **The pipeline-key census** ({@link EXPECTED_CENSUS}) — the run actually drives the i8a8 GEMM
+//    and `quantize_rows` once per linear and never runs any other linear kernel. Where 1 is about
+//    distributions, this one is a direct observation of the execution itself.
+// 3. **The collapse ceilings from output.2 on** ({@link COLLAPSE_CEILINGS}, verdict by
+//    {@link judgeCollapse}) — not numeric parity; it only detects collapse. The metric is the
+//    per-output relative RMS error ‖gpu − golden‖₂ / ‖golden‖₂ ≤ that output's ceiling (0.020 for
+//    output.2 to 0.33 for output.24), plus zero non-finite values (both sides, every element).
+//    - What it catches (fault injections that corrupted real-GPU dumps and ran them through the same
+//      verdict — red on every one of the 92 outputs of 4 cases × output.2–24): all elements 0
+//      (1.0), a sign flip (≈ 2.0), a NaN / +Inf in a single element, all elements × 2 (1.00–1.02),
+//      all elements × 1.5 (0.50–0.53).
+//    - What it does not catch: a × 1.25 scaling of the deep outputs (11 of the 12 outputs of
+//      output.22–24 are green — 81 of the 92 outputs are red), a jump of a single element in an
+//      intermediate layer, a silent fallback to the f32 route (the dump of the GPU f32 route stays
+//      within the ceilings on every one of the 92 outputs — 0.016–0.120). These are held by 1 and 2
+//      and by the atol=0 numeric contract of `tests/gpu_i8a8_test.ts` (the 24 layers go through the
+//      same pipelines of the same shape, so a defect in a shallow layer shows on output.1 of 1 as
+//      well).
+//    - How the ceilings are derived: per output, the worst of the legitimate samples (GPU a8, 6
+//      different samples of the torch mirror retaken on this machine's CPU, and a perturbation
+//      ensemble of 8 per case with relative ±2^-23 noise injected at the mirror's embedding exit) ×
+//      2, rounded up to 2 significant digits. The breakdown of the samples and the table of each
+//      output's worst and ceiling are in the addendum of ADR 0026 (2026-10-07).
+//    - Why the maxAbs atol 3 was dropped: atol 3 is about 2 × the historical value 1.46 of ADR 0026
+//      for **the last layer (output.24) only**, and it was being applied as maxAbs down to the
+//      intermediate layers. In the intermediate layers, at the sign branching point of an outlier
+//      channel (channel 686, \|ref\| max 28.8), a flipped step of the activation quantisation moves
+//      one element a lot, and the same element moves by 7.17 even between different samples of the
+//      CPU torch mirror (output.19 of case2 on the RTX 3080 Ti turning red at 3.54 was this shape —
+//      not a GPU defect).
 //
-// ## 値の出どころ
+// ## Where the values come from
 //
-// 1 の数値は ADR 0026（2026-08-03・RTX 3080 Ti・torch 鏡像との素の突合）の**歴史値**で、
-// この環境で導き直していない。3 の数値は 2026-10-07 にこの環境（RTX 3080 Ti・Ryzen 5 7600）で
-// 実測から導き直した値。この門は output.0 / 1 の maxAbs（`measurements`）と output.2 以降の
-// 相対 RMS 誤差・maxAbs（`comparisons`）を `outputs/verify/` の results.json に残す（落ちた回も
-// 全出力を測り終えてから落とす）ので、導き直しはその実測を読む。
+// The numbers of 1 are **historical values** of ADR 0026 (2026-08-03, RTX 3080 Ti, a plain
+// comparison with the torch mirror), not re-derived in this environment. The numbers of 3 were
+// re-derived from measurement on 2026-10-07 in this environment (RTX 3080 Ti, Ryzen 5 7600). This
+// check keeps the maxAbs of output.0 / 1 (`measurements`) and the relative RMS error and maxAbs
+// from output.2 on (`comparisons`) in results.json under `outputs/verify/` (even a failing run
+// measures every output before failing), so a re-derivation reads those measurements.
 //
-// ## 鏡像 golden を採り直さない
+// ## The mirror goldens are not retaken
 //
-// 鏡像 golden（`io-i8a8.<case>`）は 2026-09-05 に換装前の機の CPU で採った。1 の厳密 tolerance は
-// golden を採った CPU の第 0 層の量子化の段の丸めの向きに依存する: この機の CPU で採り直すと
-// case0 / padded の output.1 が保存版から 1.285e-3 動き（GPU は旧機の CPU と同じ側）、atol 5e-5 の
-// 1 が赤になる。採り直しは解決にならないので、別の機の CPU で鏡像 golden を作り直さない。
+// The mirror goldens (`io-i8a8.<case>`) were taken on 2026-09-05 on the CPU of the machine before
+// the hardware swap. The strict tolerance of 1 depends on the rounding direction of the
+// quantisation steps of layer 0 on the CPU that took the goldens: retaking them on this machine's
+// CPU moves output.1 of case0 / padded by 1.285e-3 from the saved version (the GPU is on the same
+// side as the old machine's CPU), and 1 with atol 5e-5 turns red. Retaking is not a fix, so the
+// mirror goldens are not rebuilt on another machine's CPU.
 //
-// ## 宣言しない variant
+// ## Variants that are not declared
 //
-// `deberta-i8/sbv2-22layer` は最終層 1 本出しで、出力が飽和域（1 の判別帯の外）にしか無い —
-// 3 の崩壊上限と 2 の census しか掛けられず、しかも崩壊上限は full-24layer の標本からしか
-// 導いていない。`deberta-i8/dev-2layer` も実測が無い。足すときは `atol=rtol=0` の素の突合と
-// 別標本で実測してから宣言する（値を発明しない）。
+// `deberta-i8/sbv2-22layer` outputs only the last layer, and its output lies only in the saturated
+// region (outside the discrimination band of 1) — only the collapse ceilings of 3 and the census of
+// 2 could be applied, and the collapse ceilings are derived only from full-24layer samples.
+// `deberta-i8/dev-2layer` has no measurement either. To add one, measure with a plain comparison
+// with `atol=rtol=0` and different samples first, then declare it (no values are invented).
 //
-// 資産が無い環境では SKIP する（GPU アダプタの有無を見る ADR 0005 の門番とは独立）。鏡像が
-// **一部だけ**ある場合は SKIP ではなく FAIL にする（下の「資産の完全性」テスト）。
+// Where the assets are absent it SKIPs (independently of ADR 0005's gate, which looks at whether a
+// GPU adapter exists). When the mirror is present **only in part** it is a FAIL rather than a SKIP
+// (the "asset completeness" test below).
 //
 // ## An implementation-time series check (ADR 0139 decision 6)
 //
@@ -112,61 +128,65 @@ import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
- * output.0 / output.1 に掛ける厳密 tolerance（**歴史値** — ADR 0026 決定 3）。
+ * The strict tolerance applied to output.0 / output.1 (**historical value** — ADR 0026 decision 3).
  *
- * ADR 0026 の実測（full-24layer・GPU i8a8 vs torch 鏡像）: output.1 の maxAbs 5.72e-6。
- * f32 経路 vs 鏡像は同じ output.1 で 5.76e-2。atol 5e-5 は前者の約 8.7 倍・後者の 1/1,150 で、
- * 活性量子化が走らなかった run（f32 経路への沈黙フォールバック）はここで落ちる。
+ * ADR 0026's measurement (full-24layer, GPU i8a8 vs torch mirror): maxAbs of output.1 5.72e-6. The
+ * f32 route vs the mirror gives 5.76e-2 on the same output.1. atol 5e-5 is about 8.7 × the former
+ * and 1/1,150 of the latter, so a run in which the activation quantisation did not run (a silent
+ * fallback to the f32 route) fails here.
  *
- * output.0 は埋め込み層の出口で linear を通らない（w8 門の実測 9.54e-7 と同じ経路）ので、
- * 同じ値で足りる。
+ * output.0 is the exit of the embedding layer and does not go through a linear (the same route as
+ * the measured 9.54e-7 of the w8 check), so the same value suffices.
  *
- * **rtol は 0**（w8 門と同じ理由 — \|ref\| の最小非ゼロが 1e-7 級まで薄く広がり、rtol は
- * 0 近傍要素の見かけに引きずられる）。
+ * **rtol is 0** (the same reason as the w8 check — the \|ref\| smallest nonzero thins out down to
+ * the 1e-7 level, and rtol is dragged by the appearance of near-zero elements).
  */
 const STRICT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 0 };
 
 /**
- * 1 run あたりの dispatch の内訳の期待値（**グラフと実装から導いた値** — ADR 0026 の診断キー
- * 192 本と一致）。
+ * The expected breakdown of the dispatches of one run (**values derived from the graph and the
+ * implementation** — they agree with the 192 diagnostic keys of ADR 0026).
  *
- * - `i8a8Linear` 192 = 24 層 × 8。DeBERTa-v2 は `share_att_key` で query_proj / key_proj を
- *   相対位置射影にも使うので、1 層あたりモジュール 6 本に対しグラフの linear ノードは 8 本
- *   （full-24layer の IR を読んで確認: linear 192 本・重みは全て i8 格納・k ∈ {1024, 4096} で
- *   全て a8 適格〈k % 4 == 0〉）。
- * - `quantizeRows` 192 = 同じ本数。a8 の linear は「活性を per-token i8 へ落とす
- *   `quantize_rows` → 整数内積の GEMM」の対で降りる（`recipe-builders/linear.ts` の
- *   `buildLinearI8a8`）。入力を共有する linear どうしでも量子化は束ねない。
+ * - `i8a8Linear` 192 = 24 layers × 8. DeBERTa-v2 uses query_proj / key_proj for the relative
+ *   position projection too (`share_att_key`), so against 6 modules per layer the graph has 8
+ *   linear nodes (confirmed by reading the IR of full-24layer: 192 linears, every weight in i8
+ *   storage, k ∈ {1024, 4096}, all a8-eligible, k % 4 == 0).
+ * - `quantizeRows` 192 = the same count. An a8 linear lowers to the pair "`quantize_rows`, which
+ *   quantises the activations to per-token i8 → the integer dot-product GEMM" (`buildLinearI8a8` of
+ *   `recipe-builders/linear.ts`). Even linears that share an input do not share the quantisation.
  *   NOTE: since the erf gelu joined the linear prologue (perf-ledger F-4, 2026-10-25), 24 of the
  *   192 are its prologue form (`quantize_rows:…:gelu:reg4` — the 24 intermediate → output linears,
  *   K 4096, whose input is the gelu), which the `quantize_rows:` prefix counts as well: the total
  *   stays 192, and the 24 gelu dispatches leave the run.
- * - `otherLinear` 0 = i8a8 以外の linear カーネル（GEMM / GEMV 族のどれでも）。1 本でも
- *   走れば、適格判定が外れて一部が黙って f32 経路へ落ちている。
+ * - `otherLinear` 0 = linear kernels other than i8a8 (any of the GEMM / GEMV families). If even one
+ *   runs, the eligibility check missed and part of it silently fell back to the f32 route.
  */
 const EXPECTED_CENSUS: KeyCensus = { i8a8Linear: 192, quantizeRows: 192, otherLinear: 0 };
 
 const MODEL_FILE = "model.krm";
-/** 鏡像 io の prefix（`deberta/export.py` の `ACT_IO_PREFIX` と同じ綴り MUST）。 */
+/**
+ * The prefix of the mirror io (MUST be the same spelling as `ACT_IO_PREFIX` of
+ * `deberta/export.py`).
+ */
 const ACT_IO_PREFIX = "io-i8a8.";
 const IO_SUFFIX = ".safetensors";
 
 const ROOT = new URL("../../../outputs/series/deberta-i8/full-24layer/", import.meta.url);
 const GRAPH = seriesGraph("deberta-i8", "full-24layer");
 const VARIANT = "i8/full-24layer";
-/** SKIP 時にそのまま貼れる生成コマンド（tools/export-recipes/deberta/README.md）。 */
+/** The generation command pasted as is on SKIP (tools/export-recipes/deberta/README.md). */
 const GENERATE =
   "cd tools/export-recipes && uv run --with 'transformers==5.14.1' " +
   "python -m deberta.export --dtype i8 --layers 24 --act-quant";
 
 /**
- * 生成されているはずのケース。**列挙結果ではなくここで固定する** — 生成を一部だけ流した
- * 環境でテストが黙って消えないため（正本は `deberta/export.py` の `GOLDEN_SENTENCES` +
- * `padded`）。
+ * The cases that should have been generated. **They are pinned here, not enumerated** — so that
+ * tests do not silently vanish in an environment where only part of the generation ran (the source
+ * of truth is `GOLDEN_SENTENCES` + `padded` of `deberta/export.py`).
  */
 const EXPECTED_CASES = ["case0", "case1", "case2", "padded"] as const;
 
-/** 1 run ぶんの分類済み dispatch 数。 */
+/** The classified dispatch counts of one run. */
 type KeyCensus = {
   readonly i8a8Linear: number;
   readonly quantizeRows: number;
@@ -174,21 +194,21 @@ type KeyCensus = {
 };
 
 /**
- * パイプラインキーの分類（綴りの正本は `src/kernels/linear{,-i8a8,-gemv}.ts` /
- * `quantize-rows.ts`）。
+ * The classification of pipeline keys (the source of truth of the spellings is
+ * `src/kernels/linear{,-i8a8,-gemv}.ts` / `quantize-rows.ts`).
  *
- * MUST: linear 側は `"linear"` の前方一致で数える（`"linear:"` ではなく）。この門の T は
- * 11〜35 で、f32 経路へ落ちた linear は GEMM（`linear:`）ではなく行ブロック GEMV
- * （`linear_gemv:` — M ≤ 64）へ降りる。`"linear:"` で数えると、そのフォールバックが
- * `otherLinear` に入らず 0 のまま通る。
+ * MUST: the linear side is counted by a prefix match on `"linear"` (not `"linear:"`). This check's
+ * T is 11 to 35, and a linear that fell back to the f32 route lowers not to the GEMM (`linear:`)
+ * but to the row-block GEMV (`linear_gemv:` — M ≤ 64). Counting with `"linear:"` would keep that
+ * fallback out of `otherLinear`, which would pass at 0.
  */
 const isLinearKey = (key: string): boolean => key.startsWith("linear");
 const isI8a8 = SEAT_SIGNATURES.linearCompute.a8;
 const isQuantizeRows = (key: string): boolean => key.startsWith("quantize_rows:");
 
 const censusOf = (diagnostics: SessionDiagnostics): KeyCensus => {
-  // MUST: census の無い run を「0 本」として数えない — `otherLinear: 0` の検査が黙って空振り
-  // する（requireCensus が undefined / 空を落とす）。
+  // MUST: a run without a census is not counted as "0 dispatches" — the `otherLinear: 0` check
+  // would silently pass vacuously (requireCensus fails on undefined / empty).
   const entries = requireCensus(diagnostics.lastRunPipelines, "deberta w8a8");
   let i8a8Linear = 0;
   let quantizeRows = 0;
@@ -205,9 +225,9 @@ const censusOf = (diagnostics: SessionDiagnostics): KeyCensus => {
 };
 
 /**
- * 鏡像 io の列挙。存在しない場合だけ空に縮退する。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、実行されて
- * いない検証が SKIP として静かに緑になる。
+ * Lists the mirror io. It degrades to empty only when the directory does not exist.
+ * MUST: anything other than NotFound propagates — reading a permission error and the like as "no
+ * assets" would turn a verification that did not run into a quietly green SKIP.
  */
 const mirrorFiles = (root: URL): readonly string[] => {
   let entries: readonly DirEntry[];
@@ -235,14 +255,16 @@ const readBuffer = async (file: string): Promise<ArrayBuffer> => {
 };
 
 /**
- * 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。
+ * Listed synchronously because it is needed at registration (the same reason as the Deno.test
+ * ignore decision).
  * MUST: the series is listed only under SERIES_CHECKS (the default lanes do not read it).
  */
 const FILES = SERIES_CHECKS ? mirrorFiles(ROOT) : [];
 /**
- * 鏡像の有無。1 件も無い = `--act-quant` なしで生成した（または生成していない）環境なので
- * 全 SKIP。export は出力席を丸ごと据え替える（`karume.artifacts.staged_publication`）ので、
- * 古い鏡像が新しいモデルの横に残る形は作られない — 無いことは正当な状態として読んでよい。
+ * Whether the mirror exists. None at all = an environment generated without `--act-quant` (or not
+ * generated), so every case SKIPs. The export replaces the output directory as a whole
+ * (`karume.artifacts.staged_publication`), so an old mirror left next to a new model is never
+ * produced — its absence can be read as a legitimate state.
  */
 const AVAILABLE = FILES.length > 0;
 const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
@@ -256,20 +278,23 @@ const CASE_FILES: readonly string[] = SERIES_CHECKS
 
 if (SERIES_CHECKS && !AVAILABLE) {
   console.warn(
-    `[karume] ${ROOT.pathname} に w8a8 鏡像 io（${ACT_IO_PREFIX}<case>）が無いため ` +
-      `DeBERTa の w8a8 鏡像門（${VARIANT}）を SKIP する。生成: ${GENERATE}`,
+    `[karume] ${ROOT.pathname} has no w8a8 mirror io (${ACT_IO_PREFIX}<case>), so ` +
+      `DeBERTa's w8a8 mirror check (${VARIANT}) SKIPs. Generate: ${GENERATE}`,
   );
 }
 
 test.skipIf(!AVAILABLE)(
   `DeBERTa w8a8 assets (${VARIANT}): every mirror io case and the model are present${SERIES_CHECKS_OPT_IN}`,
   () => {
-    assertEquals(FILES.map(caseNameOf), [...EXPECTED_CASES], `${ROOT.pathname} の鏡像ケース`);
-    assert(modelPresent(new URL(MODEL_FILE, ROOT)), `${MODEL_FILE} が無い`);
+    assertEquals(FILES.map(caseNameOf), [...EXPECTED_CASES], `mirror cases of ${ROOT.pathname}`);
+    assert(modelPresent(new URL(MODEL_FILE, ROOT)), `${MODEL_FILE} is missing`);
   },
 );
 
-/** Session を a8 で組み、鏡像 io の入力で 1 回 run する（数値門と census の共通部）。 */
+/**
+ * Builds the Session in a8 and runs it once on the mirror io's inputs (shared by the numeric check
+ * and the census).
+ */
 const openCase = async (file: string) => {
   const [opened, ioBytes] = await Promise.all([
     openSeriesContainer(new URL(MODEL_FILE, ROOT)),
@@ -277,28 +302,30 @@ const openCase = async (file: string) => {
   ]);
   const parsed = prepareContainer(opened, GRAPH);
   const io = parseSafetensors(ioBytes);
-  // 全層出し（25 本）であることを先に見る。配布形（1 本出し）の資産を取り違えると厳密
-  // tolerance を掛ける output.1 がそもそも無く、門の中身が崩壊上限だけに縮む。
-  assertEquals(parsed.graph.outputs.length, GRAPH_OUTPUTS, `${VARIANT}: graph.outputs の本数`);
-  // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+  // Check first that it outputs all layers (25). With the distribution's (one-output) assets mixed
+  // up, output.1, where the strict tolerance applies, does not even exist, and the check shrinks to
+  // the collapse ceilings alone.
+  assertEquals(parsed.graph.outputs.length, GRAPH_OUTPUTS, `${VARIANT}: count of graph.outputs`);
+  // Every tensor of io corresponds exactly to the graph's inputs and outputs (nothing extra,
+  // nothing missing).
   const expectedKeys = [
     ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
     ...parsed.graph.outputs.map((_, index) => `output.${index}`),
   ].sort();
-  assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${file} のテンソルキー`);
+  assertEquals([...io.tensors.keys()].sort(), expectedKeys, `tensor keys of ${file}`);
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
     const view = io.tensors.get(`input.${spec.name}`);
-    assert(view !== undefined, `input.${spec.name} が ${file} に無い`);
+    assert(view !== undefined, `input.${spec.name} is missing from ${file}`);
     inputs[spec.name] = ioTensor(io, view, spec.dtype);
   }
   return { parsed, io, inputs };
 };
 
 /**
- * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_deberta-w8a8/` — 消して安全）。
- * w8 門（`deberta-golden`）と席を分けるのは、同じ席に 2 モジュールが書くと互いの `cases` を
- * 上書きするため。
+ * Where the outcomes and measurements go (`outputs/verify/<environment key>/<date>_deberta-w8a8/` —
+ * safe to delete). It is a separate directory from the w8 check's (`deberta-golden`) because two
+ * modules writing to the same directory overwrite each other's `cases`.
  */
 const results = openResults("deberta-w8a8");
 
@@ -324,16 +351,18 @@ const runCheckedCase = async (
 ): Promise<void> => {
   const caseName = caseNameOf(file);
   const { parsed, io, inputs } = await openCase(file);
-  // Session の構築が落ちた回も device を手放す（構築の失敗を try の外に置くと漏れる）。
+  // The device is released even when building the Session fails (putting the build failure outside
+  // the try would leak it).
   const session = await parsed.createContainerSession(gpu, { linearCompute: "a8" });
   try {
     const outputs = await session.run(inputs);
     assertEquals(Object.keys(outputs).sort(), [...parsed.graph.outputs].sort());
     parsed.graph.outputs.forEach((name, index) => {
-      // MUST: io の引きと崩壊上限の引きは同じ名前で行う（鍵の取り違えで別の出力の上限を掛けない）。
+      // MUST: the io lookup and the collapse-ceiling lookup use the same name (no applying another
+      // output's ceiling through a mixed-up key).
       const ioName = `output.${index}`;
       const view = io.tensors.get(ioName);
-      assert(view !== undefined, `${ioName} が ${file} に無い`);
+      assert(view !== undefined, `${ioName} is missing from ${file}`);
       const where = `${VARIANT}/${caseName} ${ioName} ('${name}')`;
       const declared = parsed.graph.values[name].dtype;
       assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
@@ -371,11 +400,15 @@ for (const file of CASE_FILES) {
       await runRecordedCase(results, { id: `${VARIANT}/${caseName}` }, async (recorded) => {
         const { measurements, comparisons } = recorded;
         const gpu = await acquireGpu();
-        /** 帯を外れた出力（全出力を測り終えてから落とす — 導き直しに全出力の実測が要る）。 */
+        /**
+         * The outputs outside their band (failed after every output is measured — a re-derivation
+         * needs the measurements of every output).
+         */
         const failures: string[] = [];
         try {
-          // 結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの同一性を
-          // 見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+          // This route keeps results as this machine's rows, so check that the adapter the key was
+          // taken from is the running adapter (mixing them up on a multi-GPU machine would measure
+          // against another machine's band).
           assertAdapterMatchesEnvironment(gpu);
           await runCheckedCase(gpu, file, ({ index, name, ioName, where, actual, expected }) => {
             if (index < STRICT_OUTPUTS) {
@@ -390,8 +423,9 @@ for (const file of CASE_FILES) {
               if (!report.pass) failures.push(`${where}: ${formatAllclose(report)}`);
               return;
             }
-            // 崩壊上限の出力は `comparisons` に積む（相対 RMS と maxAbs を 1 本で表せる既存の
-            // 形 — 参照側 = torch 鏡像 golden・実行側 = a8。床は 0 = 床なし）。
+            // The outputs under a collapse ceiling go into `comparisons` (the existing form that
+            // holds the relative RMS and maxAbs in one entry — reference = the torch mirror golden,
+            // practical = a8. The floor is 0 = no floor).
             const ceiling = collapseCeilingOf(ioName);
             const report = judgeCollapse(actual.data, expected.data, ceiling);
             comparisons.push({
@@ -404,7 +438,7 @@ for (const file of CASE_FILES) {
             });
             if (!report.pass) {
               failures.push(
-                `${where}: relRms=${report.relRms} (上限 ${ceiling}) ` +
+                `${where}: relRms=${report.relRms} (ceiling ${ceiling}) ` +
                   `nonFinite=${report.nonFiniteCount} maxAbs=${report.maxAbs}`,
               );
             }
@@ -412,7 +446,11 @@ for (const file of CASE_FILES) {
         } finally {
           gpu.destroy();
         }
-        assertEquals(failures, [], "帯を外れた出力（厳密: output.0/1・崩壊上限: output.2〜）");
+        assertEquals(
+          failures,
+          [],
+          "outputs outside their band (strict: output.0/1, collapse ceiling: output.2 on)",
+        );
       });
     },
   );
@@ -421,8 +459,9 @@ for (const file of CASE_FILES) {
 test.skipIf(!RUNNABLE)(
   `DeBERTa w8a8 (${VARIANT}): the run drives its linears with i8a8 GEMMs and quantize_rows only (key census)${SERIES_CHECKS_OPT_IN}`,
   async () => {
-    // 内訳は T に依らない（計画は記号次元の束縛で形が変わるだけで、dispatch の並びは同じ）ので
-    // 1 ケースで足りる。`padded` を使うのはマスク経路まで同じ run に乗せるため。
+    // The breakdown does not depend on T (the plan only changes shape with the binding of the
+    // symbolic dimensions; the order of the dispatches is the same), so one case suffices. `padded`
+    // is used so that the mask path rides on the same run.
     const file = `${ACT_IO_PREFIX}padded${IO_SUFFIX}`;
     const { parsed, inputs } = await openCase(file);
     const gpu = await acquireGpu();
@@ -432,14 +471,14 @@ test.skipIf(!RUNNABLE)(
         await session.run(inputs);
         const census = censusOf(session.diagnostics());
         console.log(
-          `[e2e] deberta ${VARIANT} w8a8 census: i8a8 linear ${census.i8a8Linear} 本 / ` +
-            `quantize_rows ${census.quantizeRows} 本 / それ以外の linear ${census.otherLinear} 本`,
+          `[e2e] deberta ${VARIANT} w8a8 census: i8a8 linear ${census.i8a8Linear} / ` +
+            `quantize_rows ${census.quantizeRows} / other linear ${census.otherLinear}`,
         );
         assertEquals(
           census,
           EXPECTED_CENSUS,
-          "dispatch の内訳が期待と違う（otherLinear > 0 は f32 経路への沈黙フォールバック・" +
-            "本数の違いは linear の本数か降ろし方が動いた）",
+          "the dispatch breakdown differs from the expectation (otherLinear > 0 is a silent fallback to the f32 route; " +
+            "a different count means the number of linears or how they are lowered moved)",
         );
       } finally {
         await session.dispose();

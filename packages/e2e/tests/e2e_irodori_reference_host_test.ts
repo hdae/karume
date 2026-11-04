@@ -1,28 +1,33 @@
-// 参照音声のホスト前処理（LUFS 測定 → −16 正規化 → reflect pad）の**パリティ門**。
+// The **parity check** of the reference audio's host preprocessing (LUFS measurement → −16
+// normalisation → reflect pad).
 // No GPU is needed (pure functions only), but the golden
 // `outputs/test-assets/goldens/dacvae-32dim/host/` is (fetch it as FETCH_HINT below says).
 //
-// golden は `tools/export-recipes/irodori/dacvae/host.py` が **上流を呼んで**書いたもので、あちらは
-// 「記録したスカラー 2 本で正規化後の波形がビット一致で再現できる」ことと「上流
-// `_normalize_loudness` とビット一致すること」を毎回実測してから書く。したがってこの門が
-// 閉じることは「TS のホスト前処理が上流と同じ波形を作る」の 2 段目にあたる。
+// The golden was written by `tools/export-recipes/irodori/dacvae/host.py` **calling upstream**,
+// and that script measures every time, before writing, that "the normalised waveform is
+// reproduced bit-identically from the 2 recorded scalars" and that "it is bit-identical to
+// upstream's `_normalize_loudness`". This check closing is therefore the second stage of "the TS
+// host preprocessing produces the same waveform as upstream".
 //
-// ## 何を突き合わせ、何は突き合わせないのか
+// ## What is compared and what is not
 //
-// golden 5 ケースのうち **LUFS 正規化を通るのは 3 本**（`normalizeDb: -16`）で、`ref-plain` /
-// `ref-hot` は上流の「正規化しない（peak 制限だけ）」経路のケース。パイプラインの目標値は
-// −16 固定（`host/reference.ts` の `TARGET_DB`）でその経路を**持たない**ので、この 2 本からは
-// **LUFS 測定値だけ**を突き合わせる（波形まで比べると、実装が持たない枝を門が要求してしまう）。
+// Of the 5 golden cases, **3 go through LUFS normalisation** (`normalizeDb: -16`); `ref-plain` /
+// `ref-hot` are cases of upstream's "no normalisation (peak limiting only)" path. The pipeline's
+// target is fixed at −16 (`TARGET_DB` in `host/reference.ts`) and **has no** such path, so from
+// these 2 only **the LUFS measurement** is compared (comparing the waveform too would make the
+// check demand a branch the implementation does not have).
 //
-// ## 枝の踏み分け（恒真化の遮断）
+// ## Covering the branches (blocking tautology)
 //
-// - `ref-short`（0.4 秒）— 0.5 秒未満のゼロ pad 測定枝 **と** peak 制限枝（利得 441 倍で
-//   peak が 1.84 まで上がる）の両方。**LUFS 経路で peak 制限を踏む唯一のケース**
-// - `ref-odd`（144,777 サンプル）— reflect pad の端数枝 **と**、ブロックのゼロ pad 枝
-//   （`ref-plain` と先頭 144,000 サンプルを共有するので、末尾の欠けたブロックを捨てる実装では
-//   両者の LUFS が一致してしまう — その一致が起きないことを直接見る）
-// - `ref-default` — pad が 0 サンプルの恒等枝
-// - `ref-hot` — 振幅 3 倍（LUFS 測定そのものが値域に依らないこと）
+// - `ref-short` (0.4 s) — both the zero-pad measurement branch below 0.5 s **and** the
+//   peak-limiting branch (a gain of 441× raises the peak to 1.84). **The only case that hits peak
+//   limiting on the LUFS path**
+// - `ref-odd` (144,777 samples) — the remainder branch of reflect pad **and** the block zero-pad
+//   branch (it shares its first 144,000 samples with `ref-plain`, so an implementation that drops
+//   the incomplete last block would give both the same LUFS — this checks directly that they do
+//   not match)
+// - `ref-default` — the identity branch with a pad of 0 samples
+// - `ref-hot` — 3× amplitude (the LUFS measurement itself does not depend on the value range)
 
 import { readFile } from "@karume/test-support/fs";
 import { goldenDir, testAssetsFetched } from "@karume/test-support/test-assets";
@@ -34,45 +39,50 @@ import { normalizeReference, reflectPadToHop } from "../../models/src/irodori/ho
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 import { goldenPresent } from "./helpers/irodori-assets.ts";
 
-/** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
+/** The operating values of real-weight v4-small (the same numbers `pipelineConfig` carries). */
 const SAMPLE_RATE = 48000;
 const HOP_LENGTH = 1920;
 
 /**
- * LUFS 測定値（LU）の許容差。
+ * The tolerance of the LUFS measurement (LU).
  *
- * 実測（この門が毎回ログに出す表。2026-08-12 / golden 5 ケース）:
+ * Measured (the table this check logs every time; 2026-08-12, the 5 golden cases):
  *
- * | ケース      | 秒        | refDb 差   | 利得の相対差 | peak 利得の相対差 | 正規化後 maxAbs |
- * | ----------- | --------- | ---------- | ------------ | ----------------- | --------------- |
- * | ref-default | 7.6       | 5.131e-6   | −6.061e-7    | 0（厳密）         | 5.961e-7        |
- * | ref-plain   | 3.0       | 2.659e-6   | —（経路外）  | —                 | —               |
- * | ref-hot     | 3.0       | 4.982e-6   | —（経路外）  | —                 | —               |
- * | ref-short   | 0.4       | −2.158e-5  | 2.500e-6     | −2.457e-6         | 1.192e-7        |
- * | ref-odd     | 3.0161875 | 3.526e-6   | −3.745e-7    | 0（厳密）         | 3.576e-7        |
+ * | Case        | Seconds   | refDb diff | Gain rel. diff | Peak gain rel. diff | Normalised maxAbs |
+ * | ----------- | --------- | ---------- | -------------- | ------------------- | ----------------- |
+ * | ref-default | 7.6       | 5.131e-6   | −6.061e-7      | 0 (exact)           | 5.961e-7          |
+ * | ref-plain   | 3.0       | 2.659e-6   | — (off path)   | —                   | —                 |
+ * | ref-hot     | 3.0       | 4.982e-6   | — (off path)   | —                   | —                 |
+ * | ref-short   | 0.4       | −2.158e-5  | 2.500e-6       | −2.457e-6           | 1.192e-7          |
+ * | ref-odd     | 3.0161875 | 3.526e-6   | −3.745e-7      | 0 (exact)           | 3.576e-7          |
  *
- * 差の出どころは**ただ 1 つ**、K-weighting の IIR を上流が f32 で・ここが f64 で回すこと
- * （`host/loudness.ts` の MUST）。ブロック分割もゲーティングも整数と比較の判断なので、
- * 実装が違えば 0.01 LU 以上の段差で出る（実測: ブロックの数え方を取り違えると `ref-odd` が
- * 0.074 LU ずれた — 下の「ブロックのゼロ pad」テストが見ているのはその段差）。
+ * The difference has **a single source**: upstream runs the K-weighting IIR in f32 and this code in
+ * f64 (the MUST in `host/loudness.ts`). Block splitting and gating are integer and comparison
+ * decisions, so a different implementation shows as a step of 0.01 LU or more (measured: counting
+ * the blocks wrongly shifted `ref-odd` by 0.074 LU — the step the "block zero pad" test below
+ * looks at).
  *
- * 2e-4 LU は実測最悪 2.158e-5 の **9.3 倍**。正規化利得に直すと相対 2.3e-5 で、16bit PCM の
- * 1LSB（3.05e-5）より小さい — **WAV に書いた時点で消える**大きさ。
+ * 2e-4 LU is **9.3 times** the measured worst 2.158e-5. As a normalisation gain it is a relative
+ * 2.3e-5, smaller than 1 LSB of 16-bit PCM (3.05e-5) — a size that **vanishes once written to
+ * WAV**.
  */
 const REF_DB_ATOL = 2e-4;
 
 /**
- * 利得（LUFS 利得 / peak 利得）の相対許容差。実測最悪 2.500e-6（`ref-short`）の **8.0 倍**。
- * `refDb` の差がそのまま指数に乗るだけなので、上の表と同じ素性の数。
+ * The relative tolerance of the gains (LUFS gain / peak gain). **8.0 times** the measured worst
+ * 2.500e-6 (`ref-short`). The `refDb` difference just rides on the exponent, so it is a number of
+ * the same nature as the table above.
  */
 const GAIN_RTOL = 2e-5;
 
 /**
- * 正規化後 / pad 後の波形の絶対許容差。実測最悪 5.961e-7（`ref-default`）の **8.4 倍**。
+ * The absolute tolerance of the normalised / padded waveform. **8.4 times** the measured worst
+ * 5.961e-7 (`ref-default`).
  *
- * 値域は ±1 なので、−106dBFS 級。利得 1 本の相対差 6e-7 が値域上端に出たものが実体で、
- * f32 の 1ulp（6e-8）の 10 倍のところに居る。**式の取り違え**（目標 dB・利得の符号・peak の
- * 判定条件）は値域と同じ O(0.1〜1) で出る。
+ * The range is ±1, so this is around −106 dBFS. What it really is: one gain's relative difference
+ * of 6e-7 showing at the top of the range, sitting at 10 times f32's 1 ulp (6e-8). **A wrong
+ * formula** (the target dB, the gain's sign, the peak condition) shows at O(0.1–1), the same as the
+ * range.
  */
 const WAVE_ATOL = 5e-6;
 
@@ -92,7 +102,10 @@ const lostAsset = (url: URL): Error =>
       "revision: the test-asset dataset at the pin lacks it",
   );
 
-/** golden `meta.json` のうち、この門が読む欄だけ（形は exporter が持つ — ここは読み口）。 */
+/**
+ * Only the fields of the golden `meta.json` this check reads (the exporter owns the shape — this is
+ * the reader).
+ */
 type GoldenCase = {
   readonly samples: number;
   readonly seconds: number;
@@ -132,7 +145,7 @@ if (!RUNNABLE) {
   );
 }
 
-/** 1 ケースぶんの golden テンソル（`raw` / `normalized` / `padded`）。 */
+/** The golden tensors of one case (`raw` / `normalized` / `padded`). */
 const readCase = async (
   name: string,
 ): Promise<Readonly<Record<string, Float32Array<ArrayBuffer>>>> => {
@@ -151,7 +164,7 @@ const readCase = async (
   const out: Record<string, Float32Array<ArrayBuffer>> = {};
   for (const key of ["raw", "normalized", "padded"]) {
     const spec = file.tensors.get(key);
-    if (spec === undefined) throw new Error(`golden case.${name} に '${key}' が無い`);
+    if (spec === undefined) throw new Error(`golden case.${name} has no '${key}'`);
     out[key] = new Float32Array(
       file.buffer.slice(spec.byteOffset, spec.byteOffset + spec.byteLength),
     ) as Float32Array<ArrayBuffer>;
@@ -161,7 +174,7 @@ const readCase = async (
 
 const maxAbsDiff = (actual: Float32Array, expected: Float32Array, where: string): number => {
   if (actual.length !== expected.length) {
-    throw new Error(`${where}: 長さが ${actual.length} と ${expected.length} で違う`);
+    throw new Error(`${where}: the lengths differ, ${actual.length} vs ${expected.length}`);
   }
   let worst = 0;
   for (let i = 0; i < actual.length; i += 1) {
@@ -170,15 +183,15 @@ const maxAbsDiff = (actual: Float32Array, expected: Float32Array, where: string)
   return worst;
 };
 
-// ---- golden とのパリティ（本体）-------------------------------------------
+// ---- Parity with the golden (the main check) -------------------------------------------
 
 test.skipIf(!RUNNABLE)(
-  "参照音声のホスト前処理が golden（上流実測）と一致する — 5 ケース",
+  "the reference audio's host preprocessing matches the golden (upstream measurement) — 5 cases",
   async () => {
     const meta = readMeta();
-    assertEquals(meta.sampleRate, SAMPLE_RATE, "golden の sampleRate");
-    assertEquals(meta.hopLength, HOP_LENGTH, "golden の hopLength");
-    // 利得換算係数（`ln(10)/20`）— `host/reference.ts` が同じ数を持っている前提。
+    assertEquals(meta.sampleRate, SAMPLE_RATE, "golden sampleRate");
+    assertEquals(meta.hopLength, HOP_LENGTH, "golden hopLength");
+    // The gain conversion factor (`ln(10)/20`) — assumes `host/reference.ts` holds the same number.
     assertAlmostEquals(Math.LN10 / 20, meta.gainFactor, 1e-15, "gainFactor");
 
     const rows: string[] = [];
@@ -187,101 +200,121 @@ test.skipIf(!RUNNABLE)(
     let worstWave = 0;
     for (const [name, expected] of Object.entries(meta.cases)) {
       const tensors = await readCase(name);
-      assertEquals(tensors["raw"].length, expected.samples, `${name}: golden の raw の長さ`);
+      assertEquals(tensors["raw"].length, expected.samples, `${name}: length of the golden's raw`);
 
       const refDb = integratedLoudness(tensors["raw"], SAMPLE_RATE);
       const refDbDiff = refDb - expected.refDb;
       worstRefDb = Math.max(worstRefDb, Math.abs(refDbDiff));
       if (expected.normalizeDb === null) {
-        // 上流の「正規化しない」経路のケース。LUFS 測定値だけを見る（モジュール doc）。
-        rows.push(`  ${name.padEnd(11)} refDb ${refDbDiff.toExponential(3)}（LUFS 経路外）`);
+        // A case of upstream's "no normalisation" path. Only the LUFS measurement is checked (the
+        // module doc).
+        rows.push(`  ${name.padEnd(11)} refDb ${refDbDiff.toExponential(3)} (off the LUFS path)`);
         assertAlmostEquals(refDb, expected.refDb, REF_DB_ATOL, `${name}: refDb`);
         continue;
       }
-      assertEquals(expected.normalizeDb, -16, `${name}: golden の目標 dB が −16 でない`);
+      assertEquals(expected.normalizeDb, -16, `${name}: the golden's target dB is not −16`);
 
       const normalized = normalizeReference(tensors["raw"], SAMPLE_RATE);
       const padded = reflectPadToHop(normalized.data, HOP_LENGTH);
       const gainDiff = (normalized.loudnessGain - expected.loudnessGain) / expected.loudnessGain;
       const peakGainDiff = (normalized.peakGain - expected.peakGain) / expected.peakGain;
-      const waveDiff = maxAbsDiff(normalized.data, tensors["normalized"], `${name} の normalized`);
-      const padDiff = maxAbsDiff(padded, tensors["padded"], `${name} の padded`);
+      const waveDiff = maxAbsDiff(normalized.data, tensors["normalized"], `normalized of ${name}`);
+      const padDiff = maxAbsDiff(padded, tensors["padded"], `padded of ${name}`);
       worstGain = Math.max(worstGain, Math.abs(gainDiff), Math.abs(peakGainDiff));
       worstWave = Math.max(worstWave, waveDiff, padDiff);
       rows.push(
-        `  ${name.padEnd(11)} refDb ${refDbDiff.toExponential(3)} / 利得 ${gainDiff.toExponential(
+        `  ${name.padEnd(11)} refDb ${refDbDiff.toExponential(3)} / gain ${gainDiff.toExponential(
           3,
-        )} / peak 利得 ${peakGainDiff.toExponential(3)} / 波形 ${waveDiff.toExponential(3)}`,
+        )} / peak gain ${peakGainDiff.toExponential(3)} / waveform ${waveDiff.toExponential(3)}`,
       );
 
       assertAlmostEquals(refDb, expected.refDb, REF_DB_ATOL, `${name}: refDb`);
-      assertAlmostEquals(gainDiff, 0, GAIN_RTOL, `${name}: LUFS 利得の相対差`);
-      assertAlmostEquals(peakGainDiff, 0, GAIN_RTOL, `${name}: peak 利得の相対差`);
-      assertEquals(waveDiff < WAVE_ATOL, true, `${name}: 正規化後の波形の差 ${waveDiff}`);
-      assertEquals(padDiff < WAVE_ATOL, true, `${name}: pad 後の波形の差 ${padDiff}`);
-      // 長さと frames は整数の判断なので完全一致を要求する。
-      assertEquals(padded.length, expected.paddedSamples, `${name}: pad 後の長さ`);
-      assertEquals(padded.length / HOP_LENGTH, expected.frames, `${name}: フレーム数`);
+      assertAlmostEquals(gainDiff, 0, GAIN_RTOL, `${name}: relative difference of the LUFS gain`);
+      assertAlmostEquals(
+        peakGainDiff,
+        0,
+        GAIN_RTOL,
+        `${name}: relative difference of the peak gain`,
+      );
+      assertEquals(
+        waveDiff < WAVE_ATOL,
+        true,
+        `${name}: difference of the normalised waveform ${waveDiff}`,
+      );
+      assertEquals(
+        padDiff < WAVE_ATOL,
+        true,
+        `${name}: difference of the padded waveform ${padDiff}`,
+      );
+      // The length and the frames are integer decisions, so an exact match is required.
+      assertEquals(padded.length, expected.paddedSamples, `${name}: padded length`);
+      assertEquals(padded.length / HOP_LENGTH, expected.frames, `${name}: frame count`);
     }
     console.log(
-      `[parity] irodori 参照音声の前処理（tolerance: refDb ${REF_DB_ATOL} / 利得 ${GAIN_RTOL}` +
-        ` / 波形 ${WAVE_ATOL}）\n${rows.join("\n")}\n  最悪: refDb ${worstRefDb.toExponential(
+      `[parity] irodori reference-audio preprocessing (tolerance: refDb ${REF_DB_ATOL} / gain ${GAIN_RTOL}` +
+        ` / waveform ${WAVE_ATOL})\n${rows.join("\n")}\n  worst: refDb ${worstRefDb.toExponential(
           3,
-        )} / 利得 ${worstGain.toExponential(3)} / 波形 ${worstWave.toExponential(3)}`,
+        )} / gain ${worstGain.toExponential(3)} / waveform ${worstWave.toExponential(3)}`,
     );
   },
 );
 
-// ---- 枝の踏み分け（恒真化の遮断）------------------------------------------
+// ---- Covering the branches (blocking tautology) ------------------------------------------
 
-test.skipIf(!RUNNABLE)("golden の 5 ケースが狙った枝を実際に踏んでいる", async () => {
+test.skipIf(!RUNNABLE)("the 5 golden cases actually hit the branches they target", async () => {
   const meta = readMeta();
   const short = meta.cases["ref-short"];
   const odd = meta.cases["ref-odd"];
   const hot = meta.cases["ref-hot"];
   const base = meta.cases["ref-default"];
 
-  // ① 0.5 秒未満のゼロ pad 測定枝。
-  assertEquals(short.seconds < 0.5, true, `ref-short が ${short.seconds} 秒 — 枝を踏まない`);
-  // ② peak 制限枝。**LUFS 経路でこれを踏むのは ref-short だけ**（ref-hot は上流の
-  //    「正規化しない」経路で peak を踏むケースで、−16 正規化を通すと利得 0.27 倍で
-  //    peak が 0.81 まで下がり、制限が掛からない）。
+  // ① The zero-pad measurement branch below 0.5 s.
+  assertEquals(
+    short.seconds < 0.5,
+    true,
+    `ref-short is ${short.seconds} s — it does not hit the branch`,
+  );
+  // ② The peak-limiting branch. **On the LUFS path only ref-short hits it** (ref-hot is the case
+  //    that hits the peak on upstream's "no normalisation" path; through −16 normalisation its gain
+  //    is 0.27× and the peak drops to 0.81, so no limiting applies).
   const normalizedShort = normalizeReference((await readCase("ref-short"))["raw"], SAMPLE_RATE);
-  assertEquals(normalizedShort.peakBeforeScale > 1, true, "ref-short が peak > 1 にならない");
-  assertEquals(normalizedShort.peakGain < 1, true, "ref-short で peak 制限が掛かっていない");
+  assertEquals(normalizedShort.peakBeforeScale > 1, true, "ref-short does not reach peak > 1");
+  assertEquals(normalizedShort.peakGain < 1, true, "peak limiting does not apply to ref-short");
   const normalizedHot = normalizeReference((await readCase("ref-hot"))["raw"], SAMPLE_RATE);
   assertEquals(
     normalizedHot.peakGain,
     1,
-    "ref-hot が −16 正規化の後で peak 制限を踏んだ（前提が変わった — doc の説明を直す）",
+    "ref-hot hit peak limiting after −16 normalisation (the premise changed — fix the doc's explanation)",
   );
-  assertEquals(hot.peakGain < 1, true, "golden の ref-hot が peak 制限枝を踏んでいない");
-  // ③ reflect pad の端数枝と恒等枝。
-  assertEquals(base.padSamples, 0, "ref-default が pad の恒等枝を踏んでいない");
+  assertEquals(
+    hot.peakGain < 1,
+    true,
+    "the golden's ref-hot does not hit the peak-limiting branch",
+  );
+  // ③ The remainder branch and the identity branch of reflect pad.
+  assertEquals(base.padSamples, 0, "ref-default does not hit the pad's identity branch");
   assertEquals(
     0 < odd.padSamples && odd.padSamples < HOP_LENGTH,
     true,
-    `ref-odd の pad が ${odd.padSamples} サンプル — 端数枝を踏んでいない`,
+    `ref-odd's pad is ${odd.padSamples} samples — it does not hit the remainder branch`,
   );
 });
 
 test.skipIf(!RUNNABLE)(
-  "ブロックのゼロ pad: ref-odd と ref-plain の LUFS が一致しない（末尾を捨てていない）",
+  "block zero pad: the LUFS of ref-odd and ref-plain differ (the tail is not dropped)",
   async () => {
-    // ref-odd は ref-plain の先頭 144,000 サンプルに 777 サンプル足したもの。末尾の欠けた
-    // ブロックを捨てる実装（`torch.nn.Unfold` の綴り）では、この 777 サンプルが 1 ブロックも
-    // 作らないので**両者の LUFS が厳密に一致**してしまう。`julius.core.unfold` はゼロ pad して
-    // 28 ブロック目を作るので一致しない — 実測の段差は 0.074 LU。
+    // ref-odd is ref-plain's first 144,000 samples plus 777 samples. In an implementation that
+    // drops the incomplete last block (the `torch.nn.Unfold` spelling), these 777 samples make no
+    // block at all, so **the two LUFS values match exactly**. `julius.core.unfold` zero-pads and
+    // makes a 28th block, so they do not match — the measured step is 0.074 LU.
     const plain = integratedLoudness((await readCase("ref-plain"))["raw"], SAMPLE_RATE);
     const odd = integratedLoudness((await readCase("ref-odd"))["raw"], SAMPLE_RATE);
     const gap = Math.abs(odd - plain);
-    console.log(
-      `[parity] ブロックのゼロ pad: ref-odd − ref-plain = ${(odd - plain).toFixed(6)} LU`,
-    );
+    console.log(`[parity] block zero pad: ref-odd − ref-plain = ${(odd - plain).toFixed(6)} LU`);
     assertEquals(
       gap > 100 * REF_DB_ATOL,
       true,
-      `ref-odd と ref-plain の LUFS 差が ${gap} しかない — 末尾の欠けたブロックを捨てている`,
+      `the LUFS difference of ref-odd and ref-plain is only ${gap} — the incomplete last block is dropped`,
     );
   },
 );

@@ -27,7 +27,7 @@ export const conv3dCensus = (
   readonly strided: number;
 } => {
   const pipelines = diagnostics.lastRunPipelines;
-  if (pipelines === undefined) throw new Error(`${graph}: 直近 run の pipeline の census が無い`);
+  if (pipelines === undefined) throw new Error(`${graph}: the last run has no pipeline census`);
   const sum = (predicate: (key: string) => boolean): number =>
     pipelines
       .filter(({ key }) => predicate(key))

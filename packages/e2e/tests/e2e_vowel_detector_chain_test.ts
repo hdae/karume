@@ -1,64 +1,73 @@
-// 実重み母音認識 CRNN の**実音声の全鎖**（WAV → 特徴抽出 → 実 GPU → `.lab`）の門
-// （ADR 0005 の段 3）。
+// Check of the **full real-audio chain** of the real-weight vowel-recognition CRNN (WAV → feature
+// extraction → real GPU → `.lab`) (step 3 of ADR 0005).
 //
-// 鎖の両端（`src/audio/wav.ts` / `src/vowel-detector/features.ts` /
-// `src/vowel-detector/postprocess.ts`）は models の実装なので、この門は models 側にある。
-// もともとは `packages/runtime/tests/e2e_vowel_detector_test.ts` に同居していたが、runtime の
-// テストが models の実装を相対 import する**逆向きの依存**になっていたため、鎖ごとこちらへ
-// 移した（SigLIP2 で先に踏んだ分担 — `e2e_siglip2_image_preprocess_real_test.ts` 冒頭）。
+// Both ends of the chain (`src/audio/wav.ts` / `src/vowel-detector/features.ts` /
+// `src/vowel-detector/postprocess.ts`) are models implementations, so this check lives on the
+// models side. It used to sit in `packages/runtime/tests/e2e_vowel_detector_test.ts`, but there a
+// runtime test imported models implementations by relative path — a **reversed dependency** — so
+// the whole chain moved here (the split SigLIP2 went through first — the head of
+// `e2e_siglip2_image_preprocess_real_test.ts`).
 //
-// ## runtime 側との分担
+// ## Split with the runtime side
 //
-// - **ロジットの数値突合**（合成 golden 4 ケース・torch CPU 期待値）は 0.15 の選別で削除した
-//   （`e2e_vowel_detector_test.ts` — 鎖の sha 行が受け持つ）。`.lab` だけだと「ロジットが動いてもラベルが変わらな
-//   かった」変更が素通りするので、あちらが 1e-5 級の tolerance で押さえる。
-// - **`.lab` の完全一致**（実音声・全鎖）は**ここ**。離散のラベル列なので tolerance を持たない
-//   （PNG / WAV の sha256 門と同じ哲学 — 出口の成果物そのものを固定する）。
+// - **Numeric comparison of the logits** (4 synthetic golden cases, torch CPU expected values) was
+//   removed in the 0.15 test selection (`e2e_vowel_detector_test.ts` — the chain's sha rows cover
+//   it). With `.lab` alone, a change where "the logits moved but the labels did not change" would
+//   slip through, so that test pinned it with a tolerance of the 1e-5 order.
+// - **Exact match of `.lab`** (real audio, full chain) is **here**. It is a discrete label
+//   sequence, so it has no tolerance (the same philosophy as the PNG / WAV sha256 checks — pin the
+//   output artifact itself).
 //
-// 鎖の途中（ホスト側の特徴抽出と後処理）は `vowel_detector_host_test.ts` が Python 正本との
-// パリティで押さえており、ここはその 2 つを実 GPU 推論で繋いだときに**意味のある `.lab` が
-// 出る**ことを見る。
+// The middle of the chain (host-side feature extraction and post-processing) is covered by
+// `vowel_detector_host_test.ts` through parity with the canonical Python implementation; this file
+// checks that **a meaningful `.lab` comes out** when those two are connected through real GPU
+// inference.
 //
-// ## 系列は 1 本（グラフが 1 本・長さは記号）
+// ## One series (one graph; the length is a symbol)
 //
-// 時間軸は記号 `T`（20ms 格子）で、グラフ入力は `[1, 2T, 83]`（ADR 0056 / 0057）。したがって
-// **4 本の音声はすべて同じグラフ**を、それぞれの実長で回る。束縛は明示 seed を渡さず
-// **入力 shape から解かせる**（`2T` の派生次元からの束縛 = ADR 0057 の経路を、この門が実測で
-// 踏む唯一の席。配布形パイプラインの側は逆に明示 seed を渡す）。
+// The time axis is the symbol `T` (20ms grid) and the graph input is `[1, 2T, 83]` (ADR 0056 /
+// 0057). So **all 4 audio clips run the same graph**, each at its real length. The binding gets
+// no explicit seed and is **solved from the input shape** (binding through the derived dimension
+// `2T` = the path of ADR 0057; this check is the only place that exercises it in a real run. The
+// distribution pipeline, conversely, passes an explicit seed).
 //
-// **pad は 1 要素も無い**（奇数フレームの端数 1 本だけを切り捨てる）。以前は配布形だけが
-// 長さバケット + 右ゼロ pad を採っていて、pad が末尾のロジットを O(1) 動かすせいで `.lab` が
-// この門と割れていた（実測: pad 2 フレーム = 40ms でも max abs diff 2.2〜3.2）。バケットが
-// 消えた今は**配布形の `.lab` もここと完全一致**する (each case below checks this as step ②':
-// the distribution pipeline's `.lab` must equal this direct real-length path's `.lab`).
-//
-// ## 資産
+// **There is not a single pad element** (only the one leftover frame of an odd frame count is
+// cut off). Earlier, only the distribution used length buckets + right zero padding, and since the
+// pad moved the trailing logits by O(1), its `.lab` disagreed with this check (measured: max abs
+// diff 2.2–3.2 even with 2 pad frames = 40ms). Now that the buckets are gone, **the
+// distribution's `.lab` matches this one exactly as well** (each case below checks this as step
+// ②': the distribution pipeline's `.lab` must equal this direct real-length path's `.lab`).
+// ## Assets
 //
 // This is an implementation-time check (ADR 0139 decision 6): the vowel detector has no published
 // distribution and its WAVs are not in the test-asset dataset, so the whole chain reads the series
 // and the local corpus below and runs only with `KARUME_SERIES=1` (`SERIES_CHECKS`); the default
 // lanes skip it explicitly.
 //
-// - グラフ: `outputs/series/vowel-detector-crnn-epoch3/`（`.gitignore` の `outputs/`）。
-//   生成コマンドは {@link GENERATE_COMMAND} がそのまま正本。
-// - 実音声: `outputs/misc/corpus/vowel-<ケース>.wav`（16kHz mono）。生成台本は
-//   `examples/irodori/eval-audio.ts`（テキスト / seed / リサンプルの正本はあちら）で、日本語
-//   TTS（Irodori）が焼いた 48kHz を 1/3 に間引いたもの。台本の出力先は
-//   `outputs/bench/vowel-detector/<日付>_eval-audio/` で、採用分を**人手で `misc/corpus/` へ
-//   凍結コピー**したものがこの門の入力になる。**素材の同一性は sha256 で固定する** —
-//   焼き直して凍結し直したら期待 `.lab` も採り直しになる。
-// - mel 基底: `tests/fixtures/vowel-detector/parity.json`（git 追跡・上流
-//   `assets/feature_config.json` そのまま）。配布形は同じ行列を `assets` 席の safetensors で
-//   配る（`dist.py --pipeline vowel-detector`）が、この門は配布形を経由しない。
+// - Graph: `outputs/series/vowel-detector-crnn-epoch3/` (`outputs/` of `.gitignore`). The
+//   generation command is canonically {@link GENERATE_COMMAND} as written.
+// - Real audio: `outputs/misc/corpus/vowel-<case>.wav` (16kHz mono). The generation script is
+//   `examples/irodori/eval-audio.ts` (the canonical text / seed / resampling live there): 48kHz
+//   audio rendered by the Japanese TTS (Irodori), decimated to 1/3. The script writes to
+//   `outputs/bench/vowel-detector/<date>_eval-audio/`, and the adopted clips, **frozen by a manual
+//   copy into `misc/corpus/`**, are the input of this check. **The identity of the material is
+//   pinned by sha256** — once the audio is regenerated and frozen again, the expected `.lab` has to
+//   be recorded again too.
+// - mel basis: `tests/fixtures/vowel-detector/parity.json` (git-tracked; upstream
+//   `assets/feature_config.json` as is). The distribution ships the same matrix as a safetensors
+//   in the `assets` slot (`dist.py --pipeline vowel-detector`), but this check does not go through
+//   the distribution.
 // - Distribution form: `models/karume-vowel-detector/` (untracked). Only step ②' reads it, through
 //   `Pipeline.fromAssets` → `detect`. The direct path keeps the fixture mel basis, so
 //   ②' also pins that the distributed mel basis yields the same `.lab`. When it is missing, ②'
 //   alone is skipped with a warning (the direct-path gates still run).
 //
-// 資産が無い環境では**明示 SKIP** する（系列ごと・音声ごとに独立）。ADR 0005 の「全 SKIP は
-// 明示 FAIL」門番は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。golden ケースの
-// 列挙と完全性（中途半端な資産は FAIL）は runtime 側の「資産の完全性」テストが持つ — ここが
-// 要るのはグラフ本体と WAV だけなので、系列の有無も `model.krm` の有無で見る。
+// Where the assets are missing it **SKIPs explicitly** (independently per series and per audio
+// clip). The "all SKIP is an explicit FAIL" guard of ADR 0005 looks only at *whether a GPU adapter
+// exists* and is independent of this SKIP. The enumeration and completeness of the golden cases (a
+// half-present asset set FAILs) belong to the "asset completeness" test on the runtime side — this
+// file needs only the graph itself and the WAVs, so the series' presence is also judged by
+// `model.krm`.
 
 import { isNotFound, readFile, readTextFile, statSync } from "@karume/test-support/fs";
 import { describe, test } from "vite-plus/test";
@@ -90,38 +99,40 @@ import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts
 import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/series-checks.ts";
 
 /**
- * 実音声 1 本の宣言（グラフは 4 本で共有 — 違うのは長さだけ）。
+ * Declaration of one real audio clip (the graph is shared by all 4 — only the length differs).
  *
- * `frames` / `length` / `sha256` / `lab` は**全て実測値**で、音声を焼き直したら 4 つとも
- * 採り直しになる（{@link AUDIO_COMMAND} → {@link GENERATE_COMMAND} の順）。
+ * `frames` / `length` / `sha256` / `lab` are **all measured values**; when the audio is
+ * regenerated, all four have to be recorded again ({@link AUDIO_COMMAND} →
+ * {@link GENERATE_COMMAND}, in that order).
  */
 type Case = {
-  /** 音声ケース名（`examples/irodori/eval-audio.ts` の `CASES` と 1:1）。 */
+  /** Audio case name (1:1 with `CASES` of `examples/irodori/eval-audio.ts`). */
   readonly name: string;
-  /** 何を測る素材か（人が読むための欄 — 台本側の `why` の写し）。 */
+  /** What the material measures (a field for people to read — a copy of the script's `why`). */
   readonly why: string;
-  /** `extractFeatures` が返す 10ms フレーム数（波形長から決まる）。 */
+  /** Number of 10ms frames that `extractFeatures` returns (determined by the waveform length). */
   readonly frames: number;
-  /** グラフへ渡す入力長 T10（= `frames` を偶数へ落としたもの）。 */
+  /** Input length T10 passed to the graph (= `frames` rounded down to an even number). */
   readonly length: number;
-  /** 16kHz WAV の sha256（golden を採った素材と同一であることを実行前に見る）。 */
+  /** sha256 of the 16kHz WAV (checked before the run: it is the material the golden came from). */
   readonly sha256: string;
-  /** 期待する `.lab` 全文（実 GPU 出力・torch CPU 出力の両方と一致することを確認済み）。 */
+  /** The full expected `.lab` (confirmed to match both the real GPU and the torch CPU output). */
   readonly lab: string;
 };
 
 /**
- * 実走するケース。**列挙ではなくここで固定する** — 生成済みのものを拾う形にすると、
- * 一部だけ生成し忘れた環境で「緑だが未検証」になる。
+ * The cases that run. **They are pinned here, not enumerated** — picking up whatever has been
+ * generated would make an environment that forgot to generate some of them "green but unverified".
  *
- * 長さは 2.88s / 3.48s / 8.04s / 12.40s に散らしてある（**同じ 18 ノードのグラフ**を 4 通りの
- * 束縛で回す — 展開列だった頃はここが 10,812 / 13,092 / 30,420 / 46,988 ノードの別グラフ
- * 4 本だった）。`vowels` だけは内容も検査に使う（{@link VOWEL_SEQUENCE}）。
+ * The lengths are spread over 2.88s / 3.48s / 8.04s / 12.40s (**the same 18-node graph** runs
+ * under 4 bindings — back when the graph was unrolled, these were 4 separate graphs of 10,812 /
+ * 13,092 / 30,420 / 46,988 nodes). Only `vowels` also has its content checked
+ * ({@link VOWEL_SEQUENCE}).
  */
 const CASES: readonly Case[] = [
   {
     name: "short",
-    why: "2 秒級・1 文（「ありがとうございます。」）",
+    why: "2-second class, 1 sentence (「ありがとうございます。」)",
     frames: 285,
     length: 284,
     sha256: "0b48165fd11bf34c1f2b7904e4d53b5efa3f52c9baefc6a54566f850a9a30dd8",
@@ -137,7 +148,7 @@ const CASES: readonly Case[] = [
   },
   {
     name: "vowels",
-    why: "3 秒級・5 母音を区切って読む（「あ、い、う、え、お。」）",
+    why: "3-second class, 5 vowels read one by one (「あ、い、う、え、お。」)",
     frames: 345,
     length: 344,
     sha256: "ae3712e01da6906a214b46c52490d106e1dfa598528e611e8f0f85ce6207a829",
@@ -151,7 +162,7 @@ const CASES: readonly Case[] = [
   },
   {
     name: "mid",
-    why: "8 秒級・3 文",
+    why: "8-second class, 3 sentences",
     frames: 801,
     length: 800,
     sha256: "b63d35c12d9d60af44754db209b907f03e3fd5f46f25e6bb0a7ccb5195df734a",
@@ -197,7 +208,7 @@ const CASES: readonly Case[] = [
   },
   {
     name: "long",
-    why: "12 秒級・2 文（この門で最長の束縛 T=618）",
+    why: "12-second class, 2 sentences (the longest binding in this check, T=618)",
     frames: 1237,
     length: 1236,
     sha256: "28013dab4551c353d3f95e51733e69d71de43a719bf3c4f120eaa1082013f59b",
@@ -271,21 +282,22 @@ const CASES: readonly Case[] = [
 ];
 
 /**
- * `vowels` ケースの `.lab` から無音を除いたラベル列。
+ * The label sequence of the `vowels` case's `.lab` with silence removed.
  *
- * 期待 `.lab` の完全一致とは**主張が違う** — あちらは「前回と同じ値が出る」で、こちらは
- * 「5 母音を順に読ませたら 5 母音が順に出る」= 鎖が意味を持つことの主張。音声を焼き直して
- * 期待 `.lab` を採り直すとき、壊れた出力をそのまま固定してしまう事故はこちらが止める。
+ * This **claims something different** from the exact match of the expected `.lab` — that one says
+ * "the same values as last time come out", this one says "reading the 5 vowels in order yields the
+ * 5 vowels in order" = the claim that the chain means something. When the audio is regenerated and
+ * the expected `.lab` is recorded again, this one stops the accident of pinning a broken output.
  */
 const VOWEL_SEQUENCE: readonly string[] = ["a", "i", "u", "e", "o"];
 const VOWEL_CASE = "vowels";
 
-/** 8 クラス（`LIPSYNC_CLASSES` の本数 — 出力の最終軸）。 */
+/** 8 classes (the count of `LIPSYNC_CLASSES` — the last axis of the output). */
 const CLASS_COUNT = 8;
 
 const SERIES_NAME = "vowel-detector-crnn-epoch3";
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
-/** 実音声コーパス（凍結コピー — ホスト資産なので消すと焼き直し + 凍結し直しが要る）。 */
+/** Real-audio corpus (a frozen copy of a host asset — once deleted, regenerate and refreeze it). */
 const CORPUS_DIR = new URL("../../../outputs/misc/corpus/", import.meta.url);
 const FIXTURE_PATH = new URL(
   "../../models/tests/fixtures/vowel-detector/parity.json",
@@ -301,23 +313,27 @@ const INPUT_NAME = "features";
 
 const audioFile = (entry: Case): string => `vowel-${entry.name}.wav`;
 
-/** ロジットの実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_vowel-detector/` — 消して安全）。 */
+/**
+ * Where the logits and the outcomes go (`outputs/verify/<environment key>/<date>_vowel-detector/`
+ * — safe to delete).
+ */
 const results = openResults("vowel-detector");
 /**
- * ロジットの sha256 参照値（環境キーごとの行 — `helpers/reference.ts`）。ケース ID は
- * ケース名そのもの。
+ * sha256 reference values of the logits (rows per environment key — `helpers/reference.ts`). The
+ * case ID is the case name itself.
  *
- * `.lab` の完全一致とは**主張が違う** — `.lab` は argmax を経た離散の列なので、ロジットが
- * 動いてもラベルが変わらなければ通る。こちらはロジットそのもの（f32 のビット列）を固定し、
- * 「同じ機で 1 ビットも動いていない」を言う。実物はロジット 1 本の safetensors
- * （{@link logitsArtifact} — `f32ArtifactBytes`: テンソル名 = グラフの出力名・metadata なし）で、
- * sha はそのファイルのバイト列に対して採る。
+ * This **claims something different** from the exact match of `.lab` — `.lab` is a discrete
+ * sequence after argmax, so it passes as long as the labels do not change even when the logits
+ * move. This pins the logits themselves (the f32 bit pattern) and says "not a single bit moved on
+ * the same machine". The artifact is a safetensors holding the logits alone ({@link logitsArtifact}
+ * — `f32ArtifactBytes`: tensor name = the graph's output name, no metadata),
+ * and the sha is taken over the bytes of that file.
  */
 const references = openReferences(
   new URL("../../models/tests/fixtures/references/vowel-detector.json", import.meta.url),
 );
 
-/** ロジットの実物のファイル名（結果の席からの相対）。 */
+/** File name of the logits artifact (relative to the results directory). */
 const logitsArtifact = (entry: Case): string => `${entry.name}-logits.safetensors`;
 
 /** Distribution form (output of `karume dist --pipeline vowel-detector`) read by step ②'. */
@@ -327,17 +343,17 @@ const DIST_COMMAND =
   "cd tools/export-recipes && uv run python -m vowel_detector.export && " +
   "uv run python dist.py --pipeline vowel-detector";
 
-/** SKIP 時にそのまま貼れる生成コマンド（グラフは 1 本 — 長さの指定は要らない）。 */
+/** Generation command to paste as is on SKIP (one graph — no length needs to be given). */
 const GENERATE_COMMAND = "cd tools/export-recipes && uv run python -m vowel_detector.export";
 
 /**
- * 実音声そのものを焼き直すコマンド（テキスト / seed の正本は台本側）。台本は
- * `outputs/bench/vowel-detector/<日付>_eval-audio/` へ焼くので、採用分は {@link CORPUS_DIR}
- * へ**人手で凍結コピー**する。
+ * Command that regenerates the real audio itself (the canonical text / seed live in the script).
+ * The script writes to `outputs/bench/vowel-detector/<date>_eval-audio/`, so the adopted clips are
+ * **frozen by a manual copy** into {@link CORPUS_DIR}.
  */
-const AUDIO_COMMAND = "deno task demo:eval-audio --source <Irodori 配布形のパス>";
+const AUDIO_COMMAND = "deno task demo:eval-audio --source <path to the Irodori distribution>";
 
-/** mel 基底のフィクスチャ（`melBasis` 以外の欄はこの門では使わない）。 */
+/** The mel basis fixture (fields other than `melBasis` are not used by this check). */
 type Fixture = { readonly melBasis: number[][] };
 
 const melBasis: Float32Array<ArrayBuffer> = Float32Array.from(
@@ -345,9 +361,9 @@ const melBasis: Float32Array<ArrayBuffer> = Float32Array.from(
 );
 
 /**
- * ファイルの有無。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
- * 実行されていない検証が SKIP として静かに緑になる。
+ * Whether the file exists.
+ * MUST: propagate anything other than NotFound — reading a permission error or the like as "the
+ * asset is missing" would let a check that never ran turn quietly green as a SKIP.
  */
 const exists = (url: URL): boolean => {
   try {
@@ -364,25 +380,26 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> =>
     .join("");
 
 /**
- * グラフの時間軸が**記号**（入力 `2T` / 出力 `T`）で焼かれていることを見る。
+ * Checks that the graph's time axis was baked as **symbols** (input `2T` / output `T`).
  *
- * MUST: 落とさない。長さを固定して焼いた古い形は入出力の名前も階数も同じなので、置き換わって
- * いても「その 1 長のケースだけ」は緑のまま通る（残り 3 本が別の理由で落ちたように見える）。
+ * MUST: keep this. The old form baked at a fixed length has the same input / output names and
+ * ranks, so even after a replacement "only the case of that one length" stays green (the other 3
+ * look as if they failed for some other reason).
  *
- * NOTE: runtime 側 e2e にも同じ検査がある（あちらは合成 golden の側で踏む）。**共有しない**
- * のは、片方が消えたときにもう片方が黙って通る形にしないため。
+ * NOTE: the runtime-side e2e has the same check (it exercises it on the synthetic golden side). It
+ * is **not shared** so that one of them disappearing never lets the other pass silently.
  */
 const assertSymbolicTimeAxis = (parsed: PreparedModel): void => {
-  assertEquals(parsed.graph.symbols, ["T"], `${SERIES_NAME} の記号次元`);
+  assertEquals(parsed.graph.symbols, ["T"], `${SERIES_NAME} symbolic dimensions`);
   assertEquals(
     parsed.graph.inputs[0].shape,
     [1, "2T", FEATURE_DIM],
-    `${SERIES_NAME} の入力 '${INPUT_NAME}' の宣言`,
+    `${SERIES_NAME} declaration of input '${INPUT_NAME}'`,
   );
   assertEquals(
     parsed.graph.values[parsed.graph.outputs[0]].shape,
     [1, "T", CLASS_COUNT],
-    `${SERIES_NAME} の出力の宣言`,
+    `${SERIES_NAME} output declaration`,
   );
 };
 
@@ -423,8 +440,8 @@ if (!SERIES_CHECKS) {
   );
 } else if (!available) {
   console.warn(
-    `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため実音声の全鎖 E2E を ` +
-      `SKIP する（重みがリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
+    `[karume] ${SERIES_ROOT.pathname} has no exported assets, so the full real-audio chain E2E is ` +
+      `SKIPPED (the weights are outside the repository). Generate: ${GENERATE_COMMAND}`,
   );
 }
 
@@ -437,47 +454,53 @@ if (available && distManifestText === undefined) {
   );
 }
 
-/** 実走するケース（系列・WAV・GPU が揃ったもの — 参照門が数える範囲）。 */
+/** The cases that run (series, WAV and GPU all present — the range the reference guard counts). */
 const RUNNABLE_CASES: Case[] = [];
 
 for (const entry of CASES) {
-  /** 実音声の門。系列と WAV の**両方**が揃ってはじめて実走する。 */
+  /** Real-audio check. It runs only when **both** the series and the WAV are present. */
   const audioAvailable = available && exists(new URL(audioFile(entry), CORPUS_DIR));
   if (audioAvailable && GPU_AVAILABLE) RUNNABLE_CASES.push(entry);
 
   if (available && !audioAvailable) {
     console.warn(
-      `[karume] 実音声ケース (${entry.name}) を SKIP する（${audioFile(entry)} が無い）。` +
-        `生成: ${AUDIO_COMMAND}`,
+      `[karume] Real-audio case (${entry.name}) is SKIPPED (${audioFile(entry)} is missing). ` +
+        `Generate: ${AUDIO_COMMAND}`,
     );
   }
 
   test.skipIf(!audioAvailable || !GPU_AVAILABLE)(
-    `母音検出 実音声の全鎖: ${entry.name} — WAV → 特徴 → 実 GPU → .lab（${entry.why}）${SERIES_CHECKS_OPT_IN}`,
+    `Vowel detection, full real-audio chain: ${entry.name} — WAV → features → real GPU → .lab (${entry.why})${SERIES_CHECKS_OPT_IN}`,
     async () => {
-      // 所要時間は WAV の読みから決着の記録の直前まで（失敗した回も同じ範囲で残す）。
+      // The elapsed time runs from reading the WAV to just before recording the outcome (a failed
+      // run is recorded over the same range).
       const started = performance.now();
       const elapsedMs = (): number => Math.round(performance.now() - started);
-      /** ③の決着（`.lab` が通った後でだけ採る — 記録の後で不一致を落とすために外へ持ち出す）。 */
+      /**
+       * Outcome of ③ (taken only after `.lab` passed — kept outside so a mismatch fails after the
+       * record).
+       */
       let outcome: ReferenceOutcome;
       try {
         const wavBytes = await readFile(new URL(audioFile(entry), CORPUS_DIR));
-        // ① 期待 `.lab` を採った音声と、いま読んでいる音声が同一であること。**tolerance では
-        // 吸収されない差**（台本を回し直して期待値を採り直していない）を、実行の前に名指しで落とす。
+        // ① The audio the expected `.lab` came from and the audio read now are identical. A
+        // **difference no tolerance absorbs** (the script was rerun but the expected values were
+        // not recorded again) fails by name, before the run.
         assertEquals(
           await sha256Hex(wavBytes),
           entry.sha256,
-          `${audioFile(entry)} が期待 .lab を採った音声と違う（採り直す: ${AUDIO_COMMAND}）`,
+          `${audioFile(entry)} differs from the audio the expected .lab came from (record again: ${AUDIO_COMMAND})`,
         );
 
         const wav = decodeWav(wavBytes);
-        assertEquals(wav.sampleRate, SAMPLE_RATE, `${audioFile(entry)} の周波数`);
+        assertEquals(wav.sampleRate, SAMPLE_RATE, `${audioFile(entry)} sample rate`);
         const features = extractFeatures(wav.data, melBasis);
-        assertEquals(features.frames, entry.frames, `${entry.name} の 10ms フレーム数`);
-        // 出力は 20ms 格子なので、奇数フレームの端数 1 本は落として偶数長で回す（切り捨てで
-        // あって pad ではない — 冒頭の「pad は 1 要素も無い」）。
+        assertEquals(features.frames, entry.frames, `${entry.name} number of 10ms frames`);
+        // The output is on a 20ms grid, so the one leftover frame of an odd frame count is dropped
+        // and the run uses an even length (a truncation, not a pad — the "not a single pad
+        // element" of the header).
         const usable = features.frames - (features.frames % 2);
-        assertEquals(usable, entry.length, `${entry.name} の偶数化フレーム数`);
+        assertEquals(usable, entry.length, `${entry.name} frame count rounded to even`);
 
         const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
         const parsed = prepareContainer(opened, MODEL_GRAPH);
@@ -487,8 +510,9 @@ for (const entry of CASES) {
         const gpu = await acquireGpu();
         let logits: Float32Array<ArrayBuffer>;
         try {
-          // ロジットの sha をこの機の行として書きうる経路なので、キーを採ったアダプタと
-          // 実行アダプタの同一性を先に見る（複数 GPU の機で取り違えると別の機の行になる）。
+          // This path may write the logits' sha as this machine's row, so check first that the
+          // adapter the key came from is the one running (mixing them up on a multi-GPU machine
+          // would write another machine's row).
           assertAdapterMatchesEnvironment(gpu);
           const session = await parsed.createContainerSession(gpu);
           try {
@@ -501,9 +525,9 @@ for (const entry of CASES) {
                 },
               })
             )[outputName];
-            // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-            assert(output.dtype === "f32", `${entry.name}: ロジットの dtype が ${output.dtype}`);
-            assertEquals(output.shape, [1, usable / 2, CLASS_COUNT], `${entry.name}: 出力の形`);
+            // Narrow by the discriminant (a cast to Float32Array passes silently on a dtype drift).
+            assert(output.dtype === "f32", `${entry.name}: logits dtype is ${output.dtype}`);
+            assertEquals(output.shape, [1, usable / 2, CLASS_COUNT], `${entry.name}: output shape`);
             logits = output.data;
           } finally {
             await session.dispose();
@@ -512,16 +536,16 @@ for (const entry of CASES) {
           gpu.destroy();
         }
 
-        // ② `.lab` の完全一致（tolerance を持たない離散の門）。
+        // ② Exact match of `.lab` (a discrete check with no tolerance).
         const segments = logitsToSegments(logits, usable / 2);
-        assertEquals(toLab(segments), entry.lab, `${entry.name} の .lab`);
+        assertEquals(toLab(segments), entry.lab, `${entry.name} .lab`);
 
         if (entry.name === VOWEL_CASE) {
-          // 期待 `.lab` の一致とは別の主張（{@link VOWEL_SEQUENCE}）。
+          // A claim separate from the match of the expected `.lab` ({@link VOWEL_SEQUENCE}).
           assertEquals(
             segments.map((segment) => segment.label).filter((label) => label !== "pau"),
             [...VOWEL_SEQUENCE],
-            "「あ、い、う、え、お。」から 5 母音が順に出ていない",
+            "「あ、い、う、え、お。」 did not yield the 5 vowels in order",
           );
         }
 
@@ -538,20 +562,22 @@ for (const entry of CASES) {
           assertEquals(
             (await pipeline.detect(wav.data)).lab,
             toLab(segments),
-            `${entry.name}: 配布形経由の .lab が実長の直接経路と違う`,
+            `${entry.name}: the .lab via the distribution differs from the direct real-length path`,
           );
         }
 
-        // ③ ロジットの sha。①②が通った後でだけ採る（`.lab` が割れた出力から参照行を作らない）。
-        // 比較モードでこの機の行が無ければ突合だけを飛ばし、実測 sha を積む（settleOrObserve）。
+        // ③ The logits' sha. Taken only after ① and ② passed (no reference row is made from an
+        // output whose `.lab` broke). In compare mode, when this machine has no row, only the
+        // comparison is skipped and the measured sha is recorded (settleOrObserve).
         outcome = await settleOrObserve(references, results, {
           id: entry.name,
           artifact: logitsArtifact(entry),
           bytes: f32ArtifactBytes(outputName, [1, usable / 2, CLASS_COUNT], logits),
         });
       } catch (cause) {
-        // 決着を残してから落とす（決着の無いまま抜けると、同じ日の前回の走行の決着が席に
-        // 居座る）。記録の I/O 失敗で元の例外を置き換えない（recordFailure）。
+        // Record the outcome before failing (leaving without one lets the outcome of an earlier
+        // run of the same day stay in its place). An I/O failure of the record does not replace
+        // the original exception (recordFailure).
         await recordFailure(results, {
           id: entry.name,
           status: "fail",
@@ -561,7 +587,8 @@ for (const entry of CASES) {
         throw cause;
       }
       await results.record({ id: entry.name, ...outcome.fields, elapsedMs: elapsedMs() });
-      // 決着（実測 sha）を積んだ後で落とす — 先に投げると実測 sha が結果に残らない。
+      // Fail after the outcome (measured sha) is recorded — throwing first would leave the
+      // measured sha out of the results.
       if (outcome.settlement?.check.status === "fail") {
         throw new Error(referenceMismatchMessage(entry.name, outcome.settlement, references));
       }
@@ -569,11 +596,15 @@ for (const entry of CASES) {
   );
 }
 
-/** sha 門が数えるケース（系列・WAV・GPU が揃ったもの — 登録時に同期で決まる）。 */
+/**
+ * Cases the sha check counts (series, WAV and GPU all present — decided synchronously at
+ * registration).
+ */
 const CASE_IDS: readonly string[] = RUNNABLE_CASES.map((entry) => entry.name);
 const RUNNABLE = CASE_IDS.length > 0;
 if (RUNNABLE) references.warnMissing(CASE_IDS);
-// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+// The guard that keeps "this environment has no reference values yet" from being a silent green
+// (the same practice as ADR 0005).
 // The gate counts the implementation-time cases above, so it carries their opt-in suffix: a skipped
 // gate in the default lanes says why.
 describe(`Vowel-detector sha256 rows${SERIES_CHECKS_OPT_IN}`, () => {

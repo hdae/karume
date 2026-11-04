@@ -130,7 +130,7 @@ const countNonFinite = (values: Float32Array): number =>
 
 /** Relative RMS of `got` against `reference` (RMS of the difference over the RMS of the reference). */
 const relativeRms = (got: Float32Array, reference: Float32Array): number => {
-  assertEquals(got.length, reference.length, "relative RMS: 要素数");
+  assertEquals(got.length, reference.length, "relative RMS: element count");
   let diff = 0;
   let base = 0;
   for (let i = 0; i < got.length; i += 1) {
@@ -230,10 +230,14 @@ describe.skipIf(!I8_PRESENT || !FIXTURES_PRESENT || !GPU_AVAILABLE)(
       it(`${name}: both runs decode with 0 non-finite values; the subject differs from the control (floor) and its relative RMS at the first chunk's frame is recorded`, async () => {
         const control = await decode("control", name);
         const subject = await decode("subject", name);
-        assertEquals(countNonFinite(control), 0, `${name}: control の非有限`);
-        assertEquals(countNonFinite(subject), 0, `${name}: subject の非有限`);
+        assertEquals(countNonFinite(control), 0, `${name}: control non-finite values`);
+        assertEquals(countNonFinite(subject), 0, `${name}: subject non-finite values`);
         // Difference floor — a silent fallback of the knob would make the two runs bit-identical.
-        assertNotEquals([...subject], [...control], `${name}: subject が control と同じ値（床）`);
+        assertNotEquals(
+          [...subject],
+          [...control],
+          `${name}: subject equals control (difference floor)`,
+        );
         const atFirstChunk = relativeRms(firstChunkFrame(subject), firstChunkFrame(control));
         const whole = relativeRms(subject, control);
         const { fixtures } = current();
@@ -255,17 +259,17 @@ describe.skipIf(!I8_PRESENT || !FIXTURES_PRESENT || !GPU_AVAILABLE)(
         ["next", CONV3D_NODES.next],
       ] as const) {
         const subjectCensus = conv3dCensus(graph, subject[graph].diagnostics());
-        assertEquals(subjectCensus.w8a8, expected, `${graph}: subject の w8a8 conv3d の本数`);
-        assertEquals(subjectCensus.f32, 0, `${graph}: subject に f32 の conv3d が残った`);
-        assertEquals(subjectCensus.preludes, expected, `${graph}: subject の quantize_rows の本数`);
+        assertEquals(subjectCensus.w8a8, expected, `${graph}: subject w8a8 conv3d count`);
+        assertEquals(subjectCensus.f32, 0, `${graph}: an f32 conv3d remained in subject`);
+        assertEquals(subjectCensus.preludes, expected, `${graph}: subject quantize_rows count`);
         assertEquals(
           subjectCensus.channelMajorPreludes,
           expected,
           `${graph}: subject preludes on the channel-major key`,
         );
         const controlCensus = conv3dCensus(graph, control[graph].diagnostics());
-        assertEquals(controlCensus.w8a8, 0, `${graph}: control に w8a8 の conv3d が走った`);
-        assertEquals(controlCensus.f32, expected, `${graph}: control の f32 conv3d の本数`);
+        assertEquals(controlCensus.w8a8, 0, `${graph}: a w8a8 conv3d ran in control`);
+        assertEquals(controlCensus.f32, expected, `${graph}: control f32 conv3d count`);
         assertEquals(
           subjectCensus.strided,
           controlCensus.strided,

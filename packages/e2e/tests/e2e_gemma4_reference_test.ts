@@ -1,19 +1,23 @@
 /**
- * gemma4 の **quant 席ごとの sha 参照行**（ADR 0106 / ADR 0110 決定 7）— 固定プロンプト 1 本の
- * greedy の token id 列が、この機の参照値と 1 token も違わないこと。
+ * gemma4's **sha reference rows per quant preset** (ADR 0106 / ADR 0110 decision 7) — the greedy
+ * token id sequence of one fixed prompt does not differ by a single token from this machine's
+ * reference value.
  *
  * The run, the artifact and the settlement are `helpers/gemma-reference.ts`'s (shared with the q4_0
  * QAT line's `e2e_gemma4_qat_reference_test.ts` and the mobile QAT line's
  * `e2e_gemma4_qat_mobile_reference_test.ts`); this file holds only the places (its fixture and its
  * results folder).
  *
- * 席は固定表で持たず、ミラーの manifest から**全 quant 席**を列挙する（`mirrorSeats`）。行の
- * クラスも席の `session` から導く: `session` が空の席（`i4`）は参照行、非空の席（`i4-gemvpar` /
- * `i4-fast` など束のノブを持つもの）は実用行。配布形に席が増えれば行も増える。
+ * The presets are not held in a fixed table; **every quant preset** is enumerated from the
+ * mirror's manifest (`mirrorSeats`). The row class is derived from the preset's `session` too: a
+ * preset with an empty `session` (`i4`) gives a reference-path row, one with a non-empty `session`
+ * (those that bundle knobs, such as `i4-gemvpar` / `i4-fast`) a practical-preset row. When the
+ * distribution gains a preset, it gains a row.
  *
- * 資産はミラー `models/karume-gemma4/`（git 追跡外）。無い機・旧 major が残っている機は明示
- * SKIP（`helpers/gemma-mirror.ts` の `mirrorAvailable`）。ADR 0005 の「全 SKIP は明示 FAIL」
- * 門番は GPU アダプタの有無だけを見ており、この SKIP とは独立。
+ * The asset is the mirror `models/karume-gemma4/` (untracked by git). A machine without it, or
+ * with an old major left in place, SKIPs explicitly (`mirrorAvailable` in
+ * `helpers/gemma-mirror.ts`). ADR 0005's "an all-SKIP run is an explicit FAIL" guard looks only at
+ * whether a GPU adapter exists and is independent of this SKIP.
  */
 
 import { test } from "vite-plus/test";
@@ -30,30 +34,39 @@ import {
 } from "../../models/tests/helpers/gemma-reference.ts";
 
 const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
-/** token id 列の sha256 参照値（環境キーごとの行 — `runtime/tests/helpers/reference.ts`）。 */
+/**
+ * sha256 reference values of the token id sequence (rows per environment key —
+ * `runtime/tests/helpers/reference.ts`).
+ */
 const references = openReferences(
   new URL("../../models/tests/fixtures/references/gemma4.json", import.meta.url),
 );
-/** 実物と決着の置き場（`outputs/verify/<環境キー>/<日付>_gemma4/` — 消して安全）。 */
+/**
+ * Where the artifacts and settlements go (`outputs/verify/<environment key>/<date>_gemma4/` — safe
+ * to delete).
+ */
 const results = openResults("gemma4");
 
 const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 if (!AVAILABLE) {
   console.warn(
-    `[karume] ${MIRROR_DIR.pathname} が無い（か karume/5 でない）ため gemma4 の quant 席の ` +
-      "sha 参照行を SKIP する。tools/export-recipes の dist.py --pipeline gemma4 で作成する",
+    `[karume] ${MIRROR_DIR.pathname} is missing (or not karume/5), so the sha reference rows of ` +
+      "gemma4's quant presets are SKIPPED. Create it with dist.py --pipeline gemma4 in tools/export-recipes",
   );
 }
 const RUNNABLE = AVAILABLE && GPU_AVAILABLE;
 
-/** 並べる席（ミラーの全 quant 席 — 行のクラスは `session` から導かれる。ミラーが無ければ空）。 */
+/**
+ * The presets to run (every quant preset of the mirror — the row class is derived from `session`;
+ * empty without the mirror).
+ */
 const SEATS = mirrorSeats(MIRROR_DIR);
 
 for (const seat of SEATS) {
   const id = seatCaseId(seat);
   test.skipIf(!RUNNABLE || references.lacksReference(id))(
-    `gemma4 ${id}（${seat.row === "reference" ? "参照行" : "実用行"}）: ` +
-      "固定プロンプトの greedy の token id 列がこの機の参照値と一致する（実 GPU）",
+    `gemma4 ${id}（${seat.row === "reference" ? "reference-path row" : "practical-preset row"}）: ` +
+      "the greedy token id sequence of the fixed prompt matches this machine's reference value (real GPU)",
     () =>
       settleSeatReference({
         references,
@@ -64,8 +77,12 @@ for (const seat of SEATS) {
   );
 }
 
-/** この門が持つケース ID 全部（参照値が無いものを登録時に 1 度だけ知らせる）。 */
+/**
+ * Every case ID this check holds (those without a reference value are reported once, at
+ * registration).
+ */
 const CASE_IDS: readonly string[] = SEATS.map(seatCaseId);
 if (RUNNABLE) references.warnMissing(CASE_IDS);
-// 「この環境の参照値がまだ無い」を無音の緑にしないための門番（ADR 0005 と同じ流儀）。
+// A guard so that "this environment has no reference value yet" is not a silent green (the same
+// approach as ADR 0005).
 registerReferenceGate(references, { runnable: RUNNABLE, caseIds: CASE_IDS });

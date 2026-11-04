@@ -1,41 +1,47 @@
-// 実重み Gemma 4 E2B の **MTP drafter**（投機デコードの draft 側）の検収門 — ADR
-// [0096](../../../docs/decisions/0096-speculative-decoding.md) 段 2。
+// Acceptance check of the real-weight Gemma 4 E2B **MTP drafter** (the draft side of speculative
+// decoding) — ADR [0096](../../../docs/decisions/0096-speculative-decoding.md) step 2.
 //
-// 検収するのは「drafter が target の KV と埋め込み表を**借りて**回り、torch の drafter と同じ
-// draft を出す」ことである。投機ループ（verify・受理・棄却・commit）そのものの門は段 3 の
-// `e2e_gemma4_speculative_test.ts` が持つので、ここが見るのは 1 サイクルぶんの draft と、
-// 配布形の pipeline がその drafter を**既定で**使うことまでである:
+// What it accepts is "the drafter runs by **borrowing** the target's KV and embedding table, and
+// produces the same drafts as the torch drafter". The check of the speculative loop itself
+// (verify, accept, reject, commit) belongs to step 3's `e2e_gemma4_speculative_test.ts`, so this
+// file looks at one cycle's drafts and at the distribution's pipeline using that drafter **by
+// default**:
 //
-// ① 配布形（GPU 不要）… manifest の weights に `drafter` が居て、既定 quant が両方の役割を指す。
-//    `ResolveOptions.weights` の絞り込みが効き、**投機を使わないロードで drafter の容器が
-//    選択に残らない**（残ると descriptor も重みの part も落ちる）。併せて PLE の索引が
-//    `model` 容器の資産と全件で整合する（ADR 0109 決定 4 — 旧「遅延資産 = PLE shard ちょうど」の
-//    突合の後継で、この 2 本だけが GPU 無しで踏める）
-// ② コンテナの形（GPU 不要）… 入力 6 本（順序込み）/ 出口 3 本 / external スロット 4 本が
-//    target と同名同形 / 共有 initializer 1 本が target の initializer へ解決できる
-// ③ **draft の一致**（実 GPU）… 3 ケース × 200 サイクル × 3 段 = 1,800 本の draft token が、
-//    torch drafter の golden と **99% 以上**一致する。karume 側の hidden は bf16 の target が出した
-//    もの（golden の hidden は f32 の代理 target）なので、ビット一致は求められない — 一致率の
-//    門である。target の token 列は golden の継続列で teacher forcing する。
+// ① Distribution (no GPU) … the manifest's weights hold `drafter`, and the default quant points at
+//    both roles. The `ResolveOptions.weights` filter works, and **a load without speculation does
+//    not keep the drafter's container in the selection** (if it stayed, its descriptor and weight
+//    parts would be downloaded too). The PLE index is also consistent, entry for entry, with the
+//    assets of the `model` container (ADR 0109 decision 4 — the successor of the old "deferred
+//    assets = exactly the PLE shards" cross-check; only these two run without a GPU)
+// ② Container shape (no GPU) … 6 inputs (order included) / 3 outputs / 4 external slots with the
+//    same names and shapes as the target / 1 shared initializer that resolves to the target's
+//    initializer
+// ③ **Draft match** (real GPU) … 3 cases × 200 cycles × 3 steps = 1,800 draft tokens match the
+//    torch drafter's golden **at 99% or more**. The hidden on the karume side comes from the bf16
+//    target (the golden's hidden comes from an f32 proxy target), so bit identity cannot be asked
+//    for — it is a match-rate check. The target's token sequence is teacher-forced with the
+//    golden's continuation.
 //    The golden's proxy target is the product series as it stores the weights — the checkpoint's
 //    bf16 values, nothing rounded (`export_drafter.write_goldens`) — so it is the `bf16` seat this
 //    file opens, the drafter's one target.
-// ④ 寿命（実 GPU）… 借り手が生きている間は貸し手 context も貸し手 Session も dispose できず、
-//    順序（借り手 → 貸し手）どおりなら通る
+// ④ Lifetime (real GPU) … while the borrower is alive, neither the lender context nor the lender
+//    Session can be disposed, and in the right order (borrower → lender) it goes through
 //
-// MUST: 一致率の門は**実測に合わせない**。落ちたら段別・位置別の分布を報告に出し、赤のまま残す
-// （drafter の質は投機の速度そのもので、門を緩めると「動くが速くならない」形が緑になる）。
+// MUST: the match-rate check is **not fitted to the measurement**. If it fails, report the
+// distribution per step and per position and leave it red (the drafter's quality is the speed of
+// speculation itself; loosening the check would turn "works but is not faster" green).
 //
-// ## 資産
+// ## Assets
 //
-// 配布形ミラー `models/karume-gemma4/`（`dist.py --pipeline gemma4` が組む — drafter 込み・その
-// `bf16` preset — the int8 drafter borrows the bf16 target's table）と
-// the drafter goldens in the test-asset root, `goldens/gemma4-e2b-drafter/` (ADR 0139 decision 2)。
-// どちらもリポジトリ管理外で、ミラーが無い環境では**明示 SKIP** する。Their completeness case below
-// runs in the default lane under ADR 0139's fetched rule: a golden absent from a complete fetch of
-// the pinned test-asset dataset FAILs (the dataset at the pin lacks it); without a complete fetch the
-// case SKIPs explicitly (the assets gate is red then). (`e2e_gemma4_speculative_test.ts` reads the
-// q4_0 QAT drafter's goldens since 2026-11-04, so ③ is the only reader of these.)
+// The distribution mirror `models/karume-gemma4/` (assembled by `dist.py --pipeline gemma4` —
+// drafter included, its `bf16` preset — the int8 drafter borrows the bf16 target's table) and
+// the drafter goldens in the test-asset root, `goldens/gemma4-e2b-drafter/` (ADR 0139 decision 2).
+// Both are outside the repository; without the mirror the cases **SKIP explicitly**. Their
+// completeness case below runs in the default lane under ADR 0139's fetched rule: a golden absent
+// from a complete fetch of the pinned test-asset dataset FAILs (the dataset at the pin lacks it);
+// without a complete fetch the case SKIPs explicitly (the assets gate is red then).
+// (`e2e_gemma4_speculative_test.ts` reads the q4_0 QAT drafter's goldens since 2026-11-04, so ③ is
+// the only reader of these.)
 
 import {
   isNotFound,
@@ -64,7 +70,8 @@ import {
 } from "@karume/runtime";
 import { nodeDirectory } from "@karume/hub/node";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
-// MUST: 入口は**公開面**から取る（`src/...` を直に掴むと、面が痩せていても門が緑のままになる）。
+// MUST: the entry point is taken from the **public surface** (grabbing `src/...` directly would
+// keep the check green even if the surface shrank).
 import { type ChatMessage, Pipeline } from "../../models/gemma.ts";
 import { type PipelineConfig, parsePipelineConfig } from "../../models/src/gemma/config.ts";
 import { createGemma4Ple, type Gemma4Ple } from "../../models/src/gemma/ple.ts";
@@ -103,38 +110,45 @@ const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
 const BF16_SEAT = { quant: "bf16" } as const;
 const GOLDEN_ROOT = goldenDir("gemma4-e2b-drafter");
 
-/** SKIP 時にそのまま貼れる組み立てコマンド。 */
+/** The assembly command, ready to paste when the cases SKIP. */
 const ASSEMBLE_COMMAND =
   "cd tools/export-recipes && uv run python dist.py --pipeline gemma4" +
-  "（drafter 系列と golden は … python -m gemma4.export_drafter）";
+  " (drafter series and goldens: … python -m gemma4.export_drafter)";
 
-/** 配布形の役割名（`Pipeline` の同名定数と同じ綴り — 焼く側は `distribution.py`）。 */
+/**
+ * The distribution's role names (the same spelling as `Pipeline`'s constants of the same name — the
+ * writing side is `distribution.py`).
+ */
 const MODEL = "model";
 const DRAFTER = "drafter";
-/** golden のケース（正本は `export_drafter.py` の GOLDEN_CASES）。 */
+/** The golden cases (source of truth: GOLDEN_CASES in `export_drafter.py`). */
 const CASES = ["short-en", "readme-recipes", "readme-exporter"] as const;
 const GOLDEN_PREFIX = "drafter-golden.";
 const SUFFIX = ".safetensors";
 
-/** 一致率の門（分母 = 3 ケース × 200 サイクル × 3 段）。 */
+/** The match-rate floor (denominator = 3 cases × 200 cycles × 3 steps). */
 const MATCH_FLOOR = 0.99;
 
 /**
- * 実資産の形（config の `hidden_size` / `vocab_size` と、共有 initializer の名前）。
+ * The real asset's shape (`hidden_size` / `vocab_size` from the config, and the shared
+ * initializer's name).
  *
- * 共有 initializer の名前は借り手と貸し手で同じ（名前が実体の鍵 — docs/ir-v2.md）ので、
- * 定数も 1 本で足りる。
+ * The shared initializer has the same name in the borrower and the lender (the name is the key of
+ * the tensor — docs/ir-v2.md), so one constant is enough.
  */
 const HIDDEN = 1536;
 const VOCAB = 262144;
 const SHARED_WEIGHT = "model.lm_head.weight";
 
-/** グラフ入力の名前（正本は `export_product.py` の定数）。 */
+/** Graph input names (source of truth: the constants in `export_product.py`). */
 const INPUT_IDS = "input_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 const CAPACITY_SYMBOL = "C";
-/** prefill の刻み（配布形の宣言 `chunkLength` と同値 — 実行時ノブなので明示する）。 */
+/**
+ * The prefill chunk length (equal to the distribution's declared `chunkLength` — stated explicitly
+ * because it is a run-time knob).
+ */
 const CHUNK_LENGTH = 768;
 
 const exists = (url: URL): boolean => {
@@ -155,10 +169,11 @@ const missingGoldens = (files: readonly URL[]): string[] =>
     .map((file) => file.href.slice(TEST_ASSETS_ROOT.href.length));
 
 /**
- * drafter 入りの `karume/5` ミラーか。
+ * Whether this is a `karume/5` mirror with the drafter.
  *
- * MUST: ファイルの綴りではなく **manifest の宣言**で見る — 容器の part の path は書き手の規約
- * （`<stem>-NNNNN-of-NNNNN.krm`）で、本数が変われば綴りも動く（ADR 0109 決定 3）。
+ * MUST: decided by **the manifest's declaration**, not by file names — a container part's path is
+ * the writer's convention (`<stem>-NNNNN-of-NNNNN.krm`), and the names move when the part count
+ * changes (ADR 0109 decision 3).
  */
 const MIRROR_PRESENT = ((): boolean => {
   if (!mirrorAvailable(MIRROR_DIR)) return false;
@@ -170,8 +185,8 @@ const AVAILABLE = MIRROR_PRESENT && GOLDENS_PRESENT;
 
 if (!MIRROR_PRESENT) {
   console.warn(
-    `[karume] drafter 入りの配布形ミラー（${MIRROR_DIR.pathname}）が無いため MTP drafter 検収を` +
-      ` SKIP する。組み立て: ${ASSEMBLE_COMMAND}`,
+    `[karume] the distribution mirror with the drafter (${MIRROR_DIR.pathname}) is missing, so the MTP drafter acceptance is` +
+      ` SKIPPED. Assemble it: ${ASSEMBLE_COMMAND}`,
   );
 }
 
@@ -179,22 +194,22 @@ const manifest: Manifest | undefined = MIRROR_PRESENT
   ? parseManifest(readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR)))
   : undefined;
 
-/** ミラーの manifest（SKIP しない位置でだけ呼ぶ）。 */
+/** The mirror's manifest (called only where the cases do not SKIP). */
 const mirrorManifest = (): Manifest => {
-  assert(manifest !== undefined, "配布形ミラーの manifest が読めていない");
+  assert(manifest !== undefined, "the distribution mirror's manifest was not read");
   return manifest;
 };
 
 /**
- * 依存資産の完全性（欠落を SKIP に畳まない）。The goldens are read by ③ here; this case follows
- * ADR 0139's fetched rule: a golden absent from a complete fetch of the pin is a defect of the
- * dataset at the pin and FAILs; without a complete fetch the case SKIPs with the reason in its title
- * (the assets gate is red then).
+ * Completeness of the dependent assets (a gap is not folded into a SKIP). The goldens are read by ③
+ * here; this case follows ADR 0139's fetched rule: a golden absent from a complete fetch of the pin
+ * is a defect of the dataset at the pin and FAILs; without a complete fetch the case SKIPs with the
+ * reason in its title (the assets gate is red then).
  */
 const MISSING_AT_LOAD = missingGoldens(CASES.map(goldenPath));
 const GOLDENS_SKIP = MISSING_AT_LOAD.length > 0 && !testAssetsFetched();
 test.skipIf(GOLDENS_SKIP)(
-  `gemma4 drafter 資産: golden 3 ケースが揃っている${
+  `gemma4 drafter assets: the 3 golden cases are all present${
     GOLDENS_SKIP
       ? ` (SKIP: ${MISSING_AT_LOAD.join(" / ")} absent and outputs/test-assets/ is not a complete ` +
         "fetch of the pin — node tools/test-assets/fetch.ts)"
@@ -211,40 +226,45 @@ test.skipIf(GOLDENS_SKIP)(
 );
 
 // ---------------------------------------------------------------------------
-// ① 配布形（GPU 不要）— manifest の役割と `ResolveOptions.weights` の絞り込み
+// ① Distribution (no GPU) — the manifest's roles and the `ResolveOptions.weights` filter
 // ---------------------------------------------------------------------------
 
 test.skipIf(!MIRROR_PRESENT)(
-  "gemma4 drafter 配布形: manifest の weights に drafter が居て quant が両方を指す",
+  "gemma4 drafter distribution: the manifest's weights hold the drafter and the quant points at both",
   () => {
     const entry = mirrorManifest().models[mirrorManifest().defaultModel];
-    assertEquals(Object.keys(entry.weights).sort(), [DRAFTER, MODEL], "weights の役割");
+    assertEquals(Object.keys(entry.weights).sort(), [DRAFTER, MODEL], "weights roles");
     const quant = entry.quants[BF16_SEAT.quant];
     // A complete mapping (the parse guarantees it): the target is the checkpoint's own "bf16", the
     // drafter **int8 throughout** (its linears too — int4 g32 drops the acceptance by 10–30 %, ADR
     // 0096 addendum).
-    assertEquals(Object.keys(quant.weights).sort(), [DRAFTER, MODEL], "quant の weights 写像");
-    assertEquals(quant.weights[MODEL], "bf16", "target の dtype ラベル");
-    assertEquals(quant.weights[DRAFTER], "i8", "drafter の dtype ラベル");
+    assertEquals(
+      Object.keys(quant.weights).sort(),
+      [DRAFTER, MODEL],
+      "the quant's weights mapping",
+    );
+    assertEquals(quant.weights[MODEL], "bf16", "the target's dtype label");
+    assertEquals(quant.weights[DRAFTER], "i8", "the drafter's dtype label");
     // One requiredLimits per seat (the bf16 target's buffers bound it; the drafter adds none).
-    assert(quant.requiredLimits !== undefined, "既定 quant が requiredLimits を宣言していない");
+    assert(quant.requiredLimits !== undefined, "the default quant declares no requiredLimits");
   },
 );
 
 test.skipIf(!MIRROR_PRESENT)(
-  "gemma4 drafter 配布形: weights の絞り込みが drafter の容器を選択から外す",
+  "gemma4 drafter distribution: the weights filter drops the drafter's container from the selection",
   () => {
     const target = resolveSelection(mirrorManifest(), { weights: [MODEL] });
     const both = resolveSelection(mirrorManifest(), { weights: [MODEL, DRAFTER] });
 
     const components = (selection: ResolvedSelection) => Object.keys(selection.containers).sort();
-    assertEquals(components(target), [MODEL], "絞ったのに drafter の容器が残っている");
-    assertEquals(components(both), [DRAFTER, MODEL], "drafter を足した選択");
-    // 絞っても target 側の part 列と assets は 1 本も動かない。
-    assertEquals(both.containers[MODEL], target.containers[MODEL], "model の容器参照");
+    assertEquals(components(target), [MODEL], "the drafter's container remains despite the filter");
+    assertEquals(components(both), [DRAFTER, MODEL], "the selection with the drafter added");
+    // Filtering does not move a single part or asset on the target side.
+    assertEquals(both.containers[MODEL], target.containers[MODEL], "the model container reference");
     assertEquals(Object.keys(both.assets).sort(), Object.keys(target.assets).sort(), "assets");
-    // PLE は容器の資産（ADR 0109 決定 4）なので、manifest の assets には tokenizer しか残らない。
-    assertEquals(Object.keys(target.assets), ["tokenizer"], "manifest の assets");
+    // The PLE is a container asset (ADR 0109 decision 4), so only the tokenizer is left in the
+    // manifest's assets.
+    assertEquals(Object.keys(target.assets), ["tokenizer"], "the manifest's assets");
 
     assertThrows(
       () => resolveSelection(mirrorManifest(), { weights: [MODEL, "mtp"] }),
@@ -255,86 +275,104 @@ test.skipIf(!MIRROR_PRESENT)(
 );
 
 test.skipIf(!MIRROR_PRESENT)(
-  "gemma4 drafter 配布形: PLE の索引が model 容器の資産と全件で整合する",
+  "gemma4 drafter distribution: the PLE index is consistent, entry for entry, with the model container's assets",
   async () => {
-    // `openGemma4Ple` は `readGemma4PleIndex`（索引 × 容器の資産の全件列挙）を通す — drafter を
-    // 足しても足さなくても、PLE は `model` 容器の中だけで閉じる（旧 `deferred` の突合の後継）。
+    // `openGemma4Ple` goes through `readGemma4PleIndex` (every entry of index × container assets)
+    // — with or without the drafter, the PLE stays inside the `model` container (the successor of
+    // the old `deferred` cross-check).
     const { index } = await openGemma4Ple(MIRROR_DIR, BF16_SEAT);
-    assertEquals(index.tokens, VOCAB, "索引の行数（= 主 embedding の vocab）");
-    assert(index.values.blocks.length > 1, "values の block が 1 本（vocab レンジ分割が無い）");
+    assertEquals(index.tokens, VOCAB, "index row count (= the main embedding's vocab)");
+    assert(index.values.blocks.length > 1, "values has one block (no split by vocab range)");
   },
 );
 
 // ---------------------------------------------------------------------------
-// ② コンテナの形（GPU 不要）
+// ② Container shape (no GPU)
 // ---------------------------------------------------------------------------
 
 const targetComponent = () => openMirrorComponent(MIRROR_DIR, MODEL, BF16_SEAT);
 const drafterComponent = () => openMirrorComponent(MIRROR_DIR, DRAFTER, BF16_SEAT);
 
-/** ミラーの `pipelineConfig`（RoPE の宣言と容量の出どころ）。 */
+/** The mirror's `pipelineConfig` (where the RoPE declaration and the capacity come from). */
 const pipelineConfig = () => {
   const entry = mirrorManifest().models[mirrorManifest().defaultModel];
   return parsePipelineConfig(entry.pipelineConfig);
 };
 
-/** 部品 1 本ずつの記述文書から宣言を取り出す（データ節は 1 バイトも要らない）。 */
+/**
+ * Takes the declarations from each component's descriptor (not a single byte of the data section is
+ * needed).
+ */
 const readGraphs = async () => ({
   target: (await targetComponent()).graph,
   drafter: (await drafterComponent()).graph,
 });
 
 test.skipIf(!MIRROR_PRESENT)(
-  "gemma4 drafter コンテナ: 入出力・external スロット・共有 initializer が target と組める",
+  "gemma4 drafter container: the inputs/outputs, external slots and shared initializer fit the target",
   async () => {
     const { target, drafter } = await readGraphs();
     const config = pipelineConfig();
 
-    // 入力 6 本（順序が契約）・出口 3 本（段順）。
+    // 6 inputs (the order is the contract), 3 outputs (in step order).
     assertEquals(
       drafter.inputs.map((input) => input.name),
       ["token", "hidden", ...gemma4RopeInputNames()],
-      "drafter グラフの入力（順序込み）",
+      "drafter graph inputs (order included)",
     );
-    assertEquals(drafter.outputs.length, GEMMA4_DRAFT_STEPS, "draft 出口の本数（= k）");
-    assertEquals(drafter.symbols, [CAPACITY_SYMBOL], "記号（貸し手から継承する容量記号 1 本）");
+    assertEquals(drafter.outputs.length, GEMMA4_DRAFT_STEPS, "number of draft outputs (= k)");
+    assertEquals(
+      drafter.symbols,
+      [CAPACITY_SYMBOL],
+      "symbols (one capacity symbol inherited from the lender)",
+    );
 
-    // external スロット 4 本（l13 sliding / l14 full の k/v）が target と同名同形。
+    // 4 external slots (k/v of l13 sliding / l14 full) with the same names and shapes as the
+    // target.
     const external = Object.keys(drafter.states).filter((name) => drafter.states[name].external);
-    assertEquals(external.length, 4, "external スロットの本数");
-    assertEquals(external.length, Object.keys(drafter.states).length, "自前スロットが混ざっている");
+    assertEquals(external.length, 4, "number of external slots");
+    assertEquals(external.length, Object.keys(drafter.states).length, "own slots are mixed in");
     for (const name of external) {
-      assertEquals(drafter.states[name].shape, target.states[name].shape, `${name} の形`);
+      assertEquals(drafter.states[name].shape, target.states[name].shape, `shape of ${name}`);
     }
 
-    // 共有 initializer は 1 本で、バイトを持たない（格納が無い）。名前がそのまま貸し手の
-    // initializer 名（= 実体の鍵）。
+    // There is one shared initializer, and it holds no bytes (no storage). Its name is the
+    // lender's initializer name as is (= the key of the tensor).
     const shared = Object.keys(drafter.initializers).filter(
       (name) => drafter.initializers[name].shared !== undefined,
     );
-    assertEquals(shared.length, 1, "共有 initializer の本数");
+    assertEquals(shared.length, 1, "number of shared initializers");
     assertEquals(
       drafter.initializers[shared[0]].storage,
       undefined,
-      "共有宣言がバイトを持っている",
+      "the shared declaration holds bytes",
     );
-    assertEquals(shared[0], SHARED_WEIGHT, "共有 initializer が名乗る貸し手の initializer 名");
+    assertEquals(
+      shared[0],
+      SHARED_WEIGHT,
+      "the lender initializer name the shared initializer gives",
+    );
 
-    // 門そのもの（`Pipeline` が admission で通す 1 本）。貸し手の initializer 名まで解決する。
+    // The check itself (the one `Pipeline` runs at admission). It resolves as far as the lender's
+    // initializer name.
     const admitted = admitGemma4Drafter("test", drafter, {
       graph: target,
       rope: config.rope,
       hiddenSize: HIDDEN,
       capacitySymbol: CAPACITY_SYMBOL,
     });
-    assertEquals(admitted.outputs, [...drafter.outputs], "admission が返す出口（段順）");
-    assertEquals(admitted.hiddenSize, HIDDEN, "hidden の幅");
-    assertEquals(admitted.sharedWeights, { [shared[0]]: SHARED_WEIGHT }, "共有重みの対応表");
+    assertEquals(
+      admitted.outputs,
+      [...drafter.outputs],
+      "the outputs admission returns (step order)",
+    );
+    assertEquals(admitted.hiddenSize, HIDDEN, "hidden width");
+    assertEquals(admitted.sharedWeights, { [shared[0]]: SHARED_WEIGHT }, "the shared weight map");
   },
 );
 
 test.skipIf(!MIRROR_PRESENT)(
-  "gemma4 drafter コンテナ: 別世代の target と組んだ宣言は admission で落ちる",
+  "gemma4 drafter container: a declaration paired with a target of another generation fails at admission",
   async () => {
     const { target, drafter } = await readGraphs();
     const config = pipelineConfig();
@@ -346,11 +384,11 @@ test.skipIf(!MIRROR_PRESENT)(
         capacitySymbol,
       });
 
-    // hidden の幅が違う target（= 別世代）とは組めない。
+    // It cannot pair with a target of a different hidden width (= another generation).
     assertThrows(() => admit(HIDDEN + 1, CAPACITY_SYMBOL), Error, "drafter input 'hidden'");
-    // 容量記号の綴りが違えば借り手 context の束縛点が無い。
+    // With a differently spelled capacity symbol the borrower context has nothing to bind.
     assertThrows(() => admit(HIDDEN, "K"), Error, "the drafter graph's symbols are");
-    // 貸し手に共有テンソルが無い形（initializer を落とした target）。
+    // A lender without the shared tensor (a target with the initializer dropped).
     const stripped = {
       ...target,
       initializers: Object.fromEntries(
@@ -375,10 +413,10 @@ test.skipIf(!MIRROR_PRESENT)(
 // `packages/models/tests/speculative_options_test.ts`.
 
 // ---------------------------------------------------------------------------
-// ③④ 実 GPU — golden との突合と寿命
+// ③④ Real GPU — comparison with the golden, and lifetime
 // ---------------------------------------------------------------------------
 
-/** golden 1 ケース（`prompt [T]` / `tokens [N + k]` / `draft [N, k]`）。 */
+/** One golden case (`prompt [T]` / `tokens [N + k]` / `draft [N, k]`). */
 type Golden = {
   readonly prompt: Int32Array<ArrayBuffer>;
   readonly tokens: Int32Array<ArrayBuffer>;
@@ -388,8 +426,8 @@ type Golden = {
 
 const goldenI32 = (file: SafetensorsFile, name: string): Int32Array<ArrayBuffer> => {
   const view = file.tensors.get(name);
-  assert(view !== undefined, `golden に '${name}' が無い`);
-  assertEquals(view.dtype, "I32", `golden '${name}' の格納 dtype`);
+  assert(view !== undefined, `the golden has no '${name}'`);
+  assertEquals(view.dtype, "I32", `storage dtype of golden '${name}'`);
   return new Int32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
@@ -401,14 +439,15 @@ const readGolden = async (name: string): Promise<Golden> => {
       : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   );
   const draftView = file.tensors.get("draft");
-  assert(draftView !== undefined, `golden ${name} に 'draft' が無い`);
-  assertEquals(draftView.shape[1], GEMMA4_DRAFT_STEPS, `${name}: draft の段数`);
+  assert(draftView !== undefined, `golden ${name} has no 'draft'`);
+  assertEquals(draftView.shape[1], GEMMA4_DRAFT_STEPS, `${name}: draft step count`);
   const tokens = goldenI32(file, "tokens");
-  // 継続列は draft の**比較相手ぶん**（+ k 本）長い — 最後のサイクルの d_k が当てる位置まで。
+  // The continuation is longer by **what the drafts are compared against** (+ k) — up to the
+  // position the last cycle's d_k predicts.
   assertEquals(
     draftView.shape[0] + GEMMA4_DRAFT_STEPS,
     tokens.length,
-    `${name}: draft のサイクル数`,
+    `${name}: draft cycle count`,
   );
   return {
     prompt: goldenI32(file, "prompt"),
@@ -418,9 +457,9 @@ const readGolden = async (name: string): Promise<Golden> => {
   };
 };
 
-/** f32 の出力テンソルを取り出す（dtype の取り違えは黙って別の列になる）。 */
+/** Takes out an f32 output tensor (a dtype mix-up would silently give a different sequence). */
 const f32Of = (tensor: Tensor, where: string): Float32Array<ArrayBuffer> => {
-  assert(tensor.data instanceof Float32Array, `${where}: f32 でない出力を f32 として読んでいる`);
+  assert(tensor.data instanceof Float32Array, `${where}: reading a non-f32 output as f32`);
   return tensor.data;
 };
 
@@ -455,13 +494,14 @@ const openDrafterPair = async (): Promise<DrafterPair> => {
   const targetOpened = await targetComponent();
   const drafterOpened = await drafterComponent();
   const gpu = await acquireGpu();
-  // ③PV は並列縮約で回す — the order the parallel presets decode with (`i4-gemvpar`'s
-  // `"parallel"`; `i4-fast`'s `"parallel-fused"` adds in the same order — ADR 0102).
+  // ③PV runs with the parallel reduction — the order the parallel presets decode with
+  // (`i4-gemvpar`'s `"parallel"`; `i4-fast`'s `"parallel-fused"` adds in the same order — ADR
+  // 0102).
   const sessionOptions = { stateAttentionReduce: "parallel" } as const;
   const target: Session = await targetOpened.createSession(gpu, sessionOptions);
   let drafterSession: Session;
   try {
-    // 借りるのは埋め込み表 1 本（バイトは 1 つも複製されない）。
+    // What is borrowed is the one embedding table (not a single byte is copied).
     const sharedWeights = Object.fromEntries(
       Object.keys(admitted.sharedWeights).map((borrower) => [
         borrower,
@@ -486,7 +526,8 @@ const openDrafterPair = async (): Promise<DrafterPair> => {
     hiddenSize: admitted.hiddenSize,
   };
   const close = async (): Promise<void> => {
-    // MUST: 借り手 Session を先に畳む（貸し手の重みを借りている間の dispose は拒否される）。
+    // MUST: the borrower Session is torn down first (disposing the lender while its weights are
+    // borrowed is refused).
     const refused = await assertRejects(() => target.dispose(), ExecutionError);
     assert(refused.message.includes("lent out"), refused.message);
     await drafterSession.dispose();
@@ -497,7 +538,7 @@ const openDrafterPair = async (): Promise<DrafterPair> => {
 };
 
 describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
-  "gemma4 drafter 寿命: drafter は target の表を借りて常駐し、借り手が生きている間は貸し手を畳めない（実 GPU）",
+  "gemma4 drafter lifetime: the drafter stays resident on the target's borrowed table, and the lender cannot be torn down while the borrower lives (real GPU)",
   () => {
     let pair: DrafterPair | undefined;
 
@@ -506,14 +547,14 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
       const { target, drafterSession } = pair;
       // The residency check was the head of the former test body, before its step: it stays a
       // precondition here (a failure fails this describe and skips the step's it).
-      // drafter はバイトを 1 本も常駐させ**ない**わけではない（自前の 4 層ぶんは持つ）が、
-      // 借りた表ぶんは持たない = target の 1/20 未満に収まる。
+      // It is not that the drafter keeps **no** bytes resident (it holds its own 4 layers), but it
+      // does not hold the borrowed table = it stays under 1/20 of the target.
       const drafterStorage = drafterSession.diagnostics().storage;
       const targetStorage = target.diagnostics().storage;
       assert(
         drafterStorage.residentCompressedBytes * 10 < targetStorage.residentCompressedBytes,
-        `drafter の常駐 ${drafterStorage.residentCompressedBytes} バイトが target の ` +
-          `${targetStorage.residentCompressedBytes} バイトに対して大きすぎる（表を借りていない）`,
+        `the drafter's resident ${drafterStorage.residentCompressedBytes} bytes are too many against the target's ` +
+          `${targetStorage.residentCompressedBytes} bytes (it is not borrowing the table)`,
       );
     });
 
@@ -521,7 +562,7 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
       await pair?.close();
     });
 
-    it("④ 寿命: 借り手が生きている間は貸し手を畳めない", async () => {
+    it("④ lifetime: the lender cannot be torn down while the borrower lives", async () => {
       assert(pair !== undefined, "the target / drafter pair is not open");
       const { target, drafter } = pair;
       const context = await target.createGenerationContext({
@@ -529,23 +570,24 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
         chunkLength: CHUNK_LENGTH,
       });
       const borrowed = await openDrafterContext(drafter, context);
-      // 貸し手 context は借り手が居る間 dispose できない（借り手の bind group が掴んでいる）。
+      // The lender context cannot be disposed while a borrower exists (the borrower's bind group
+      // holds it).
       const refusedContext = await assertRejects(() => context.dispose(), ExecutionError);
       assert(refusedContext.message.includes("are borrowing"), refusedContext.message);
-      // 順序どおりなら通る。
+      // In the right order it goes through.
       await borrowed.dispose();
       await context.dispose();
     });
   },
 );
 
-/** 1 ケースぶんの一致数（段別）。 */
+/** The match counts of one case (per step). */
 type MatchCounts = { readonly perStep: number[]; readonly total: number; readonly cycles: number };
 
 // The draft-match gate compares Karume's drafts with the torch drafter's goldens under a match-rate
 // floor (upstream parity), so it is opt-in.
 describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
-  `gemma4 drafter 検収: draft が torch golden と 99% 以上一致する（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
+  `gemma4 drafter acceptance: the drafts match the torch golden at 99% or more (real GPU)${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     let config: PipelineConfig;
     let ple: Gemma4Ple | undefined;
@@ -559,7 +601,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
         index,
         openBlock,
         vocabSize: VOCAB,
-        // 全量常駐（読み直しゼロ — 予算は索引から導く）。
+        // Fully resident (zero re-reads — the budget is derived from the index).
         maxResidentBytes: allResidentBytes(index),
       });
       pair = await openDrafterPair();
@@ -573,7 +615,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
       }
     });
 
-    /** 1 run ぶんの target 実行（返すのは選んだ行の hidden）。 */
+    /** One run of the target (it returns the hidden of the selected row). */
     const runTarget = async (
       context: GenerationContext,
       ids: Int32Array<ArrayBuffer>,
@@ -594,27 +636,28 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
           [LAST_ROW]: { dtype: "i32", shape: [1], data: Int32Array.of(queryLength - 1) },
         },
         undefined,
-        // MUST: `commit: "deferred"` は使わない（未 commit の run が残っていると draft は
-        // 拒否される — draft は commit の後に採る）。
+        // MUST: `commit: "deferred"` is not used (a draft is refused while an uncommitted run
+        // remains — the draft is taken after the commit).
         { context, queryLength },
       );
-      assertEquals(outputs[logitsName].shape, [1, 1, VOCAB], `${where}: logits の shape`);
-      assertEquals(outputs[hiddenName].shape, [1, 1, HIDDEN], `${where}: hidden の shape`);
+      assertEquals(outputs[logitsName].shape, [1, 1, VOCAB], `${where}: logits shape`);
+      assertEquals(outputs[hiddenName].shape, [1, 1, HIDDEN], `${where}: hidden shape`);
       return f32Of(outputs[hiddenName], `${where}: hidden`);
     };
 
     for (const name of CASES) {
-      it(`${name}: 200 サイクル × 3 段の draft を golden と突合`, async () => {
+      it(`${name}: compares 200 cycles × 3 steps of drafts with the golden`, async () => {
         assert(pair !== undefined, "the target / drafter pair is not open");
         const { target, drafter } = pair;
         const golden = await readGolden(name);
         const prompt = golden.prompt;
         const promptLength = prompt.length;
-        // この会話が要る容量（prompt + 継続列ぶん — 配布形の既定 4096 では足りないケースがある）。
+        // The capacity this conversation needs (prompt + continuation — some cases do not fit
+        // the distribution's default of 4096).
         const capacity = promptLength + golden.cycles;
         assert(
           capacity <= config.maxPosition,
-          `${name}: 容量 ${capacity} が maxPosition ${config.maxPosition} を超える`,
+          `${name}: capacity ${capacity} exceeds maxPosition ${config.maxPosition}`,
         );
         const started = performance.now();
         const context = await target.createGenerationContext({
@@ -623,10 +666,14 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
         });
         const borrowed = await openDrafterContext(drafter, context);
         const perStep = Array.from({ length: GEMMA4_DRAFT_STEPS }, () => 0);
-        /** 出た draft token の顔ぶれ（突合が自明でないことを毎回見るための欄）。 */
+        /**
+         * The set of draft tokens produced (a field that shows on every run that the comparison is
+         * not trivial).
+         */
         const distinct = new Set<number>();
         try {
-          // 相 1: prompt を prefill（最後の chunk の行が位置 T−1 の hidden を出す）。
+          // Phase 1: prefill the prompt (the row of the last chunk gives the hidden at position
+          // T−1).
           let hidden!: Float32Array<ArrayBuffer>;
           const chunks = planPrefillChunks(promptLength, CHUNK_LENGTH);
           for (const chunk of chunks) {
@@ -645,10 +692,10 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
             );
           }
 
-          // 相 2: サイクル t の draft。渡す token は**最後に確定した 1 本**（継続列の
-          // `tokens[t]` — 位置 P = T+t に居るが KV には未投入）で、hidden はそれを出した行
-          // （位置 P−1）。t>0 では 1 つ前の継続 token を流してその行の hidden を採る
-          // （teacher forcing）。
+          // Phase 2: the draft of cycle t. The token passed is **the last one confirmed** (the
+          // continuation's `tokens[t]` — at position P = T+t but not yet in the KV), and the hidden
+          // is that of the row that produced it (position P−1). For t>0 the previous continuation
+          // token is fed and that row's hidden is taken (teacher forcing).
           for (let cycle = 0; cycle < golden.cycles; cycle += 1) {
             const position = promptLength + cycle;
             const token = golden.tokens[cycle];
@@ -661,9 +708,9 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
                 `${name} decode@${cycle}`,
               );
             }
-            assertEquals(context.pastLength, position, `${name}: サイクル ${cycle} の論理長`);
+            assertEquals(context.pastLength, position, `${name}: logical length at cycle ${cycle}`);
             const draft = await draftOnce(drafter, borrowed, { token, hidden, position });
-            assertEquals(draft.length, GEMMA4_DRAFT_STEPS, `${name}: draft の本数`);
+            assertEquals(draft.length, GEMMA4_DRAFT_STEPS, `${name}: number of drafts`);
             for (let step = 0; step < GEMMA4_DRAFT_STEPS; step += 1) {
               distinct.add(draft[step]);
               if (draft[step] === golden.draft[cycle * GEMMA4_DRAFT_STEPS + step]) {
@@ -672,60 +719,64 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
             }
           }
         } finally {
-          // MUST: 借り手 → 貸し手（逆順は runtime が拒否する）。
+          // MUST: borrower → lender (the runtime refuses the reverse order).
           await borrowed.dispose();
           await context.dispose();
         }
-        // MUST: 突合が自明でないことを見る（drafter が 1 語を出し続ければ一致率は golden の
-        // 受理率まで落ちるが、`argmax` が固まった形は「どの位置でも同じ語」として先に出る）。
+        // MUST: check that the comparison is not trivial (if the drafter kept emitting one word,
+        // the match rate would fall to the golden's acceptance rate, but a stuck `argmax` shows up
+        // first as "the same word at every position").
         assert(
           distinct.size >= 32,
-          `${name}: 出た draft token が ${distinct.size} 種類しかない（drafter の出口が固まっている）`,
+          `${name}: only ${distinct.size} distinct draft tokens (the drafter's output is stuck)`,
         );
         const total = perStep.reduce((sum, value) => sum + value, 0);
         counts.push({ perStep, total, cycles: golden.cycles });
         console.log(
-          `[e2e] gemma4 drafter ${name}: T=${promptLength} / ${golden.cycles} サイクル / 一致 ` +
-            `${total}/${golden.cycles * GEMMA4_DRAFT_STEPS}（段別 ${perStep
+          `[e2e] gemma4 drafter ${name}: T=${promptLength} / ${golden.cycles} cycles / matched ` +
+            `${total}/${golden.cycles * GEMMA4_DRAFT_STEPS} (per step ${perStep
               .map((hit, step) => `${step + 1}: ${((hit / golden.cycles) * 100).toFixed(1)}%`)
-              .join(" / ")}）/ ${(performance.now() - started).toFixed(0)}ms`,
+              .join(" / ")}) / ${(performance.now() - started).toFixed(0)}ms`,
         );
       });
     }
 
-    it("① 3 ケース合計の一致率が門を満たす", () => {
+    it("① the match rate over the 3 cases meets the floor", () => {
       const matched = counts.reduce((sum, entry) => sum + entry.total, 0);
       const drafts = counts.reduce((sum, entry) => sum + entry.cycles * GEMMA4_DRAFT_STEPS, 0);
-      assertEquals(counts.length, CASES.length, "突合したケース数");
+      assertEquals(counts.length, CASES.length, "number of cases compared");
       const rate = matched / drafts;
       console.log(
-        `[e2e] gemma4 drafter 合計: ${matched}/${drafts} = ${(rate * 100).toFixed(2)}%` +
-          `（門 ${(MATCH_FLOOR * 100).toFixed(0)}%）`,
+        `[e2e] gemma4 drafter total: ${matched}/${drafts} = ${(rate * 100).toFixed(2)}%` +
+          ` (floor ${(MATCH_FLOOR * 100).toFixed(0)}%)`,
       );
       assert(
         rate >= MATCH_FLOOR,
-        `draft の一致率 ${(rate * 100).toFixed(2)}% が門 ${(MATCH_FLOOR * 100).toFixed(
-          0,
-        )}% に満たない（段別: ${counts
+        `the draft match rate ${(rate * 100).toFixed(2)}% is below the floor ${(
+          MATCH_FLOOR * 100
+        ).toFixed(0)}% (per step: ${counts
           .map(
             (entry, index) =>
               `${CASES[index]} ${entry.perStep.map((hit) => `${hit}/${entry.cycles}`).join(",")}`,
           )
-          .join(" / ")}）`,
+          .join(" / ")})`,
       );
     });
   },
 );
 
 // ---------------------------------------------------------------------------
-// ⑤ pipeline の投機オプション（実 GPU）— drafter Session まで組んで、生成は 1 つも変わらない
+// ⑤ The pipeline's speculative option (real GPU) — builds as far as the drafter Session, and not
+//   one generated token changes
 // ---------------------------------------------------------------------------
 
 /**
- * chat の検収ケース（`e2e_gemma4_pretrained_test.ts` と**同じ golden** — 投機の有無で動かない）。
+ * The chat acceptance case (**the same golden** as `e2e_gemma4_pretrained_test.ts` — it does not
+ * move with or without speculation).
  *
- * `stop` も同じ値である（投機は `speculation` 欄を**足すだけ**で、理由・停止 token・生成 token 数を
- * 1 つも動かさない — 動いたら投機経路が会話を別の列にしている）。
+ * `stop` has the same value too (speculation **only adds** the `speculation` field and does not
+ * move the reason, the stop token or the generated token count at all — if they moved, the
+ * speculative path would be turning the conversation into a different sequence).
  */
 const CHAT_CASE = {
   fixture: "single-user",
@@ -739,7 +790,7 @@ type ChatFixture = {
 };
 
 describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
-  "gemma.Pipeline: speculative を渡すと drafter も載り、chat の golden は動かない（実 GPU）",
+  "gemma.Pipeline: passing speculative loads the drafter too, and the chat golden does not move (real GPU)",
   () => {
     let chatCase: ChatFixture["chat"][number];
     let pipeline: Pipeline | undefined;
@@ -751,7 +802,7 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
         ),
       );
       const found = fixture.chat.find((row) => row.name === CHAT_CASE.fixture);
-      assert(found !== undefined, `フィクスチャに chat ケース '${CHAT_CASE.fixture}' が無い`);
+      assert(found !== undefined, `the fixture has no chat case '${CHAT_CASE.fixture}'`);
       chatCase = found;
 
       const started = performance.now();
@@ -761,74 +812,89 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
         maxResidentPleBytes: await allResidentPleBytesOfMirror(MIRROR_DIR, BF16_SEAT),
       });
       console.log(
-        `[e2e] gemma4 drafter pipeline: 投機ありのロード ${(performance.now() - started).toFixed(
-          0,
-        )}ms`,
+        `[e2e] gemma4 drafter pipeline: load with speculation ${(
+          performance.now() - started
+        ).toFixed(0)}ms`,
       );
     });
 
     afterAll(async () => {
-      // 順序（drafter Session → target Session）が正しければ、この 1 本は成功で返る
-      // （逆順だと貸し出しの門に当たって `disposeSteps` が失敗を運ぶ）。
+      // If the order (drafter Session → target Session) is right, this call returns successfully
+      // (in the reverse order it hits the lending check and `disposeSteps` carries the failure).
       await pipeline?.dispose();
     });
 
-    // NOTE: この pipeline は drafter を持つので、`chat` は**既定で投機を張る**（段 3）。
-    // 受理率・非投機との token 列一致・phase・見積りの厳密門は `e2e_gemma4_speculative_test.ts`
-    // が持つ — ここが見るのは「既定経路（chat）で投機が実際に張られ、それでも golden が
-    // 1 文字も動かない」ことである。
-    it("① 投機を張っても chat の golden は 1 文字も動かない", async () => {
+    // NOTE: this pipeline has the drafter, so `chat` **speculates by default** (step 3). The strict
+    // checks of the acceptance rate, token-sequence agreement with non-speculative decoding, the
+    // phases and the estimate belong to `e2e_gemma4_speculative_test.ts` — this file checks that
+    // "speculation is actually set up on the default path (chat), and still the golden does not
+    // move by a single character".
+    it("① even with speculation the chat golden does not move by a single character", async () => {
       assert(pipeline !== undefined, "the pipeline is not open");
       const stream = pipeline.chat(chatCase.messages, {
         maxNewTokens: CHAT_CASE.maxNewTokens,
         sampler: { temperature: 0 },
       });
-      assertEquals(await stream.text(), CHAT_CASE.expected, "温度 0 の出力");
+      assertEquals(await stream.text(), CHAT_CASE.expected, "output at temperature 0");
       const stop = await stream.done;
-      assertEquals(stop.tokens, CHAT_CASE.stop.tokens, "生成 token 数（停止 token 込み）");
-      assert(stop.reason === "eos", `停止理由が eos でない: ${JSON.stringify(stop)}`);
-      assertEquals(stop.token, CHAT_CASE.stop.token, "停止 token");
-      // MUST: 投機が**実際に張られた**ことをここで見る（張られていなければ①は
-      // 「非投機の golden 再走」に化け、投機経路は 1 度も踏まれない）。`cycles > 0` は
-      // verify run が回ったこと、`accepted > 0` は draft が 1 本以上受理されたこと —
-      // 後者が無いと「毎 cycle 全棄却 = decode と同じ列を遠回りで出しただけ」と区別が付かない。
+      assertEquals(
+        stop.tokens,
+        CHAT_CASE.stop.tokens,
+        "generated token count (stop token included)",
+      );
+      assert(stop.reason === "eos", `the stop reason is not eos: ${JSON.stringify(stop)}`);
+      assertEquals(stop.token, CHAT_CASE.stop.token, "stop token");
+      // MUST: check here that speculation was **actually set up** (if not, ① would turn into "a
+      // re-run of the non-speculative golden" and the speculative path would never run).
+      // `cycles > 0` means verify runs happened, `accepted > 0` that at least one draft was
+      // accepted — without the latter it cannot be told apart from "every cycle rejected
+      // everything = the same sequence as decode, by a detour".
       const speculation = stop.speculation;
-      assert(speculation !== undefined, `既定で投機が張られていない: ${JSON.stringify(stop)}`);
-      assert(speculation.cycles > 0, "verify run が 1 本も回っていない");
+      assert(
+        speculation !== undefined,
+        `speculation is not set up by default: ${JSON.stringify(stop)}`,
+      );
+      assert(speculation.cycles > 0, "not a single verify run happened");
       assert(
         speculation.accepted > 0,
-        `draft が 1 本も受理されていない（${speculation.cycles} cycle / ` +
+        `not a single draft was accepted（${speculation.cycles} cycle / ` +
           `drafted ${speculation.drafted}）`,
       );
       console.log(
-        `[e2e] gemma4 drafter chat: ${speculation.cycles} cycle / 受理 ` +
-          `${speculation.accepted}/${speculation.drafted} / 配送 ${stop.tokens} token`,
+        `[e2e] gemma4 drafter chat: ${speculation.cycles} cycle / accepted ` +
+          `${speculation.accepted}/${speculation.drafted} / delivered ${stop.tokens} token`,
       );
     });
 
-    it("② 見積りは target + drafter の常駐を合算する", () => {
+    it("② the estimate adds up the residency of target + drafter", () => {
       assert(pipeline !== undefined, "the pipeline is not open");
       const opened = pipeline;
       const report = opened.estimateSessionMemory();
-      assert(report.resident.weights.totalBytes > 0, "常駐重みの見積りが 0 バイト");
+      assert(report.resident.weights.totalBytes > 0, "the resident weight estimate is 0 bytes");
       assert(
         report.auxiliaryBytes !== undefined && report.auxiliaryBytes > 0,
-        "非投機の会話でも使える補助出力の勘定が落ちている",
+        "the accounting of the auxiliary output, usable in non-speculative conversations too, is missing",
       );
-      // 内側の max は公開シナリオに、sequence が流す prefill バケット形（シナリオには並ばない）を
-      // 加えた最大（ADR 0095 追記 2026-10-10 で見積りの仕様が変わった — バケット形の中間は行
-      // ブロックの枚数の境界で prefill 形を上回りうるので、公開シナリオの max だけでは式にならない）。
-      // バケット形の値は「その行数を chunk 長として見積った prefill 形」で採る（同じ束縛・同じ
-      // 計算で、物理行数だけが違う形）。
-      // NOTE: 実資産の gemma4 E2B ではバケット形がピークを支配しないので、この等式は配線を
-      // 判別しない — 配線は gemma4_estimate_test.ts（GPU 無し）が固定する。
+      // The inner max is the maximum over the public scenarios plus the prefill bucket shapes the
+      // sequence runs (which are not listed among the scenarios) (the estimate's spec changed in
+      // ADR 0095 addendum 2026-10-10 — an intermediate bucket shape can exceed the prefill shape
+      // at a row-block count boundary, so the max of the public scenarios alone is not the
+      // formula). The value of a bucket shape is taken as "the prefill shape estimated with that
+      // row count as the chunk length" (the same bindings and computation; only the physical row
+      // count differs).
+      // NOTE: on the real gemma4 E2B asset the bucket shapes do not dominate the peak, so this
+      // equality does not discriminate the wiring — gemma4_estimate_test.ts (no GPU) pins the
+      // wiring.
       const { chunkBuckets } = opened.program;
-      assert(chunkBuckets.length > 0, "バケットが無い（バケット形の勘定を見ない門になる）");
+      assert(
+        chunkBuckets.length > 0,
+        "no buckets (the check would not look at the bucket-shape accounting)",
+      );
       const bucketShapes = chunkBuckets.map((rows) => {
         const prefill = opened
           .estimateSessionMemory({ chunkLength: rows })
           .scenarios.find((one) => one.name === "prefill");
-        assert(prefill !== undefined, `バケット ${rows} 行の prefill 形が報告に無い`);
+        assert(prefill !== undefined, `the report has no prefill shape for the ${rows}-row bucket`);
         return prefill.ioBytes + prefill.workspaceBytes;
       });
       assertEquals(
@@ -841,14 +907,14 @@ describe.skipIf(!MIRROR_PRESENT || !GPU_AVAILABLE)(
             ...bucketShapes,
           ) +
           report.auxiliaryBytes,
-        "drafter合算後も追加勘定とピークの内訳が一致する",
+        "after adding the drafter, the extra accounting and the peak breakdown still agree",
       );
-      // 厳密一致の門（2 Session の診断との突合・借り手 state 8 バイト・verify シナリオの
-      // ioBytes）は段 3 の実 GPU レッグが足す。
+      // The exact-match checks (comparison with the two Sessions' diagnostics, the borrower
+      // state's 8 bytes, the verify scenario's ioBytes) are added by step 3's real-GPU leg.
       assertEquals(
         report.scenarios.map((scenario) => scenario.name),
         ["prefill", "decode", "verify"],
-        "verify シナリオが並んでいない",
+        "the verify scenario is not listed",
       );
     });
   },

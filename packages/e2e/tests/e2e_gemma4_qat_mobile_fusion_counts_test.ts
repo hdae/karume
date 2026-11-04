@@ -17,23 +17,27 @@ import {
 } from "../../runtime/tests/helpers/container-graph.ts";
 import { decodeFusionCounts, exists, NONE } from "./helpers/fusion-counts.ts";
 
-// 配布形も先頭part（part 0）をmanifestから引く。旧seriesとQATの両方で発行順を守る。
+// The distribution also takes its first part (part 0) from the manifest. Both the old series and
+// QAT keep the emission order.
 const family = "gemma4-qat-mobile";
 const root = new URL(`../../../models/karume-${family}/`, import.meta.url);
 const manifestUrl = new URL("karume.json", root);
 const available = await exists(manifestUrl);
 if (!available) {
-  console.warn(`[karume] ${manifestUrl.pathname} が無いため配布形のRoPE検査をSKIPする`);
+  console.warn(
+    `[karume] ${manifestUrl.pathname} is missing, so the distribution's RoPE check is SKIPPED`,
+  );
 }
 test.skipIf(!available)(
-  `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
+  `the real ${family} E2B distribution matches RoPE 50 and the opt-in RMS→add 106`,
   async () => {
     const manifest: ContainerManifest = JSON.parse(await readTextFile(manifestUrl));
-    // MUST: quant は名指しする（下の SRQ の期待値は i2 / i4 の格納と group 長に依存する —
-    // manifest の並びの先頭を採ると、quant を足した日に並び順で期待値が割れる）。
+    // MUST: the quant is named (the SRQ expectations below depend on the i2 / i4 storage and the
+    // group length — taking the first entry of the manifest would split the expectations by order
+    // the day a quant is added).
     const head = containerPart0(manifest, "e2b", "model", "i4");
     if (head.repo !== undefined) {
-      throw new Error("Gemma実資産の融合テストは自己完結配布を要求する");
+      throw new Error("the Gemma real-asset fusion test requires a self-contained distribution");
     }
     const graph = await readContainerGraph(new URL(head.path, root), "model");
     for (const rows of [1, 4, 8, 32, 40, 64]) {
@@ -53,14 +57,15 @@ test.skipIf(!available)(
         },
         `${family} linear SRQ M=${rows}`,
       );
-      // packed 活性（ADR 0105）は**素のまま残った SRQ** のうち、消費先が全て
-      // `packedActivations: true` の実測形（ADR 0105 追記 1）に落ちるものだけを掴む。
-      // QAT decode 計画（M ≤ 8）では 70 本 — 内訳は per-key 実測の本数そのもので、
-      // i2 1536×12288 が 20 / i4 g2048 1536×{2048,6144} が 43 / i4 g4096 1536×4096 が 7。
-      // 追記 1 の前は 210 本で、差の 140 本は実測で効かなかった形（i4 g512 の l4 / l32・
-      // i8・i2 12288×1536 の l2）へ落ちる SRQ。linear→SRQ 融合が掴む 275 本とは重ならない
-      // （あちらの出力側の消費先には linear 以外が混ざる）。prefill 計画（M ≥ 32）は
-      // 並列 GEMV に落ちないので 0 になる。融合の有無でこの数は動かない。
+      // Packed activations (ADR 0105) match only those **SRQs left standalone** whose consumers
+      // all land on a measured shape with `packedActivations: true` (ADR 0105 addendum 1).
+      // A QAT decode plan (M ≤ 8) has 70 — the breakdown is exactly the per-key measured counts:
+      // 20 for i2 1536×12288 / 43 for i4 g2048 1536×{2048,6144} / 7 for i4 g4096 1536×4096.
+      // Before addendum 1 it was 210; the 140 difference are SRQs that land on shapes where the
+      // measurement showed no gain (l4 / l32 of i4 g512, i8, l2 of i2 12288×1536). They do not
+      // overlap the 275 the linear→SRQ fusion matches (the consumers on that output side include
+      // ops other than linear). A prefill plan (M ≥ 32) does not take the parallel GEMV, so it is
+      // 0. Whether the fusion is on does not move this count.
       for (const fuseSrq of [false, true]) {
         assertEquals(
           decodeFusionCounts(graph, rows, true, fuseSrq, true),

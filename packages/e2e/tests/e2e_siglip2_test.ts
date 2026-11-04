@@ -1,9 +1,9 @@
-// 実重み SigLIP2 の **vision tower** の実 GPU golden E2E（ADR 0005 の段 3）。
+// Real-GPU golden E2E of the real-weight SigLIP2 **vision tower** (stage 3 of ADR 0005).
 //
-// tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、実重み SBV2 / Irodori が
-// 「音響チェーン側の実重み」を、EmbeddingGemma（tests/e2e_embeddinggemma_test.ts）が
-// 「単一ベクトル出力のテキスト系」を受け持つのに対し、こちらは**単一ベクトル出力の画像系**
-// を受け持つ。
+// The tiny golden (tests/e2e_golden_test.ts) covers "the coverage of the op contracts", the
+// real-weight SBV2 / Irodori cover "real weights on the audio-chain side", and EmbeddingGemma
+// (tests/e2e_embeddinggemma_test.ts) covers "text models with a single-vector output"; this one
+// covers **image models with a single-vector output**.
 //
 // The container comes from the distribution mirror `models/karume-siglip2/` (model `base` /
 // `so400m`, quant `f32`, graph `vision`, read through the manifest) and the goldens from the
@@ -14,44 +14,52 @@
 // assets gate is red then); absent from a complete fetch, it FAILs — the dataset at the pin lacks
 // it. An absent mirror SKIPs (the distribution gate owns that red).
 //
-// 系列は **モデルごとに 1 本**（下の SERIES）。base（`patch16-224` — hidden 768 / 12 層 /
-// 196 パッチ）と so400m（`patch14-384` — hidden 1152 / 27 層 / 729 パッチ）は同じ経路の
-// 大小 2 点で、グラフの形も op 表も同じ。**tolerance だけは系列ごとに実測から導く**
-// （片方の実測で他方を通さない — 桁が違えば誤差も違う）。格納 dtype 系列は f32 の 1 本
-// のみなので、そちらの軸は持たない。
+// There is **one series per model** (SERIES below). base (`patch16-224` — hidden 768 / 12 layers /
+// 196 patches) and so400m (`patch14-384` — hidden 1152 / 27 layers / 729 patches) are a small and
+// a large point of the same path, with the same graph shape and op table. **Only the tolerance is
+// derived from measurements per series** (one's measurement does not pass the other — another
+// order of magnitude means another error). There is only one storage-dtype series, f32, so there
+// is no axis for that.
 //
-// グラフは vision tower 1 本で、出力も **pooler_output（MAP head 経由の `[1,hidden]`）
-// 1 本だけ**（text tower も `last_hidden_state` も載っていない — export_siglip2.py の
-// docstring）。入力は**正規化済みの** `pixel_values f32 [1,3,解像度,解像度]` 1 本で、記号
-// 次元は無い（解像度もパッチ数も固定）。
+// The graph is the vision tower alone, and so is the output: **only pooler_output (`[1,hidden]`
+// through the MAP head)** (neither the text tower nor `last_hidden_state` is included — the
+// docstring of export_siglip2.py). The input is one **normalized** `pixel_values f32
+// [1,3,resolution,resolution]`, with no symbolic dimension (the resolution and the patch count are
+// fixed).
 //
-// ## golden の 2 群（合成画像 + 実画像）— どちらも残す
+// ## Two groups of goldens (synthetic images + real images) — both are kept
 //
-// 入力は**どちらの群も golden に焼かれた `pixel_values` そのもの**（ビット同一）なので、
-// 突合に出るのは**ランタイムの数値誤差だけ**。2 群に分けて持つのは、踏む分布が違うから:
+// The input of **both groups is the very `pixel_values` baked into the golden** (bit-identical),
+// so the comparison sees **only the runtime's numerical error**. They are kept as two groups
+// because they exercise different distributions:
 //
-// - **合成画像 4 ケース**（`ramp` / `ramp-dim` / `checker` / `noise`）: 値域の端や勾配を
-//   踏むぶん数値回帰の検出が鋭い（実測 6.4e-6〜1.05e-5）。
-// - **実画像 4 ケース**（`photo-*`）: 自然画像の分布点でのランタイム忠実度と、出力が埋め込み
-//   として意味を持つかの**判別**（cosine の順序 — {@link REAL_PERSON_CASES}）を受け持つ。
-//   誤差の桁は合成側と同じだが、tolerance は群ごと・系列ごとに独立に実測から導く
-//   （{@link REAL_BASE_TOLERANCE}）。
+// - **4 synthetic-image cases** (`ramp` / `ramp-dim` / `checker` / `noise`): they hit the edges of
+//   the value range and gradients, so they catch numerical regressions sharply (measured 6.4e-6 to
+//   1.05e-5).
+// - **4 real-image cases** (`photo-*`): they cover the runtime fidelity at the distribution point
+//   of natural images, and the **discrimination** of whether the output means something as an
+//   embedding (the cosine order — {@link REAL_PERSON_CASES}). The error is of the same order as the
+//   synthetic side, but the tolerance is derived from measurements independently per group and per
+//   series ({@link REAL_BASE_TOLERANCE}).
 //
-// ## TS 前処理を含む鎖は、2 つの門の**合成**で持つ
+// ## The chain including the TS preprocessing is held by the **composition** of two checks
 //
-// 「PNG を渡したら Python と同じ埋め込みが返る」という鎖は、このテスト単独ではなく
-// `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` の**入力側 parity 門**（同じ PNG から
-// Python と同じ `pixel_values` が出る — 入力差 ≤ 7.85e-3 = uint8 の 1 LSB 級）と、本テストの
-// **golden 入力での忠実度**の合成で持つ。前処理をここで通さないのは依存方向のため
-// （runtime のテストから models の実装を相対 import するのは逆向き）。分けた副産物として、
-// 落ちたときに前処理と推論のどちらが動いたのかがテストの名前で分かる。
+// The chain "pass a PNG and get the same embedding as Python" is held not by this test alone but by
+// the composition of the **input-side parity check** of
+// `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` (the same PNG gives the same
+// `pixel_values` as Python — an input difference ≤ 7.85e-3 = about one uint8 LSB) and this test's
+// **fidelity on the golden input**. The preprocessing is not run here because of the dependency
+// direction (a runtime test importing the models implementation by a relative path is backwards).
+// As a side benefit of the split, when one fails, the test name tells whether the preprocessing or
+// the inference moved.
 //
-// 資産が無い環境では**明示 SKIP**する（系列ごとに独立 — 片方だけ生成した環境でも、ある方は
-// 実走する）。実画像の群も独立に SKIP する（`--real-images` を付けずに emit した資産では
-// 合成 4 ケースしか無い）。ADR 0005 の「全 SKIP は明示 FAIL」門番
-// （tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。
-// 逆に資産が**中途半端に**（ケース欠け）存在する場合は SKIP ではなく FAIL にする（下の
-// 「資産の完全性」テスト）— そこは無音の見かけ成功になる。
+// Where the assets are absent it **SKIPs explicitly** (independently per series — in an environment
+// that generated only one, the present one still runs). The real-image group also SKIPs
+// independently (assets emitted without `--real-images` have only the 4 synthetic cases). ADR
+// 0005's "all-SKIP is an explicit FAIL" guard (tests/gpu_gate_test.ts) looks only at *whether a GPU
+// adapter exists*, independent of this SKIP. Conversely, assets that are **partially** present
+// (missing cases) FAIL rather than SKIP (the "asset completeness" test below) — that would be a
+// silent apparent success.
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
 import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
@@ -90,121 +98,135 @@ import {
 } from "../../models/tests/helpers/mirror.ts";
 
 /**
- * 実重み SigLIP2 **base**（`patch16-224`）の torch CPU 期待値との突合に使う許容誤差。
+ * The tolerance for comparing the real-weight SigLIP2 **base** (`patch16-224`) against the torch
+ * CPU expected values.
  *
- * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,768]`）:
+ * Measured (raw comparison with `atol=rtol=0`, 4 cases × 1 output `[1,768]`):
  *
- * | ケース   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | -------- | ------- | ------- | ------------ | ------------------ |
+ * | Case     | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
+ * | -------- | ------- | ------- | ------------ | ------------------- |
  * | checker  | 1.05e-5 | 7.45e-3 | 6.842        | 2.04e-4            |
  * | noise    | 9.54e-6 | 6.11e-3 | 7.147        | 1.02e-4            |
  * | ramp     | 6.44e-6 | 4.13e-3 | 6.909        | 1.70e-4            |
  * | ramp-dim | 1.05e-5 | 3.03e-3 | 6.950        | 2.36e-4            |
  *
- * **判定は atol が主導する**（`|x−y| ≤ atol + rtol·|ref|`）: pooler_output は L2 正規化されて
- * いない生のベクトルで、値域は 0 を跨いで \|ref\| 最小非ゼロ 1.02e-4 まで薄く広がるため、
- * rtol を主役にすると 0 近傍で発散する（実測 maxRel 7.45e-3 の要素も絶対誤差は
- * `7.45e-3 × 1.4e-3 ≈ 1.0e-5` でしかない）。rtol 1e-6 の寄与は \|ref\| 上端 7.147 でも
- * 7.1e-6 で、atol の 1/7 と判定を主導しない。
+ * **atol drives the decision** (`|x−y| ≤ atol + rtol·|ref|`): pooler_output is a raw vector, not
+ * L2-normalized, whose values straddle 0 and thin out down to a \|ref\| min nonzero of 1.02e-4, so
+ * making rtol the main term would diverge near 0 (even the element with the measured maxRel
+ * 7.45e-3 has an absolute error of only `7.45e-3 × 1.4e-3 ≈ 1.0e-5`). rtol 1e-6 contributes 7.1e-6
+ * even at the \|ref\| max of 7.147, 1/7 of atol, so it does not drive the decision.
  *
- * atol 5e-5 は実測最悪 1.05e-5（checker / ramp-dim）の約 4.8 倍。**EmbeddingGemma の
- * `EMBEDDINGGEMMA_TOLERANCE`（atol 1e-6）より 2 桁緩いのは値域の違いだけ** — あちらの出力は
- * L2 正規化済みの単位ベクトル（\|ref\| 上端 0.25）で、値域で割った相対量はどちらも 1.5e-6 級で
- * 揃っている（1.05e-5 / 7.15 ≈ 1.5e-6 対 2.8e-7 / 0.25 ≈ 1.1e-6）。誤差の出所も同じ（fma 融合・
- * linear / attention の縮約順序が torch と違う・超越関数（tanh / exp / rsqrt）の実装差）で、
- * SDPA は分解経路（mul×2 + bmm + softmax + bmm）を 13 本とも通っている。
+ * atol 5e-5 is about 4.8× the worst measured 1.05e-5 (checker / ramp-dim). **It is 2 orders of
+ * magnitude looser than EmbeddingGemma's `EMBEDDINGGEMMA_TOLERANCE` (atol 1e-6) only because of the
+ * value range** — that output is an L2-normalized unit vector (\|ref\| max 0.25), and the error
+ * relative to the value range is about 1.5e-6 for both (1.05e-5 / 7.15 ≈ 1.5e-6 vs 2.8e-7 / 0.25 ≈
+ * 1.1e-6). The sources of error are the same too (fma fusion, a linear / attention reduction order
+ * that differs from torch, implementation differences of the transcendental functions (tanh / exp /
+ * rsqrt)), and all 13 SDPAs go through the decomposed path (mul×2 + bmm + softmax + bmm).
  *
- * NOTE: MAP head の q/k/v 明示化パッチ由来の差（`export_siglip2.py --verify` の実測
- * 7.75e-7〜2.38e-6）は**ここには入らない** — golden の期待値は差し替え**後**のモジュールから
- * 採っており、この突合はランタイム側の誤差だけを見ている。
+ * NOTE: the difference from the patch that makes the MAP head's q/k/v explicit (measured 7.75e-7 to
+ * 2.38e-6 by `export_siglip2.py --verify`) **is not included here** — the golden's expected values
+ * are taken from the module **after** the replacement, and this comparison sees only the runtime's
+ * error.
  *
- * 実装バグ（パッチ埋め込みのチャネル取り違え・位置埋め込みの並び違い・attention の head 分割
- * 誤り・MAP head の probe 取り違え）の誤差は出力の値域と同じ O(1)〜O(7) で、この閾値の
- * 5 桁以上上に出る。
+ * The error of implementation bugs (mixed-up channels in the patch embedding, a wrong order of the
+ * position embeddings, a wrong attention head split, a mixed-up MAP head probe) is O(1) to O(7),
+ * the same as the output's value range, 5 or more orders of magnitude above this threshold.
  */
 const BASE_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
 
 /**
- * 実重み SigLIP2 **so400m**（`patch14-384`）の torch CPU 期待値との突合に使う許容誤差。
+ * The tolerance for comparing the real-weight SigLIP2 **so400m** (`patch14-384`) against the torch
+ * CPU expected values.
  *
- * MUST: base と**独立に**実測から導く（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本
- * `[1,1152]`）。同じ経路でも hidden 1152 / 27 層 / 729 パッチと縮約の長さが違い、誤差の
- * 積み上がり方も違う:
+ * MUST: derived from measurements **independently** of base (raw comparison with `atol=rtol=0`, 4
+ * cases × 1 output `[1,1152]`). On the same path, hidden 1152 / 27 layers / 729 patches give other
+ * reduction lengths, and the error accumulates differently:
  *
- * | ケース   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | -------- | ------- | ------- | ------------ | ------------------ |
+ * | Case     | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
+ * | -------- | ------- | ------- | ------------ | ------------------- |
  * | checker  | 8.46e-6 | 4.64e-3 | 10.389       | 1.00e-4            |
  * | noise    | 1.05e-5 | 9.76e-3 | 8.451        | 1.28e-4            |
  * | ramp     | 6.68e-6 | 2.55e-2 | 10.753       | 4.68e-6            |
  * | ramp-dim | 6.08e-6 | 8.35e-3 | 10.874       | 1.89e-4            |
  *
- * atol 5e-5 は実測最悪 1.05e-5（noise）の約 4.8 倍。**base と同じ値になったのは実測の帰結**
- * で、共有はしない（片方を測り直したときにもう片方が黙って緩む）。判定を atol が主導する
- * 理由も base と同じ — \|ref\| 最小非ゼロが 4.68e-6（ramp）まで薄く広がり、maxRel 2.55e-2 の
- * 要素も絶対誤差は 1.2e-7 でしかない。rtol 1e-6 の寄与は \|ref\| 上端 10.874 でも 1.1e-5 で、
- * atol の 1/5 と判定を主導しない。
+ * atol 5e-5 is about 4.8× the worst measured 1.05e-5 (noise). **It came out the same as base as a
+ * consequence of the measurements**, and it is not shared (re-measuring one would silently loosen
+ * the other). atol drives the decision for the same reason as base — the \|ref\| min nonzero thins
+ * out down to 4.68e-6 (ramp), and even the element with maxRel 2.55e-2 has an absolute error of
+ * only 1.2e-7. rtol 1e-6 contributes 1.1e-5 even at the \|ref\| max of 10.874, 1/5 of atol, so it
+ * does not drive the decision.
  *
- * NOTE: MAP head の q/k/v 明示化パッチ由来の差（`--verify` の so400m 実測
- * 1.07e-6〜2.86e-6・形の畳み込みは 4 ケースともビット同一）は base と同じくここには入らない。
+ * NOTE: as for base, the difference from the patch that makes the MAP head's q/k/v explicit
+ * (so400m measured 1.07e-6 to 2.86e-6 by `--verify`; the shape folding is bit-identical in all 4
+ * cases) is not included here.
  */
 const SO400M_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
 
 /**
- * **実画像**ケース（`photo-*`）の突合に使う許容誤差 — SigLIP2 **base**。
+ * The tolerance for comparing the **real-image** cases (`photo-*`) — SigLIP2 **base**.
  *
- * 入力は合成画像と同じく golden に焼かれた `pixel_values` そのものなので、出るのは
- * ランタイム誤差だけで桁も合成側と同じ。それでも {@link BASE_TOLERANCE} と**共有しない**のは、
- * 踏む分布が違って誤差の出方も違うから（片方を測り直したときにもう片方が黙って緩む形にしない
- * のは、系列間で共有しないのと同じ理由）。
+ * As for the synthetic images, the input is the very `pixel_values` baked into the golden, so only
+ * the runtime error shows, of the same order as the synthetic side. It is still **not shared** with
+ * {@link BASE_TOLERANCE} because the distribution exercised differs and so does the error (not
+ * letting a re-measurement of one silently loosen the other is the same reason as not sharing
+ * across series).
  *
- * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 1 本 `[1,768]`）:
+ * Measured (raw comparison with `atol=rtol=0`, 4 cases × 1 output `[1,768]`):
  *
- * | ケース          | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | --------------- | ------- | ------- | ------------ | ------------------ |
+ * | Case            | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
+ * | --------------- | ------- | ------- | ------------ | ------------------- |
  * | photo-portrait  | 3.34e-6 | 2.16e-3 | 5.314        | 8.77e-5            |
  * | photo-landscape | 1.34e-5 | 6.30e-3 | 4.550        | 1.82e-4            |
  * | photo-corridor  | 3.82e-6 | 1.73e-2 | 6.727        | 7.22e-5            |
  * | photo-street    | 5.72e-6 | 2.49e-3 | 5.319        | 1.55e-4            |
  *
- * atol 5e-5 は実測最悪 1.34e-5（photo-landscape）の約 3.7 倍。合成画像側と同じ値になったのは
- * 実測の帰結で、共有の根拠ではない。
+ * atol 5e-5 is about 3.7× the worst measured 1.34e-5 (photo-landscape). That it came out the same
+ * as the synthetic side is a consequence of the measurements, not a reason to share it.
  *
- * rtol は **0**（合成画像側の 1e-6 も入れない）。実測最悪 1.34e-5 は atol 単独で収まり、
- * rtol 1e-6 を足しても \|ref\| 上端 6.727 で寄与は 6.7e-6 = atol の 1/7 と判定を動かさない —
- * 判定を動かさないものは置かない。maxRel が 1.73e-2 まで出るのは 0 近傍の要素の見かけで、
- * その絶対誤差は 3.8e-6 でしかない（合成画像側の docstring と同じ理屈）。
+ * rtol is **0** (not even the synthetic side's 1e-6). The worst measured 1.34e-5 fits within atol
+ * alone, and adding rtol 1e-6 would contribute 6.7e-6 at the \|ref\| max of 6.727 = 1/7 of atol,
+ * not moving the decision — what does not move the decision is not set. maxRel reaching 1.73e-2 is
+ * an artifact of elements near 0, whose absolute error is only 3.8e-6 (the same reasoning as the
+ * synthetic side's docstring).
  *
- * ランタイム側の実装バグ（{@link BASE_TOLERANCE} が列挙するもの）の誤差は出力の値域と同じ
- * O(1)〜O(7) で、この閾値の 5 桁以上上に出る。一方 **TS 前処理側の誤り**（解像度の取り違え・
- * チャネル順の反転・補間の取り違え）**はこの門では捕まらない** — 入力が golden の
- * `pixel_values` だから。そこは
- * `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` が受け持つ（ファイル冒頭の「2 つの門の
- * 合成」）。
+ * The error of runtime-side implementation bugs (those {@link BASE_TOLERANCE} lists) is O(1) to
+ * O(7), the same as the output's value range, 5 or more orders of magnitude above this threshold.
+ * On the other hand, **errors on the TS preprocessing side** (a wrong resolution, reversed channel
+ * order, a wrong interpolation) **are not caught by this check** — the input is the golden's
+ * `pixel_values`. That is covered by
+ * `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` ("the composition of two
+ * checks" at the top of the file).
  */
 const REAL_BASE_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 0 };
 
 /**
- * **実画像**ケースの許容誤差 — SigLIP2 **so400m**。MUST: base と独立に実測から導く。
+ * The tolerance of the **real-image** cases — SigLIP2 **so400m**. MUST: derived from measurements
+ * independently of base.
  *
- * | ケース          | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | --------------- | ------- | ------- | ------------ | ------------------ |
+ * | Case            | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
+ * | --------------- | ------- | ------- | ------------ | ------------------- |
  * | photo-portrait  | 9.06e-6 | 2.85e-3 | 5.845        | 3.24e-4            |
  * | photo-landscape | 7.63e-6 | 1.20e-2 | 5.883        | 3.19e-4            |
  * | photo-corridor  | 9.54e-6 | 1.42e-3 | 6.584        | 1.47e-4            |
  * | photo-street    | 3.34e-5 | 3.95e-3 | 5.329        | 4.22e-4            |
  *
- * atol 1e-4 は実測最悪 3.34e-5（photo-street）の約 3.0 倍。**合成画像側の
- * {@link SO400M_TOLERANCE}（5e-5）より緩いのは実測の帰結** — photo-street だけが合成 4 ケースの
- * 最悪 1.05e-5 の 3 倍出ており、自然画像の分布点が縮約の長い経路（hidden 1152 / 27 層 /
- * 729 パッチ）で合成画像より悪い側を踏むことがある、という実測そのもの。base（実測最悪
- * 1.34e-5）へ流用できない理由でもある。
+ * atol 1e-4 is about 3.0× the worst measured 3.34e-5 (photo-street). **It is looser than the
+ * synthetic side's {@link SO400M_TOLERANCE} (5e-5) as a consequence of the measurements** — only
+ * photo-street comes out at 3× the worst of the 4 synthetic cases (1.05e-5), which is itself the
+ * measurement showing that a natural-image distribution point can land on the worse side than
+ * synthetic images on a path with long reductions (hidden 1152 / 27 layers / 729 patches). It is
+ * also why it cannot be reused for base (worst measured 1.34e-5).
  *
- * rtol が 0 な理由は base と同じ（rtol 1e-6 の寄与は \|ref\| 上端 6.584 でも 6.6e-6 で、
- * atol の 1/15）。
+ * rtol is 0 for the same reason as base (rtol 1e-6 contributes 6.6e-6 even at the \|ref\| max of
+ * 6.584, 1/15 of atol).
  */
 const REAL_SO400M_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 0 };
 
-/** 系列（= モデル）1 本の宣言。系列名は exporter の `--model-dir` のディレクトリ名。 */
+/**
+ * The declaration of one series (= model). The series name is the directory name of the exporter's
+ * `--model-dir`.
+ */
 type Series = {
   /**
    * The series name: the golden directory (`goldenDir(name)`) and the prefix of the sha256 case
@@ -220,13 +242,16 @@ type Series = {
    */
   readonly quant: string;
   readonly tolerance: Tolerance;
-  /** 実画像ケースの許容誤差（合成画像とは独立に実測から導く — {@link REAL_BASE_TOLERANCE}）。 */
+  /**
+   * The tolerance of the real-image cases (derived from measurements independently of the synthetic
+   * images — {@link REAL_BASE_TOLERANCE}).
+   */
   readonly realTolerance: Tolerance;
 };
 
 /**
- * 実走する系列。**列挙ではなくここで固定する** — 生成済みのものを拾う形にすると、
- * 系列ごと生成し忘れた環境で「緑だが未検証」になる。
+ * The series that run. **Fixed here rather than enumerated** — picking up whatever was generated
+ * would give "green but unchecked" in an environment that forgot to generate a whole series.
  */
 const SERIES: readonly Series[] = [
   {
@@ -287,44 +312,46 @@ const openVision = async (series: Series): Promise<PreparedModel> =>
 /**
  * The export command that regenerates the goldens, real-image cases included
  * (`tools/export-recipes/siglip2/export.py`; `--real-images` needs the `siglip2-preprocess` group).
- * 系列名は実重みのディレクトリ名でもある（どちらも HF のリポジトリ名）。
+ * The series name is also the directory name of the real weights (both are the HF repository name).
  */
 const realGenerateCommand = (series: Series): string =>
   "cd tools/export-recipes && uv run --group siglip2-preprocess python -m siglip2.export" +
   ` --real-images --model-dir ../../inputs/siglip2/${series.name}`;
 
 /**
- * 生成されているはずの**合成画像**ケース。**列挙結果ではなくここで固定する** — 列挙だけに
- * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
- * `tools/exporter/export_siglip2.py` の `build_cases`。
+ * The **synthetic-image** cases that should have been generated. **Fixed here rather than
+ * enumerated** — relying on an enumeration alone, tests would silently vanish in an environment
+ * that ran only part of the generation, giving "green but unchecked". The source of truth is
+ * `build_cases` in `tools/exporter/export_siglip2.py`.
  */
 const EXPECTED_CASES = ["checker", "noise", "ramp", "ramp-dim"] as const;
 
 /**
- * **実画像**ケース（`--real-images` を付けた emit だけが持つ）。正本は `export_siglip2.py` の
- * `REAL_CASES`。ここが要るのは golden のケース名だけで、元になった PNG との対応は
- * `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` が持つ（このテストは PNG を読まない —
- * ファイル冒頭の「2 つの門の合成」）。
+ * The **real-image** cases (only an emit with `--real-images` has them). The source of truth is
+ * `REAL_CASES` in `export_siglip2.py`. Only the golden case names are needed here; the mapping to
+ * the source PNGs is held by `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts`
+ * (this test does not read PNGs — "the composition of two checks" at the top of the file).
  */
 const REAL_CASES = ["photo-portrait", "photo-landscape", "photo-corridor", "photo-street"] as const;
 
 /**
- * 実画像の判別で見る 2 群（人物が写っている 2 枚 / 写っていない 2 枚）。正本は
- * `export_siglip2.py` の `REAL_PERSON_CASES` / `REAL_SCENE_CASES` で、あちらは torch 出力に、
- * こちらは**実 GPU 出力**に掛ける。
+ * The two groups the real-image discrimination looks at (2 images with a person / 2 without). The
+ * source of truth is `REAL_PERSON_CASES` / `REAL_SCENE_CASES` in `export_siglip2.py`; that one is
+ * applied to the torch output, this one to the **real-GPU output**.
  *
- * NOTE: 合成画像の対（`ramp`×`ramp-dim` 対 `ramp`×`checker`）はここには無い — 判別は実画像
- * 側へ**置き直した**（同じ構造の強弱より「人が写っているか」の方が意味のある判別で、合成
- * 画像側は数値回帰の門として残っている）。torch 側の順序検査は emit のたびに
- * `export_siglip2.py` の `_sanity` が合成・実画像の両方に掛けている。
+ * NOTE: the synthetic-image pairs (`ramp`×`ramp-dim` vs `ramp`×`checker`) are not here — the
+ * discrimination was **moved** to the real images ("is there a person" is a more meaningful
+ * discrimination than the strength of the same structure, and the synthetic side stays as the
+ * numerical-regression check). On every emit, `_sanity` in `export_siglip2.py` applies the torch-
+ * side order check to both the synthetic and the real images.
  */
 const REAL_PERSON_CASES = ["photo-portrait", "photo-street"] as const;
 const REAL_SCENE_CASES = ["photo-landscape", "photo-corridor"] as const;
 
 /**
- * 資産ディレクトリの列挙。存在しない場合だけ空に縮退する。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
- * 実行されていない検証が SKIP として静かに緑になる。
+ * Lists an asset directory. Only a missing directory degrades to empty.
+ * MUST: anything other than NotFound propagates — reading a permission error or the like as "no
+ * asset" would quietly turn a check that never ran green as a SKIP.
  */
 const listDir = (url: URL): readonly DirEntry[] => {
   try {
@@ -350,12 +377,15 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 };
 
-/** golden の入力を宣言 dtype の view で組む（記号次元が無いので明示 bindings も不要）。 */
+/**
+ * Builds the golden's inputs as views of the declared dtype (no symbolic dimension, so no explicit
+ * bindings either).
+ */
 const goldenInputs = (parsed: PreparedModel, io: SafetensorsFile): Record<string, Tensor> => {
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
     const view = io.tensors.get(`input.${spec.name}`);
-    assert(view !== undefined, `input.${spec.name} が golden に無い`);
+    assert(view !== undefined, `input.${spec.name} is not in the golden`);
     inputs[spec.name] = ioTensor(io, view, spec.dtype);
   }
   return inputs;
@@ -374,27 +404,31 @@ const cosine = (first: Float32Array, second: Float32Array): number => {
 };
 
 /**
- * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_siglip2-golden/` — 消して安全）。
+ * Where the verdicts and measurements go (`outputs/verify/<environment key>/<date>_siglip2-golden/`
+ * — safe to delete).
  *
- * 系列名を `<family>-golden` にするのは、models 側の e2e が素の family 名で同じ根へ書くため
- * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ * The series name is `<family>-golden` because the models-side e2e writes to the same root under
+ * the bare family name (two modules writing to the same slot would overwrite each other's `cases`).
  */
 const results = openResults("siglip2-golden");
 
 /**
- * pooled 出力の sha256 参照値（環境ごとの行 — ADR 0106。行の ID は結果と同じ `<系列>/<ケース>`）。
+ * The sha256 reference values of the pooled output (rows per environment — ADR 0106; the row ID is
+ * `<series>/<case>`, the same as the results).
  *
- * tolerance 突合は torch との**機をまたいだ**近さを言うだけで、この機で数値が 1 ビット動いた
- * 退行（縮約順序・fma 融合の変化）は帯の内側に隠れる。sha の行はそちらを掴む追加検査で、
- * tolerance 突合を置き換えない。
+ * The tolerance comparison only states closeness to torch **across machines**; a regression that
+ * moved a value by one bit on this machine (a change of reduction order or fma fusion) hides inside
+ * the band. The sha rows are an additional check that catches that, and they do not replace the
+ * tolerance comparison.
  */
 const references = openReferences(
   new URL("../../runtime/tests/fixtures/references/siglip2-golden.json", import.meta.url),
 );
 
 /**
- * 登録した golden ケースの ID（参照門と `warnMissing` が数える集合 — 登録時に同期で決まる）。
- * 資産のある系列のケースだけが入るので、空 = どの系列にも資産が無い。
+ * The IDs of the registered golden cases (the set the reference gate and `warnMissing` count —
+ * fixed synchronously at registration). Only cases of series with assets go in, so empty = no
+ * series has assets.
  */
 const caseIds: string[] = [];
 
@@ -409,7 +443,7 @@ if (!MIRROR_PRESENT) {
 
 for (const series of SERIES) {
   const root = goldenRoot(series);
-  /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
+  /** Enumerated synchronously, as registration needs it (the same reason as Deno.test's ignore). */
   const discovered = discoverCases(root);
   const realNames = new Set<string>(REAL_CASES);
   const cases = discovered.filter((name) => !realNames.has(name));
@@ -420,7 +454,7 @@ for (const series of SERIES) {
    * set, is a FAIL of the completeness test.
    */
   const available = discovered.length > 0;
-  /** 実画像の群（`--real-images` を付けずに emit した資産には無い）。 */
+  /** The real-image group (absent from assets emitted without `--real-images`). */
   const realAvailable = available && realCases.length > 0;
   const goldensMissing = !available && !FETCHED;
   /** The discrimination reads the real-image goldens: absent from a complete fetch, it FAILs. */
@@ -433,8 +467,8 @@ for (const series of SERIES) {
     );
   } else if (available && !realAvailable) {
     console.warn(
-      `[karume] 実画像ケース (${series.name}) を SKIP する（golden ${realCases.length}/` +
-        `${REAL_CASES.length} 本）。生成: ${realGenerateCommand(series)}`,
+      `[karume] skipping the real-image cases (${series.name}) (goldens ${realCases.length}/` +
+        `${REAL_CASES.length}). Generate: ${realGenerateCommand(series)}`,
     );
   }
 
@@ -446,31 +480,33 @@ for (const series of SERIES) {
     `SigLIP2 goldens: ${series.name} — the expected cases are present${goldensMissing ? NOT_FETCHED : ""}`,
     () => {
       assert(available, absentAsset(root));
-      assertEquals(cases, [...EXPECTED_CASES], `${root.pathname} の合成画像 golden ケース`);
-      // 実画像は**任意だが全部か 0 か**（`--real-images` を付けた emit は 4 本まとめて書く）。
-      // 部分的な欠けを SKIP に丸めると、採り直しの途中で落ちた資産が黙って通る。
+      assertEquals(cases, [...EXPECTED_CASES], `${root.pathname}: synthetic-image golden cases`);
+      // The real images are **optional, but all or none** (an emit with `--real-images` writes all
+      // 4 together). Rounding a partial gap to SKIP would let assets lost mid-regeneration pass
+      // silently.
       assert(
         realCases.length === 0 || realCases.length === REAL_CASES.length,
-        `${root.pathname} の実画像 golden が ${realCases.length}/${REAL_CASES.length} 本` +
-          `（採り直す: ${realGenerateCommand(series)}）`,
+        `${root.pathname} has ${realCases.length}/${REAL_CASES.length} real-image goldens` +
+          ` (regenerate: ${realGenerateCommand(series)})`,
       );
     },
   );
 
   /**
-   * 突合を回すケース。合成と実画像で**入力の作り方は同じ**（どちらも golden の
-   * `pixel_values`）で、違うのは踏む分布と、そこから独立に導いた tolerance だけ。
+   * The cases that run the comparison. Synthetic and real images **build the input the same way**
+   * (both from the golden's `pixel_values`); only the distribution exercised and the tolerance
+   * derived independently from it differ.
    */
   const goldenCases = [
     ...cases.map((name) => ({
       name,
-      label: "golden 突合",
+      label: "golden comparison",
       tolerance: series.tolerance,
       ignore: !available,
     })),
     ...realCases.map((name) => ({
       name,
-      label: "実画像 golden 突合",
+      label: "real-image golden comparison",
       tolerance: series.realTolerance,
       ignore: !realAvailable,
     })),
@@ -478,14 +514,17 @@ for (const series of SERIES) {
 
   for (const entry of goldenCases) {
     const caseName = entry.name;
-    /** ケース ID（系列が違えば同じケース名があるので組で持つ）。 */
+    /** The case ID (another series has the same case names, so it is kept as a pair). */
     const caseId = `${series.name}/${caseName}`;
     if (!entry.ignore && MIRROR_PRESENT) caseIds.push(caseId);
     test.skipIf(entry.ignore || !MIRROR_PRESENT || !GPU_AVAILABLE)(
-      `SigLIP2 ${entry.label}: ${series.name} / ${caseName}（実 GPU / torch CPU 期待値）` +
+      `SigLIP2 ${entry.label}: ${series.name} / ${caseName} (real GPU / torch CPU expected values)` +
         (MIRROR_PRESENT ? "" : MIRROR_ABSENT),
       async () => {
-        /** sha の決着（突合したときだけ — 記録の後で不一致を落とすために外へ持ち出す）。 */
+        /**
+         * The sha settlement (only when compared — carried outside so a mismatch fails after the
+         * recording).
+         */
         let settlement: ReferenceSettlement | undefined;
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const [parsed, ioBytes] = await Promise.all([
@@ -494,26 +533,24 @@ for (const series of SERIES) {
           ]);
           const io = parseSafetensors(ioBytes);
 
-          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+          // Every tensor of io maps exactly onto the graph's inputs and outputs (nothing extra,
+          // nothing missing).
           const expectedKeys = [
             ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
             ...parsed.graph.outputs.map((_, index) => `output.${index}`),
           ].sort();
-          assertEquals(
-            [...io.tensors.keys()].sort(),
-            expectedKeys,
-            "io.safetensors のテンソルキー",
-          );
+          assertEquals([...io.tensors.keys()].sort(), expectedKeys, "io.safetensors tensor keys");
 
           const inputs = goldenInputs(parsed, io);
 
           const gpu = await acquireGpu();
-          // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
-          // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
-          // （known-issues の遅延解放）。
+          // MUST: the device is destroyed even when the adapter check or `createSession` fails.
+          // Missing that, the rest of the run carries an undestroyed device and later cases go red
+          // with OOM (the deferred release in known-issues).
           try {
-            // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-            // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+            // This path keeps the reference values and results as this machine's rows, so check
+            // here that the adapter the key was taken from is the one running (mixing them up on a
+            // multi-GPU machine would measure against another machine's band).
             assertAdapterMatchesEnvironment(gpu);
             const session = await parsed.createContainerSession(gpu);
             try {
@@ -522,7 +559,7 @@ for (const series of SERIES) {
 
               parsed.graph.outputs.forEach((name, index) => {
                 const view = io.tensors.get(`output.${index}`);
-                assert(view !== undefined, `output.${index} が golden に無い`);
+                assert(view !== undefined, `output.${index} is not in the golden`);
                 const where = `${series.name} / ${caseName} output.${index} ('${name}')`;
                 const declared = parsed.graph.values[name].dtype;
                 assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
@@ -542,15 +579,16 @@ for (const series of SERIES) {
                 assert(report.pass, `${where}: ${formatAllclose(report)}`);
               });
 
-              // tolerance 突合が通った出力を実物（safetensors 1 本・metadata なし）にし、この機の
-              // 参照行と突き合わせる（比較モードで行が無ければ突合だけを飛ばす — settleOrObserve）。
-              // 出力が増えたら先頭だけを黙って固定しない。
-              assertEquals(parsed.graph.outputs.length, 1, `${series.name}: グラフ出力の本数`);
+              // Turn the output that passed the tolerance comparison into an artifact (one
+              // safetensors, no metadata) and compare it with this machine's reference row (in
+              // compare mode with no row, only the comparison is skipped — settleOrObserve). If
+              // outputs are added, do not silently pin only the first.
+              assertEquals(parsed.graph.outputs.length, 1, `${series.name}: graph output count`);
               const [pooled] = parsed.graph.outputs;
               const pooledTensor = outputs[pooled];
               assert(
                 pooledTensor.dtype === "f32",
-                `${pooled}: 実物にする出力の dtype が ${pooledTensor.dtype}`,
+                `${pooled}: the output to make an artifact of has dtype ${pooledTensor.dtype}`,
               );
               const outcome = await settleOrObserve(references, results, {
                 id: caseId,
@@ -566,7 +604,8 @@ for (const series of SERIES) {
             gpu.destroy();
           }
         });
-        // 決着（実測 sha）を結果に積んだ後で落とす — 先に投げると実測が結果に残らない。
+        // Fail after the settlement (the measured sha) is in the results — throwing first would
+        // leave the measurement out of the results.
         if (settlement?.check.status === "fail") {
           throw new Error(referenceMismatchMessage(caseId, settlement, references));
         }
@@ -575,7 +614,7 @@ for (const series of SERIES) {
   }
 
   test.skipIf(realMissing || !MIRROR_PRESENT || !GPU_AVAILABLE)(
-    `SigLIP2 判別: ${series.name} — 人物 2 枚の cosine が人物と風景のどの対よりも高い` +
+    `SigLIP2 discrimination: ${series.name} — the cosine of the 2 person images is higher than any person-scene pair` +
       (realMissing ? NOT_FETCHED : "") +
       (MIRROR_PRESENT ? "" : MIRROR_ABSENT),
     async () => {
@@ -583,34 +622,39 @@ for (const series of SERIES) {
         const golden = new URL(`${IO_PREFIX}${real}${IO_SUFFIX}`, root);
         assert(realCases.includes(real), absentAsset(golden));
       }
-      // golden 突合だけだと「期待値と合っている」ことしか言えず、埋め込みとして意味のある
-      // 出力かは別問題（1 点へ潰れた出力は期待値も同じく潰れていれば通ってしまう）。ここは
-      // **別々の入力どうしの順序**を見るので、出力がケース間で定数なら cosine が全て 1 に
-      // なって落ちる。閾値は置かない（順序そのものが検査対象 — export_siglip2.py の
-      // `_real_sanity` と同じ形で、あちらは torch 側に掛かっている）。
+      // A golden comparison alone says only "it matches the expected values"; whether the output
+      // means something as an embedding is another matter (an output collapsed to one point passes
+      // if the expected values collapsed the same way). This looks at **the order between distinct
+      // inputs**, so an output constant across cases makes every cosine 1 and fails. No threshold
+      // is set (the order itself is what is checked — the same form as `_real_sanity` in
+      // export_siglip2.py, which applies to the torch side).
       //
-      // 入力は golden に焼かれた `pixel_values`（= 突合ケースと同じもの）。TS 前処理を通した
-      // 入力での判別ではなくなったが、主張は落ちない — 前処理側の parity は
-      // `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts` が入力差 1 LSB 級で縛っており、
-      // その幅では順序が反転しないことを実測してある（2026-08-14: 人物対と最悪の交差対の差は
-      // base 0.1196 / so400m 0.0747 なのに対し、入力を TS 前処理へ差し替えたときの各 cosine の
-      // 動きは最大 1.6e-3 —— 2 桁小さい）。
+      // The input is the `pixel_values` baked into the golden (= the same as the comparison
+      // cases). The discrimination no longer runs on input from the TS preprocessing, but the claim
+      // holds — the preprocessing-side parity is pinned to about one input LSB by
+      // `packages/models/tests/e2e_siglip2_image_preprocess_real_test.ts`, and it was measured that
+      // the order does not flip within that width (2026-08-14: the gap between the person pair and
+      // the worst cross pair is base 0.1196 / so400m 0.0747, while swapping the input for the TS
+      // preprocessing moves each cosine by at most 1.6e-3 — 2 orders of magnitude smaller).
       const parsed = await openVision(series);
       const [outputName] = parsed.graph.outputs;
 
       const pooled = new Map<string, Float32Array>();
       const gpu = await acquireGpu();
-      // MUST: device の破棄は `createSession` の失敗も通す。取り逃がすと、その走行の残りが
-      // 破棄されない device を抱えたまま進み、後続が OOM で赤くなる（known-issues の遅延解放）。
+      // MUST: the device is destroyed even when `createSession` fails. Missing that, the rest of
+      // the run carries an undestroyed device and later cases go red with OOM (the deferred
+      // release in known-issues).
       try {
         const session = await parsed.createContainerSession(gpu);
         try {
-          // 4 ケースを 1 Session で回す（重みは 350MB〜1.7GB — ケースごとに組み直す理由が無い）。
+          // Run the 4 cases on one Session (the weights are 350 MB to 1.7 GB — no reason to
+          // rebuild per case).
           for (const real of REAL_CASES) {
             const io = parseSafetensors(await readBuffer(root, `${IO_PREFIX}${real}${IO_SUFFIX}`));
             const output = (await session.run(goldenInputs(parsed, io)))[outputName];
-            // 判別子で絞る（Float32Array へのキャストは dtype がずれたときに黙って通る）。
-            assert(output.dtype === "f32", `${real}: pooler_output の dtype が ${output.dtype}`);
+            // Narrow by the discriminant (a cast to Float32Array would silently pass a wrong
+            // dtype).
+            assert(output.dtype === "f32", `${real}: pooler_output has dtype ${output.dtype}`);
             pooled.set(real, output.data);
           }
         } finally {
@@ -622,7 +666,7 @@ for (const series of SERIES) {
 
       const cosineOf = (first: string, second: string): number => {
         const [left, right] = [pooled.get(first), pooled.get(second)];
-        assert(left !== undefined && right !== undefined, `${first}×${second} の出力が無い`);
+        assert(left !== undefined && right !== undefined, `no output for ${first}×${second}`);
         return cosine(left, right);
       };
       const person = cosineOf(REAL_PERSON_CASES[0], REAL_PERSON_CASES[1]);
@@ -631,7 +675,7 @@ for (const series of SERIES) {
           const cross = cosineOf(personCase, sceneCase);
           assert(
             person > cross,
-            `cosine の順序が逆: ${REAL_PERSON_CASES.join("×")}=${person} <=` +
+            `cosine order reversed: ${REAL_PERSON_CASES.join("×")}=${person} <=` +
               ` ${personCase}×${sceneCase}=${cross}`,
           );
         }

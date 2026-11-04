@@ -1,13 +1,15 @@
 /**
- * Irodori の実 GPU E2E 門が共有する**読み口**（配布形の資産と full-loop golden）。
+ * The **readers** shared by Irodori's real-GPU E2E checks (the distribution's assets and the
+ * full-loop goldens).
  *
- * 門そのものは席ごとに別ファイルへ分かれる（格納 dtype の席は数値パリティ網 =
- * `e2e_irodori_latent_test.ts`・活性量子化の `i8-a8` 席は判別帯 + キー census =
- * `e2e_irodori_ab_test.ts` — 網の性格が違うので同じ表には乗らない）。共有するのは
- * 「どこから何を読むか」だけで、**何を要求するかは各門が持つ**。
+ * The checks themselves are split into one file per preset (the storage-dtype presets get the
+ * numeric parity suite = `e2e_irodori_latent_test.ts`; the activation-quantized `i8-a8` preset gets
+ * a discrimination band + key census = `e2e_irodori_ab_test.ts` — the suites differ in nature, so
+ * they do not share one table). What is shared is only "what to read from where"; **what to require
+ * belongs to each check**.
  *
- * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
- * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
+ * NOTE: only the tests read local files with `Deno.readFile`. The packages themselves use Web
+ * standard APIs only (cross-cutting invariant), and `fromAssets` is a surface that only takes bytes.
  */
 
 import { isNotFound, readFile, statSync } from "@karume/test-support/fs";
@@ -21,7 +23,7 @@ import { readTextIfPresent } from "../../../models/tests/helpers/read-if-present
 /** The distribution mirror (`models/karume-irodori-v4-small/` — ADR 0139 decision 1). */
 export const ASSETS_DIR: URL = mirrorRoot("karume-irodori-v4-small");
 
-/** SKIP 時にそのまま貼れる生成コマンド。 */
+/** The generation command to paste as is when a case SKIPs. */
 export const DIST_COMMAND = "cd tools/exporter && uv run karume dist --pipeline irodori";
 /**
  * Fetches the test assets, including the full-loop goldens (`goldens/<series>/pipeline/`). The
@@ -61,7 +63,7 @@ export const manifestText: string | undefined = mirrorPresent(ASSETS_DIR)
   ? await readTextIfPresent(new URL("karume.json", ASSETS_DIR))
   : undefined;
 
-/** golden `meta.json` のうち、門が読む欄だけ（形は exporter が持つ — ここは読み口）。 */
+/** Only the fields of the golden `meta.json` the checks read (the exporter owns the shape — this is only the reader). */
 export type GoldenCase = {
   readonly text: string;
   readonly caption: string;
@@ -87,21 +89,23 @@ export const readManifest = (): Manifest => parseManifest(manifestText as string
 export const modelEntry = (manifest: Manifest): ModelEntry => {
   if (!Object.hasOwn(manifest.models, MODEL)) {
     throw new Error(
-      `配布形に model '${MODEL}' が無い（あるもの: ${manifest.available.models.join(" / ")}）`,
+      `the distribution has no model '${MODEL}' (available: ${manifest.available.models.join(" / ")})`,
     );
   }
   return manifest.models[MODEL];
 };
 
-/** 配布形にこの quant 席があるか（席が無い環境は「組み直していない」= SKIP 側）。 */
+/** Whether the distribution has this quant preset (an environment without it "has not rebuilt" = SKIP). */
 export const hasQuantSeat = (quant: string): boolean =>
   manifestText !== undefined && Object.hasOwn(modelEntry(readManifest()).quants, quant);
 
 /**
- * 配布形が要求する資産をローカルから読む（`fetchAssets` のローカル版 — 取得層を通さない）。
+ * Reads the assets the distribution requires from local files (a local version of `fetchAssets`
+ * — it bypasses the fetch layer).
  *
- * 部品は容器の part 列を `<部品>[i]` の綴りで並べる（part 0 から添字順・**長さ 0 の part も
- * 並べる** — 添字が容器の中の id なので、飛ばすと以降が 1 つずつ繰り上がる）。
+ * A component lists its container's parts as `<component>[i]` (in index order from part 0, **listing
+ * zero-length parts too** — the index is the id inside the container, so skipping one shifts every
+ * later part down by one).
  */
 export const loadLocalAssets = async (
   manifest: Manifest,
@@ -124,7 +128,7 @@ export const loadLocalAssets = async (
   return assets;
 };
 
-/** golden の 1 ケース（`case.<name>.safetensors`）から f32 テンソルを引く。 */
+/** Looks up an f32 tensor in one golden case (`case.<name>.safetensors`). */
 export const readCase = async (
   directory: URL,
   name: string,
@@ -135,10 +139,10 @@ export const readCase = async (
   );
   return (tensor: string): Float32Array<ArrayBuffer> => {
     const spec = file.tensors.get(tensor);
-    if (spec === undefined) throw new Error(`golden case.${name} に '${tensor}' が無い`);
-    if (spec.dtype !== "F32") throw new Error(`golden '${tensor}' の dtype が ${spec.dtype}`);
-    // MUST: 写して返す（golden の buffer は 1 本を全テンソルで共有しており、`initialNoise` は
-    // パイプラインが**そのまま書き換える**配列になる — 借りたままだと 2 回目の突合が壊れる）。
+    if (spec === undefined) throw new Error(`golden case.${name} has no '${tensor}'`);
+    if (spec.dtype !== "F32") throw new Error(`golden '${tensor}' has dtype ${spec.dtype}`);
+    // MUST: return a copy (all tensors of a golden share one buffer, and `initialNoise` becomes an
+    // array the pipeline **overwrites in place** — a borrowed view would break the second comparison).
     return new Float32Array(
       file.buffer.slice(spec.byteOffset, spec.byteOffset + spec.byteLength),
     ) as Float32Array<ArrayBuffer>;
@@ -146,19 +150,19 @@ export const readCase = async (
 };
 
 /**
- * 全要素の最大絶対差と、その位置（差分の報告用）。
+ * The maximum absolute difference over all elements and its position (for reporting the difference).
  *
- * MUST: NaN / ±Inf は数えて落とす。`difference > maxAbs` は NaN で常に偽なので、素朴に書くと
- * **全要素 NaN の出力が maxAbs 0 として tolerance 門を素通りする**（この戻り値だけを見る門が
- * `e2e_irodori_latent_test.ts` / `e2e_irodori_ab_test.ts` にある）。対照は
- * `e2e_depth_anything_real_test.ts` の pixel_values 突合。
+ * MUST: NaN / ±Inf are counted and fail. `difference > maxAbs` is always false for NaN, so a naive
+ * version would let **an all-NaN output pass the tolerance check as maxAbs 0** (the checks that look
+ * only at this return value are in `e2e_irodori_latent_test.ts` / `e2e_irodori_ab_test.ts`). For
+ * contrast, see the pixel_values comparison in `e2e_depth_anything_real_test.ts`.
  */
 export const worstDifference = (
   actual: Float32Array,
   expected: Float32Array,
 ): { readonly maxAbs: number; readonly at: number } => {
   if (actual.length !== expected.length) {
-    throw new Error(`要素数が違う（実測 ${actual.length} / golden ${expected.length}）`);
+    throw new Error(`element counts differ (actual ${actual.length} / golden ${expected.length})`);
   }
   let maxAbs = 0;
   let at = 0;
@@ -178,8 +182,8 @@ export const worstDifference = (
   }
   if (nonFinite > 0) {
     throw new Error(
-      `非有限の標本が ${nonFinite} 個ある（最初は ${firstNonFinite}: ` +
-        `実測 ${actual[firstNonFinite]} / golden ${expected[firstNonFinite]}）`,
+      `${nonFinite} non-finite samples (first at ${firstNonFinite}: ` +
+        `actual ${actual[firstNonFinite]} / golden ${expected[firstNonFinite]})`,
     );
   }
   return { maxAbs, at };

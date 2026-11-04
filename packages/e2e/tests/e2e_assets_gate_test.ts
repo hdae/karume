@@ -1,29 +1,34 @@
-// ADR 0005「全ケース SKIP は明示 FAIL」の**実資産**版の門番（GPU 版は tests/gpu_gate_test.ts）。
+// The **real-asset** gate of ADR 0005's "all cases SKIP = explicit FAIL" (the GPU one is
+// tests/gpu_gate_test.ts).
 //
-// 実重み e2e（birefnet / dacvae / deberta / depth_anything / embeddinggemma / gemma4 / irodori /
-// minicpm5 / sbv2 / siglip2 / vowel_detector）は `ignore: !available || !GPU_AVAILABLE` で、
-// `available` は系列 root の列挙が空なら偽になる。GPU はあるが実重み資産が 1 つも無い機
-// （新しい作業機・worktree を別ホストへ持ち出した場合）では、これらが丸ごと SKIP したまま
-// `deno task verify` が緑になる — 「検証していない」を「検証済み」と誤読させる無音の見かけ
-// 成功なので、ここで 1 本だけ落とす。
+// The real-weight e2e tests (birefnet / dacvae / deberta / depth_anything / embeddinggemma / gemma4
+// / irodori / minicpm5 / sbv2 / siglip2 / vowel_detector) are `ignore: !available ||
+// !GPU_AVAILABLE`, and `available` is false when the listing of the series root is empty. On a
+// machine that has a GPU but not a single real-weight asset (a new work machine, or a worktree
+// taken to another host), they all SKIP and `deno task verify` still turns green — a silent
+// apparent success that reads "not verified" as "verified", so this gate fails one test for it.
 //
-// 見るのは**有無だけではない**（ADR 0108 段 3 検収②）。系列は `krm` コンテナ（`model.krm` の
-// part 列）になったので、ディレクトリだけ在って中身が旧 shard のまま、という形が実在しうる。
-// それは「資産が無い」とは別の壊れ方で、e2e 側の `modelPresent` が偽になって**無音 SKIP** に
-// 化ける。もう 1 本の門番が系列ごとに (a) 容器が part 列として開けること（part の本数と
-// 長さの突合まで `openContainer` が掛ける）と (b) 容器が名乗るグラフ名が期待の weights キー
-// であることを見る。block の実バイトは読まない（§7 のハッシュ 3 分離 — 実バイトの突合は各
-// e2e が通る）。
+// It looks at **more than presence** (ADR 0108 stage 3, acceptance ②). A series is now a `krm`
+// container (the part sequence of `model.krm`), so a directory that exists but still holds the old
+// shards can really occur. That is a different breakage from "no assets": the e2e side's
+// `modelPresent` turns false and it becomes a **silent SKIP**. The second gate checks, per series,
+// (a) that the container opens as a part sequence (`openContainer` checks the part count and
+// lengths too) and (b) that the graph name the container declares is the expected weights key. It
+// does not read the blocks' bytes (the three-way hash split of §7 — each e2e test checks the actual
+// bytes).
 //
-// グラフ名の表の正本は `packages/models/tests/helpers/series-graphs.ts` の 1 本で、**各 e2e も同じ 1 本から引く**。
-// 門番と e2e が別々に表を持つと、片方だけ書き換えても誰も落ちない（門番は「期待どおり」と
-// 言い、e2e は別のグラフを読む）。
+// The source of truth for the graph-name table is the one in
+// `packages/models/tests/helpers/series-graphs.ts`, and **every e2e test reads from the same one**.
+// If the gate and the e2e tests kept separate tables, rewriting only one would fail nothing (the
+// gate says "as expected" while the e2e test reads another graph).
 //
-// この門番自身は資産がある環境では**通る（緑の 1 件として見える）**。ignore にすると
-// 「門番が効いているのか、門番ごと消えているのか」が区別できなくなるため（GPU 版と同じ理由）。
+// Where the assets exist, this gate itself **passes (it shows up as one green test)**. Making it
+// ignore would make "the gate works" indistinguishable from "the gate is gone" (the same reason as
+// the GPU gate).
 //
-// NOTE: 見るのは実重み e2e 11 本が共有する `outputs/series/` の 1 根だけ。配布形ミラー
-// （`models/`）は distribution_gate_test.ts の担当で、そちらの SKIP は本門番の射程外。
+// NOTE: it looks only at the one root `outputs/series/` shared by the 11 real-weight e2e tests. The
+// distribution mirrors (`models/`) belong to distribution_gate_test.ts; their SKIPs are outside
+// this gate's reach.
 //
 // ADR 0139 decision 5 moves this gate to the test-asset root `outputs/test-assets/` (the fetched
 // cache of the pinned private dataset): it is red while no fetch completed there (no `.revision`)
@@ -54,20 +59,30 @@ import { modelPresent, openSeriesContainer } from "../../runtime/tests/helpers/c
 import { SERIES_GRAPHS } from "../../models/tests/helpers/series-graphs.ts";
 
 /**
- * 「実資産無しでの全 SKIP」を明示的に許可する opt-out（`KARUME_ALLOW_NO_GPU` と同形）。
+ * The opt-out that explicitly allows "all cases SKIP without real assets" (the same form as
+ * `KARUME_ALLOW_NO_GPU`).
  *
- * MUST: 既定は fail loudly。models パッケージだけを触る作業機や資産を持たない CI で通すには、
- * 意図表明としてこの環境変数を要求する。
+ * MUST: the default is to fail loudly. Passing on a work machine that touches only the models
+ * package, or on a CI without assets, requires this environment variable as a statement of intent.
  */
 const ALLOW_NO_ASSETS = process.env.KARUME_ALLOW_NO_ASSETS === "1";
 
-/** 実重み e2e が資産を探す唯一の根（各 e2e の `SERIES_ROOT` / `SERIES_PARENT` の親）。 */
+/**
+ * The single root where the real-weight e2e tests look for assets (the parent of each e2e test's
+ * `SERIES_ROOT` / `SERIES_PARENT`).
+ */
 const SERIES_PARENT = new URL("../../../outputs/series/", import.meta.url);
 
-/** 系列の容器の代表 path（実体は `model-NNNNN-of-NNNNN.krm` の part 列）。 */
+/**
+ * The representative path of a series container (in reality the part sequence
+ * `model-NNNNN-of-NNNNN.krm`).
+ */
 const MODEL_FILE = "model.krm";
 
-/** 系列 + 部品ディレクトリ（重みが根直下なら空文字）の容器の代表 path。 */
+/**
+ * The representative path of the container of a series + component directory (the component is an
+ * empty string when the weights sit at the series root).
+ */
 const representativeOf = (parent: URL, series: string, component: string): URL =>
   new URL(
     component === "" ? MODEL_FILE : `${component}/${MODEL_FILE}`,
@@ -75,13 +90,14 @@ const representativeOf = (parent: URL, series: string, component: string): URL =
   );
 
 /**
- * 表（`SERIES_GRAPHS`）の系列の容器がひとつでも実在するか。
+ * Whether at least one container of the series in the table (`SERIES_GRAPHS`) exists.
  *
- * MUST: 見るのは表の系列の容器だけで、述語は e2e が SKIP を決める `modelPresent` と同じ 1 本を
- * 使う。直下のディレクトリを数えると、表に無い系列（`anima-*` 等）や中身の無いディレクトリ
- * だけの機で門が緑になり、実重み e2e は全部 SKIP する。NotFound 以外の I/O 異常は
- * `modelPresent` が伝播させる — 権限エラー等を「資産が無い」と読み替えると、門番自身が環境の
- * 壊れを資産の不在として報告する。
+ * MUST: it looks only at the containers of the series in the table, with the same predicate
+ * `modelPresent` that the e2e tests use to decide a SKIP. Counting the directories under the root
+ * would turn the gate green on a machine with only series outside the table (`anima-*` and the
+ * like) or only empty directories, while every real-weight e2e test SKIPs. `modelPresent`
+ * propagates I/O errors other than NotFound — reading a permission error and the like as "no
+ * assets" would have the gate report a broken environment as missing assets.
  */
 const seriesAssetsPresent = (parent: URL): boolean =>
   Object.entries(SERIES_GRAPHS).some(([series, components]) =>
@@ -90,7 +106,7 @@ const seriesAssetsPresent = (parent: URL): boolean =>
     ),
   );
 
-/** ディレクトリが在るか（不在は偽・それ以外の I/O 異常は伝播させる）。 */
+/** Whether a directory exists (absence is false; any other I/O error propagates). */
 const directoryPresent = (url: URL): boolean => {
   try {
     const stat = statSync(url);
@@ -146,20 +162,20 @@ test.skipIf(ALLOW_NO_ASSETS)(
 );
 
 test.skipIf(ALLOW_NO_ASSETS)(
-  "資産門番: 実重み系列が 1 つも無い全 SKIP は明示 FAIL（ADR 0005）",
+  "assets gate: an all-SKIP run with not a single real-weight series is an explicit FAIL (ADR 0005)",
   () => {
     assert(
       seriesAssetsPresent(SERIES_PARENT),
-      `${SERIES_PARENT.pathname} に表（packages/models/tests/helpers/series-graphs.ts）の系列の容器が 1 つも無く、` +
-        "実重み e2e が全て SKIP された。" +
-        "ADR 0005 によりこれは FAIL として扱う（リリース判定は実資産の golden 突合が必須）。" +
-        "資産の無い環境で意図的に通すには KARUME_ALLOW_NO_ASSETS=1 を設定すること。",
+      `${SERIES_PARENT.pathname} holds not a single container of the series in the table (packages/models/tests/helpers/series-graphs.ts), ` +
+        "so every real-weight e2e test was SKIPped. " +
+        "ADR 0005 treats this as a FAIL (the release decision requires the golden comparison on real assets). " +
+        "To pass deliberately in an environment without assets, set KARUME_ALLOW_NO_ASSETS=1.",
     );
   },
 );
 
 test.skipIf(ALLOW_NO_ASSETS)(
-  "資産門番: 在る系列の容器が開けて、期待の weights キーを名乗る（ADR 0108 段 3）",
+  "assets gate: the containers of the present series open and declare the expected weights key (ADR 0108 stage 3)",
   async () => {
     const broken: string[] = [];
     for (const [series, components] of Object.entries(SERIES_GRAPHS)) {
@@ -169,15 +185,18 @@ test.skipIf(ALLOW_NO_ASSETS)(
         const where = component === "" ? series : `${series}/${component}`;
         const representative = representativeOf(SERIES_PARENT, series, component);
         try {
-          // part 列の解決・part の本数と長さの突合・2 文書の parse・束縛表との合流まで掛かる。
+          // Resolving the part sequence, checking the part count and lengths, parsing the two
+          // documents and merging with the binding table all run here.
           const opened = await openSeriesContainer(representative);
           const declared = Object.keys(opened.graphs);
           if (declared.length !== 1 || declared[0] !== expected) {
-            broken.push(`${where}: グラフ名が ${declared.join(" / ")}（期待は ${expected}）`);
+            broken.push(
+              `${where}: the graph name is ${declared.join(" / ")} (expected ${expected})`,
+            );
           }
         } catch (cause) {
           broken.push(
-            `${where}: 容器を開けない — ${cause instanceof Error ? cause.message : cause}`,
+            `${where}: cannot open the container — ${cause instanceof Error ? cause.message : cause}`,
           );
         }
       }
@@ -185,16 +204,16 @@ test.skipIf(ALLOW_NO_ASSETS)(
     assertEquals(
       broken,
       [],
-      `${SERIES_PARENT.pathname} の系列が容器として読めない、または期待の weights キーを` +
-        "名乗っていない。ディレクトリだけ在って中身が旧 shard のままだと、e2e は無音 SKIP する" +
-        "（ADR 0005 によりこれは FAIL）。tools/export-recipes の各 export で焼き直すか、" +
-        "退役した系列なら上の表から行を消すこと。",
+      `The series under ${SERIES_PARENT.pathname} cannot be read as containers, or do not declare the expected ` +
+        "weights key. A directory that exists but still holds the old shards makes the e2e tests SKIP silently " +
+        "(ADR 0005 makes this a FAIL). Re-bake it with the export of tools/export-recipes, " +
+        "or, for a retired series, remove its row from the table above.",
     );
   },
 );
 
-describe("資産門番の判定（表の系列の容器が 1 つでも在るか）", () => {
-  /** 一時ディレクトリを系列の根として判定を引き、後始末する。 */
+describe("the assets gate's verdict (whether at least one container of the series in the table exists)", () => {
+  /** Takes the verdict with a temporary directory as the series root, then cleans up. */
   const judge = (arrange: (parent: URL) => void): boolean => {
     const parent = new URL(`file://${makeTempDirSync()}/`);
     try {
@@ -205,7 +224,7 @@ describe("資産門番の判定（表の系列の容器が 1 つでも在るか�
     }
   };
 
-  it("表に無い系列のディレクトリだけなら、容器が在っても資産無しと判定する", () => {
+  it("with only directories of series outside the table, reports no assets even if a container exists", () => {
     assertFalse(
       judge((parent) => {
         const root = new URL("anima-f16/", parent);
@@ -215,11 +234,11 @@ describe("資産門番の判定（表の系列の容器が 1 つでも在るか�
     );
   });
 
-  it("表の系列のディレクトリが在っても、容器が無ければ資産無しと判定する", () => {
+  it("reports no assets when a series directory of the table exists but holds no container", () => {
     assertFalse(judge((parent) => mkdirSync(new URL("birefnet-hr-1024-f16/", parent))));
   });
 
-  it("表の系列に容器の part が在れば資産ありと判定する", () => {
+  it("reports assets when a series of the table holds a container part", () => {
     assert(
       judge((parent) => {
         const root = new URL("birefnet-hr-1024-f16/", parent);
@@ -229,7 +248,7 @@ describe("資産門番の判定（表の系列の容器が 1 つでも在るか�
     );
   });
 
-  it("表の系列の部品ディレクトリに容器が在れば資産ありと判定する", () => {
+  it("reports assets when a component directory of a series of the table holds a container", () => {
     assert(
       judge((parent) => {
         const component = new URL("dacvae-32dim/decoder/", parent);
@@ -247,8 +266,8 @@ describe("assets gate verdict (the fetched revision of the test-asset root again
   };
 
   /**
-   * Reads the verdict for the root `<temporary dir>/<child>` arranged by `arrange`, then removes the
-   * temporary directory.
+   * Reads the verdict for the root `<temporary dir>/<child>` arranged by `arrange`, then removes
+   * the temporary directory.
    */
   const verdictOf = (arrange: (root: URL) => void, child = ""): string | undefined => {
     const dir = new URL(`file://${makeTempDirSync({ prefix: "karume-test-assets-" })}/`);

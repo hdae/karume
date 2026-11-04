@@ -1,31 +1,33 @@
 /**
- * Anima のホスト糊（IR の外側で TS が持つ段）を、Python の参照フィクスチャと**ビット一致**で
- * 突き合わせる。対象は 4 関数: `sigmaSchedule` / `cfgEulerStep`（`sampler.ts`）・
- * `denormalizeLatents` / `padSequence`（`latents.ts`）。GPU は要らない。
+ * Checks Anima's host glue (the stages TS runs outside the IR) against the Python reference
+ * fixtures **bit for bit**. Four functions are covered: `sigmaSchedule` / `cfgEulerStep`
+ * (`sampler.ts`) and `denormalizeLatents` / `padSequence` (`latents.ts`). No GPU is needed. The
+ * fixtures are `pipeline.{json,safetensors}` of `tools/export-recipes/anima/pipeline_ref.py` (the
+ * generation commands and their roles: the recipe README's "Anima host pipeline reference fixture"
+ * section), read from the test-asset root `goldenDir("anima-pipeline{,-f16,-i8,-turbo-f16}")` (ADR
+ * 0139 — fetched with `node tools/test-assets/fetch.ts`). In all 4 variants, each stage's inputs
+ * and outputs are in the same file, so the host glue can be checked on its own without mixing in
+ * the DiT's error (the DiT's raw output `noise_*` is passed as the input and the next latent is
+ * compared).
  *
- * The fixtures are `pipeline.{json,safetensors}` of `tools/export-recipes/anima/pipeline_ref.py`
- * (the generation commands and their roles: the recipe README's "Anima host pipeline reference
- * fixture" section), read from the test-asset root `goldenDir("anima-pipeline{,-f16,-i8,-turbo-f16}")`
- * (ADR 0139 — fetched with `node tools/test-assets/fetch.ts`).
- * 4 変種とも、各段の入力と出力が同じファイルに入っている。そのため、DiT の誤差と混ざらない
- * 形でホスト糊だけを見られる（DiT の生出力 `noise_*` を入力として渡し、次の latent を比べる）。
+ * MUST: the comparison is **bit-identical** (no tolerance). All 4 functions round to f32 one
+ * operation at a time with `Math.fround`, and agreeing with the reference (numpy / torch sequential
+ * f32 arithmetic) down to the last bit is exactly what the recipe README records as measured.
+ * Loosening it lets a mix-up of the operation order (dividing by the reciprocal of std →
+ * multiplying, moving where the f32 conversion happens) be absorbed as "GPU error" by the tolerance
+ * of later stages.
  *
- * MUST: 突合は**ビット一致**（tolerance を持たない）。4 関数はどれも `Math.fround` で 1 演算
- * ずつ f32 に丸める実装で、参照（numpy / torch の f32 逐次計算）と最終ビットまで一致するのが
- * recipe README の実測記録そのもの。ここを緩めると、演算順の取り違え（std の逆数で割る →
- * 掛け算、f32 化の位置の移動）が「GPU の誤差」として後段の tolerance に吸われる。
- *
- * NOTE（turbo 変種で CFG 合成のケースが無い理由）: turbo の参照は guidance_scale=1.0 で採って
- * おり、`pipeline_ref.py` は uncond 側の DiT を**呼ばない**。そのため `noise_uncond_stepNNNN`
- * キー自体が存在せず、`uncond + scale·(cond − uncond)` の枝は突き合わせる相手が無い。turbo
- * 変種が固定するのは CFG=1 の枝（cond をそのまま Euler に渡す）で、CFG 合成の枝は他 3 変種
- * （guidance_scale=4）が固定する。キーの有無は `needsUncond(guidance_scale)` と突き合わせる —
- * 「guidance≠1 なのに uncond が無い」フィクスチャは黙って CFG=1 の枝へ流さず落とす。
- *
- * The assets are outside git, so a variant whose fixture is absent SKIPs explicitly, naming the
- * missing path and the fetch command (ADR 0005) — except when `outputs/test-assets/` holds a
- * complete fetch of the pinned dataset (`testAssetsFetched`): then its cases FAIL, since the dataset
- * at the pin lacks the fixture.
+ * NOTE (why the turbo variant has no case for the CFG combination): the turbo reference was taken
+ * with guidance_scale=1.0, and `pipeline_ref.py` does **not call** the uncond DiT. So the
+ * `noise_uncond_stepNNNN` keys do not exist at all, and the `uncond + scale·(cond − uncond)` branch
+ * has nothing to be checked against. The turbo variant pins the CFG=1 branch (cond goes straight
+ * into Euler); the CFG combination branch is pinned by the other 3 variants (guidance_scale=4). The
+ * presence of the keys is checked against `needsUncond(guidance_scale)` — a fixture "with
+ * guidance≠1 but no uncond" fails instead of silently flowing into the CFG=1 branch. The assets are
+ * outside git, so a variant whose fixture is absent SKIPs explicitly, naming the missing path and
+ * the fetch command (ADR 0005) — except when `outputs/test-assets/` holds a complete fetch of the
+ * pinned dataset (`testAssetsFetched`): then its cases FAIL, since the dataset at the pin lacks the
+ * fixture.
  */
 
 import { goldenDir, TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
@@ -40,7 +42,10 @@ import {
   readTextIfPresent,
 } from "../../models/tests/helpers/read-if-present.ts";
 
-/** フィクスチャ 4 変種（ディレクトリ名 = `pipeline_ref.py` の既定出力 / turbo の `--out`）。 */
+/**
+ * The 4 fixture variants (directory name = the default output of `pipeline_ref.py` / turbo's
+ * `--out`).
+ */
 const VARIANTS = [
   "anima-pipeline",
   "anima-pipeline-f16",
@@ -51,7 +56,7 @@ const VARIANTS = [
 /** The command that fetches the fixtures (pasted into the SKIP message). */
 const FETCH_HINT = "node tools/test-assets/fetch.ts";
 
-/** `pipeline.json` のうち、ここが読むフィールド。 */
+/** The fields of `pipeline.json` read here. */
 type FixtureMeta = {
   readonly steps: number;
   readonly ref_steps: number;
@@ -64,7 +69,7 @@ type Fixture = {
   readonly meta: FixtureMeta;
   readonly f32: (name: string) => { data: Float32Array<ArrayBuffer>; shape: readonly number[] };
   readonly has: (name: string) => boolean;
-  /** dtype を問わない shape（id 列 = I32 の行数を読むため）。 */
+  /** The shape regardless of dtype (to read the row count of the id column = I32). */
   readonly shape: (name: string) => readonly number[];
 };
 
@@ -84,13 +89,13 @@ const openFixture = async (variant: string): Promise<Fixture | undefined> => {
     has: (name) => file.tensors.has(name),
     shape: (name) => {
       const tensor = file.tensors.get(name);
-      assert(tensor !== undefined, `${variant}: フィクスチャに '${name}' が無い`);
+      assert(tensor !== undefined, `${variant}: '${name}' is missing from the fixture`);
       return tensor.shape;
     },
     f32: (name) => {
       const tensor = file.tensors.get(name);
-      assert(tensor !== undefined, `${variant}: フィクスチャに '${name}' が無い`);
-      assertEquals(tensor.dtype, "F32", `${variant}: '${name}' の dtype`);
+      assert(tensor !== undefined, `${variant}: '${name}' is missing from the fixture`);
+      assertEquals(tensor.dtype, "F32", `${variant}: dtype of '${name}'`);
       return {
         data: new Float32Array(file.buffer, tensor.byteOffset, tensor.byteLength / 4),
         shape: tensor.shape,
@@ -100,11 +105,12 @@ const openFixture = async (variant: string): Promise<Fixture | undefined> => {
 };
 
 /**
- * ビット列の一致を見る（値の `===` ではなく）。`-0` と `+0`・NaN のペイロードも区別する —
- * ゼロ詰めの符号や、非有限値が紛れた場合も「一致」と数えない。
+ * Checks that the bit patterns agree (not `===` on the values). `-0` and `+0`, and NaN payloads,
+ * are distinguished too — neither the sign of a zero padding nor a stray non-finite value counts as
+ * "equal".
  */
 const assertBitIdentical = (actual: Float32Array, expected: Float32Array, label: string): void => {
-  assertEquals(actual.length, expected.length, `${label}: 要素数`);
+  assertEquals(actual.length, expected.length, `${label}: element count`);
   const got = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
   const want = new Uint32Array(expected.buffer, expected.byteOffset, expected.length);
   let mismatches = 0;
@@ -117,8 +123,8 @@ const assertBitIdentical = (actual: Float32Array, expected: Float32Array, label:
   }
   assert(
     mismatches === 0,
-    `${label}: ${mismatches}/${got.length} 要素がビット不一致（先頭 index ${first}: ` +
-      `${actual[first]} vs 参照 ${expected[first]}）`,
+    `${label}: ${mismatches}/${got.length} elements differ in bits (first index ${first}: ` +
+      `${actual[first]} vs reference ${expected[first]})`,
   );
 };
 
@@ -143,7 +149,7 @@ for (const variant of VARIANTS) {
   const skip = ignore ? ` (SKIP: no ${files} — ${FETCH_HINT})` : "";
 
   test.skipIf(ignore)(
-    `${variant}: sigmaSchedule が参照の sigma 列（終端 0 込み）とビット一致する${skip}`,
+    `${variant}: sigmaSchedule is bit-identical to the reference sigma sequence (terminal 0 included)${skip}`,
     () => {
       assert(fixture !== undefined, absent);
       const { steps, shift } = fixture.meta;
@@ -152,25 +158,26 @@ for (const variant of VARIANTS) {
   );
 
   test.skipIf(ignore)(
-    `${variant}: cfgEulerStep を ref_steps 回つなぐと参照の latent 列とビット一致する${skip}`,
+    `${variant}: cfgEulerStep chained ref_steps times is bit-identical to the reference latent sequence${skip}`,
     () => {
       assert(fixture !== undefined, absent);
       const { ref_steps: refSteps, guidance_scale: guidance } = fixture.meta;
       const sigmas = fixture.f32("sigmas").data;
-      // uncond キーの有無は guidance から決まる（NOTE 参照）。食い違えばフィクスチャか
-      // 参照側の分岐が壊れているので、ケースを飛ばさず落とす。
+      // Whether the uncond keys exist is decided by guidance (see the NOTE). A disagreement means
+      // the fixture or the reference's branch is broken, so the case fails instead of skipping.
       assertEquals(
         fixture.has(`noise_uncond_${stepTag(1)}`),
         needsUncond(guidance),
-        `guidance_scale ${guidance} と noise_uncond の有無が食い違う`,
+        `guidance_scale ${guidance} disagrees with the presence of noise_uncond`,
       );
-      // 各 step は参照側の前 step の latent から始める（TS の出力を持ち回らない）。持ち回ると
-      // 1 step 目のずれが 2 step 目以降へ伝播し、どの step で割れたのかが読めなくなる。
+      // Each step starts from the reference's latent of the previous step (the TS output is not
+      // carried forward). Carried forward, a drift at step 1 would propagate into the later steps
+      // and hide which step broke.
       let previous = fixture.f32("latents_init").data;
       for (let step = 1; step <= refSteps; step += 1) {
         const tag = stepTag(step);
         const uncond = needsUncond(guidance) ? fixture.f32(`noise_uncond_${tag}`).data : undefined;
-        // Δσ の綴りは denoise ループ（`pipeline.ts` の `denoiseStep`）と同じ。
+        // Δσ is spelled as in the denoise loop (`denoiseStep` in `pipeline.ts`).
         const next = cfgEulerStep(
           previous,
           fixture.f32(`noise_cond_${tag}`).data,
@@ -186,18 +193,20 @@ for (const variant of VARIANTS) {
   );
 
   test.skipIf(ignore)(
-    `${variant}: denormalizeLatents が参照の逆正規化 latent とビット一致する${skip}`,
+    `${variant}: denormalizeLatents is bit-identical to the reference denormalised latent${skip}`,
     () => {
       assert(fixture !== undefined, absent);
-      // 本番は VAE config の写し（latentStats）を使うので、ここでもそれを渡す。写しが
-      // この変種の参照と同じ数であることを先に押さえる（変種ごとに VAE を読み直して採った値）。
+      // Production uses the copy of the VAE config (latentStats), so it is passed here too. First
+      // pin that the copy holds the same numbers as this variant's reference (values taken by
+      // reading the VAE again for each variant).
       const { mean, std } = latentStats();
       assertBitIdentical(mean, fixture.f32("latents_mean").data, "latents_mean");
       assertBitIdentical(std, fixture.f32("latents_std").data, "latents_std");
-      // 逆正規化の入力は最後に参照を採った step の latent（`pipeline_ref.py` の decode 段）。
+      // The denormalisation input is the latent of the last step with a reference (the decode
+      // stage of `pipeline_ref.py`).
       const last = fixture.f32(`latents_${stepTag(fixture.meta.ref_steps)}`);
       const expected = fixture.f32("latents_denorm");
-      assertEquals(expected.shape, last.shape, "latents_denorm の shape");
+      assertEquals(expected.shape, last.shape, "shape of latents_denorm");
       assertBitIdentical(
         denormalizeLatents(last.data, last.shape, mean, std),
         expected.data,
@@ -207,20 +216,21 @@ for (const variant of VARIANTS) {
   );
 
   test.skipIf(ignore)(
-    `${variant}: padSequence が参照の 512 行ゼロ詰め（正・ネガティブ）とビット一致する${skip}`,
+    `${variant}: padSequence is bit-identical to the reference 512-row zero padding (positive and negative)${skip}`,
     () => {
       assert(fixture !== undefined, absent);
       const rows = fixture.meta.min_sequence_length;
       for (const prefix of ["", "neg_"]) {
-        // IR の conditioner は T5 の id 列と同じ行数 T を出す。参照は上流の conditioner が
-        // `min_sequence_length` 行まで詰めた形なので、その先頭 T 行を IR 側の出力の代わりに
-        // 渡し、詰めた結果が参照全体（余白のゼロの符号まで）と一致するかを見る。T を参照の
-        // id 列から取るので、余白の開始位置の取り違えもここで割れる。
+        // The IR conditioner outputs the same row count T as the T5 id column. The reference is the
+        // upstream conditioner's output padded to `min_sequence_length` rows, so its first T rows
+        // stand in for the IR output, and the padded result is compared with the whole reference
+        // (down to the sign of the zeros in the padding). T comes from the reference's id column,
+        // so a mix-up of where the padding starts breaks here too.
         const targetLength = fixture.shape(`${prefix}t5_input_ids`)[1];
         const padded = fixture.f32(`${prefix}encoder_hidden_states`);
         const [batch, total, width] = padded.shape;
-        assertEquals([batch, total], [1, rows], `${prefix}encoder_hidden_states の shape`);
-        assert(targetLength < rows, `${prefix}t5 の長さ ${targetLength} に余白が無い`);
+        assertEquals([batch, total], [1, rows], `shape of ${prefix}encoder_hidden_states`);
+        assert(targetLength < rows, `${prefix}t5 length ${targetLength} leaves no padding`);
         const hidden: Tensor = {
           dtype: "f32",
           shape: [1, targetLength, width],

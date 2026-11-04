@@ -14,13 +14,15 @@ import type { ContainerManifest } from "../../runtime/tests/helpers/container-gr
 import { exists, fusionCounts, NONE, readDistributionGraph } from "./helpers/fusion-counts.ts";
 
 /**
- * Wan2.1 T2V 1.3B の配布形（`models/karume-wan2.1/` — ADR 0118 段 7・HF へは未公開）。DiT は S 形 1 本、
- * VAE は chunk グラフ 2 本（タイル 32 の静的形）。
+ * The Wan2.1 T2V 1.3B distribution (`models/karume-wan2.1/` — ADR 0118 step 7; not published on
+ * HF). The DiT is one S-shaped graph, the VAE two chunk graphs (static shapes at tile 32).
  */
 const WAN_DIR = new URL("../../../models/karume-wan2.1/", import.meta.url);
 const WAN_AVAILABLE = await exists(new URL("karume.json", WAN_DIR));
 if (!WAN_AVAILABLE) {
-  console.warn(`[karume] ${WAN_DIR.pathname} が無いため Wan2.1 の融合ヒット数を SKIP する`);
+  console.warn(
+    `[karume] ${WAN_DIR.pathname} is missing, so the Wan2.1 fusion hit counts are SKIPPED`,
+  );
 }
 
 /**
@@ -47,7 +49,10 @@ const readWanGraph = async (component: string, dtype = "f16"): Promise<IrGraph> 
   );
 };
 
-/** 入力の記号次元（DiT の `S`）を `sequence` で解いた shape（VAE は全部静的なので素通し）。 */
+/**
+ * Shape with the input's symbolic dimension (the DiT's `S`) solved as `sequence` (the VAE is all
+ * static, so passed through).
+ */
 const wanShapes = (graph: IrGraph, sequence: number): Readonly<Record<string, readonly number[]>> =>
   Object.fromEntries(
     graph.inputs.map((spec) => [

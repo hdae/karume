@@ -1,8 +1,8 @@
-// ホスト生成の `t_embed` 表を、exporter が出した **torch 基準の golden** と突き合わせる。
+// Compares the host-generated `t_embed` table with the exporter's **torch-referenced golden**.
 //
-// `t_embed` は IR に載らない（`cos` が op 語彙に無い — ADR 0043 / 0047 決定 4）ので、この式の
-// 正しさを見る門は他に無い。DiT の入力そのものなので、取り違えは「全 step で条件が別の時刻を
-// 指す」形で latent 全体を変える。
+// `t_embed` is not in the IR (`cos` is not in the op vocabulary — ADR 0043 / 0047 decision 4), so
+// no other check looks at this formula's correctness. It is the DiT's input itself, so a mistake
+// changes the whole latent in the shape "the condition points at another time at every step".
 //
 // The golden is `outputs/test-assets/goldens/irodori-v4-small/pipeline/t-embed.safetensors` (`t`
 // `[40]` and `t_embed` `[40,512]`), written by `tools/export-recipes/irodori/pipeline_ref.py`. An
@@ -25,33 +25,36 @@ const FETCH_HINT =
   "--include 'goldens/irodori-v4-small/pipeline/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone";
 
 /**
- * `t_embed` 表の突合に使う許容誤差。
+ * The tolerance for comparing the `t_embed` table.
  *
- * 実測（`atol=0` の素の突合・40 step × 512 列 = 20,480 要素）: **maxAbs 3.05e-5**
- * （step 13 / t=0.674319 / 列 k=24）。内訳は 2 段に割れる:
+ * Measured (a plain comparison with `atol=0`, 40 steps × 512 columns = 20,480 elements):
+ * **maxAbs 3.05e-5** (step 13 / t=0.674319 / column k=24). The breakdown splits in two:
  *
- * - **255/256 の周波数列は 1 ulp 以内**（≤ 5.96e-8 = 値域 [-1,1] の 1 ulp）
- * - **k=24 の 1 列だけが 3.05e-5**。原因は周波数表そのもので、torch の f32 `exp` が返す
- *   `freqs[24]` は JS の `Math.exp` 経由の値の **ちょうど 1 ulp 上**（実測: その 1 ビットを
- *   足すと列全体が 5.96e-8 まで落ちる）。`args = t·freqs[24] ≈ 284` は f32 の ulp が 3.05e-5 の
- *   領域なので、周波数の 1 ulp がそのまま `cos` / `sin` の絶対差として出る。
+ * - **255/256 of the frequency columns are within 1 ulp** (≤ 5.96e-8 = 1 ulp of the range [-1,1])
+ * - **Only the single column k=24 is 3.05e-5**. The cause is the frequency table itself: the
+ *   `freqs[24]` torch's f32 `exp` returns is **exactly 1 ulp above** the value via JS's
+ *   `Math.exp` (measured: adding that one bit drops the whole column to 5.96e-8).
+ *   `args = t·freqs[24] ≈ 284` is in the region where f32's ulp is 3.05e-5, so the frequency's
+ *   1 ulp shows up directly as an absolute difference of `cos` / `sin`.
  *
- * つまり**大きい `args` を持つ列では超越関数の 1 ulp が絶対差 1e-5 級へ拡大する**構造で、
- * ビット一致させるには SLEEF の多項式近似を写すしかない（anima の `timestepsProj` と同じ判断）。
+ * So the structure is that **in columns with large `args`, a transcendental function's 1 ulp grows
+ * into an absolute difference of order 1e-5**, and bit identity would require copying SLEEF's
+ * polynomial approximation (the same judgement as anima's `timestepsProj`).
  *
- * atol 3e-4 は実測最悪 3.05e-5 の約 10 倍。実装バグの差はこの 4 桁以上上に出る（故障注入の
- * 実測）: **cos/sin の前後半反転で 1.41e+0**・**周波数の 1000 倍忘れで 2.00e+0**。
+ * atol 3e-4 is about 10 times the measured worst 3.05e-5. Differences from implementation bugs show
+ * at least 4 orders of magnitude above this (measured by fault injection): **1.41e+0 with the
+ * cos/sin halves swapped** and **2.00e+0 with the frequencies' factor of 1000 forgotten**.
  */
 const T_EMBED_ATOL = 3e-4;
 
 /**
- * 閉形式 t スケジュールと golden の `t`（上流 `linspace`）の許容差。
+ * The tolerance between the closed-form t schedule and the golden's `t` (upstream `linspace`).
  *
- * 実測 **5.96e-8**（= exporter が meta.json に載せる `tScheduleClosedFormMaxAbs` と同値）。
- * `linspace` は `start + i·step` を f32 で積むので、閉形式 `0.999·(1 − i/40)` とは最終 ulp が
- * 割れる点がある。t が入るのは `t_embed` と刻み幅だけで、latent への効き方は golden の
- * 突合閾値の 3 桁下（`tools/export-recipes/irodori/pipeline_ref.py` の `EULER_REFERENCE_ATOL` の
- * doc）。
+ * Measured **5.96e-8** (= the same value as `tScheduleClosedFormMaxAbs` the exporter puts in
+ * meta.json). `linspace` accumulates `start + i·step` in f32, so there are points where the last
+ * ulp differs from the closed form `0.999·(1 − i/40)`. t enters only `t_embed` and the step size,
+ * and its effect on the latent is 3 orders of magnitude below the golden comparison's threshold
+ * (the doc of `EULER_REFERENCE_ATOL` in `tools/export-recipes/irodori/pipeline_ref.py`).
  */
 const T_SCHEDULE_ATOL = 1e-7;
 
@@ -65,7 +68,7 @@ if (!AVAILABLE) {
   );
 }
 
-/** golden の `[名前 → f32 view]`（登録時に 1 回だけ読む）。 */
+/** The golden's `[name → f32 view]` (read once at registration). */
 const readGolden = () => {
   if (goldenBytes === undefined) {
     throw new Error(
@@ -81,8 +84,8 @@ const readGolden = () => {
   );
   const view = (name: string): { data: Float32Array; shape: readonly number[] } => {
     const tensor = file.tensors.get(name);
-    assert(tensor !== undefined, `golden に '${name}' が無い`);
-    assertEquals(tensor.dtype, "F32", `golden '${name}' の dtype`);
+    assert(tensor !== undefined, `the golden has no '${name}'`);
+    assertEquals(tensor.dtype, "F32", `dtype of golden '${name}'`);
     return {
       data: new Float32Array(file.buffer, tensor.byteOffset, tensor.byteLength / 4),
       shape: tensor.shape,
@@ -91,44 +94,47 @@ const readGolden = () => {
   return { t: view("t"), table: view("t_embed") };
 };
 
-test.skipIf(!AVAILABLE)("Irodori t_embed: ホスト式が torch 基準の golden 表と一致する", () => {
-  const { t, table } = readGolden();
-  const [steps, width] = [table.shape[0], table.shape[1]];
-  assertEquals(t.shape, [steps], "t と t_embed の step 数");
-  const frequencies = timestepFrequencies(width);
-  let worst = 0;
-  let where = "";
-  let nonFinite = 0;
-  for (let step = 0; step < steps; step += 1) {
-    const row = timestepEmbedding(t.data[step], frequencies);
-    assertEquals(row.length, width, `step ${step} の幅`);
-    for (let column = 0; column < width; column += 1) {
-      const golden = table.data[step * width + column];
-      if (!Number.isFinite(row[column]) || !Number.isFinite(golden)) {
-        nonFinite += 1;
-        continue;
-      }
-      const diff = Math.abs(row[column] - golden);
-      if (diff > worst) {
-        worst = diff;
-        where = `step ${step}（t=${t.data[step]}）列 ${column}`;
+test.skipIf(!AVAILABLE)(
+  "Irodori t_embed: the host formula matches the torch-referenced golden table",
+  () => {
+    const { t, table } = readGolden();
+    const [steps, width] = [table.shape[0], table.shape[1]];
+    assertEquals(t.shape, [steps], "step counts of t and t_embed");
+    const frequencies = timestepFrequencies(width);
+    let worst = 0;
+    let where = "";
+    let nonFinite = 0;
+    for (let step = 0; step < steps; step += 1) {
+      const row = timestepEmbedding(t.data[step], frequencies);
+      assertEquals(row.length, width, `width of step ${step}`);
+      for (let column = 0; column < width; column += 1) {
+        const golden = table.data[step * width + column];
+        if (!Number.isFinite(row[column]) || !Number.isFinite(golden)) {
+          nonFinite += 1;
+          continue;
+        }
+        const diff = Math.abs(row[column] - golden);
+        if (diff > worst) {
+          worst = diff;
+          where = `step ${step} (t=${t.data[step]}) column ${column}`;
+        }
       }
     }
-  }
-  // MUST: NaN / ±Inf は不合格。素朴な差分判定だと NaN が「差 0」に化けて通る。
-  assertEquals(nonFinite, 0, "t_embed に非有限の標本");
-  assert(
-    worst <= T_EMBED_ATOL,
-    `t_embed の最大絶対差 ${worst.toExponential(4)} が atol ${T_EMBED_ATOL} を超えた（${where}）`,
-  );
-});
+    // MUST: NaN / ±Inf fail. A naive difference check turns NaN into "difference 0" and passes it.
+    assertEquals(nonFinite, 0, "non-finite samples in t_embed");
+    assert(
+      worst <= T_EMBED_ATOL,
+      `the maximum absolute difference of t_embed ${worst.toExponential(4)} exceeds atol ${T_EMBED_ATOL} (${where})`,
+    );
+  },
+);
 
 test.skipIf(!AVAILABLE)(
-  "Irodori t スケジュール: 閉形式が上流 linspace と 1 ulp 級で一致する",
+  "Irodori t schedule: the closed form matches upstream linspace to about 1 ulp",
   () => {
     const { t } = readGolden();
     const steps = t.shape[0];
-    // golden は末尾の 0 を落とした `[:-1]` なので、こちらも同じ範囲だけを見る。
+    // The golden is `[:-1]` with the trailing 0 dropped, so only the same range is looked at here.
     const schedule = tSchedule(steps, 0.999);
     let worst = 0;
     for (let index = 0; index < steps; index += 1) {
@@ -136,7 +142,7 @@ test.skipIf(!AVAILABLE)(
     }
     assert(
       worst <= T_SCHEDULE_ATOL,
-      `t スケジュールの最大絶対差 ${worst.toExponential(4)} が atol ${T_SCHEDULE_ATOL} を超えた`,
+      `the maximum absolute difference of the t schedule ${worst.toExponential(4)} exceeds atol ${T_SCHEDULE_ATOL}`,
     );
   },
 );

@@ -1,30 +1,37 @@
 /**
- * Wan2.2 TI2V-5B の通し（`Ti2vPipeline` の T2V — ADR 0121 段 6 の結線・段 8 の配布形）の照合（実 GPU）。
+ * End-to-end comparison of Wan2.2 TI2V-5B (`Ti2vPipeline`'s T2V — the wiring of ADR 0121 stage 6 and the distribution
+ * form of stage 8) (real GPU).
  *
- * 配布形ミラー `models/karume-wan2.2/`（`dist.py --pipeline wan-ti2v` が組む — `krm` 3 本と 2.1 の系列のテキスト資産 2 本）
- * を `nodeDirectory` で `Ti2vPipeline.fromPretrained` へ渡して組み、`generate` を通す（公開面の取得面 — manifest の解決・
- * 家族 admission・part の逐次読み。2.1 の段 7 と同じ入口）。The references (`pipeline_steps.*`) are goldens no
+ * The distribution mirror `models/karume-wan2.2/` (assembled by `dist.py --pipeline wan-ti2v` — three `krm` files and
+ * the two text assets of the 2.1 series) is passed to `Ti2vPipeline.fromPretrained` through `nodeDirectory`, and
+ * `generate` runs on it (the public fetch surface — manifest resolution, family admission, sequential part reads; the
+ * same entry as 2.1's stage 7). The references (`pipeline_steps.*`) are goldens no
  * distribution carries, read from the test-asset root (ADR 0139 decision 2).
  *
- * 配布形が無い機ではこの e2e は明示 SKIP する（理由と組み立てのコマンドを出す）。それで全 SKIP になるのを FAIL にするのは
- * 門番 `packages/runtime/tests/distribution_gate_test.ts`（意図して通すなら `KARUME_ALLOW_NO_DISTRIBUTION=1` — 2.1 の通しの
- * e2e と同じ分担）。
+ * On a machine without the distribution, this e2e SKIPs explicitly (it prints the reason and the assembly command).
+ * Turning the resulting all-SKIP into a FAIL is the gate test `packages/runtime/tests/distribution_gate_test.ts` (to
+ * pass it on purpose, `KARUME_ALLOW_NO_DISTRIBUTION=1` — the same split as 2.1's end-to-end e2e).
  *
- * 比べる相手は recipe の 2 ステップの参照（`tools/export-recipes/wan/ti2v_few_step_ref.py` — `goldens/wan2.2-ti2v-5b-i8-dyn/
- * pipeline_steps.<case>.safetensors` of the test-asset root）: diffusers の `Pipeline(expand_timesteps=False)` を CPU f32 で素のまま 2 ステップ
- * （CFG あり・guidance 5.0・shift 5.0）回した潜在と、それを段 5 のタイル decode → unpatchify → クランプに通したフレーム（重みは
- * DiT が i8 の RTN の fake-quant・VAE が f16 表現可能値 = 参照席 `f16+dit8` と同じ値）。形は 1280×704・17 フレーム（潜在
- * `[48,5,44,80]`・S = 4,400）で、決定用 2 本と受入れ 1 本は同じ形（受入れの形を変えて帯を外させない — 利用者の裁定 2026-10-05）。
- * 初期ノイズは参照の `latents_init`（torch の `randn`）を `latents` で注入する。
+ * The comparison target is the recipe's two-step reference (`tools/export-recipes/wan/ti2v_few_step_ref.py` —
+ * `goldens/wan2.2-ti2v-5b-i8-dyn/pipeline_steps.<case>.safetensors` of the test-asset root): the latents of diffusers'
+ * `Pipeline(expand_timesteps=False)` run plainly for two steps in CPU f32 (with CFG, guidance 5.0, shift 5.0), and the
+ * frames from passing them through stage 5's tiled decode → unpatchify → clamp (the weights: the DiT is the i8 RTN
+ * fake-quant and the VAE holds f16-representable values = the same values as the reference preset `f16+dit8`). The
+ * shape is 1280×704 with 17 frames (latents `[48,5,44,80]`, S = 4,400), and the two deciding cases and the one
+ * acceptance case share it (the acceptance case's shape is not changed to push it out of the band — the maintainer's
+ * ruling 2026-10-05). The initial noise is the reference's `latents_init` (torch's `randn`), injected through
+ * `latents`.
  *
- * ## 門（既定のレーン）
+ * ## Checks (default lane)
  *
- * この e2e が持つのは**結線**の門（プロンプトの取り違え・guidance の揺れ・shift の結線・step の順・段の受け渡し・48 値の統計の
- * 向き）であって、DiT の forward 1 本の数値の門ではない（それは段 2 の `e2e_wan_ti2v_dit_test.ts` の r 門）。
+ * What this e2e holds are the **wiring** checks (swapped prompts, a guidance drift, the shift wiring, the step order,
+ * the hand-off between stages, the direction of the 48 statistics), not the numeric check of one DiT forward (that is
+ * the r check of stage 2's `e2e_wan_ti2v_dit_test.ts`).
  *
- * - **ホストの自己整合**（GPU 不要）: 参照が記録した DiT の出力（cond / uncond）から、ホストの CFG + UniPC（shift 5.0）が参照の
- *   潜在を**ビット一致**で作り直す。メタの timesteps が `wanUniPcSchedule(2, 5.0)` と完全一致し、sigmas が f32 で一致する。
- *   参照の `latents_mean` / `latents_std` が `WAN22_LATENTS_*` とビット一致する（逆正規化の統計の向きの縛り）。
+ * - **Host self-consistency** (no GPU): from the DiT outputs (cond / uncond) the reference recorded, the host's CFG +
+ *   UniPC (shift 5.0) rebuilds the reference latents **bit for bit**. The metadata's timesteps equal
+ *   `wanUniPcSchedule(2, 5.0)` exactly and the sigmas match in f32. The reference's `latents_mean` / `latents_std` are
+ *   bit-identical to `WAN22_LATENTS_*` (pinning the direction of the denormalization statistics).
  * - **Band (opt-in upstream parity)** (ratio = max absolute difference ÷ the reference's max absolute value — the
  *   same metric as 2.1): the observation points are the latents after each step (`latents.0` / `latents.1` — the
  *   `denoise-step` event's `copyLatents`) and the clamped frames. The band is the worst of the two deciding cases
@@ -37,29 +44,41 @@
  *   default for their sha256 rows.
  *   MUST: do not change the band or the cases after seeing the acceptance result. If the acceptance case leaves the
  *   band, investigate the cause instead of widening the band.
- * - **故障注入**（受入れの初期ノイズ・`latents.1` で比べる・床は帯の {@link FAULT_MARGIN} 倍）: プロンプトの正負の取り違え・
- *   guidance 5.0 → 5.05・shift 5.0 → 3.0（shift の結線）。どれも DiT の段の `end` のイベントで打ち切って VAE を回さない。T2V では
- *   条件マスクと条件側の時刻は原理的に値に出ない（2 本が同じ値・マスクは全て偽 — 段 2 と同じ理由）ので注入に入れない。
- * - **sha256 の環境行**（ADR 0106 — `fixtures/references/wan-ti2v.json`。2.1 の `wan.json` には触らない）: 出力フレーム（uint8 の
- *   RGB を全フレーム連結したバイト列 — `frameToRgba` の規則）。既定のレーンは 8 本 = 参照席の 6 本（帯のケース 3 本・seed
- *   経路の 1280×704 と 704×1280・GPU 経路〈umT5 を GPU で回す — umT5 のミラー `models/karume-umt5-xxl/` が無い機は明示 SKIP〉）
- *   と、実用席 2 つ（s16 と online — ADR 0132）の seed 経路の 1280×704 の 1 本ずつ（{@link PRACTICAL_SEED_CASES} — 参照席の seed 経路の 1280×704 と同じ要求で席だけ
- *   違う）。opt-in の 50 ステップと 121 フレームの行は下の節。ID は席・経路・step 数・
- *   ケース・寸法・フレーム数・shift を全て持つ（{@link caseIdOf} — 裁定 F12）。行が無い機はそのケースの sha の突合を飛ばし
- *   （実物と実測の sha は残す）、参照門が赤になる（既存の規律）。行は帯が緑になった後に `KARUME_REFERENCE=write` をこのファイル
- *   単独で回して作る（裁定 F8）。参照席の行は段 6 で**系列を直読み**（`fromAssets`）する版で書いた値（RTX 3080 Ti の行は凍結コピー
- *   `128b511e` で書く — 利用者の裁定 2026-10-06）で、配布形経由（`fromPretrained`）のこの e2e が HEAD で同じ行と一致することを
- *   要求する（ADR 0121 検収の段 8）— 配布形は系列の `krm` とテキスト資産の独立コピーで、席も
- *   要求の値も全て明示するので、1 ビットでも割れたら取得面か席の解決の退行。実用席の行（段 7 で足した）は配布形経由のこの e2e
- *   で書く。
- * - **行のクラス**（ADR 0110 決定 7 — manifest の席の `session` が空か否かで決まる）: 参照席 `f16+dit8` の行は**参照行**（凍結 —
- *   実用層を変えるコミットで触らない）、実用席 `f16+dit8-a8-attn8-s16` の行は**実用行**（実用層の退行と決定性の検出器 — 実用層の
- *   数値を意図して変えるコミットで同じコミットの `rewrite`）。CPU の参照は参照席の値でしか採っていないので、実用席は帯を持たず
- *   sha256 の環境行だけで縛る。既定のレーンの実用行は、突合と書き込みの前に、同じ要求の参照席の実物と 1 bit 以上違うこと（床 —
- *   ADR 0110 決定 5）を見る（席の `session` が届かない退行で、参照行と同じ sha を実用行として凍結しないように）。実用席の数値の門（参照席との比較）は自機 A/B 門 `e2e_wan_ti2v_ab_test.ts`（ADR 0121 段 7 —
- *   1280×704 の 33 フレームと opt-in の 121 フレーム）が持つ。
- * - **席は全ケースで明示する**（{@link loadPipeline} は席を必須にする）: manifest の `defaultQuant`（実用席 — 視認の裁定 2026-10-06）は
- *   品質の裁定で動きうる値で、既定席に乗ると、同じ ID が別の席の値で回る。
+ * - **Fault injection** (the acceptance case's initial noise, compared at `latents.1`, floor = {@link FAULT_MARGIN} ×
+ *   the band): swapped positive / negative prompts, guidance 5.0 → 5.05, shift 5.0 → 3.0 (the shift wiring). Each one
+ *   stops at the `end` event of the DiT stage and does not run the VAE. In T2V the condition mask and the conditioning
+ *   timestep cannot show in the values by construction (both are the same value, the mask is all false — the same
+ *   reason as stage 2), so they are not injected.
+ * - **sha256 per-environment rows** (ADR 0106 — `fixtures/references/wan-ti2v.json`; 2.1's `wan.json` is not touched):
+ *   the output frames (the uint8 RGB of all frames concatenated — the rule of `frameToRgba`). The default lane has 8
+ *   rows = the reference preset's 6 (the 3 band cases, the seed path's 1280×704 and 704×1280, and the GPU path (umT5 on
+ *   the GPU — a machine without the umT5 mirror `models/karume-umt5-xxl/` SKIPs it explicitly)) and one seed-path
+ *   1280×704 row for each of the two practical presets (s16 and online — ADR 0132) ({@link PRACTICAL_SEED_CASES} — the
+ *   same request as the reference preset's seed-path 1280×704, only the preset differs). The rows of the opt-in 50
+ *   steps and 121 frames are in the sections below. An ID carries the preset, path, step count, case, size, frame count
+ *   and shift ({@link caseIdOf} — ruling F12). A machine without the row skips that case's sha comparison (the artifact
+ *   and the measured sha are kept), and the reference guard turns red (the existing rule). Rows are written after the
+ *   band is green by running `KARUME_REFERENCE=write` on this file alone (ruling F8). The reference preset's rows are
+ *   the values written in stage 6 by the version that **read the series directly** (`fromAssets`) (the RTX 3080 Ti rows
+ *   were written by the frozen copy `128b511e` — the maintainer's ruling 2026-10-06), and this e2e, which goes through
+ *   the distribution (`fromPretrained`), is required to match the same rows at HEAD (stage 8 of ADR 0121's acceptance)
+ *   — the distribution is an independent copy of the series' `krm` files and text assets, and the preset and every
+ *   request value are explicit, so a single differing bit is a regression of the fetch surface or of preset resolution.
+ *   The practical presets' rows (added in stage 7) are written by this e2e through the distribution.
+ * - **Row classes** (ADR 0110 decision 7 — decided by whether the manifest preset's `session` is empty): the rows of
+ *   the reference preset `f16+dit8` are **reference rows** (frozen — not touched by commits that change the practical
+ *   tier), the rows of the practical preset `f16+dit8-a8-attn8-s16` are **practical rows** (the detector of
+ *   practical-tier regressions and of determinism — `rewrite` in the same commit when a commit changes practical-tier
+ *   numerics on purpose). The CPU reference was taken only with the reference preset's values, so the practical presets
+ *   carry no band and are pinned by the sha256 per-environment rows alone. Before the comparison and the write, a
+ *   practical row of the default lane is checked to differ by at least 1 bit from the reference preset's artifact for
+ *   the same request (the floor — ADR 0110 decision 5), so that a regression in which the preset's `session` does not
+ *   arrive does not freeze the reference row's sha as a practical row. The numeric check of the practical presets
+ *   (against the reference preset) is the self A/B check `e2e_wan_ti2v_ab_test.ts` (ADR 0121 stage 7 — 1280×704 with 33
+ *   frames and the opt-in 121 frames).
+ * - **The preset is explicit in every case** ({@link loadPipeline} requires it): the manifest's `defaultQuant` (the
+ *   practical preset — the visual-check ruling 2026-10-06) is a value that can move with a quality ruling, and riding
+ *   on the default preset would run the same ID with another preset's values.
  *
  * ## Default run vs opt-in upstream parity
  *
@@ -76,50 +95,63 @@
  * the band only as the margin a wiring fault must exceed (ratio > {@link FAULT_MARGIN} × band) — a check on the
  * wiring, not on parity.
  *
- * ## 50 ステップの通し（env の opt-in `KARUME_WAN_TI2V_FULL_PIPELINE=1` — 既定のレーンに入れない）
+ * ## The 50-step run (env opt-in `KARUME_WAN_TI2V_FULL_PIPELINE=1` — not in the default lane)
  *
- * 事前計算の経路・`boxing-cats`・seed 42・shift 5.0・1280×704・33 フレーム・manifest の既定の 50 ステップを、参照席と実用席で
- * 1 本ずつ回し、全フレームの PNG・一覧図（4×8 マス・1/4 縮小）・RGB の実物・段ごとの所要・段の境目の VRAM の山を
- * `outputs/verify/<環境キー>/<日付>_wan-ti2v-pipeline-full/` に書き、非有限 0 と device lost が無いことを見る（利用者の視認の
- * 素材 — 生成スクリプトの同じ要求の PNG とバイトが一致することもここで見られる）。sha256 の環境行は 2 本とも持つ（参照席は参照行・
- * 実用席は実用行 — 上の「行のクラス」。段 6 では数値の正しさを確かめる前の出力を凍結しないため観測だけにしていて、段 7 で実用席の
- * 数値の門〈自機 A/B 門〉と一緒に行を持たせた — ADR 0121 段 7）。実用席は突合と書き込みの前に、同じ走行の参照席の実物と 1 bit
- * 以上違うこと（床 — 既定のレーンの実用行と同じ・ADR 0110 決定 5）を見る（並びが参照席 → 実用席なのはこの床の相手を先に
- * 作るためでもある）。参照門への登録は opt-in のときだけ（既定のレーンでは回らない
- * ので、登録すると行が無い機の参照門を赤にする — 121 フレームと同じ扱い）。行は `KARUME_REFERENCE=write` を付けて同じコマンド
- * （`KARUME_WAN_TI2V_FULL_PIPELINE=1` と `--filter "50 ステップ"`）で作る。結果の席を既定のレーン
- * （`<日付>_wan-ti2v-pipeline/`）と分けるのは、`results.json` が走行ごとに丸ごと書き直されるため。
+ * The precomputed path, `boxing-cats`, seed 42, shift 5.0, 1280×704, 33 frames and the manifest's default 50 steps run
+ * once with the reference preset and once with each practical preset, writing the PNG of every frame, a contact sheet
+ * (4×8 cells, 1/4 scale), the RGB artifact, the time per stage and the VRAM peaks at the stage boundaries to
+ * `outputs/verify/<environment key>/<date>_wan-ti2v-pipeline-full/`, and checking 0 non-finite values and no device
+ * lost (material for the maintainer's visual check — it also shows that the bytes equal the PNG of the generation
+ * script for the same request). Both kinds of sha256 per-environment rows are kept (reference preset = reference row,
+ * practical preset = practical row — "Row classes" above. Stage 6 only observed, so as not to freeze an output before
+ * its numerics were confirmed, and stage 7 gave it rows together with the practical presets' numeric check (the self
+ * A/B check) — ADR 0121 stage 7). Before the comparison and the write, a practical preset is checked to differ by at
+ * least 1 bit from the reference preset's artifact of the same run (the floor — the same as the default lane's
+ * practical rows, ADR 0110 decision 5) (the order reference preset → practical presets also produces this floor's
+ * partner first). The cases register with the reference guard only under the opt-in (they do not run in the default
+ * lane, so registering them would turn the reference guard red on a machine without the rows — the same as the 121
+ * frames). The rows are written by adding `KARUME_REFERENCE=write` to the same command
+ * (`KARUME_WAN_TI2V_FULL_PIPELINE=1` and `--filter "50 steps"`). The results directory is kept apart from the default
+ * lane's (`<date>_wan-ti2v-pipeline/`) because `results.json` is rewritten whole on every run.
  *
- * ## 121 フレームの参照値（env の opt-in `KARUME_WAN_TI2V_121F=1` — 既定のレーンに入れない）
+ * ## The 121-frame reference values (env opt-in `KARUME_WAN_TI2V_121F=1` — not in the default lane)
  *
- * 受理の上限 121 フレーム（公式の既定 — 開発機 RTX 3080 Ti で 50 ステップの完走を確かめて受理を広げた・ADR 0121 段 10）の、
- * 開発機の参照値。要求は seed 経路の 1280×704 のケースと同じ（事前計算の経路・`boxing-cats`・seed 42・2 ステップ・guidance 5.0・
- * shift 5.0）でフレーム数だけ 121 にし、出力の形・非有限 0・device lost が無いこと・denoise-step の数・sha256 の環境行を見る
- * （行が無い機は突合を飛ばして実物と実測の sha を残す — seed のケースと同じ扱い）。席は参照席 `f16+dit8` だけ（実用席の 121
- * フレームは自機 A/B 門の opt-in の点 — `e2e_wan_ti2v_ab_test.ts` — が回す）。所要は約 15〜20 分（VAE だけで約 12 分）なので、
- * 50 ステップの通しと同じく env の opt-in でだけ回し、参照門への登録も opt-in のときだけ（既定のレーンの参照門を赤にしない）。
- * 結果の席は `<日付>_wan-ti2v-pipeline-121f/`（既定のレーンと分ける理由は 50 ステップの通しと同じ）。行は
- * `KARUME_REFERENCE=write` を付けて同じコマンドで作る:
+ * The development machine's reference values for the accepted maximum of 121 frames (upstream's default — the accepted
+ * range was widened after a 50-step run completed on the development machine's RTX 3080 Ti, ADR 0121 stage 10). The
+ * request is the same as the seed path's 1280×704 case (the precomputed path, `boxing-cats`, seed 42, 2 steps,
+ * guidance 5.0, shift 5.0) with only the frame count set to 121, and it checks the output shape, 0 non-finite values,
+ * no device lost, the number of denoise steps and the sha256 per-environment row (a machine without the row skips the
+ * comparison and keeps the artifact and the measured sha — the same as the seed cases). The preset is the reference
+ * preset `f16+dit8` only (the practical presets' 121 frames run as the opt-in point of the self A/B check —
+ * `e2e_wan_ti2v_ab_test.ts`). It takes about 15–20 minutes (about 12 minutes for the VAE alone), so like the 50-step
+ * run it runs only under the env opt-in, and it registers with the reference guard only under the opt-in (it does not
+ * turn the default lane's reference guard red). The results directory is `<date>_wan-ti2v-pipeline-121f/` (kept apart
+ * from the default lane for the same reason as the 50-step run). The row is written by adding `KARUME_REFERENCE=write`
+ * to the same command:
  *
  * ```
- * KARUME_WAN_TI2V_121F=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_pipeline_test.ts --filter "121 フレーム"
+ * KARUME_WAN_TI2V_121F=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_pipeline_test.ts --filter "121 frames"
  * ```
  *
- * ## device の使い方（B570 の `destroy()` が VRAM を返さない件 — docs/known-issues.md）
+ * ## Device use (B570's `destroy()` does not return VRAM — docs/known-issues.md)
  *
- * 既定のレーンの `Deno.test` 1 本は device を 1 つだけ取り、全ケースを `t.step` で回す（ケースの間に `settleReleases`）。
- * opt-in の 50 ステップと 121 フレームも同じく device 1 つで、`--filter "50 ステップ"` / `--filter "121 フレーム"` で**単独の
- * プロセス**として回す（既定のレーンの device の残りを背負わない）。構築（`fromPretrained`）は配布形の part を読むだけで
- * Session を張らない（段ごとに張って畳む）。
+ * The one `Deno.test` of the default lane takes a single device and runs every case with `t.step` (with
+ * `settleReleases` between cases). The opt-in 50 steps and 121 frames likewise use one device and run as a **separate
+ * process** with `--filter "50 steps"` / `--filter "121 frames"` (so they do not carry what the default lane's device
+ * left behind). Building (`fromPretrained`) only reads the distribution's parts and does not build Sessions (each
+ * stage builds and disposes its own).
  *
- * ## 観測（門ではない）
+ * ## Observations (not checks)
  *
- * 段の所要（壁時計 — `stage` イベントの間）と、段の境目ごとの VRAM（`/proc/self/fdinfo` の `drm-total-*` —
- * `helpers/drm-usage.ts`）。GPU 時間は採らない — 計測の device では VAE の batch を開けない（構築が拒む）。
+ * The time per stage (wall clock — between `stage` events) and the VRAM at each stage boundary (`drm-total-*` of
+ * `/proc/self/fdinfo` — `helpers/drm-usage.ts`). GPU time is not taken — a measuring device cannot open the VAE's
+ * batch (building refuses it).
  *
- * 配布形が無い環境は明示 SKIP（ホストの自己整合は配布形に依らないので回る）。参照（`pipeline_steps.*`）が無い環境では帯・
- * 故障注入・ホストの自己整合だけを明示 SKIP する（seed 経路と GPU 経路は CPU の参照に依らないので回る）。参照が一部だけある
- * 環境は FAIL（2.1 の通しの e2e と同じ規律）。
+ * Environments without the distribution SKIP explicitly (the host self-consistency check does not depend on the
+ * distribution and still runs). Environments without the references (`pipeline_steps.*`) SKIP only the band, the
+ * fault injection and the host self-consistency check explicitly (the seed path and the GPU path do not depend on the
+ * CPU reference and still run). An environment with only some of the references FAILs (the same rule as 2.1's
+ * end-to-end e2e).
  */
 
 import { readFile, writeFile } from "@karume/test-support/fs";
@@ -193,43 +225,51 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
- * 2 ステップの通しの潜在（各 step の後 — `[48,5,44,80]`）の帯（比 = 最大絶対差 ÷ 参照の最大絶対値）。添字が step。
- * `undefined` = 未導出（モジュール doc「門」— 各ケースは比を記録して赤で止まり、「帯の候補」の step が候補を出す）。
+ * The band of the two-step run's latents (after each step — `[48,5,44,80]`) (ratio = max absolute difference ÷ the
+ * reference's max absolute value). The index is the step. `undefined` = not derived yet (module doc "Checks" — each
+ * case records its ratios and stops red, and the "band candidate" step prints a candidate).
  *
- * 導出の規則: 観測点ごとに決定用 2 本の最悪 × 5（有効数字 2 桁へ切り上げ）。最初の実走が出した候補を、実測の表（決定用 2 本・
- * 帯・受入れ）と一緒にここへ書く（2.1 の `e2e_wan_pipeline_test.ts` の同名の定数の doc と同じ形）。
+ * The derivation rule: per observation point, the worst of the two deciding cases × 5 (rounded up to 2 significant
+ * digits). The candidate the first real run printed is written here together with the table of measurements (the two
+ * deciding cases, the band, the acceptance case) (the same form as the doc of the constant of the same name in 2.1's
+ * `e2e_wan_pipeline_test.ts`).
  *
- * 導出（2026-10-05・B570・参照席）:
+ * Derivation (2026-10-05, B570, reference preset):
  *
- * | 観測点    | band-boxing-cats | band-cat-dog-baking | 最悪 × 5 | 帯     | 受入れ accept-ferret |
- * | --------- | ---------------: | ------------------: | -------: | -----: | -------------------: |
- * | latents.0 |         7.185e-6 |            3.315e-6 | 3.593e-5 | 3.6e-5 |             2.968e-6 |
- * | latents.1 |         1.035e-4 |            1.885e-4 | 9.424e-4 | 9.5e-4 |             1.199e-4 |
- * | frames    |         2.276e-3 |            1.839e-4 | 1.138e-2 | 1.2e-2 |             1.781e-3 |
+ * | Point     | band-boxing-cats | band-cat-dog-baking | worst × 5 | band   | acceptance accept-ferret |
+ * | --------- | ---------------: | ------------------: | --------: | -----: | -----------------------: |
+ * | latents.0 |         7.185e-6 |            3.315e-6 |  3.593e-5 | 3.6e-5 |                 2.968e-6 |
+ * | latents.1 |         1.035e-4 |            1.885e-4 |  9.424e-4 | 9.5e-4 |                 1.199e-4 |
+ * | frames    |         2.276e-3 |            1.839e-4 |  1.138e-2 | 1.2e-2 |                 1.781e-3 |
  *
- * 故障注入の比（latents.1・床は帯の 2 倍 = 1.9e-3）: プロンプトの正負の取り違え 1.321・guidance 5.0 → 5.05 は 8.181e-2・
- * shift 5.0 → 3.0 は 5.512e-1。
+ * Fault-injection ratios (latents.1, floor = 2 × the band = 1.9e-3): swapped positive / negative prompts 1.321,
+ * guidance 5.0 → 5.05 8.181e-2, shift 5.0 → 3.0 5.512e-1.
  *
- * MUST: 受入れ（`accept-ferret`）の結果を見てこの値も、決定用のケースも変えない（帯の決定と受入れの独立が崩れる）。
- * 受入れが帯を外れたら帯を広げずに原因を調べる。
+ * MUST: do not change this value or the deciding cases after seeing the acceptance (`accept-ferret`) result (that
+ * would break the independence of setting the band and accepting it). If the acceptance case leaves the band,
+ * investigate the cause instead of widening the band.
  */
 const LATENT_RATIO_BANDS: readonly [number | undefined, number | undefined] = [3.6e-5, 9.5e-4];
 
 /**
- * 2 ステップの通しの出力フレーム（クランプ後の `[3,17,704,1280]` — 参照もクランプ後で書かれている）の帯。`undefined` = 未導出
- * （{@link LATENT_RATIO_BANDS} と同じ規則）。
+ * The band of the two-step run's output frames (`[3,17,704,1280]` after the clamp — the reference is written after
+ * the clamp too). `undefined` = not derived yet (the same rule as {@link LATENT_RATIO_BANDS}).
  *
- * MUST: 受入れの結果を見てこの値を変えない（{@link LATENT_RATIO_BANDS} と同じ）。
+ * MUST: do not change this value after seeing the acceptance result (the same as {@link LATENT_RATIO_BANDS}).
  */
 const FRAME_RATIO_BAND: number | undefined = 1.2e-2;
 
 /**
- * 故障（プロンプトの正負の取り違え・guidance の 1% のずれ・shift の取り違え）が帯から離れているべき倍率の床（2.1 と段 2 と
- * 同じ 2 — 赤にならない注入は帯が広すぎる兆候）。
+ * The floor of the factor by which a fault (swapped positive / negative prompts, a 1% guidance drift, a wrong shift)
+ * must stay away from the band (2, the same as 2.1 and stage 2 — an injection that does not turn red is a sign that
+ * the band is too wide).
  */
 const FAULT_MARGIN = 2;
 
-/** 2 ステップの通しの条件（参照の `ti2v_few_step_ref.py` の `STEPS` / `GUIDANCE_SCALE` / `FLOW_SHIFT` / `LATENT_SHAPE`）。 */
+/**
+ * The two-step run's conditions (`STEPS` / `GUIDANCE_SCALE` / `FLOW_SHIFT` / `LATENT_SHAPE` of the reference's
+ * `ti2v_few_step_ref.py`).
+ */
 const STEPS = 2;
 const GUIDANCE = 5;
 const SHIFT = 5;
@@ -245,8 +285,9 @@ const LATENT_SHAPE: readonly number[] = [48, 5, 44, 80];
 const STEPS_ROOT = goldenDir(WAN_TI2V_SERIES_NAME);
 
 /**
- * 参照のケース（正本は recipe `wan/ti2v_few_step_ref.py` の `FIXTURE_CASES`）。決定用（`band`）2 本 + 受入れ（`accept`）1 本。
- * MUST: 受入れの結果を見て決定用のケースを変えない。
+ * The reference cases (the source of truth is `FIXTURE_CASES` in the recipe `wan/ti2v_few_step_ref.py`). Two
+ * deciding (`band`) cases + one acceptance (`accept`) case.
+ * MUST: do not change the deciding cases after seeing the acceptance result.
  */
 const CASES: readonly { readonly name: string; readonly role: "band" | "accept" }[] = [
   { name: "band-boxing-cats", role: "band" },
@@ -256,26 +297,28 @@ const CASES: readonly { readonly name: string; readonly role: "band" | "accept" 
 const ACCEPT_CASE = "accept-ferret";
 
 /**
- * sha 行のケース ID（席・経路・step 数・ケース・寸法・フレーム数・shift を全て持つ — 裁定 F12）。`head` は
- * `<席>[-gpu-text]-<step 数>-<ケース>`。
+ * The case ID of a sha row (it carries the preset, path, step count, case, size, frame count and shift — ruling F12).
+ * `head` is `<preset>[-gpu-text]-<step count>-<case>`.
  *
- * MUST: 要求（プロンプト・seed・step 数・寸法・フレーム数・shift・席・経路）を変えたら ID も変える（行の値が別の条件の sha と
- * 突き合わさる）。寸法・フレーム数・shift はこの関数が要求と同じ値から綴る。
+ * MUST: when the request (prompt, seed, step count, size, frame count, shift, preset, path) changes, change the ID too
+ * (otherwise the row's value is compared with the sha of other conditions). This function spells the size, frame
+ * count and shift from the same values as the request.
  */
 const caseIdOf = (head: string, width: number, height: number, frames: number): string =>
   `${head}-${width}x${height}-${frames}f-shift${SHIFT}`;
 
-/** 帯のケースの ID（参照席・事前計算の経路）。 */
+/** The band cases' ID (reference preset, precomputed path). */
 const bandCaseId = (name: string): string =>
   caseIdOf(`${WAN_TI2V_REFERENCE_QUANT}-2step-${name}`, WIDTH, HEIGHT, FRAMES);
 
-/** seed 経路の固定の要求（資産の行の原文・seed 42）。 */
+/** The seed path's fixed request (the original text of the asset's row, seed 42). */
 const SEED_PROMPT = "boxing-cats";
 const SEED = 42;
 
 /**
- * seed 経路の 2 ステップ（`latents` を注入せず seed から初期ノイズを作る）。CPU の参照は無いので、完走・非有限 0 と sha256 の
- * 環境行だけで縛る。2 寸法（横長と縦長 — 受理集合の 2 つ）を 1 本ずつ。
+ * The seed path's two steps (no `latents` injected; the initial noise comes from the seed). There is no CPU
+ * reference, so it is pinned only by completion, 0 non-finite values and the sha256 per-environment row. One case per
+ * size (landscape and portrait — the two of the accepted set).
  */
 const SEED_CASES: readonly {
   readonly id: string;
@@ -296,8 +339,10 @@ const SEED_CASES: readonly {
 }));
 
 /**
- * 実用席の seed 経路の 2 ステップ（{@link SEED_CASES} の 1280×704 と同じ要求で、席だけ実用席 — 既定のレーンの実用行。モジュール
- * doc「行のクラス」）。帯は持たない（実用席の数値の門は自機 A/B 門）。参照席の pipeline とは別に席の pipeline を組んで回す。
+ * The practical preset's seed-path two steps (the same request as the 1280×704 of {@link SEED_CASES}, only the preset
+ * is the practical one — a practical row of the default lane; module doc "Row classes"). It carries no band (the
+ * practical preset's numeric check is the self A/B check). It builds the preset's own pipeline, separate from the
+ * reference preset's.
  */
 const PRACTICAL_SEED_CASE_ID = caseIdOf(
   `${WAN_TI2V_PRACTICAL_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
@@ -368,8 +413,9 @@ type Conv8VaeRecord = {
 };
 
 /**
- * GPU 経路のケース（umT5 i8 を GPU で回す — 固定プロンプトの原文・seed 42・2 ステップ・1280×704）。CPU の参照は持たない（umT5 の
- * 数値の門は `e2e_wan_umt5_test.ts`）。資産の経路の seed のケースと同じ文字列で、経路だけが違う。
+ * The GPU-path case (umT5 i8 on the GPU — the fixed prompt's original text, seed 42, 2 steps, 1280×704). It has no CPU
+ * reference (umT5's numeric check is `e2e_wan_umt5_test.ts`). The same string as the asset path's seed case; only the
+ * path differs.
  */
 const GPU_TEXT_CASE_ID = caseIdOf(
   `${WAN_TI2V_REFERENCE_QUANT}-gpu-text-2step-${SEED_PROMPT}-seed${SEED}`,
@@ -378,19 +424,20 @@ const GPU_TEXT_CASE_ID = caseIdOf(
   FRAMES,
 );
 
-/** 50 ステップの通しの opt-in（モジュール doc）。 */
+/** The opt-in of the 50-step run (module doc). */
 const FULL_PIPELINE = process.env.KARUME_WAN_TI2V_FULL_PIPELINE === "1";
-/** 50 ステップの通しのフレーム数（既定のフレーム数）。 */
+/** The 50-step run's frame count (the default frame count). */
 const FULL_FRAMES = 33;
 /**
- * 50 ステップの通しの step 数。要求では指定せず manifest の既定に任せるので、観測した denoise-step の数で縛る（manifest の
- * 既定が変わったら ID の `50step` と食い違う）。
+ * The 50-step run's step count. The request does not set it and leaves it to the manifest's default, so it is pinned
+ * by the observed number of denoise steps (if the manifest's default changes, it disagrees with the ID's `50step`).
  */
 const FULL_STEPS = 50;
 /**
- * 50 ステップの通しの席。並びは確保の大きい順: S = 7,920（1280×704・33 フレーム）の DiT の diag は参照席 7.36 GiB > 実用席
- * 7.25 GiB（ADR 0121 段 2 の追記の容量の表）。前の確保の残りが後ろの大きな確保を OOM にしうる（B570 の `destroy()` の遅れ）ので
- * 大きい側を先に置く。
+ * The 50-step run's presets. Ordered by allocation size, largest first: at S = 7,920 (1280×704, 33 frames) the DiT's
+ * diag is 7.36 GiB for the reference preset > 7.25 GiB for the practical preset (the capacity table of the addendum to
+ * ADR 0121 stage 2). What an earlier allocation leaves behind can make a later large allocation OOM (B570's delayed
+ * `destroy()`), so the larger one goes first.
  */
 const FULL_CASES: readonly { readonly id: string; readonly quant: string }[] = [
   WAN_TI2V_REFERENCE_QUANT,
@@ -401,14 +448,18 @@ const FULL_CASES: readonly { readonly id: string; readonly quant: string }[] = [
   quant,
 }));
 
-/** 121 フレームの参照値の opt-in（モジュール doc）。 */
+/** The opt-in of the 121-frame reference values (module doc). */
 const LONG_CLIP = process.env.KARUME_WAN_TI2V_121F === "1";
 /**
- * 121 フレームのケースのフレーム数（受理の上限 = 公式の既定）。記述子から読まずに値で持つ — ID の `121f` は sha 行のキーで、
- * 記述子の上限が動いても同じ ID が別の要求の値で回らないようにする。
+ * The 121-frame case's frame count (the accepted maximum = upstream's default). Held as a value, not read from the
+ * descriptor — the ID's `121f` is the sha row's key, and the same ID must not run with another request's values if the
+ * descriptor's maximum moves.
  */
 const LONG_CLIP_FRAMES = 121;
-/** 121 フレームのケース（参照席・事前計算の経路・seed 経路の 1280×704 のケースとフレーム数だけが違う）。 */
+/**
+ * The 121-frame case (reference preset, precomputed path; it differs from the seed path's 1280×704 case only in the
+ * frame count).
+ */
 const LONG_CLIP_CASE_ID = caseIdOf(
   `${WAN_TI2V_REFERENCE_QUANT}-2step-${SEED_PROMPT}-seed${SEED}`,
   WIDTH,
@@ -427,50 +478,53 @@ const ASSEMBLE_UMT5_COMMAND = "cd tools/export-recipes && uv run python dist.py 
  */
 const TEXT_EMBEDS = "text_embeds";
 
-/** umT5 の配布形ミラー（Wan2.2 の manifest の `text_encoder` が越境参照する先 — 2.1 と同じミラー）。 */
+/**
+ * umT5's distribution mirror (the target that `text_encoder` of the Wan2.2 manifest references across repositories —
+ * the same mirror as 2.1).
+ */
 const UMT5_ROOT = new URL("../../../models/karume-umt5-xxl/", import.meta.url);
-/** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
+/** The manifest's component name (`TEXT_ENCODER` of `src/wan/pipeline.ts`). */
 const TEXT_ENCODER = "text_encoder";
 
 const fixtureUrl = (name: string): URL => new URL(`pipeline_steps.${name}.safetensors`, STEPS_ROOT);
 
-/** 配布形の manifest（無ければ `undefined` — 通しの照合を SKIP する）。 */
+/** The distribution's manifest (`undefined` when absent — the end-to-end comparison SKIPs). */
 const DIST_MANIFEST_TEXT = await readWanTi2vDistributionManifestText();
 const DIST_MANIFEST =
   DIST_MANIFEST_TEXT === undefined ? undefined : parseManifest(DIST_MANIFEST_TEXT);
 const DIST_PRESENT = DIST_MANIFEST !== undefined;
 if (!DIST_PRESENT) {
   console.warn(
-    `[karume] 配布形ミラー ${WAN_TI2V_DIST_ROOT.pathname} が無いため Wan2.2 の通しの照合を SKIP する。` +
-      `組み立て: ${WAN_TI2V_ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
+    `[karume] the distribution mirror ${WAN_TI2V_DIST_ROOT.pathname} is absent, so Wan2.2's end-to-end comparison is SKIPPED. ` +
+      `Assemble it: ${WAN_TI2V_ASSEMBLE_COMMAND} (the gate test distribution_gate_test.ts turns an all-SKIP into a FAIL)`,
   );
 }
 /**
- * umT5 の越境先の repo（配布形の既定の選択の `text_encoder` の part 0 が宣言する — キーを写経しない）。配布形が umT5 を
- * 持たない・自リポに持つ形は 2.2 の配布形の宣言の外なので、GPU 経路の構築で fail loudly にする（{@link umt5CrossRepo}）。
+ * The repo of umT5's cross-repository target (declared by part 0 of `text_encoder` in the distribution's default
+ * selection — the key is not copied by hand). A distribution without umT5, or with umT5 in its own repo, is outside
+ * the 2.2 distribution's declaration, so building the GPU path fails loudly ({@link umt5CrossRepo}).
  */
 const UMT5_REPO =
   DIST_MANIFEST === undefined
     ? undefined
     : resolveSelection(DIST_MANIFEST).containers[TEXT_ENCODER]?.parts[0]?.repo;
 const UMT5_PRESENT = filePresent(new URL("karume.json", UMT5_ROOT));
-/** GPU 経路を組める（配布形と umT5 のミラーがある）。 */
+/** Whether the GPU path can be built (the distribution and the umT5 mirror are present). */
 const GPU_TEXT_PRESENT = DIST_PRESENT && UMT5_PRESENT;
 if (DIST_PRESENT && !GPU_TEXT_PRESENT) {
   console.warn(
-    `[karume] umT5 の配布形ミラー ${UMT5_ROOT.pathname}（${
+    `[karume] umT5's distribution mirror ${UMT5_ROOT.pathname} (the cross-repository target of ${
       UMT5_REPO ?? TEXT_ENCODER
-    } の越境先）が無いため、` +
-      `Wan2.2 の GPU 経路のケースを SKIP する。組み立て: ${ASSEMBLE_UMT5_COMMAND}`,
+    }) is absent, so ` + `Wan2.2's GPU-path case is SKIPPED. Assemble it: ${ASSEMBLE_UMT5_COMMAND}`,
   );
 }
 
-/** 越境先の mapping（umT5 の容器の repo → ローカルのミラー）。 */
+/** The cross-repository mapping (the repo of umT5's container → the local mirror). */
 const umt5CrossRepo = (): Record<string, DistributionSource> => {
   if (UMT5_REPO === undefined) {
     throw new Error(
-      `配布形 ${WAN_TI2V_DIST_ROOT.pathname} の既定の選択の ${TEXT_ENCODER} が越境参照でない（2.2 の配布形は umT5 を ` +
-        `karume-umt5-xxl から越境参照する）。組み直し: ${WAN_TI2V_ASSEMBLE_COMMAND}`,
+      `in the default selection of the distribution ${WAN_TI2V_DIST_ROOT.pathname}, ${TEXT_ENCODER} is not a cross-repository reference ` +
+        `(the 2.2 distribution references umT5 from karume-umt5-xxl). Reassemble it: ${WAN_TI2V_ASSEMBLE_COMMAND}`,
     );
   }
   return { [UMT5_REPO]: nodeDirectory(UMT5_ROOT) };
@@ -507,9 +561,9 @@ const references = openReferences(
   new URL("../../models/tests/fixtures/references/wan-ti2v.json", import.meta.url),
 );
 const results = openResults("wan-ti2v-pipeline");
-/** 50 ステップの通しの結果の席（既定のレーンと分ける — モジュール doc）。 */
+/** The 50-step run's results directory (kept apart from the default lane — module doc). */
 const fullResults = openResults("wan-ti2v-pipeline-full");
-/** 121 フレームの結果の席（同じく既定のレーンと分ける）。 */
+/** The 121-frame results directory (likewise kept apart from the default lane). */
 const longClipResults = openResults("wan-ti2v-pipeline-121f");
 
 /** A value a `beforeAll` assigns, read inside an `it` (fails loudly when the hook did not assign it). */
@@ -519,7 +573,7 @@ const assigned = <T>(value: T | undefined, what: string): T => {
 };
 
 test.skipIf(!ANY_FIXTURE && !FETCHED)(
-  "Wan2.2 通しの参照: 2 ステップの参照 3 本が揃っている",
+  "Wan2.2 end-to-end references: all three two-step references are present",
   () => {
     assertEquals(
       FIXTURES_PRESENT,
@@ -531,7 +585,7 @@ test.skipIf(!ANY_FIXTURE && !FETCHED)(
   },
 );
 
-/** 参照 1 本（F32 のテンソル・形・メタ）。 */
+/** One reference (F32 tensors, shapes, metadata). */
 type Fixture = {
   readonly tensor: (key: string) => Float32Array<ArrayBuffer>;
   readonly shape: (key: string) => readonly number[];
@@ -545,7 +599,7 @@ const readFixture = async (url: URL): Promise<Fixture> => {
   );
   const view = (key: string) => {
     const found = file.tensors.get(key);
-    assert(found !== undefined && found.dtype === "F32", `${url.pathname}: '${key}' が F32 で無い`);
+    assert(found !== undefined && found.dtype === "F32", `${url.pathname}: '${key}' is not F32`);
     return found;
   };
   return {
@@ -556,16 +610,16 @@ const readFixture = async (url: URL): Promise<Fixture> => {
     shape: (key) => view(key).shape,
     meta: (key) => {
       const value = file.metadata.get(key);
-      assert(value !== undefined, `${url.pathname}: メタ '${key}' が無い`);
+      assert(value !== undefined, `${url.pathname}: metadata '${key}' is missing`);
       return value;
     },
   };
 };
 
-/** 差の要約（比 = 最大絶対差 ÷ 参照の最大絶対値）。 */
+/** A summary of the difference (ratio = max absolute difference ÷ the reference's max absolute value). */
 type Difference = {
   readonly maxAbs: number;
-  /** 要素ごとの相対差の最大（参照が 0 の要素は除く — 結果の記録用）。 */
+  /** The maximum per-element relative difference (elements where the reference is 0 are excluded — for the record). */
   readonly maxRel: number;
   readonly referenceMax: number;
   readonly ratio: number;
@@ -573,7 +627,7 @@ type Difference = {
 };
 
 const difference = (got: Float32Array, want: Float32Array): Difference => {
-  assertEquals(got.length, want.length, "要素数");
+  assertEquals(got.length, want.length, "element count");
   let maxAbs = 0;
   let maxRel = 0;
   let referenceMax = 0;
@@ -592,11 +646,11 @@ const difference = (got: Float32Array, want: Float32Array): Difference => {
 };
 
 const formatDifference = (label: string, diff: Difference): string =>
-  `${label} 比 ${diff.ratio.toExponential(3)}（maxAbs ${diff.maxAbs.toExponential(3)} / 参照 ${diff.referenceMax.toFixed(
+  `${label} ratio ${diff.ratio.toExponential(3)} (maxAbs ${diff.maxAbs.toExponential(3)} / reference ${diff.referenceMax.toFixed(
     3,
-  )}）`;
+  )})`;
 
-/** f32 の列どうしのビット一致（NaN の符号や -0 も区別する）。 */
+/** Bit identity of two f32 arrays (the sign of NaN and -0 are told apart too). */
 const bitsEqual = (got: Float32Array, want: Float32Array): boolean => {
   if (got.length !== want.length) return false;
   const gotBits = new Uint32Array(got.buffer, got.byteOffset, got.length);
@@ -604,7 +658,7 @@ const bitsEqual = (got: Float32Array, want: Float32Array): boolean => {
   return gotBits.every((value, index) => value === wantBits[index]);
 };
 
-/** 出力フレームの uint8 の RGB を全フレーム連結したバイト列（sha256 の実物）。 */
+/** The uint8 RGB of all output frames concatenated (the sha256 artifact). */
 const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
   const plane = video.width * video.height;
   const out = new Uint8Array(video.frames * plane * 3);
@@ -620,11 +674,14 @@ const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
 const countNonFinite = (values: Float32Array): number =>
   values.reduce((count, value) => count + (Number.isFinite(value) ? 0 : 1), 0);
 
-/** 1 回の generate の観測（イベントから — 各 step の後の潜在・段の所要・段の境目の VRAM）。 */
+/**
+ * The observations of one generate (from the events — the latents after each step, the time per stage, the VRAM at the
+ * stage boundaries).
+ */
 type Observed = {
   readonly video: GeneratedVideo;
   readonly latents: readonly Float32Array[];
-  /** 段名 → 壁時計の ms（`start` から `end` まで）。 */
+  /** Stage name → wall-clock ms (from `start` to `end`). */
   readonly stageMs: Readonly<Record<string, number>>;
   readonly wallMs: number;
   readonly drm: DrmTimeline;
@@ -634,8 +691,9 @@ type Observed = {
 };
 
 /**
- * generate を 1 回まわし、イベントから観測を集める。`abortAfterDenoise` なら DiT の段の `end`（Session を畳んだ後）で投げて
- * VAE の段を飛ばす（故障注入は潜在だけを見る — 28 タイルの VAE を払わない）。
+ * Runs generate once and collects observations from the events. With `abortAfterDenoise` it throws at the DiT stage's
+ * `end` (after its Session is disposed) and skips the VAE stage (fault injection looks only at the latents — it does
+ * not pay for the 28-tile VAE).
  */
 const observe = async (
   pipeline: Ti2vPipeline,
@@ -651,7 +709,7 @@ const observe = async (
   // after an end). Started before the generate and given one sample so the baseline is recorded.
   const nvidia = options.nvidiaSmi === true ? monitorNvidiaSmi() : undefined;
   await nvidia?.waitForSample(2000);
-  const abort = new Error("DiT の段の後で止める（故障注入）");
+  const abort = new Error("stop after the DiT stage (fault injection)");
   diagnostics.clear();
   const started = performance.now();
   const onEvent = (event: GenerateEvent): void => {
@@ -691,26 +749,31 @@ const observe = async (
   }
 };
 
-/** 観測の 1 行（段の所要・VRAM の区間ごとの山と境目の値・診断の内訳）。 */
+/**
+ * The observation lines (time per stage, the VRAM peak per interval and the value at each boundary, the diagnostics
+ * breakdown).
+ */
 const formatObserved = (observed: Observed): string[] => {
   const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(3)} GiB`;
   const lines = [
-    `壁 ${(observed.wallMs / 1000).toFixed(1)} s・段 ${Object.entries(observed.stageMs)
+    `wall ${(observed.wallMs / 1000).toFixed(1)} s, stages ${Object.entries(observed.stageMs)
       .map(([stage, ms]) => `${stage} ${(ms / 1000).toFixed(1)} s`)
-      .join("・")}`,
-    ...[...observed.drm.peaks].map(([phase, peak]) => `VRAM 山 [${phase}] ${formatDrmUsage(peak)}`),
-    ...observed.drm.marks.map(({ label, usage }) => `VRAM 点 [${label}] ${formatDrmUsage(usage)}`),
+      .join(", ")}`,
+    ...[...observed.drm.peaks].map(
+      ([phase, peak]) => `VRAM peak [${phase}] ${formatDrmUsage(peak)}`,
+    ),
+    ...observed.drm.marks.map(({ label, usage }) => `VRAM at [${label}] ${formatDrmUsage(usage)}`),
     ...(observed.nvidia === undefined
       ? []
       : [`nvidia-smi ${formatNvidiaTimeline(observed.nvidia)}`]),
   ];
   for (const [component, diagnostics] of observed.diagnostics) {
     lines.push(
-      `${component}: 重み ${gib(diagnostics.weights.allocatedBytes)}・backing ${gib(
+      `${component}: weights ${gib(diagnostics.weights.allocatedBytes)}, backing ${gib(
         diagnostics.planBacking.residentBytes + diagnostics.planBacking.inputBytes,
-      )}・幾何 ${diagnostics.geometryProfile}・submit ${diagnostics.submit.submitCount} 本・窓平均の最大 ${
+      )}, geometry ${diagnostics.geometryProfile}, ${diagnostics.submit.submitCount} submits, max window mean ${
         diagnostics.submit.chunkBudget.maxWindowMeanMs?.toFixed(1) ?? "—"
-      } ms・予算超過 ${diagnostics.submit.chunkBudget.overBudgetChunks} 本`,
+      } ms, ${diagnostics.submit.chunkBudget.overBudgetChunks} over budget`,
     );
   }
   return lines;
@@ -746,14 +809,15 @@ const textOf = (
   form: "prompt" | "normalized",
 ): string => {
   const entry = prompts.find((candidate) => candidate.name === name);
-  assert(entry !== undefined, `埋め込み資産に '${name}' が無い`);
+  assert(entry !== undefined, `the embedding asset has no '${name}'`);
   return entry[form];
 };
 
 /**
- * 配布形を取得元ハンドルで読んで参照席 / 実用席の pipeline を組む（network も CacheStorage も通らない）。経路と席は呼び手が
- * 必ず名乗る（既定の `"gpu"` にも manifest の既定席にも黙って乗せない — 2.1 の e2e と同じ規律）。`"gpu"` は umT5 の越境先を
- * `crossRepo` の mapping で渡す。
+ * Builds the reference / practical preset's pipeline by reading the distribution through a source handle (neither the
+ * network nor CacheStorage is involved). The caller always names the path and the preset (it never rides silently on
+ * the default `"gpu"` or on the manifest's default preset — the same rule as 2.1's e2e). `"gpu"` passes umT5's
+ * cross-repository target through the `crossRepo` mapping.
  */
 const loadPipeline = (
   gpu: GpuContext,
@@ -773,12 +837,12 @@ const loadPipeline = (
     },
   );
 
-/** 2 ステップの通しの要求の共通部分（寸法とプロンプトと初期ノイズはケースが足す）。 */
+/** The common part of the two-step run's requests (each case adds the size, prompt and initial noise). */
 const TWO_STEP = { steps: STEPS, guidance: GUIDANCE, shift: SHIFT, frames: FRAMES } as const;
 
 test.skipIf(!ANY_FIXTURE || !TEXT_EMBEDS_READABLE)(
-  "Wan2.2 通し（ホスト・GPU 不要）: 参照のメタ（埋め込み資産・σ / timestep・shift 5.0）と統計 48 値が TS と一致し、" +
-    "参照の DiT 出力から CFG + UniPC が参照の潜在をビット一致で再現する",
+  "Wan2.2 end-to-end (host, no GPU): the reference metadata (embedding asset, σ / timestep, shift 5.0) and the 48 " +
+    "statistics match TS, and CFG + UniPC rebuild the reference latents bit for bit from the reference DiT outputs",
   async () => {
     const embedsSha = await sha256Hex(await readMirrorAsset(WAN_TI2V_DIST_ROOT, TEXT_EMBEDS));
     const schedule = wanUniPcSchedule(STEPS, SHIFT, WAN_UNIPC_CONFIG.numTrainTimesteps);
@@ -786,11 +850,11 @@ test.skipIf(!ANY_FIXTURE || !TEXT_EMBEDS_READABLE)(
     const std = Float32Array.from(WAN22_LATENTS_STD);
     for (const { name, role } of CASES) {
       const fixture = await readFixture(fixtureUrl(name));
-      assertEquals(fixture.meta("role"), role, `${name}: 役割`);
+      assertEquals(fixture.meta("role"), role, `${name}: role`);
       assertEquals(
         fixture.meta("text_embeds_sha256"),
         embedsSha,
-        `${name}: 参照を作った埋め込み資産`,
+        `${name}: the embedding asset the reference was made with`,
       );
       assertEquals(
         [
@@ -800,36 +864,41 @@ test.skipIf(!ANY_FIXTURE || !TEXT_EMBEDS_READABLE)(
           fixture.meta("expand_timesteps"),
         ],
         [String(STEPS), "5.0", "5.0", "false"],
-        `${name}: step 数・guidance・shift・時刻の経路`,
+        `${name}: step count, guidance, shift, timestep path`,
       );
-      assertEquals(fixture.meta("negative"), "negative", `${name}: negative の行名`);
-      assertEquals(fixture.shape("latents_init"), LATENT_SHAPE, `${name}: 潜在の形`);
-      assertEquals(fixture.shape("frames"), [3, FRAMES, HEIGHT, WIDTH], `${name}: フレームの形`);
-      // 48 値の統計（逆正規化の向き）— 参照が上流の VAE の config から書いた値と TS の定数のビット一致。
+      assertEquals(fixture.meta("negative"), "negative", `${name}: negative row name`);
+      assertEquals(fixture.shape("latents_init"), LATENT_SHAPE, `${name}: latent shape`);
+      assertEquals(fixture.shape("frames"), [3, FRAMES, HEIGHT, WIDTH], `${name}: frame shape`);
+      // The 48 statistics (direction of the denormalization) — the values the reference wrote from upstream's VAE
+      // config are bit-identical to the TS constants.
       assert(
         bitsEqual(fixture.tensor("latents_mean"), mean),
-        `${name}: latents_mean が WAN22 と違う`,
+        `${name}: latents_mean differs from WAN22`,
       );
-      assert(bitsEqual(fixture.tensor("latents_std"), std), `${name}: latents_std が WAN22 と違う`);
+      assert(
+        bitsEqual(fixture.tensor("latents_std"), std),
+        `${name}: latents_std differs from WAN22`,
+      );
       const timesteps: unknown = JSON.parse(fixture.meta("timesteps"));
       const sigmas: unknown = JSON.parse(fixture.meta("sigmas"));
       assertEquals(timesteps, schedule.timesteps, `${name}: timesteps`);
       assert(
         Array.isArray(sigmas) && sigmas.every((value) => typeof value === "number"),
-        `${name}: sigmas が数の列でない`,
+        `${name}: sigmas is not an array of numbers`,
       );
       assert(
         bitsEqual(Float32Array.from(sigmas), schedule.sigmas),
-        `${name}: sigmas ${JSON.stringify(sigmas)} が f32 で ${[...schedule.sigmas]} と一致しない`,
+        `${name}: sigmas ${JSON.stringify(sigmas)} do not match ${[...schedule.sigmas]} in f32`,
       );
-      // 参照が記録した DiT の出力（forward の hook）から、ホストの CFG + UniPC で参照の潜在を作り直す。
+      // Rebuild the reference latents with the host's CFG + UniPC from the DiT outputs the reference recorded (forward
+      // hook).
       const sampler = new WanUniPcSampler(schedule, WAN_UNIPC_CONFIG);
       let latents: Float32Array<ArrayBuffer> = fixture.tensor("latents_init");
       for (let step = 0; step < STEPS; step += 1) {
         assertEquals(
           fixture.shape(`latents.${step}`),
           LATENT_SHAPE,
-          `${name}: latents.${step} の形`,
+          `${name}: latents.${step} shape`,
         );
         const velocity = wanClassifierFreeGuidance(
           fixture.tensor(`noise_cond.${step}`),
@@ -840,8 +909,8 @@ test.skipIf(!ANY_FIXTURE || !TEXT_EMBEDS_READABLE)(
         const want = fixture.tensor(`latents.${step}`);
         assert(
           bitsEqual(latents, want),
-          `${name}: step ${step} の潜在がビット一致しない（${formatDifference(
-            "潜在",
+          `${name}: step ${step} latents are not bit-identical (${formatDifference(
+            "latents",
             difference(latents, want),
           )}）`,
         );
@@ -850,19 +919,20 @@ test.skipIf(!ANY_FIXTURE || !TEXT_EMBEDS_READABLE)(
   },
 );
 
-/** 観測点（帯を持つ出力 — 各 step の後の潜在とクランプ後のフレーム）。 */
+/** The observation points (outputs with a band — the latents after each step and the clamped frames). */
 const OBSERVATION_POINTS = ["latents.0", "latents.1", "frames"] as const;
 type ObservationPoint = (typeof OBSERVATION_POINTS)[number];
 
-/** 観測点ごとの帯（未導出は `undefined`）。 */
+/** The band per observation point (`undefined` when not derived). */
 const bandOf = (point: ObservationPoint): number | undefined =>
   point === "frames" ? FRAME_RATIO_BAND : LATENT_RATIO_BANDS[point === "latents.0" ? 0 : 1];
 
 const BANDS_DERIVED = OBSERVATION_POINTS.every((point) => bandOf(point) !== undefined);
 
 /**
- * 1 ケースの観測点ごとの比（帯の候補の材料）。非有限と device lost の検査を通った後・帯の判定の前に積む（帯の外の回は残し、
- * 非有限の要素を飛ばして出た比や device lost の後の比は候補に混ぜない）。
+ * One case's ratios per observation point (the material for the band candidate). Stored after the non-finite and
+ * device-lost checks pass and before the band verdict (a run outside the band is kept, and ratios computed by skipping
+ * non-finite elements or after a device lost are not mixed into the candidate).
  */
 type CaseRatios = {
   readonly name: string;
@@ -871,8 +941,9 @@ type CaseRatios = {
 };
 
 /**
- * 帯の候補（最悪 × 5 を有効数字 2 桁へ切り上げ — 段 2 の `bandCandidate` と同じ規則）。割り算の誤差（例 1.1e-6 / 1e-7 が
- * 11 をわずかに超える）で、ちょうど 2 桁の値を 1 単位上へ切り上げないよう、商を 12 桁へ丸めてから切り上げる。
+ * The band candidate (worst × 5 rounded up to 2 significant digits — the same rule as stage 2's `bandCandidate`). So
+ * that a division error (e.g. 1.1e-6 / 1e-7 slightly exceeding 11) does not round an exactly-2-digit value up by one
+ * unit, the quotient is rounded to 12 digits before rounding up.
  */
 const roundUpTwoDigits = (value: number): number => {
   const unit = 10 ** (Math.floor(Math.log10(value)) - 1);
@@ -880,8 +951,8 @@ const roundUpTwoDigits = (value: number): number => {
 };
 
 describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
-  "Wan2.2 通し 2 ステップ（実 GPU）: 1280×704・17 フレームの故障注入は帯の外・" +
-    "sha256 の環境行（参照席の帯のケース・seed 経路の 2 寸法・実用席の seed 経路・GPU 経路）— the latents and " +
+  "Wan2.2 end-to-end 2 steps (real GPU): 1280×704, 17 frames, fault injection outside the band, " +
+    "sha256 per-environment rows (reference preset's band cases, seed path in 2 sizes, practical presets' seed path, GPU path) — the latents and " +
     "frames inside the band of the diffusers reference only with KARUME_UPSTREAM_PARITY=1",
   () => {
     let deviceLost: string | undefined;
@@ -891,16 +962,18 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
     let referencePipeline: Ti2vPipeline | undefined;
     const diagnostics = new Map<RunComponent, SessionDiagnostics>();
     /**
-     * 参照席の seed 経路の 1280×704 の実物（RGB のバイト列）— 同じ要求の実用席のケースの床（{@link runSeedCase} の
-     * `beforeSettle`）の比べる相手。
+     * The reference preset's seed-path 1280×704 artifact (RGB bytes) — the partner of the floor of the practical
+     * presets' cases for the same request (`beforeSettle` of {@link runSeedCase}).
      */
     let referenceSeedRgb: Uint8Array<ArrayBuffer> | undefined;
     /** The practical seats' outputs seen so far (the online seat must also differ from the s16 seat). */
     const practicalSeedRgb: Uint8Array<ArrayBuffer>[] = [];
     /**
-     * seed 経路の 2 ステップ 1 本（完走・非有限 0・sha256 の環境行）。席は `seatPipeline` を組んだ席で、参照席の 2 寸法と実用席の
-     * 1280×704 が同じ本体を通る（席ごとに検査が割れないように）。`beforeSettle` は sha の突合と行の書き込み
-     * （`settleOrObserve`）の前に実物を受ける（`KARUME_REFERENCE=write` の走行でも、行を書く前に効かせる検査の置き場）。
+     * One seed-path two-step case (completion, 0 non-finite values, the sha256 per-environment row). The preset is the
+     * one `seatPipeline` was built with; the reference preset's two sizes and the practical presets' 1280×704 go
+     * through the same body (so the checks do not diverge per preset). `beforeSettle` receives the artifact before the
+     * sha comparison and the row write (`settleOrObserve`) (the place for checks that must apply before a row is
+     * written, even in a `KARUME_REFERENCE=write` run).
      */
     /** The conv8 cases' VAE stage by tile (filled in run order — tile 16 first). */
     const conv8Vae = new Map<16 | 32, Conv8VaeRecord>();
@@ -933,12 +1006,12 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
             },
             { nvidiaSmi: knobs.conv8Record !== undefined },
           );
-          assert("video" in observed, "generate が最後まで回っていない");
-          assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+          assert("video" in observed, "generate did not run to the end");
+          assertEquals(observed.latents.length, STEPS, "denoise-step count");
           const { video } = observed;
           assertEquals([video.frames, video.height, video.width], [FRAMES, height, width]);
           const nonFinite = countNonFinite(video.data);
-          const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
+          const notes = [`non-finite ${nonFinite}`, ...formatObserved(observed)];
           if (knobs.conv8Record !== undefined) {
             const vaeMs = observed.stageMs.vae_decoder;
             assert(vaeMs !== undefined, `${id}: the vae_decoder stage was not timed`);
@@ -956,7 +1029,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
             notes.push(...conv8VaeLines(conv8Vae));
           }
           console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-          assertEquals(nonFinite, 0, `${id}: 非有限`);
+          assertEquals(nonFinite, 0, `${id}: non-finite values`);
           assertEquals(deviceLost, undefined, "device lost");
           const bytes = rgbBytes(video);
           beforeSettle(bytes);
@@ -995,7 +1068,8 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
       try {
         await referencePipeline?.dispose();
       } finally {
-        // MUST: device を捨てる前に解放を待つ（B570 の destroy の遅れ — 後続のテストの予算を残す）。
+        // MUST: wait for the releases before discarding the device (B570's delayed destroy — leave budget for the
+        // following tests).
         await settleReleases(gpuContext);
         gpuContext.destroy();
       }
@@ -1009,8 +1083,8 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
         const pipeline = assigned(referencePipeline, "referencePipeline");
         const { prompts } = pipeline;
         const fixture = await readFixture(fixtureUrl(name));
-        assertEquals(fixture.meta("role"), role, `${name}: 役割`);
-        // band は原文・accept は正規化後の文字列で引く（受理集合の 2 つの綴りを両方通す）。
+        assertEquals(fixture.meta("role"), role, `${name}: role`);
+        // band looks up the original text, accept the normalized string (both spellings of the accepted set are used).
         const prompt = textOf(
           prompts,
           fixture.meta("prompt"),
@@ -1030,14 +1104,14 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
                 width: WIDTH,
                 height: HEIGHT,
               });
-              assert("video" in observed, "generate が最後まで回っていない");
-              assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+              assert("video" in observed, "generate did not run to the end");
+              assertEquals(observed.latents.length, STEPS, "denoise-step count");
               const { video } = observed;
               assertEquals([video.frames, video.height, video.width], [FRAMES, HEIGHT, WIDTH]);
               const diffs = OBSERVATION_POINTS.map((point) => ({
                 point,
                 band: bandOf(point),
-                // 参照のフレームはクランプ後で書かれている（`ti2v_few_step_ref.decode_frames` の clamp）。
+                // The reference frames are written after the clamp (the clamp of `ti2v_few_step_ref.decode_frames`).
                 diff:
                   point === "frames"
                     ? difference(video.data, fixture.tensor("frames"))
@@ -1054,7 +1128,8 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
                     output: point,
                     maxAbs: diff.maxAbs,
                     maxRel: diff.maxRel,
-                    // 未導出の帯は無限の帯として記録する（判定は下で赤にする — 段 2 の `toleranceOf` と同じ扱い）。
+                    // An underived band is recorded as an infinite band (the verdict below fails — the same as
+                    // stage 2's `toleranceOf`).
                     tolerance:
                       band === undefined
                         ? { atol: Number.POSITIVE_INFINITY, rtol: 0 }
@@ -1073,7 +1148,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
               caseNote = notes.join(" / ");
               console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
               for (const { point, diff } of diffs) {
-                assertEquals(diff.nonFinite, 0, `${id}: ${point} の非有限`);
+                assertEquals(diff.nonFinite, 0, `${id}: ${point} non-finite values`);
               }
               assertEquals(deviceLost, undefined, "device lost");
               caseRatios.push({
@@ -1091,13 +1166,13 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
                 for (const { point, band, diff } of diffs) {
                   if (band === undefined) {
                     throw new Error(
-                      `${id}: ${point} の帯が未導出（比 ${diff.ratio.toExponential(3)}）— ` +
-                        "帯の候補は「帯の候補」の step が出す",
+                      `${id}: ${point} band not derived yet (ratio ${diff.ratio.toExponential(3)}) — ` +
+                        'the "band candidate" step prints the candidate',
                     );
                   }
                   assert(
                     diff.ratio <= band,
-                    `${id}: ${formatDifference(point, diff)} が帯 ${band} の外`,
+                    `${id}: ${formatDifference(point, diff)} is outside the band ${band}`,
                   );
                 }
               }
@@ -1111,7 +1186,8 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
             },
           );
         } finally {
-          // 次のケースの確保の前に、このケースの段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+          // Before the next case allocates, wait for the release of this case's stage allocations (B570's delayed
+          // `destroy()`).
           await settleReleases(gpu);
         }
         if (settlement?.check.status === "fail") {
@@ -1120,11 +1196,12 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
       });
     }
 
-    // 未導出の帯の候補（決定用だけから作る — 受入れの比は並べるが候補に使わない。決定用のどれかが比を出す前に落ちた回は
-    // 候補を出さない）。帯が導出済みなら step を作らない。
+    // The candidate for an underived band (built from the deciding cases only — the acceptance ratios are listed but
+    // not used; when one of the deciding cases failed before reporting its ratios, no candidate is printed). When the
+    // bands are derived, no step is created.
     if (!BANDS_DERIVED) {
       it.skipIf(!ANY_FIXTURE || !UPSTREAM_PARITY)(
-        `帯の候補（未導出）${UPSTREAM_PARITY_OPT_IN}`,
+        `band candidate (not derived yet)${UPSTREAM_PARITY_OPT_IN}`,
         () => {
           const expected = CASES.filter(({ role }) => role === "band").length;
           const decided = caseRatios.filter(({ role }) => role === "band");
@@ -1132,29 +1209,32 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
             decided.length === expected
               ? OBSERVATION_POINTS.map((point) => {
                   const worst = Math.max(...decided.map(({ ratios }) => ratios[point]));
-                  return `${point}: 決定用 ${expected} 本の最悪 ${worst.toExponential(3)} × 5 = ${(
+                  return `${point}: worst of the ${expected} deciding cases ${worst.toExponential(3)} × 5 = ${(
                     worst * 5
-                  ).toExponential(3)}（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`;
+                  ).toExponential(
+                    3,
+                  )} (rounded up to 2 significant digits: ${roundUpTwoDigits(worst * 5)})`;
                 }).join(" / ")
-              : `決定用 ${expected} 本のうち比が出たのは ${decided.length} 本 — 候補にしない（落ちたケースを先に調べる）`;
+              : `of the ${expected} deciding cases, only ${decided.length} reported ratios — no candidate (investigate the failed cases first)`;
           const accepted = caseRatios
             .filter(({ role }) => role === "accept")
             .map(
               ({ name, ratios }) =>
                 `${name} ${OBSERVATION_POINTS.map(
                   (point) => `${point} ${ratios[point].toExponential(3)}`,
-                ).join("・")}`,
+                ).join(", ")}`,
             );
           throw new Error(
-            `帯が未導出 — ${candidate}。受入れの比（帯の決定に使わない）: ${
-              accepted.join(" / ") || "なし"
+            `band not derived yet — ${candidate}. Acceptance ratios (not used to set the band): ${
+              accepted.join(" / ") || "none"
             }`,
           );
         },
       );
     }
 
-    // 故障注入（受入れの初期ノイズ — 潜在だけを見るので VAE の段の前で止める）。
+    // Fault injection (the acceptance case's initial noise — only the latents are checked, so it stops before the VAE
+    // stage).
     let acceptFixture: Fixture | undefined;
     const faults: readonly {
       readonly label: string;
@@ -1164,7 +1244,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
       ) => Omit<GenerateRequest, "onEvent" | "latents">;
     }[] = [
       {
-        label: "プロンプトの正負の取り違え",
+        label: "swapped positive / negative prompts",
         request: (ferret, negative) => ({
           ...TWO_STEP,
           prompt: negative,
@@ -1182,74 +1262,81 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
     ];
     const lastBand = LATENT_RATIO_BANDS[STEPS - 1];
     for (const { label, request } of faults) {
-      it.skipIf(!ANY_FIXTURE)(`故障注入: ${label} → ${ACCEPT_CASE} の潜在が帯の外`, async () => {
-        const gpu = assigned(gpuContext, "gpuContext");
-        const pipeline = assigned(referencePipeline, "referencePipeline");
-        const { prompts } = pipeline;
-        try {
-          acceptFixture ??= await readFixture(fixtureUrl(ACCEPT_CASE));
-          const accept = acceptFixture;
-          const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
-          const negative = textOf(prompts, accept.meta("negative"), "prompt");
-          const observed = await observe(
-            pipeline,
-            diagnostics,
-            {
-              ...request(ferret, negative),
-              latents: accept.tensor("latents_init"),
-              width: WIDTH,
-              height: HEIGHT,
-            },
-            { abortAfterDenoise: true },
-          );
-          // 段のイベント名が変わって打ち切りが効かないと、28 タイルの VAE を黙って払う（値の判定には出ない）。
-          assert(!("video" in observed), "DiT の段の後で止まっていない");
-          assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-          const diff = difference(
-            observed.latents[STEPS - 1],
-            accept.tensor(`latents.${STEPS - 1}`),
-          );
-          console.log(
-            `[wan-ti2v-pipeline] fault ${label}: ${formatDifference(
-              `latents.${STEPS - 1}`,
-              diff,
-            )}（${
-              lastBand === undefined
-                ? "帯は未導出"
-                : `帯の ${(diff.ratio / lastBand).toFixed(1)} 倍`
-            }）`,
-          );
-          if (lastBand === undefined) {
-            throw new Error(`${label}: 帯が未導出（故障注入の比 ${diff.ratio.toExponential(3)}）`);
+      it.skipIf(!ANY_FIXTURE)(
+        `fault injection: ${label} → ${ACCEPT_CASE} latents outside the band`,
+        async () => {
+          const gpu = assigned(gpuContext, "gpuContext");
+          const pipeline = assigned(referencePipeline, "referencePipeline");
+          const { prompts } = pipeline;
+          try {
+            acceptFixture ??= await readFixture(fixtureUrl(ACCEPT_CASE));
+            const accept = acceptFixture;
+            const ferret = textOf(prompts, accept.meta("prompt"), "prompt");
+            const negative = textOf(prompts, accept.meta("negative"), "prompt");
+            const observed = await observe(
+              pipeline,
+              diagnostics,
+              {
+                ...request(ferret, negative),
+                latents: accept.tensor("latents_init"),
+                width: WIDTH,
+                height: HEIGHT,
+              },
+              { abortAfterDenoise: true },
+            );
+            // If a stage event name changes and the abort stops working, the 28-tile VAE is paid silently (it does not
+            // show in the value verdict).
+            assert(!("video" in observed), "did not stop after the DiT stage");
+            assertEquals(observed.latents.length, STEPS, "denoise-step count");
+            const diff = difference(
+              observed.latents[STEPS - 1],
+              accept.tensor(`latents.${STEPS - 1}`),
+            );
+            console.log(
+              `[wan-ti2v-pipeline] fault ${label}: ${formatDifference(
+                `latents.${STEPS - 1}`,
+                diff,
+              )}（${
+                lastBand === undefined
+                  ? "band not derived yet"
+                  : `${(diff.ratio / lastBand).toFixed(1)} × the band`
+              }）`,
+            );
+            if (lastBand === undefined) {
+              throw new Error(
+                `${label}: band not derived yet (fault-injection ratio ${diff.ratio.toExponential(3)})`,
+              );
+            }
+            assert(
+              diff.ratio > FAULT_MARGIN * lastBand,
+              `${label}: ratio ${diff.ratio} does not exceed the band ${lastBand} × ${FAULT_MARGIN}`,
+            );
+          } finally {
+            await settleReleases(gpu);
           }
-          assert(
-            diff.ratio > FAULT_MARGIN * lastBand,
-            `${label}: 比 ${diff.ratio} が帯 ${lastBand} の ${FAULT_MARGIN} 倍を超えない`,
-          );
-        } finally {
-          await settleReleases(gpu);
-        }
-      });
+        },
+      );
     }
 
-    // seed 経路の 2 ステップ（2 寸法 — 完走・非有限 0・sha256 の環境行）。
+    // The seed path's two steps (2 sizes — completion, 0 non-finite values, the sha256 per-environment row).
     for (const { id, width, height } of SEED_CASES) {
-      it(`${id}（seed 経路・sha256 の環境行）`, () =>
+      it(`${id} (seed path, sha256 per-environment row)`, () =>
         runSeedCase(
           assigned(referencePipeline, "referencePipeline"),
           id,
           width,
           height,
           (bytes) => {
-            // 実用席のケースと同じ要求（1280×704）の実物だけ床の相手に残す。
+            // Keep as the floor's partner only the artifact of the practical presets' request (1280×704).
             if (width === WIDTH && height === HEIGHT) referenceSeedRgb = bytes;
           },
         ));
     }
 
-    // 実用席の seed 経路（参照席の pipeline を畳んでから席の pipeline を組む — 構築では Session を張らない）。
+    // The practical presets' seed path (the reference preset's pipeline is disposed before this preset's is built —
+    // building creates no Session).
     for (const { id: seedCaseId, quant, vaeTile } of PRACTICAL_SEED_CASES) {
-      it(`${seedCaseId}（実用席・seed 経路・sha256 の環境行）`, async () => {
+      it(`${seedCaseId} (practical preset, seed path, sha256 per-environment row)`, async () => {
         // The reference-seat its above are done: dispose that pipeline before building this seat's
         // (afterAll disposes it again, idempotently, for runs where this it does not run).
         await referencePipeline?.dispose();
@@ -1265,12 +1352,15 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
           WIDTH,
           HEIGHT,
           (bytes) => {
-            // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 配布形の経路で席の `session` が Session に届かない
-            // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として書くと、参照行と同じ sha が凍結され、以後この行は
-            // 実用層の退行も決定性も縛らない。行を書く前（`settleOrObserve` の前）に落とす。
+            // The floor (ADR 0110 decision 5 — a practical preset differs by at least 1 bit from the reference preset
+            // for the same request): in a regression where the preset's `session` does not reach the Session on the
+            // distribution path, the practical preset produces the same bytes as the reference preset. Writing that
+            // artifact as a practical row would freeze the reference row's sha, and from then on this row would pin
+            // neither practical-tier regressions nor determinism. Fail before writing the row (before
+            // `settleOrObserve`).
             if (referenceSeedRgb === undefined) {
               throw new Error(
-                `${seedCaseId}: 同じ要求の参照席の実物が無い（参照席の seed 経路の 1280×704 が回っていない — 床を確かめられない）`,
+                `${seedCaseId}: no reference-preset artifact for the same request (the reference preset's seed-path 1280×704 did not run — the floor cannot be checked)`,
               );
             }
             const reference = referenceSeedRgb;
@@ -1278,7 +1368,7 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
               bytes.length !== other.length || bytes.some((value, index) => value !== other[index]);
             assert(
               differs(reference),
-              `${seedCaseId}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+              `${seedCaseId}: the practical preset's output is byte-identical to the reference preset's for the same request (the preset's session did not arrive)`,
             );
             // The practical seats differ from each other too (the online seat replaces the three
             // dispatches; a route that silently kept them would reproduce the s16 bytes).
@@ -1297,71 +1387,79 @@ describe.skipIf(!DIST_PRESENT || !GPU_AVAILABLE)(
       });
     }
 
-    // GPU 経路（umT5 の text 段を畳んでから DiT・VAE の段を張る）。
-    it.skipIf(!GPU_TEXT_PRESENT)(`${GPU_TEXT_CASE_ID}（GPU 経路・sha256 の環境行）`, async () => {
-      const gpu = assigned(gpuContext, "gpuContext");
-      let settlement: ReferenceSettlement | undefined;
-      try {
-        // 構築では Session を張らない（umT5 の重みは generate ごとに text 段で読む — ADR 0119 決定 11）。
-        await using gpuPipeline = await loadPipeline(
-          gpu,
-          diagnostics,
-          "gpu",
-          WAN_TI2V_REFERENCE_QUANT,
-        );
-        const prompt = textOf(gpuPipeline.prompts, SEED_PROMPT, "prompt");
-        await runRecordedCase(results, { id: GPU_TEXT_CASE_ID }, async () => {
-          const observed = await observe(gpuPipeline, diagnostics, {
-            ...TWO_STEP,
-            prompt,
-            seed: SEED,
-            width: WIDTH,
-            height: HEIGHT,
-          });
-          assert("video" in observed, "generate が最後まで回っていない");
-          assertEquals(observed.latents.length, STEPS, "denoise-step の数");
-          // text 段は DiT 段を張る前に畳む（段の境目の並び — VRAM の点も同じ並びで採る）。
-          assertEquals(
-            observed.drm.marks.slice(0, 3).map(({ label }) => label),
-            ["text_encoder start", "text_encoder end", "transformer start"],
-            "text 段 → DiT 段の順",
+    // The GPU path (the umT5 text stage is disposed before the DiT and VAE stages are built).
+    it.skipIf(!GPU_TEXT_PRESENT)(
+      `${GPU_TEXT_CASE_ID} (GPU path, sha256 per-environment row)`,
+      async () => {
+        const gpu = assigned(gpuContext, "gpuContext");
+        let settlement: ReferenceSettlement | undefined;
+        try {
+          // Building creates no Session (umT5's weights are read by the text stage on every generate — ADR 0119
+          // decision 11).
+          await using gpuPipeline = await loadPipeline(
+            gpu,
+            diagnostics,
+            "gpu",
+            WAN_TI2V_REFERENCE_QUANT,
           );
-          assert(observed.diagnostics.has("text_encoder"), "umT5 の run の診断が届いていない");
-          const { video } = observed;
-          assertEquals([video.frames, video.height, video.width], [FRAMES, HEIGHT, WIDTH]);
-          const nonFinite = countNonFinite(video.data);
-          const notes = [
-            "textEncoder: gpu（umT5 i8・活性 f32）",
-            `非有限 ${nonFinite}`,
-            ...formatObserved(observed),
-          ];
-          console.log(`[wan-ti2v-pipeline] ${GPU_TEXT_CASE_ID}:\n  ${notes.join("\n  ")}`);
-          assertEquals(nonFinite, 0, `${GPU_TEXT_CASE_ID}: 非有限`);
-          assertEquals(deviceLost, undefined, "device lost");
-          const outcome = await settleOrObserve(references, results, {
-            id: GPU_TEXT_CASE_ID,
-            artifact: `${GPU_TEXT_CASE_ID}.rgb`,
-            bytes: rgbBytes(video),
+          const prompt = textOf(gpuPipeline.prompts, SEED_PROMPT, "prompt");
+          await runRecordedCase(results, { id: GPU_TEXT_CASE_ID }, async () => {
+            const observed = await observe(gpuPipeline, diagnostics, {
+              ...TWO_STEP,
+              prompt,
+              seed: SEED,
+              width: WIDTH,
+              height: HEIGHT,
+            });
+            assert("video" in observed, "generate did not run to the end");
+            assertEquals(observed.latents.length, STEPS, "denoise-step count");
+            // The text stage is disposed before the DiT stage is built (the order of the stage boundaries — the VRAM
+            // points are taken in the same order).
+            assertEquals(
+              observed.drm.marks.slice(0, 3).map(({ label }) => label),
+              ["text_encoder start", "text_encoder end", "transformer start"],
+              "text stage → DiT stage order",
+            );
+            assert(
+              observed.diagnostics.has("text_encoder"),
+              "the diagnostics of the umT5 run did not arrive",
+            );
+            const { video } = observed;
+            assertEquals([video.frames, video.height, video.width], [FRAMES, HEIGHT, WIDTH]);
+            const nonFinite = countNonFinite(video.data);
+            const notes = [
+              "textEncoder: gpu (umT5 i8, f32 activations)",
+              `non-finite ${nonFinite}`,
+              ...formatObserved(observed),
+            ];
+            console.log(`[wan-ti2v-pipeline] ${GPU_TEXT_CASE_ID}:\n  ${notes.join("\n  ")}`);
+            assertEquals(nonFinite, 0, `${GPU_TEXT_CASE_ID}: non-finite values`);
+            assertEquals(deviceLost, undefined, "device lost");
+            const outcome = await settleOrObserve(references, results, {
+              id: GPU_TEXT_CASE_ID,
+              artifact: `${GPU_TEXT_CASE_ID}.rgb`,
+              bytes: rgbBytes(video),
+            });
+            settlement = outcome.settlement;
+            return { ...outcome.fields, note: notes.join(" / ") };
           });
-          settlement = outcome.settlement;
-          return { ...outcome.fields, note: notes.join(" / ") };
-        });
-      } finally {
-        await settleReleases(gpu);
-      }
-      if (settlement?.check.status === "fail") {
-        throw new Error(referenceMismatchMessage(GPU_TEXT_CASE_ID, settlement, references));
-      }
-    });
+        } finally {
+          await settleReleases(gpu);
+        }
+        if (settlement?.check.status === "fail") {
+          throw new Error(referenceMismatchMessage(GPU_TEXT_CASE_ID, settlement, references));
+        }
+      },
+    );
   },
 );
 
-// NOTE: opt-in の env を付けて `--filter` なしで回すと、既定のレーンの `Deno.test` と合わせて 1 プロセスで device を 2 つ順に
-// 取る（B570 の `destroy()` が VRAM を返さない件に当たる）。`--filter "50 ステップ"` で単独のプロセスとして回す（モジュール doc
-// 「device の使い方」）。
+// NOTE: run with the opt-in env and without `--filter`, one process takes two devices in turn together with the default
+// lane's `Deno.test` (hitting B570's `destroy()` not returning VRAM). Run it as a separate process with
+// `--filter "50 steps"` (module doc "Device use").
 describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
-  "Wan2.2 通し 50 ステップ（実 GPU・opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1）: 1280×704・33 フレーム（参照席・実用席 s16・online）が" +
-    "完走し非有限 0・所要と段の切り替えの VRAM・PNG 全フレーム + 一覧図・sha256 の環境行",
+  "Wan2.2 end-to-end 50 steps (real GPU, opt-in KARUME_WAN_TI2V_FULL_PIPELINE=1): 1280×704, 33 frames (reference preset, practical s16, online)" +
+    " complete with 0 non-finite values; time and VRAM at stage switches, PNG of every frame + contact sheet, sha256 per-environment rows",
   () => {
     let deviceLost: string | undefined;
     // One device shared by the its below (acquired before them, destroyed after them all).
@@ -1381,7 +1479,10 @@ describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
       await settleReleases(gpuContext);
       gpuContext.destroy();
     });
-    /** 参照席の実物（RGB のバイト列）の sha256 — 同じ要求の実用席の床の比べる相手（既定のレーンの実用行と同じ床）。 */
+    /**
+     * The sha256 of the reference preset's artifact (RGB bytes) — the partner of the practical presets' floor for the
+     * same request (the same floor as the default lane's practical rows).
+     */
     let referenceRgbSha: string | undefined;
     for (const { id, quant } of FULL_CASES) {
       it(id, async () => {
@@ -1398,18 +1499,22 @@ describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
               height: HEIGHT,
               frames: FULL_FRAMES,
             });
-            assert("video" in observed, "generate が最後まで回っていない");
+            assert("video" in observed, "generate did not run to the end");
             assertEquals(
               observed.latents.length,
               FULL_STEPS,
-              "denoise-step の数（manifest の既定）",
+              "denoise-step count (the manifest's default)",
             );
             const { video } = observed;
             assertEquals([video.frames, video.height, video.width], [FULL_FRAMES, HEIGHT, WIDTH]);
             const nonFinite = countNonFinite(video.data);
-            const notes = [`席 ${quant}`, `非有限 ${nonFinite}`, ...formatObserved(observed)];
+            const notes = [
+              `preset ${quant}`,
+              `non-finite ${nonFinite}`,
+              ...formatObserved(observed),
+            ];
             console.log(`[wan-ti2v-pipeline] ${id}:\n  ${notes.join("\n  ")}`);
-            assertEquals(nonFinite, 0, "非有限");
+            assertEquals(nonFinite, 0, "non-finite values");
             assertEquals(deviceLost, undefined, "device lost");
             await writeWanFrames(fullResults, id, video);
             const sheet = contactSheet(video, 4, 8, 4);
@@ -1423,16 +1528,18 @@ describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
             if (quant === WAN_TI2V_REFERENCE_QUANT) {
               referenceRgbSha = sha;
             } else {
-              // 床（ADR 0110 決定 5 — 実用席は同じ要求の参照席と 1 bit 以上違う）: 席の `session` が Session に届かない
-              // 退行では、実用席は参照席と同じバイトを出す。その実物を実用行として凍結しないよう、突合と書き込みの前に落とす。
+              // The floor (ADR 0110 decision 5 — a practical preset differs by at least 1 bit from the reference preset
+              // for the same request): in a regression where the preset's `session` does not reach the Session, the
+              // practical preset produces the same bytes as the reference preset. Fail before the comparison and the
+              // write, so that artifact is not frozen as a practical row.
               if (referenceRgbSha === undefined) {
                 throw new Error(
-                  `${id}: 同じ要求の参照席の実物が無い（参照席の 50 ステップが回っていない — 床を確かめられない）`,
+                  `${id}: no reference-preset artifact for the same request (the reference preset's 50 steps did not run — the floor cannot be checked)`,
                 );
               }
               assert(
                 sha !== referenceRgbSha,
-                `${id}: 実用席の出力が参照席の同じ要求とバイト単位で一致した（席の session が届いていない）`,
+                `${id}: the practical preset's output is byte-identical to the reference preset's for the same request (the preset's session did not arrive)`,
               );
             }
             const outcome = await settleOrObserve(references, fullResults, {
@@ -1444,7 +1551,8 @@ describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
             return { ...outcome.fields, note: notes.join(" / ") };
           });
         } finally {
-          // 次の席の確保の前に、この席の段の確保の解放を待つ（B570 の `destroy()` の遅れ）。
+          // Before the next preset allocates, wait for the release of this preset's stage allocations (B570's delayed
+          // `destroy()`).
           await settleReleases(gpu);
         }
         if (settlement?.check.status === "fail") {
@@ -1455,10 +1563,10 @@ describe.skipIf(!FULL_PIPELINE || !DIST_PRESENT || !GPU_AVAILABLE)(
   },
 );
 
-// NOTE: 50 ステップの通しと同じく `--filter "121 フレーム"` で単独のプロセスとして回す（モジュール doc「device の使い方」）。
+// NOTE: like the 50-step run, run it as a separate process with `--filter "121 frames"` (module doc "Device use").
 test.skipIf(!LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE)(
-  "Wan2.2 通し 121 フレーム（実 GPU・opt-in KARUME_WAN_TI2V_121F=1）: 1280×704・2 ステップ（参照席・seed 経路）が完走し" +
-    "非有限 0・sha256 の環境行・所要と段の切り替えの VRAM",
+  "Wan2.2 end-to-end 121 frames (real GPU, opt-in KARUME_WAN_TI2V_121F=1): 1280×704, 2 steps (reference preset, seed path) complete" +
+    " with 0 non-finite values; sha256 per-environment row, time and VRAM at stage switches",
   async () => {
     let deviceLost: string | undefined;
     const gpu = verifyRunningGpu(
@@ -1486,14 +1594,14 @@ test.skipIf(!LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE)(
           width: WIDTH,
           height: HEIGHT,
         });
-        assert("video" in observed, "generate が最後まで回っていない");
-        assertEquals(observed.latents.length, STEPS, "denoise-step の数");
+        assert("video" in observed, "generate did not run to the end");
+        assertEquals(observed.latents.length, STEPS, "denoise-step count");
         const { video } = observed;
         assertEquals([video.frames, video.height, video.width], [LONG_CLIP_FRAMES, HEIGHT, WIDTH]);
         const nonFinite = countNonFinite(video.data);
-        const notes = [`非有限 ${nonFinite}`, ...formatObserved(observed)];
+        const notes = [`non-finite ${nonFinite}`, ...formatObserved(observed)];
         console.log(`[wan-ti2v-pipeline] ${LONG_CLIP_CASE_ID}:\n  ${notes.join("\n  ")}`);
-        assertEquals(nonFinite, 0, `${LONG_CLIP_CASE_ID}: 非有限`);
+        assertEquals(nonFinite, 0, `${LONG_CLIP_CASE_ID}: non-finite values`);
         assertEquals(deviceLost, undefined, "device lost");
         const outcome = await settleOrObserve(references, longClipResults, {
           id: LONG_CLIP_CASE_ID,
@@ -1514,9 +1622,10 @@ test.skipIf(!LONG_CLIP || !DIST_PRESENT || !GPU_AVAILABLE)(
 );
 
 /**
- * 参照門に登録するケース（回せるものだけ — 帯のケースは参照と配布形、seed のケースは配布形、GPU 経路は加えて umT5 の
- * ミラーが要る）。50 ステップの通しと 121 フレームのケースは opt-in のときだけ登録する（既定のレーンでは回らないので、
- * 登録すると行が無い機の参照門を赤にする）。
+ * The cases registered with the reference guard (only those that can run — the band cases need the references and the
+ * distribution, the seed cases the distribution, and the GPU path also the umT5 mirror). The 50-step run and the
+ * 121-frame case register only under the opt-in (they do not run in the default lane, so registering them would turn
+ * the reference guard red on a machine without the rows).
  */
 const CASE_IDS = [
   ...(DIST_PRESENT && ANY_FIXTURE ? CASES.map(({ name }) => bandCaseId(name)) : []),

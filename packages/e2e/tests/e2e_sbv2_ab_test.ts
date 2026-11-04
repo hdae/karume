@@ -1,37 +1,45 @@
 /**
- * SBV2 の**自機 A/B 門**（実 GPU・ADR 0110 決定 5）。実用席 `i8-a8`（`front` / `voice` の linear を
- * 活性まで整数内積で回す `linearCompute: "a8"` — 既定席ではない）を、**同じ機・同じ i8 重み**で
- * `session` が空の参照席（manifest から導く — {@link referencePartnerOf}。今の配布形では `i8`）と
- * 比べる。この席にはこれまで門が 1 本も無かった。
+ * SBV2's **self A/B check** (real GPU, ADR 0110 decision 5). It compares the practical preset
+ * `i8-a8` (`linearCompute: "a8"`, which runs the linears of `front` / `voice` as integer dot
+ * products down to the activations — not the default preset), **on the same machine with the same
+ * i8 weights**, against the reference preset whose `session` is empty (derived from the manifest —
+ * {@link referencePartnerOf}; `i8` in the current distribution). This preset had no check at all
+ * until now.
  *
- * ## 観測点 = front の 4 出力（席が最初に効いた直後 — 決定 5-4）
+ * ## Observation points = the 4 outputs of front (right after the preset first takes effect —
+ * decision 5-4)
  *
- * SBV2 に DiT の step は無い。quant の `session` が届くのは `front` と `voice` の Session だけで
- * （`text_encoder` は `{}` — `src/sbv2/pipeline.ts` のモジュール doc）、先に走るのは `front`
- * （enc_p + dp + sdp reverse）なので、その**グラフ出力 4 本**（logw_sdp / logw_dp / m_p /
- * logs_p — 位置で引く）を観測点にする。
+ * SBV2 has no DiT step. A quant's `session` reaches only the `front` and `voice` Sessions
+ * (`text_encoder` gets `{}` — the module doc of `src/sbv2/pipeline.ts`), and `front` (enc_p + dp +
+ * sdp reverse) runs first, so its **4 graph outputs** (logw_sdp / logw_dp / m_p / logs_p — looked
+ * up by position) are the observation points.
  *
- * - 最終出力（波形）を観測点にしない理由: front の logw は継続長の `ceil` を通ってフレーム数を
- *   決めるので、a8 の差で 1 音素でも長さが割れると波形の長さが変わり、要素ごとの比較が成り立た
- *   ない（離散化の前で比べる）。
- * - 出力を 4 本とも帯に掛ける理由: front の適格 linear は 2 本しかなく
- *   （docs/research/2026-08-03-dp4a-w8a8-design.md）、どの出力にどれだけ効くかは実測まで分からない。
- *   1 本に絞ると、効かない出力を選んだときに床が恒常的に赤になる。
+ * - Why the final output (the waveform) is not an observation point: front's logw goes through the
+ *   duration `ceil` and decides the frame count, so if the a8 difference splits the length of even
+ *   one phoneme, the waveform's length changes and an element-wise comparison no longer holds
+ *   (compare before the discretization).
+ * - Why all 4 outputs are held to a band: front has only 2 eligible linears
+ *   (docs/research/2026-08-03-dp4a-w8a8-design.md), and how much each affects which output is not
+ *   known until measured. Narrowing to one would leave the floor permanently red if it picked an
+ *   unaffected output.
  *
- * 公開面（`Pipeline.generate`）は front の出力を返さないので、この門は `Pipeline` と
- * **同じ合成本体**（`openSbv2State` → `synthesizeSbv2` — dump 経路 `examples/sbv2/dump.ts` と
- * 同じ入口）を回し、`front` の部品だけを「Session の出力を写して渡す」包みに差し替える
- * （{@link capturingOutputs} — 数値には触らない）。quant → SessionOptions → front / voice の
- * Session という配線は包みの外（admission と `synthesizeSbv2`）なので、門はその配線ごと見る。
+ * The public surface (`Pipeline.generate`) does not return front's outputs, so this check runs
+ * **the same synthesis body** as `Pipeline` (`openSbv2State` → `synthesizeSbv2` — the same entry
+ * point as the dump path `examples/sbv2/dump.ts`) and swaps only the `front` component for a
+ * wrapper that "copies the Session's outputs out" ({@link capturingOutputs} — it does not touch the
+ * values). The wiring quant → SessionOptions → the front / voice Sessions is outside the wrapper
+ * (admission and `synthesizeSbv2`), so the check covers that wiring as well.
  *
- * 門と故障注入の対応は `e2e_anima_ab_test.ts` のモジュール doc と同じ。census は front と voice の
- * Session を**別々に**見る（片方の Session にだけ席が届かない配線を掴むため）。束のノブは
- * `linearCompute` の 1 つだけなので故障注入は ①（`session` を空にした manifest → 床）と
- * ②（2 回目だけ別 seed → 決定性）の 2 本。
+ * The mapping of checks to fault injections is the same as the module doc of
+ * `e2e_anima_ab_test.ts`. The census looks at the front and voice Sessions **separately** (to catch
+ * wiring where the preset reaches only one of the Sessions). The bundle has only one knob,
+ * `linearCompute`, so there are two fault injections: ① (a manifest with an empty `session` → the
+ * floor) and ② (another seed for the second run only → determinism).
  *
- * MUST: 資産は `models/karume-sbv2-jvnv/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU
- * 無し環境は理由を出して**明示 SKIP** する（ADR 0005）。発話の解析は呼び手の責務なので、日本語
- * 辞書はこのテストが `@hdae/yomi` で取る（初回だけネットワーク — `e2e_sbv2_wav_test.ts` と同じ）。
+ * MUST: the assets are `models/karume-sbv2-jvnv/` (untracked, local assets of a real-GPU machine).
+ * Environments without them and without a GPU **SKIP explicitly** with a reason (ADR 0005).
+ * Analyzing the utterance is the caller's responsibility, so this test fetches the Japanese
+ * dictionary with `@hdae/yomi` (network on the first run only — the same as `e2e_sbv2_wav_test.ts`).
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -72,27 +80,35 @@ import {
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
-/** 資産の置き場（リポ直下 `models/karume-sbv2-jvnv/`）。 */
+/** Where the assets are (`models/karume-sbv2-jvnv/` at the repository root). */
 const ASSETS_DIR = new URL("../../../models/karume-sbv2-jvnv/", import.meta.url);
-/** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_sbv2-ab/` — 消して安全）。 */
+/**
+ * Where the measurements and verdicts go (`outputs/verify/<environment key>/<date>_sbv2-ab/` —
+ * safe to delete).
+ */
 const results = openResults("sbv2-ab");
 
 const MODEL = "F1";
 const PRACTICAL = "i8-a8";
-/** 入力（`e2e_sbv2_wav_test.ts` の sha 門と同じ文・seed — ノブは配布形の既定）。 */
+/**
+ * The input (the same sentence and seed as the sha check of `e2e_sbv2_wav_test.ts` — the knobs
+ * are the distribution's defaults).
+ */
 const TEXT = "こんにちは、これはテストです。";
 const SEED = 0;
 
 /**
- * front の出力（グラフ出力の**位置**順 — IR の出力名は torch のノード名で意味を持たない）と帯。
- * `band: undefined` = 未導出 — 門は実測を出して赤で止まる。
+ * front's outputs (in graph-output **position** order — the IR's output names are torch node names
+ * and carry no meaning) and their bands. `band: undefined` = not derived yet — the check prints the
+ * measurement and stops red.
  *
- * 帯の導出規則は `e2e_anima_ab_test.ts` の `CASES` の doc と同じ（上限 = 実測 × 2 程度・床 =
- * 1 bit 以上違う MUST + 示せたときだけ係数）。導出表（2026-09-26・Intel Arc B570 / Deno・参照席 `i8`・
- * 上限 = 実測 × 2 を有効数字 2 桁へ）:
+ * The band derivation rule is the same as the doc of `CASES` in `e2e_anima_ab_test.ts` (ceiling =
+ * about the measurement × 2; floor = the MUST of at least one bit different + a factor only when one
+ * can be shown). Derivation table (2026-09-26, Intel Arc B570 / Deno, reference preset `i8`,
+ * ceiling = the measurement × 2 to two significant digits):
  *
- * | 出力            | 実測 relRMS | 実測 maxAbs | floor | ceiling | 採った日・機 |
- * | --------------- | ----------- | ----------- | ----- | ------- | ------------ |
+ * | Output          | relRMS      | maxAbs      | floor | ceiling | Date, machine   |
+ * | --------------- | ----------- | ----------- | ----- | ------- | --------------- |
  * | front.logw_sdp  | 5.1713e-3   | 2.3147e-2   | 0     | 1.0e-2  | 2026-09-26 B570 |
  * | front.logw_dp   | 1.7008e-3   | 7.4958e-3   | 0     | 3.4e-3  | 2026-09-26 B570 |
  * | front.m_p       | 3.9264e-3   | 2.5642e-2   | 0     | 7.9e-3  | 2026-09-26 B570 |
@@ -108,15 +124,15 @@ const FRONT_OUTPUTS: readonly { readonly name: string; readonly band: AbBand | u
 const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR));
 if (manifestText === undefined) {
   console.warn(
-    `[karume] ${ASSETS_DIR.pathname} に karume.json が無いため SBV2 の自機 A/B 門を SKIP する` +
-      "（exporter の dist.py で焼く）",
+    `[karume] ${ASSETS_DIR.pathname} has no karume.json, so the SBV2 self A/B check is SKIPped` +
+      " (bake it with the exporter's dist.py)",
   );
 }
 const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
 
 const readManifest = (): Manifest => parseManifest(manifestText as string);
 
-/** 発話（解析は 1 度きり — 辞書の取得を門ごとに繰り返さない）。 */
+/** The utterance (analyzed only once — the dictionary is not fetched again per check). */
 const utteranceOnce = (() => {
   let cached: Promise<Utterance> | undefined;
   return (): Promise<Utterance> => {
@@ -130,8 +146,9 @@ const utteranceOnce = (() => {
 })();
 
 /**
- * quant が要求する資産をローカルから読む（`fetchAssets` のローカル版 — `e2e_sbv2_wav_test.ts` の
- * 読み口と同じ形）。MUST: 長さ 0 の part も並べる（添字が容器の中の id）。
+ * Reads the assets a quant requires from local files (a local version of `fetchAssets` — the same
+ * form as the reader of `e2e_sbv2_wav_test.ts`). MUST: zero-length parts are listed too (the index
+ * is the id inside the container).
  */
 const loadLocalAssets = async (
   manifest: Manifest,
@@ -155,11 +172,13 @@ const loadLocalAssets = async (
 };
 
 /**
- * Session の `run` の出力を（グラフ出力の位置順に）写して `sink` へ渡す部品。数値には触らない —
- * 呼び手へは元の出力をそのまま返し、`sink` には写しを渡す。
+ * A component that copies the outputs of the Session's `run` (in graph-output position order) and
+ * hands them to `sink`. It does not touch the values — the caller gets the original outputs as
+ * they are, and `sink` gets the copies.
  *
- * NOTE: `Session` は private フィールドを持つので、`run` 以外のメンバは元の Session に束縛して
- * 返す（Proxy の受け手のまま呼ぶと private フィールドの読みが落ちる）。
+ * NOTE: `Session` has private fields, so members other than `run` are returned bound to the
+ * original Session (calling them with the Proxy as the receiver would fail to read the private
+ * fields).
  */
 const capturingOutputs = (
   component: ModelComponent,
@@ -176,7 +195,7 @@ const capturingOutputs = (
         component.graph.outputs.map((name) => {
           const tensor = outputs[name];
           if (tensor === undefined || tensor.dtype !== "f32") {
-            throw new Error(`front の出力 '${name}' が f32 で無い / 無い`);
+            throw new Error(`front's output '${name}' is not f32 / is missing`);
           }
           return new Float32Array(tensor.data);
         }),
@@ -193,15 +212,21 @@ const capturingOutputs = (
   },
 });
 
-/** 1 合成ぶんの観測（front の出力 4 本・波形・front / voice の census）。 */
+/** The observation of one synthesis (front's 4 outputs, the waveform, the front / voice census). */
 type Observation = {
   readonly front: readonly Float32Array<ArrayBuffer>[];
-  /** 波形（帯には掛けない — 決定性の検査だけに使う。voice の Session まで含めた決定性）。 */
+  /**
+   * The waveform (not held to a band — used only for the determinism check; determinism including
+   * the voice Session).
+   */
   readonly audio: Float32Array<ArrayBuffer>;
   readonly census: Readonly<Record<"front" | "voice", readonly CensusRow[]>>;
 };
 
-/** `quant` で 1 回合成し、front の出力と census を採る（GPU は状態が自前で取って返す）。 */
+/**
+ * Synthesizes once with `quant` and takes front's outputs and the census (the state acquires and
+ * releases the GPU itself).
+ */
 const observeFront = async (
   manifest: Manifest,
   quant: string,
@@ -232,23 +257,25 @@ const observeFront = async (
     closeSbv2State(state);
   }
   if (captured.length !== 1) {
-    throw new Error(`${where}: front の run が ${captured.length} 回（1 合成 = 1 回のはず）`);
+    throw new Error(
+      `${where}: front ran ${captured.length} times (one synthesis should be one run)`,
+    );
   }
   return {
     front: captured[0],
     audio,
     census: {
-      front: mergeCensus(runs.front, `${where} の front`),
-      voice: mergeCensus(runs.voice, `${where} の voice`),
+      front: mergeCensus(runs.front, `${where} front`),
+      voice: mergeCensus(runs.voice, `${where} voice`),
     },
   };
 };
 
-/** front の出力ごとの実測（位置で {@link FRONT_OUTPUTS} と対にする）。 */
+/** The measurement per front output (paired with {@link FRONT_OUTPUTS} by position). */
 const measureFront = (practical: Observation, reference: Observation): readonly AbMeasurement[] => {
   if (practical.front.length !== FRONT_OUTPUTS.length) {
     throw new Error(
-      `front の出力が ${practical.front.length} 本（期待 ${FRONT_OUTPUTS.length} 本 — 位置の対応が崩れた）`,
+      `front has ${practical.front.length} outputs (expected ${FRONT_OUTPUTS.length} — the positional mapping broke)`,
     );
   }
   return FRONT_OUTPUTS.map((_, index) => measureAb(practical.front[index], reference.front[index]));
@@ -260,7 +287,7 @@ const errorText = (cause: unknown): string =>
 const ID = `${MODEL}-${PRACTICAL}`;
 
 test.skipIf(!RUNNABLE)(
-  `e2e(実GPU): ${ID} の front 出力が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
+  `e2e (real GPU): ${ID}'s front outputs balance against the reference preset in determinism, census and band (self A/B)`,
   async () => {
     await runRecordedCase(results, { id: ID, failureNote: errorText }, async (recorded) => {
       const manifest = readManifest();
@@ -282,11 +309,19 @@ test.skipIf(!RUNNABLE)(
       )}`;
       console.log(`[e2e] sbv2 A/B ${ID}: ${reference} → ${PRACTICAL} / census ${census}`);
       FRONT_OUTPUTS.forEach(({ name }, index) => {
-        assertBitIdentical(first.front[index], second.front[index], `${ID}: 実用席の 2 回 ${name}`);
+        assertBitIdentical(
+          first.front[index],
+          second.front[index],
+          `${ID}: two runs of the practical preset ${name}`,
+        );
       });
-      assertBitIdentical(first.audio, second.audio, `${ID}: 実用席の 2 回の波形`);
-      assertSeatsApplied(first.census.front, declared, `${ID}: 実用席の front`);
-      assertSeatsApplied(first.census.voice, declared, `${ID}: 実用席の voice`);
+      assertBitIdentical(
+        first.audio,
+        second.audio,
+        `${ID}: waveforms of two runs of the practical preset`,
+      );
+      assertSeatsApplied(first.census.front, declared, `${ID}: practical preset front`);
+      assertSeatsApplied(first.census.voice, declared, `${ID}: practical preset voice`);
       FRONT_OUTPUTS.forEach(({ name, band }, index) => {
         judgeAb(measured[index], band, `${ID} ${name}`);
       });
@@ -295,10 +330,10 @@ test.skipIf(!RUNNABLE)(
   },
 );
 
-// --- 故障注入（ADR 0110 決定 5-5 — 門が赤になることを assert する）-------------------
+// --- Fault injection (ADR 0110 decision 5-5 — asserts that the check turns red) ---------
 
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
+  "e2e (real GPU): fault injection ① a manifest with the practical preset's session emptied is red at the floor",
   async () => {
     const id = `fault1-empty-session-${MODEL}`;
     await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
@@ -315,29 +350,30 @@ test.skipIf(!RUNNABLE)(
       FRONT_OUTPUTS.forEach(({ name, band }, index) => {
         recorded.comparisons.push(
           comparisonOf(
-            { output: name, reference, practical: `${PRACTICAL}（session 空）` },
+            { output: name, reference, practical: `${PRACTICAL} (session empty)` },
             measured[index],
             band,
           ),
         );
-        console.log(`[e2e] sbv2 故障注入 ① ${name}: ${describeAb(measured[index])}`);
-        assertThrows(() => judgeAb(measured[index], band, `${id} ${name}`), Error, "床の失敗");
+        console.log(`[e2e] sbv2 fault injection ① ${name}: ${describeAb(measured[index])}`);
+        assertThrows(() => judgeAb(measured[index], band, `${id} ${name}`), Error, "floor failure");
       });
     });
   },
 );
 
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
+  "e2e (real GPU): fault injection ② another seed for the practical preset's second run only turns the determinism check red",
   async () => {
     const manifest = readManifest();
     const first = await observeFront(manifest, PRACTICAL, SEED);
     const second = await observeFront(manifest, PRACTICAL, SEED + 1);
-    // seed が効くのは sdp reverse のノイズ（z_noise）なので、確実に割れるのは logw_sdp（位置 0）。
+    // The seed affects the sdp reverse noise (z_noise), so the output that surely diverges is
+    // logw_sdp (position 0).
     assertThrows(
-      () => assertBitIdentical(first.front[0], second.front[0], "故障注入 ②"),
+      () => assertBitIdentical(first.front[0], second.front[0], "fault injection ②"),
       Error,
-      "ビット一致しない",
+      "not bit-identical",
     );
   },
 );

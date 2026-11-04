@@ -26,17 +26,18 @@ const gemma4DecodeModel = () => seriesSource("gemma4-e2b-decode");
 const GEMMA4_DECODE_AVAILABLE = SERIES_CHECKS && (await exists(gemma4DecodeModel().part0));
 if (SERIES_CHECKS && !GEMMA4_DECODE_AVAILABLE) {
   console.warn(
-    `[karume] ${gemma4DecodeModel().part0.pathname} が無いため Gemma 4 decode の融合ヒット数を SKIP する`,
+    `[karume] ${gemma4DecodeModel().part0.pathname} is missing, so the Gemma 4 decode fusion hit counts are SKIPPED`,
   );
 }
 
 /**
- * Gemma 4 E2B は BSHD / table B S 1 D の50鎖（q=35、所有k=15）。
- * 旧BHSD matcherではM=1・H=1のkだけが一致し、decode=15 / prefill=0だった。
- * BSHDの専用添字を追加したため、両方で全50鎖を固定する（ADR 0040追記2026-09-12）。
+ * Gemma 4 E2B has 50 chains of BSHD / table B S 1 D (q = 35, owned k = 15).
+ * The old BHSD matcher matched only the k with M = 1 and H = 1, giving decode = 15 / prefill = 0.
+ * Dedicated BSHD indexing was added, so all 50 chains are pinned in both (ADR 0040 addendum
+ * 2026-09-12).
  */
 test.skipIf(!GEMMA4_DECODE_AVAILABLE)(
-  `実資産の Gemma 4 E2B は decode / prefill とも rope 50 を掴む${SERIES_CHECKS_OPT_IN}`,
+  `the real Gemma 4 E2B asset matches rope 50 in both decode and prefill${SERIES_CHECKS_OPT_IN}`,
   async () => {
     const source = gemma4DecodeModel();
     const graph = await readContainerGraph(source.part0, source.graph);
@@ -48,21 +49,24 @@ test.skipIf(!GEMMA4_DECODE_AVAILABLE)(
     assertEquals(
       decodeFusionCounts(graph, 32),
       { ...NONE, rope: 50 },
-      "logits opt-in prefill 形（M=32）",
+      "logits opt-in prefill shape (M=32)",
     );
   },
 );
 
-// 配布形も先頭part（part 0）をmanifestから引く。旧seriesとQATの両方で発行順を守る。
+// The distribution also takes its first part (part 0) from the manifest. Both the old series and
+// QAT keep the emission order.
 const family = "gemma4";
 const root = new URL(`../../../models/karume-${family}/`, import.meta.url);
 const manifestUrl = new URL("karume.json", root);
 const available = await exists(manifestUrl);
 if (!available) {
-  console.warn(`[karume] ${manifestUrl.pathname} が無いため配布形のRoPE検査をSKIPする`);
+  console.warn(
+    `[karume] ${manifestUrl.pathname} is missing, so the distribution's RoPE check is SKIPPED`,
+  );
 }
 test.skipIf(!available)(
-  `実配布 ${family} E2B は RoPE 50 と任意指定のRMS→add 106を掴む`,
+  `the real ${family} E2B distribution matches RoPE 50 and the opt-in RMS→add 106`,
   async () => {
     const manifest: ContainerManifest = JSON.parse(await readTextFile(manifestUrl));
     // MUST: the storage is named — the expectations below are one container's graph (the SRQ ones
@@ -70,7 +74,7 @@ test.skipIf(!available)(
     // the day a storage is added.
     const head = containerPart0(manifest, "e2b", "model", "bf16");
     if (head.repo !== undefined) {
-      throw new Error("Gemma実資産の融合テストは自己完結配布を要求する");
+      throw new Error("the Gemma real-asset fusion test requires a self-contained distribution");
     }
     const graph = await readContainerGraph(new URL(head.path, root), "model");
     for (const rows of [1, 4, 8, 32, 40, 64]) {

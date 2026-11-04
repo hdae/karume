@@ -1,4 +1,7 @@
-/** 同じ配布重みのquant選択と明示指定が、実際のGEMV・融合設定へ届くことを検証する。 */
+/**
+ * Checks that the quant selection and the explicit options over the same distribution weights
+ * reach the actual GEMV and fusion settings.
+ */
 import {
   makeTempDir,
   readDir,
@@ -29,7 +32,10 @@ import { mirrorAvailable } from "../../models/tests/helpers/gemma-mirror.ts";
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** QAT E2B decode 計画で packed になる SRQ の本数（e2e_*_fusion_counts_test.ts と同じ値）。 */
+/**
+ * The number of SRQs that become packed in a QAT E2B decode plan (the same value as
+ * e2e_*_fusion_counts_test.ts).
+ */
 const DECODE_PACKED = 70;
 
 /**
@@ -44,13 +50,13 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
   const available = mirrorAvailable(root);
   if (!available) {
     console.warn(
-      `[karume] ${root.pathname} が無い（か karume/5 でない）ためquantの実GPU検査をSKIP`,
+      `[karume] ${root.pathname} is missing (or not karume/5), so the quant real-GPU check is SKIPPED`,
     );
   }
   describe.skipIf(!available || !GPU_AVAILABLE)(
-    `${family}: quant定義からGEMVを選ぶ（実GPU）`,
+    `${family}: picks the GEMV from the quant definition (real GPU)`,
     () => {
-      it("既定quant・参照quant・明示上書きの優先順位を守る", async () => {
+      it("keeps the precedence of default quant, reference quant and explicit override", async () => {
         const original = await readTextFile(new URL("karume.json", root));
         const parsed = parseManifest(original);
         const raw: unknown = JSON.parse(original);
@@ -58,7 +64,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
         const entry = raw.models.e2b;
         assert(isRecord(entry) && isRecord(entry.quants));
         const reference = parsed.models.e2b.quants.i4;
-        assertEquals(reference.session, {}, "参照i4の定義が変わっている");
+        assertEquals(reference.session, {}, "the reference i4's definition has changed");
         const fastSession = {
           linearGemvReduce: "parallel",
           fuseRmsNormAdd: true,
@@ -66,7 +72,8 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             ? { fuseLinearStaticQuantize: true, packedStaticQuantize: true }
             : {}),
         } as const;
-        // 差し替えた manifest の quant 席の宣言（束の census 表を引く鍵の材料にもする）。
+        // The quant preset declarations of the replaced manifest (also the material of the key
+        // that looks up the bundle's census table).
         const quantSessions = {
           i4: reference.session,
           "i4-gemvpar": { linearGemvReduce: "parallel" },
@@ -88,7 +95,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
             },
           },
         };
-        // manifestだけ独立させる。元の配布形と重みは書き換えない。
+        // Only the manifest is separated. The original distribution and weights are not rewritten.
         const temp = await makeTempDir({ prefix: "gemma-quant-test-" });
         try {
           for await (const file of readDir(root)) {
@@ -110,7 +117,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               packed: family === "gemma4-qat",
             },
             {
-              // i4-gemvpar は parallel だけを宣言する quant なので packed も立たない。
+              // i4-gemvpar is a quant that declares only parallel, so packed is not on either.
               name: "parallel-reference",
               options: { quant: "i4-gemvpar" },
               parallel: true,
@@ -135,7 +142,8 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               packed: family === "gemma4-qat",
             },
             {
-              // packed が掴むのは素のまま残った SRQ なので、linear→SRQ 融合とは独立に立つ。
+              // Packed matches the SRQs left standalone, so it is on independently of the
+              // linear→SRQ fusion.
               name: "disable-srq",
               options: { fuseLinearStaticQuantize: false },
               parallel: true,
@@ -160,8 +168,8 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               packed: false,
             },
             {
-              // sequential へ倒すので packed も明示 false で降ろす（quant 由来の true でも
-              // parallel 必須の拒否は効く）。
+              // This switches to sequential, so packed is turned off with an explicit false too
+              // (even a true from the quant is rejected because it requires parallel).
               name: "override",
               options: {
                 linearGemvReduce: "sequential",
@@ -175,10 +183,12 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               packed: false,
             },
           ] as const) {
-            // NOTE: census は計測に依らない `lastRunPipelines`。`onRunDiagnostics` を付けると GPU 上の
-            // greedy 出力経路は外れる（src/gemma/pipeline.ts の `greedyOutput`）— 下の census は
-            // フック有りの経路のもので、この前提は計測を外しても変わらない。
-            // 実効の束（差し替えた quant 席の宣言 + 明示指定を家族の合成に通した値）。
+            // NOTE: the census is `lastRunPipelines`, which does not depend on measurement. With
+            // `onRunDiagnostics` attached, the on-GPU greedy output path is not taken
+            // (`greedyOutput` in src/gemma/pipeline.ts) — the census below is that of the path with
+            // the hook, and this premise holds even without measurement.
+            // The effective bundle (the replaced quant preset's declaration + the explicit options,
+            // passed through the family's merge).
             const {
               quant = "i4-fast",
               ...overrides
@@ -225,9 +235,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 runs.set(mode.name, { text, stop });
                 const merged = mergeCensus(census, mode.name);
                 assert(merged.some((row) => row.key.startsWith("linear_gemv")));
-                // 実効の席（quant 席の宣言 + 明示指定の合成結果）を両側で見る — 非参照値は
-                // 変種が 1 本以上・参照値は変種が 0 本（packed 変種のキーは既存キーの末尾に
-                // 断片が付く — ADR 0105 決定 4。述語は tests/helpers/pipeline-census.ts）。
+                // Checks the effective options (the merge of the quant preset's declaration and the
+                // explicit options) from both sides — a non-reference value has at least one
+                // variant, a reference value none (a packed variant's key is an existing key with a
+                // suffix — ADR 0105 decision 4; the predicate is in
+                // tests/helpers/pipeline-census.ts).
                 assertSeatsApplied(
                   merged,
                   {
@@ -238,11 +250,15 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   },
                   mode.name,
                 );
-                // 束の census 表に行があれば、相ごと・run ごとに本数ちょうどで見る（並列 GEMV の
-                // 適格表から一部の形が外れて逐次へ落ちると、上の 1 本以上の検査は通るがここで赤）。
+                // If the bundle's census table has a row, check the exact counts per phase and per
+                // run (if some shapes drop out of the parallel GEMV eligibility table and fall to
+                // sequential, the at-least-one check above passes but this one goes red).
                 if (row !== undefined) {
                   const checked = assertRowCensus(row, byPhase, gemmaComponentOf, mode.name);
-                  assert(checked > 0, `${mode.name}: 表の期待と突き合わせた run が 1 本も無い`);
+                  assert(
+                    checked > 0,
+                    `${mode.name}: no run was compared against the table's expectation`,
+                  );
                 }
               } finally {
                 await pipeline.dispose();
@@ -271,9 +287,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 chunkLength: 32,
                 maxResidentPleBytes: 0,
                 speculative: { k: 3 },
-                // 投機/非投機の厳密一致はsequential席でだけ保証される（docs/limitations.md
-                // 「投機デコード」節）。既定のparallelはdecodeとverifyでQKの縮約順が違い、
-                // 近い値のtokenでargmaxが割れうるので、一致を門にする席へ倒す。
+                // Exact agreement between speculative and non-speculative decoding is guaranteed
+                // only with sequential (the "speculative decoding" section of docs/limitations.md).
+                // The default parallel has a different QK reduction order in decode and verify, and
+                // argmax can split on tokens with close values, so this switches to the setting
+                // whose agreement the check relies on.
                 stateAttentionReduce: "sequential",
                 onRunDiagnostics: (d, phase) => {
                   const phaseRuns = phaseCensus.get(phase.kind) ?? [];
@@ -302,8 +320,8 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                       if (event.kind === "token") ids.push(event.id);
                     }
                     const stop = await stream.done;
-                    // 先に停止理由を見る。EOSなどで早く止まると一致比較とは無関係に長さが
-                    // 割れるので、赤の原因が「早期停止」だと読めるようにしておく。
+                    // Check the stop reason first. An early stop on EOS or the like splits the
+                    // length regardless of the comparison, so a red reads as "early stop".
                     assertEquals(stop.reason, "max-tokens");
                     assertEquals(ids.length, 32);
                     if (speculative === "always") assert((stop.speculation?.cycles ?? 0) > 0);
@@ -312,11 +330,11 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                     await sequence.dispose();
                   }
                 }
-                assertEquals(outputs[1], outputs[0], "高速quantの投機/非投機");
+                assertEquals(outputs[1], outputs[0], "fast quant, speculative vs non-speculative");
                 for (const phase of ["decode", "draft", "verify"]) {
                   const phaseRuns = phaseCensus.get(phase);
                   assert(phaseRuns !== undefined, phase);
-                  // RMS融合の適用はtarget側のdecode/verifyで見る。
+                  // The RMS fusion is checked on the target's decode/verify.
                   assertSeatsApplied(
                     mergeCensus(phaseRuns, phase),
                     {
@@ -326,8 +344,9 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                     phase,
                   );
                 }
-                // 束の census 表（既定 quant の宣言 + 明示の sequential）に行があれば、相ごと・
-                // run ごとに本数ちょうどで見る（drafter の逐次 GEMV への縮退本数もここで固定）。
+                // If the bundle's census table (the default quant's declaration + the explicit
+                // sequential) has a row, check the exact counts per phase and per run (this also
+                // pins how many of the drafter's linears fall back to the sequential GEMV).
                 const row = censusRowOf(
                   family,
                   "e2b",
@@ -347,7 +366,10 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                     gemmaComponentOf,
                     "speculative",
                   );
-                  assert(checked > 0, "speculative: 表の期待と突き合わせた run が 1 本も無い");
+                  assert(
+                    checked > 0,
+                    "speculative: no run was compared against the table's expectation",
+                  );
                 }
               } finally {
                 await pipeline.dispose();
@@ -356,10 +378,10 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               gpu.destroy();
             }
           }
-          // slice(1)なのは、part 0 = descriptor が admission の入力そのもので、門より前に
-          // 取る契約だから（packages/models/src/hub/components.ts の相 1）。門の後にしか
-          // 触れてはいけないのは part 1 以降と assets（tokenizer）で、そちらをまとめて
-          // この集合に入れる。
+          // slice(1) because part 0 = the descriptor is the very input of admission, and the
+          // contract fetches it before the check (phase 1 of
+          // packages/models/src/hub/components.ts). What may be touched only after the check is
+          // part 1 onward and the assets (tokenizer), and those all go into this set.
           const heavyPaths = new Set([
             ...Object.values(parsed.models.e2b.weights).flatMap((entry) =>
               Object.values(entry).flatMap((weights) =>
@@ -376,7 +398,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                 requested.push(path);
                 assert(
                   !heavyPaths.has(path),
-                  `不正な実行設定で重みの part・資産を取得している: ${path}`,
+                  `fetching a weight part or asset under an invalid run configuration: ${path}`,
                 );
                 return await readFile(`${temp}/${path}`);
               },
@@ -409,17 +431,19 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
   // Kept as its own case rather than one more mode of the loop above: that loop compares
   // 24-token chat text, while this one fixes 64-token greedy id equality and the exact
   // per-phase packed counts read from lastRunFusions.
-  // packed int8 活性（ADR 0105）の e2e 門 — QAT E2B の実配布重みで、席 on / off の
-  // **greedy な token id 列が完全一致**することと、対付けの本数（decode 210 / prefill 0）を固定する。
+  // The e2e check of packed int8 activations (ADR 0105) — on the real QAT E2B distribution
+  // weights it pins that **the greedy token id sequences are identical** with the option on / off,
+  // and the pairing counts (decode 210 / prefill 0).
   //
-  // 単体の u32 一致門（runtime の `gpu_packed_static_quantize_test.ts`）はカーネル 1 本ぶんしか
-  // 見ない。実グラフでは 210 本の SRQ と 275 本の融合エピローグが混ざるので、対付けが 1 本でも
-  // 外れた形（生産側だけ packed・消費側だけ packed）はここでしか出ない。
+  // The unit u32 identity check (the runtime's `gpu_packed_static_quantize_test.ts`) covers only
+  // one kernel. The real graph mixes 210 SRQs with 275 fused epilogues, so a shape where even one
+  // pairing is off (packed only on the producer side, or only on the consumer side) shows up only
+  // here.
   if (family === "gemma4-qat") {
     describe.skipIf(!available || !GPU_AVAILABLE)(
-      "gemma4-qat: packed int8 活性（ADR 0105・実GPU）",
+      "gemma4-qat: packed int8 activations (ADR 0105, real GPU)",
       () => {
-        it("席 on / off の 64 token greedy id 列が完全一致し、decode 計画だけが 70 本を掴む", async () => {
+        it("the 64-token greedy id sequences with the option on / off are identical, and only the decode plan matches 70", async () => {
           const outputs: number[][] = [];
           const packedByPhase: Record<string, number[]> = {};
           for (const packedStaticQuantize of [false, true]) {
@@ -454,7 +478,7 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
                   for await (const event of stream) {
                     if (event.kind === "token") ids.push(event.id);
                   }
-                  // 先に停止理由を見る（早期停止だと id 列の一致比較が長さで割れる）。
+                  // Check the stop reason first (an early stop splits the id comparison by length).
                   const stop = await stream.done;
                   assertEquals(stop.reason, "max-tokens");
                   assertEquals(ids.length, 64);
@@ -473,11 +497,15 @@ for (const family of ["gemma4", "gemma4-qat"] as const) {
               gpu.destroy();
             }
           }
-          assertEquals(outputs[0], outputs[1], "席 on / off の greedy id 列");
-          assertEquals(packedByPhase["off:decode"], [0], "席 off の decode 計画");
-          assertEquals(packedByPhase["off:prefill"], [0], "席 off の prefill 計画");
-          assertEquals(packedByPhase["on:decode"], [DECODE_PACKED], "席 on の decode 計画");
-          assertEquals(packedByPhase["on:prefill"], [0], "席 on の prefill 計画");
+          assertEquals(outputs[0], outputs[1], "greedy id sequences with the option on / off");
+          assertEquals(packedByPhase["off:decode"], [0], "decode plan with the option off");
+          assertEquals(packedByPhase["off:prefill"], [0], "prefill plan with the option off");
+          assertEquals(
+            packedByPhase["on:decode"],
+            [DECODE_PACKED],
+            "decode plan with the option on",
+          );
+          assertEquals(packedByPhase["on:prefill"], [0], "prefill plan with the option on");
         });
       },
     );

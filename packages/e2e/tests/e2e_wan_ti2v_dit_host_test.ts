@@ -1,20 +1,21 @@
-// Wan2.2 TI2V-5B の DiT（i8 系列 `wan2.2-ti2v-5b-i8-dyn`）の GPU 不要の突き合わせ（ADR 0121 段 1 / 段 2）。
+// GPU-free comparisons of the Wan2.2 TI2V-5B DiT (i8 series `wan2.2-ti2v-5b-i8-dyn`) (ADR 0121 steps 1 / 2).
 //
-// 見るのは 2 つ:
+// Two things are checked:
 //
-// - **ホスト関数 × golden の入力**: 2.1 のホスト関数（`src/wan/dit-*.ts`）が潜在 48 チャネルの 5B でも
-//   golden のグラフ入力を再現すること（patchify・資産 `rope_base` からの RoPE 表はビット一致・
-//   `timesteps_proj` は atol）。I2V 対応の 2 入力（`timesteps_proj_condition`・`condition_mask`）は、T2V の
-//   形だけ `src/wan/dit-loop.ts` が組み（段 6）、I2V の形の TS の実装はまだ無い（段 9）ので、ここで golden の
-//   規約を固定する: 条件側の時刻は `reference` の `condition_timestep`（I2V は 0・T2V は生成側と
-//   同じ）、条件マスクは I2V なら先頭の潜在フレームの H'·W' トークンが 1（u32）・T2V は全て 0。
-//   テストの中のホストの条件マスク（`helpers/wan-ti2v-dit.ts` の `conditionMask` — 実 GPU の r 門の
-//   製品の経路の入力と故障注入が使う）も golden とビット一致させる。
-//   S = 192 の golden（段 1）と、実寸の 2 つの形の golden（段 2 — 潜在 `[48,21,30,52]` / `[48,9,44,80]`・
-//   P = 390 / 880）の両方で見る。
-// - **runtime から見た容器の宣言**: 入力 7 本（条件マスクは bool `[1,S,1]`）・linear のノード 310 本
-//   （時刻の MLP の 3 本を M = 1 で 2 回 — 決定 2 の dispatch の本数）・`where` 182 本（30 層 × 6 + head 2）・
-//   i8 の重み 307 本。recipe の IR の検査（`wan/ti2v_export_dit.py`）と同じ数を、runtime の読み口で数える。
+// - **Host functions × golden inputs**: the 2.1 host functions (`src/wan/dit-*.ts`) reproduce the golden graph inputs
+//   for the 5B with 48 latent channels too (patchify and the RoPE tables from the asset `rope_base` bit-identical;
+//   `timesteps_proj` within atol). Of the 2 inputs for I2V (`timesteps_proj_condition`, `condition_mask`),
+//   `src/wan/dit-loop.ts` builds only the T2V form (step 6) and there is no TS implementation of the I2V form yet
+//   (step 9), so the golden's convention is pinned here: the condition-side timestep is `condition_timestep` of
+//   `reference` (0 for I2V; the same as the generation side for T2V), and the condition mask is 1 (u32) on the H'·W'
+//   tokens of the first latent frame for I2V and all 0 for T2V. The host condition mask inside the tests
+//   (`conditionMask` of `helpers/wan-ti2v-dit.ts` — used by the production-path input and the fault injection of the
+//   real-GPU r check) is also held bit-identical to the golden. Both the S = 192 goldens (step 1) and the goldens of
+//   the 2 full-size shapes (step 2 — latents `[48,21,30,52]` / `[48,9,44,80]`, P = 390 / 880) are checked.
+// - **The container's declaration as the runtime sees it**: 7 inputs (the condition mask is bool `[1,S,1]`), 310
+//   linear nodes (the 3 of the timestep MLP run twice at M = 1 — the dispatch count of decision 2), 182 `where` (30
+//   layers × 6 + 2 in the head), 307 i8 weights. The same counts as the recipe's IR check (`wan/ti2v_export_dit.py`),
+//   counted through the runtime's reader.
 //
 // The container is the int8 transformer of the distribution mirror `models/karume-wan2.2/` (through its manifest —
 // ADR 0139 decision 1) and the goldens are in the test-asset root (decision 2). Without them the cases SKIP
@@ -58,19 +59,19 @@ import {
 import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 
 /**
- * `timesteps_proj` の TS 実装と上流（torch CPU f32）の許容差（絶対）。
+ * Tolerance (absolute) between the TS implementation of `timesteps_proj` and upstream (torch CPU f32).
  *
- * 2.1 と同じ関数・同じ幅（`freq_dim` 256）なので、実測（全 1,001 通りの最悪 3.0517e-5 — `exp` の 1 ULP）と
- * 帯の根拠は `wan_dit_host_test.ts` の `TIMESTEPS_PROJ_ATOL` のまま。
+ * The same function and the same width (`freq_dim` 256) as 2.1, so the measurement (worst over all 1,001 values
+ * 3.0517e-5 — 1 ULP of `exp`) and the basis of the band stay those of `TIMESTEPS_PROJ_ATOL` in `wan_dit_host_test.ts`.
  */
 const TIMESTEPS_PROJ_ATOL = 1.5e-4;
 
-/** 決定 2 / 3 の本数（5B — 30 層）。 */
+/** The counts of decisions 2 / 3 (5B — 30 layers). */
 const EXPECTED_LINEAR_NODES = 310;
 const EXPECTED_WHERE_NODES = 30 * 6 + 2;
 const EXPECTED_I8_WEIGHTS = 307;
 
-/** グラフ入力の宣言（`wan/ti2v_export_dit.py` の `INPUT_NAMES` と形）。 */
+/** Declaration of the graph inputs (names and shapes of `INPUT_NAMES` in `wan/ti2v_export_dit.py`). */
 const EXPECTED_INPUTS = [
   { name: "tokens", dtype: "f32", shape: [1, "S", 192] },
   { name: "timesteps_proj", dtype: "f32", shape: [1, 256] },
@@ -120,7 +121,7 @@ if (MIRROR_PRESENT && !FULL_ANY_PRESENT) {
 }
 
 const maxAbsDiff = (actual: Float32Array, expected: Float32Array): number => {
-  assertEquals(actual.length, expected.length, "要素数");
+  assertEquals(actual.length, expected.length, "element count");
   let worst = 0;
   for (let index = 0; index < actual.length; index++) {
     worst = Math.max(worst, Math.abs(actual[index] - expected[index]));
@@ -130,7 +131,7 @@ const maxAbsDiff = (actual: Float32Array, expected: Float32Array): number => {
 
 /** The container's graph (named by the manifest's weights key — the NOTE at the top of the file). */
 const containerGraphOf = (opened: OpenedContainer) => {
-  assertEquals(Object.keys(opened.graphs), [COMPONENT], "容器のグラフ名");
+  assertEquals(Object.keys(opened.graphs), [COMPONENT], "container graph names");
   return opened.graphs[COMPONENT];
 };
 
@@ -148,7 +149,7 @@ test.skipIf(!ANY_PRESENT && !FETCHED)(
 );
 
 test.skipIf(!MIRROR_PRESENT)(
-  "Wan2.2 TI2V DiT 容器（GPU 不要）: 入力 7 本・条件マスクは bool [1,S,1]・linear 310・where 182・i8 307",
+  "Wan2.2 TI2V DiT container (no GPU): 7 inputs, condition mask is bool [1,S,1], linear 310, where 182, i8 307",
   async () => {
     const graph = containerGraphOf(await openTi2vTransformer());
     const { declaration } = graph;
@@ -158,17 +159,17 @@ test.skipIf(!MIRROR_PRESENT)(
     );
     assertEquals(declaration.symbols, ["S"]);
     const count = (op: string): number => declaration.nodes.filter((node) => node.op === op).length;
-    assertEquals(count("linear"), EXPECTED_LINEAR_NODES, "linear のノード（dispatch）の本数");
-    assertEquals(count("where"), EXPECTED_WHERE_NODES, "where のノードの本数");
+    assertEquals(count("linear"), EXPECTED_LINEAR_NODES, "number of linear nodes (dispatches)");
+    assertEquals(count("where"), EXPECTED_WHERE_NODES, "number of where nodes");
     const i8 = [...graph.supplies.values()].filter(
       ({ encoding }) => codecLayout(encoding.codec) === "i8",
     );
-    assertEquals(i8.length, EXPECTED_I8_WEIGHTS, "i8 の重みの本数");
+    assertEquals(i8.length, EXPECTED_I8_WEIGHTS, "number of i8 weights");
   },
 );
 
 test.skipIf(!MIRROR_PRESENT)(
-  "Wan2.2 TI2V DiT 容器（GPU 不要）: 2.2 の世代の記述子の入力の形で ditContract を通り、form は ti2v",
+  "Wan2.2 TI2V DiT container (no GPU): passes ditContract with the input shapes of the 2.2 generation descriptor, form is ti2v",
   async () => {
     const opened = await openTi2vTransformer();
     const prepared = prepareContainer(opened, COMPONENT);
@@ -184,8 +185,9 @@ test.skipIf(!MIRROR_PRESENT)(
 );
 
 /**
- * ホスト関数（patchify・資産 `rope_base` からの RoPE 表・`timesteps_proj` 2 本・テストの中の条件マスク）が
- * golden のグラフ入力を再現することを、ケースごとに見る（ファイル冒頭の 1 つ目）。
+ * Checks per case that the host functions (patchify, the RoPE tables from the asset `rope_base`, the 2
+ * `timesteps_proj`, the condition mask inside the tests) reproduce the golden graph inputs (the first item at the top
+ * of the file).
  */
 const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
   const base = await readRopeBase(await openTi2vTransformer());
@@ -216,35 +218,35 @@ const assertHostInputs = async (cases: readonly Ti2vCase[]): Promise<void> => {
     );
 
     const { timestep, conditionTimestep: condition } = golden;
-    assertEquals(condition, form === "i2v" ? 0 : timestep, `${name}: 条件側の timestep`);
+    assertEquals(condition, form === "i2v" ? 0 : timestep, `${name}: condition-side timestep`);
     for (const [key, value] of [
       ["input.timesteps_proj", timestep],
       ["input.timesteps_proj_condition", condition],
     ] as const) {
       const expected = floatsOf(io, key, name);
       const diff = maxAbsDiff(timestepsProj(value, expected.length), expected);
-      assert(diff <= TIMESTEPS_PROJ_ATOL, `${name}: ${key} の差 ${diff}`);
+      assert(diff <= TIMESTEPS_PROJ_ATOL, `${name}: ${key} difference ${diff}`);
     }
 
-    // 条件マスクの格納（bool は u32 の 0 / 1）は読み口が U32 でなければ落とす。
+    // Fail unless the reader of the condition mask's storage (bool as u32 0 / 1) is U32.
     const mask = storedConditionMask(golden, name);
     const conditioned = form === "i2v" ? grid.rows * grid.cols : 0;
-    assertEquals(mask.length, grid.count, `${name}: 条件マスクの長さ`);
+    assertEquals(mask.length, grid.count, `${name}: condition mask length`);
     assertEquals(
       mask.findIndex((bit, index) => bit !== (index < conditioned ? 1 : 0)),
       -1,
-      `${name}: 条件マスク（${form === "i2v" ? "先頭の潜在フレーム" : "全て 0"}）`,
+      `${name}: condition mask (${form === "i2v" ? "first latent frame" : "all 0"})`,
     );
     assertEquals(
       firstBitMismatch(conditionMask(grid, form), mask),
       -1,
-      `${name}: テストの中のホストの条件マスク`,
+      `${name}: the host condition mask inside the tests`,
     );
   }
 };
 
 test.skipIf(!ASSETS_AVAILABLE)(
-  "Wan2.2 TI2V DiT ホスト: patchify・rope_base の RoPE 表・timesteps_proj 2 本・条件マスクが golden の入力と一致する",
+  "Wan2.2 TI2V DiT host: patchify, the RoPE tables of rope_base, the 2 timesteps_proj and the condition mask match the golden inputs",
   () => assertHostInputs(CASES),
 );
 
@@ -260,7 +262,7 @@ test.skipIf(!FULL_ANY_PRESENT && !FETCHED)(
 );
 
 test.skipIf(!FULL_AVAILABLE)(
-  "Wan2.2 TI2V DiT 実寸のホスト（S = 8,190 / 7,920・条件フレーム P = 390 / 880）: patchify・RoPE 表・" +
-    "timesteps_proj 2 本・条件マスクが golden の入力と一致する",
+  "Wan2.2 TI2V DiT full-size host (S = 8,190 / 7,920, condition frames P = 390 / 880): patchify, RoPE tables, " +
+    "the 2 timesteps_proj and the condition mask match the golden inputs",
   () => assertHostInputs(FULL_CASES),
 );

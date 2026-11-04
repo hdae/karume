@@ -1,37 +1,44 @@
-// 実重み Gemma 4 E2B を**配布形から**組む検収門 —— 段 5 の合格線（実 DL 疎通）。
+// Acceptance check that builds the real-weight Gemma 4 E2B **from the distribution** — the pass
+// line of step 5 (a real download end to end).
 //
-// `fromAssets`（段 4 の門は `e2e_gemma4_chat_test.ts`）と違い、こちらはロード経路を本番と
-// 1 本にする: `karume.json` の解決 → 容器の記述文書だけ取って admission → 重みの part の逐次流し
-// → PLE（`model` 容器の資産 — ADR 0109 決定 4）の block の遅延読み。門は 4 本:
+// Unlike `fromAssets` (step 4's check is `e2e_gemma4_chat_test.ts`), this file makes the load path
+// the same one as production: resolve `karume.json` → fetch only the container's descriptor and
+// run admission → stream the weight parts in order → lazily read the blocks of the PLE (an asset
+// of the `model` container — ADR 0109 decision 4). Four checks:
 //
-//  ① **完走**: `fromPretrained` → `chat` が実重みで回り、温度 0（明示）の出力が
-//     `e2e_gemma4_chat_test.ts` と**同じ golden** に一致する。同じバイト列を別経路で読んでいる
-//     ことの証明で、割れたら動いたのは配布形か取得経路である
-//  ② **既定サンプラの結線**（ADR 0083 決定 7）: 配布形が宣言した推奨値がそのまま
-//     `pipeline.defaultSampler` に載り、要求が `sampler` を省略したときの既定になる。宣言が
-//     `pipelineConfig` に焼かれていても結線が抜けていれば、①（温度 0 を明示する経路）は緑の
-//     ままなので、この門が要る
-//  ③ **PLE が全量常駐しない**（ADR 0085 決定 3）: 索引が指す block は `model` 容器の資産として
-//     遅延側で受け、触った 1 本だけを読む。全量を `fetchAssets` へ流す形へ戻ると 4.70 GB（bf16）が常駐する
-//  ④ **配布形の宣言と現物の対応**: 索引が名指しする block が `model` 容器の資産として全件そのまま
-//     在ること（取得キーを「並び順で合わせる」形に戻っていないこと）
+//  ① **Runs to completion**: `fromPretrained` → `chat` runs on the real weights, and the output at
+//     (explicit) temperature 0 matches **the same golden** as `e2e_gemma4_chat_test.ts`. This
+//     proves the same bytes are read through another path; if it splits, what moved is the
+//     distribution or the fetch path
+//  ② **Wiring of the default sampler** (ADR 0083 decision 7): the recommended values the
+//     distribution declares land as they are on `pipeline.defaultSampler` and become the default
+//     when a request omits `sampler`. Even with the declaration baked into `pipelineConfig`, a
+//     missing wire would leave ① (the path that sets temperature 0 explicitly) green, so this
+//     check is needed
+//  ③ **The PLE is not fully resident** (ADR 0085 decision 3): the blocks the index points at are
+//     taken lazily as assets of the `model` container, and only the one touched is read. Going
+//     back to streaming everything through `fetchAssets` would keep 4.70 GB (bf16) resident
+//  ④ **The distribution's declaration matches what is there**: every block the index names exists
+//     as is as an asset of the `model` container (the fetch keys have not gone back to "matching
+//     by order")
 //
-// ## 資産と経路
+// ## Asset and path
 //
-// ローカルの配布形ミラー `models/karume-gemma4/`（`dist.py --pipeline gemma4` が組む）を
-// **HF 形の HTTP** で配る使い捨てサーバ越しに読む（`examples/shared/local-dist-server.ts` —
-// デモが `--source <ローカルのパス>` で通るのと同じ 1 本）。ミラーはリポジトリ管理外なので、
-// 無い環境では**明示 SKIP** する。
+// The local distribution mirror `models/karume-gemma4/` (assembled by `dist.py --pipeline gemma4`)
+// is read through a throwaway server that serves it over **HF-style HTTP**
+// (`examples/shared/local-dist-server.ts` — the same one the demo goes through with
+// `--source <local path>`). The mirror is outside the repository, so where it is missing the cases
+// **SKIP explicitly**.
 //
 // The seat is the regular line's `bf16` preset (its one preset since 2026-11-04). The census of the
 // summation-order seats reads the q4_0 QAT line's mirror (`models/karume-gemma4-qat/`) instead —
 // the same `gemma4` pipeline with the same `i4` / `i4-gemvpar` / `i4-fast` declarations, the line
 // that keeps them.
 //
-// NOTE: テストから `examples/` の道具を借りるのは、疑似 HF サーバの綴りを 2 つ持たないため
-// （`packages/models/tests/` も `examples/` も publish には入らない）。取得層は資産を
-// **永続キャッシュ**（Deno は DENO_DIR）へ写すので、この門を 1 度回すと約 8.6GiB（bf16 E2B）が
-// そこに残る（掃除は `@karume/hub` の `clearHubCache`）。
+// NOTE: the test borrows the tool from `examples/` so that there are not two spellings of the
+// fake HF server (neither `packages/models/tests/` nor `examples/` is published). The fetch layer
+// copies the assets into the **persistent cache** (DENO_DIR on Deno), so one run of this check
+// leaves about 8.6 GiB (bf16 E2B) there (clean it with `clearHubCache` of `@karume/hub`).
 //
 // ## Directory source
 //
@@ -47,8 +54,9 @@ import { assert, assertEquals } from "@std/assert";
 import { MANIFEST_FILENAME, type ModelEntry, parseManifest } from "@karume/hub";
 import { nodeCacheStorage, nodeDirectory } from "@karume/hub/node";
 import { acquireGpu, type SessionDiagnostics } from "@karume/runtime";
-// MUST: 入口は**公開面**（`./gemma` サブパス）から取る — `src/...` を直に掴むと、面が痩せていても
-// 門が緑のままになる（消費者が書けない経路で検収したことになる）。
+// MUST: the entry point is taken from the **public surface** (the `./gemma` subpath) — grabbing
+// `src/...` directly would keep the check green even if the surface shrank (the acceptance would
+// run through a path consumers cannot write).
 import { type ChatMessage, Pipeline } from "../../models/gemma.ts";
 import { type LocalDistServer, serveLocalDist } from "@karume/test-support/local-dist-server";
 import { mergeCensus } from "../../runtime/tests/helpers/pipeline-census.ts";
@@ -74,24 +82,30 @@ const MIRROR_DIR = new URL("../../../models/karume-gemma4/", import.meta.url);
  */
 const BF16_SEAT = { quant: "bf16" } as const;
 
-/** SKIP 時にそのまま貼れる組み立てコマンド。 */
+/** The assembly command, ready to paste when the cases SKIP. */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4";
 
 /**
- * PLE の常駐に使う予算（バイト）。索引から導く = PLE 全量常駐で、token 範囲をまたぐ会話でも
- * 読み直しが起きない。定数（旧: 768MiB）で書くと、資産世代で block 幅が変われば同じ数が別の
- * 本数を意味してしまう（ADR 0085 追記 2026-09-02 の「本数ではなくバイト」はテスト側の定数にも
- * 同じく効く）。ミラーが無い環境では評価しない（SKIP 判定の後で呼ぶ）。
+ * The budget (bytes) for keeping the PLE resident. Derived from the index = the whole PLE
+ * resident, so a conversation that spans token ranges never re-reads. Written as a constant (it
+ * used to be 768 MiB), the same number would mean a different block count once an asset
+ * generation changes the block width (the "bytes, not counts" of ADR 0085 addendum 2026-09-02
+ * applies to the test's constants too). Not evaluated without the mirror (called after the SKIP
+ * decision).
  */
 const maxResidentPleBytes = (): Promise<number> =>
   allResidentPleBytesOfMirror(MIRROR_DIR, BF16_SEAT);
 
-/** 上流 `generation_config.json` の推奨（配布形が `pipelineConfig.sampler` へ焼いた値）。 */
+/**
+ * The recommendation of upstream `generation_config.json` (the values the distribution baked into
+ * `pipelineConfig.sampler`).
+ */
 const RECOMMENDED_SAMPLER = { temperature: 1, topK: 64, topP: 0.95 } as const;
 
 /**
- * 検収ケース。**`e2e_gemma4_chat_test.ts` の CASES と同じ golden**（同じ重み・同じ静的配線を
- * 別経路で読んでいることの証明なので、値を割ってはいけない）。
+ * Acceptance cases. **The same goldens as CASES in `e2e_gemma4_chat_test.ts`** (this proves the
+ * same weights and the same static wiring are read through another path, so the values must not
+ * diverge).
  */
 const CASES = [
   {
@@ -132,11 +146,12 @@ const fixture = JSON.parse(
 
 const caseOf = (name: string) => {
   const found = fixture.chat.find((row) => row.name === name);
-  assert(found !== undefined, `フィクスチャに chat ケース '${name}' が無い`);
+  assert(found !== undefined, `the fixture has no chat case '${name}'`);
   return found;
 };
 
-// 無い機も旧 major が残っている機も明示 SKIP（helper の MUST — ADR 0109 決定 9）。
+// A machine without the mirror, or with an old major left in place, SKIPs explicitly (the
+// helper's MUST — ADR 0109 decision 9).
 const AVAILABLE = mirrorAvailable(MIRROR_DIR);
 const MANIFEST_TEXT = AVAILABLE
   ? readTextFileSync(new URL(MANIFEST_FILENAME, MIRROR_DIR))
@@ -144,42 +159,54 @@ const MANIFEST_TEXT = AVAILABLE
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 配布形ミラー models/karume-gemma4/ が無いため段 5 の疎通検収を SKIP する。` +
-      `組み立て: ${ASSEMBLE_COMMAND}`,
+    `[karume] the distribution mirror models/karume-gemma4/ is missing, so step 5's end-to-end acceptance is SKIPPED. ` +
+      `Assemble it: ${ASSEMBLE_COMMAND}`,
   );
 }
 
-test.skipIf(!AVAILABLE)("gemma4 配布形: manifest の宣言と PLE 索引の対応（GPU 不要）", async () => {
-  const manifest = parseManifest(MANIFEST_TEXT ?? "");
-  const entry = manifest.models[manifest.defaultModel];
-  assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline 契約");
-  // weights の役割は製品グラフ + 投機の drafter の 2 本ちょうど（ADR 0096 段 2 で
-  // `drafter` が増えた）。tokenizer は manifest の assets の席、PLE は `model` 容器の資産
-  // （ADR 0109 決定 4）— ここが増えたら「sidecar を weights へ戻した」退行である。
-  assertEquals(
-    Object.keys(entry.weights),
-    ["model", "drafter"],
-    "weights は製品グラフ + drafter の 2 本（PLE は容器の資産・tokenizer は assets の席）",
-  );
-  assertEquals(Object.keys(entry.assets), ["tokenizer"], "manifest の assets は tokenizer だけ");
-  // ④ The blocks the index names are the `model` container's assets as they are — the helper
-  // (`readGemma4PleIndex`) matches every one, so a mirror with one side rebuilt fails here. The
-  // container is the default `bf16` preset's (schema 5 — the bf16 values, no scale table).
-  assertEquals(entry.defaultQuant, "bf16", "the default preset");
-  const { index: original } = await openGemma4Ple(MIRROR_DIR, BF16_SEAT);
-  assert(original.storage === "bf16", `the default preset's PLE storage is ${original.storage}`);
-  assert(!("scales" in original), "a schema 5 index has no scale table");
-  assertEquals(
-    original.values.rowBytes,
-    original.layers * original.dim * 2,
-    "schema 5: 2 bytes per bf16 value",
-  );
-  assert(original.values.blocks.length > 0, "the bf16 index names no values block");
-  assertEquals(original.values.blocks.at(-1)?.stop, original.tokens, "bf16 values close at tokens");
-});
+test.skipIf(!AVAILABLE)(
+  "gemma4 distribution: the manifest's declaration matches the PLE index (no GPU needed)",
+  async () => {
+    const manifest = parseManifest(MANIFEST_TEXT ?? "");
+    const entry = manifest.models[manifest.defaultModel];
+    assertEquals(entry.pipeline, { name: "gemma4", major: 1 }, "pipeline contract");
+    // The weights roles are exactly two: the product graph + the speculative drafter (`drafter`
+    // was added in ADR 0096 step 2). The tokenizer is in the manifest's assets, the PLE is an asset
+    // of the `model` container (ADR 0109 decision 4) — more entries here would be the regression
+    // "the sidecar went back into weights".
+    assertEquals(
+      Object.keys(entry.weights),
+      ["model", "drafter"],
+      "weights are the product graph + the drafter (the PLE is a container asset, the tokenizer is in assets)",
+    );
+    assertEquals(
+      Object.keys(entry.assets),
+      ["tokenizer"],
+      "the manifest's assets are the tokenizer only",
+    );
+    // ④ The blocks the index names are the `model` container's assets as they are — the helper
+    // (`readGemma4PleIndex`) matches every one, so a mirror with one side rebuilt fails here. The
+    // container is the default `bf16` preset's (schema 5 — the bf16 values, no scale table).
+    assertEquals(entry.defaultQuant, "bf16", "the default preset");
+    const { index: original } = await openGemma4Ple(MIRROR_DIR, BF16_SEAT);
+    assert(original.storage === "bf16", `the default preset's PLE storage is ${original.storage}`);
+    assert(!("scales" in original), "a schema 5 index has no scale table");
+    assertEquals(
+      original.values.rowBytes,
+      original.layers * original.dim * 2,
+      "schema 5: 2 bytes per bf16 value",
+    );
+    assert(original.values.blocks.length > 0, "the bf16 index names no values block");
+    assertEquals(
+      original.values.blocks.at(-1)?.stop,
+      original.tokens,
+      "bf16 values close at tokens",
+    );
+  },
+);
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "gemma4 配布形: fromPretrained → chat が実 GPU で完走し既定サンプラが宣言どおり",
+  "gemma4 distribution: fromPretrained → chat runs to completion on the real GPU and the default sampler is as declared",
   () => {
     let server: LocalDistServer;
     let cacheDir: string;
@@ -205,16 +232,17 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       }
     });
 
-    it("② 配布形が宣言した推奨サンプラが省略時の既定として載っている", () => {
+    it("② the recommended sampler the distribution declares is the default when omitted", () => {
       assertEquals(pipeline.defaultSampler, RECOMMENDED_SAMPLER);
     });
 
-    it("① 温度 0 の chat が fromAssets 経路と同じ golden を出す", async () => {
+    it("① chat at temperature 0 gives the same golden as the fromAssets path", async () => {
       for (const { fixture: name, maxNewTokens, expected, stop } of CASES) {
         const { messages } = caseOf(name);
         const started = performance.now();
         const stream = pipeline.chat(messages, {
-          // 明示の温度 0 が既定（推奨サンプラ）を上書きする — golden は greedy の列。
+          // The explicit temperature 0 overrides the default (the recommended sampler) — the
+          // golden is the greedy sequence.
           maxNewTokens,
           sampler: { temperature: 0 },
         });
@@ -225,24 +253,25 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
           `[e2e] gemma4 fromPretrained ${name}: ${JSON.stringify(parts.join(""))} / ` +
             `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
         );
-        assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
-        assertEquals(stopped, stop, `${name}: 停止理由`);
+        assertEquals(parts.join(""), expected, `${name}: output at temperature 0`);
+        assertEquals(stopped, stop, `${name}: stop reason`);
       }
     });
 
-    it("③ 既定サンプラ（温度 1.0）でも同じ会話が完走する", async () => {
+    it("③ the same conversation also runs to completion with the default sampler (temperature 1.0)", async () => {
       const { messages } = caseOf(CASES[0].fixture);
-      // `sampler` を省略 = 配布形の宣言で走る（抽選は splitmix64 で決定的だが、値そのものは
-      // 固定しない —— HF の sampling とは列が一致しないので golden にする意味が無い）。
+      // Omitting `sampler` = running on the distribution's declaration (the sampling is
+      // deterministic through splitmix64, but the values themselves are not pinned — the sequence
+      // does not match HF's sampling, so a golden would mean nothing).
       const stream = pipeline.chat(messages, { maxNewTokens: 8 });
       const parts: string[] = [];
       for await (const chunk of stream) parts.push(chunk);
       const stopped = await stream.done;
-      console.log(`[e2e] gemma4 既定サンプラ: ${JSON.stringify(parts.join(""))}`);
-      assert(parts.join("").length > 0, "既定サンプラで 1 文字も出ていない");
+      console.log(`[e2e] gemma4 default sampler: ${JSON.stringify(parts.join(""))}`);
+      assert(parts.join("").length > 0, "the default sampler produced not a single character");
       assert(
         stopped.reason === "eos" || stopped.reason === "max-tokens",
-        `停止理由 ${stopped.reason}`,
+        `stop reason ${stopped.reason}`,
       );
     });
   },
@@ -264,42 +293,52 @@ if (!QAT_AVAILABLE) {
 const QAT_FAST_SEAT = { quant: "i4-fast" } as const;
 
 /**
- * **census**（ADR 0058 決定 4 ③）— ③PV の縮約形が**合成の規則どおり**に効くこと: 明示 > quant 宣言 >
- * runtime の参照経路（ADR 0104 追記 2026-09-26 — 家族のコード既定は無い）。
+ * **census** (ADR 0058 decision 4 ③) — the ③PV reduction form takes effect **by the merge rule**:
+ * explicit > quant declaration > the runtime's reference path (ADR 0104 addendum 2026-09-26 — there
+ * is no family code default).
  *
- * - `i4`（`session` が空）は参照経路 ③ で走り、③' のキーが 1 本も出ない（宣言の無い席が参照経路に
- *   戻っていること — 家族のコード既定が再び紛れ込むと赤になる）。
- * - `i4-gemvpar`（`stateAttentionReduce: "parallel"` を宣言）は ③' で走り、③ のキーが出ない。
- * - 同じ席でも明示の `"sequential"` が宣言に勝つ（戻す口が生きていること）。
- * - `i4-fast`（`"parallel-fused"` を宣言）は ③ のキーが出ない。融合 kernel
- *   （`attention_state_stats_pv`）が選ばれるかは列上限で決まるので、③' か融合のどちらかが走れば足りる。
+ * - `i4` (empty `session`) runs on the reference path ③ and not a single ③' key appears (a preset
+ *   without a declaration is back on the reference path — red if a family code default sneaks in
+ *   again).
+ * - `i4-gemvpar` (declares `stateAttentionReduce: "parallel"`) runs on ③' and no ③ key appears.
+ * - On the same preset an explicit `"sequential"` beats the declaration (the way back still works).
+ * - `i4-fast` (declares `"parallel-fused"`) shows no ③ key. Whether the fused kernel
+ *   (`attention_state_stats_pv`) is chosen depends on the column limit, so either ③' or the fused
+ *   kernel running is enough.
  *
- * NOTE: 席が効くのは **decode（M = 1）の dispatch だけ**になった（perf-ledger K-13 段 2）。
- * prefill 計画（M = `chunkLength` ≥ 16）は席に依らず ③ₜ（V 行タイル共有・キーに幾何断片
- * `:f32:reg…` が載る）を選ぶ — ③ とビット同一なので既定経路に置ける。したがって 1 回の chat は
- * **必ず ③ₜ を含み**、席で入れ替わるのは残りの ③ / ③' の側になる。
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い device でも走る）。census の無い run は
- * 無条件に FAIL にする（`mergeCensus` — 空なら素通り、にすると無検査のまま緑になる）。
- * NOTE: `onRunDiagnostics` を付けると GPU 上の greedy 出力経路は外れる（src/gemma/pipeline.ts の
- * `greedyOutput`）。census はフック有りの経路のもので、この前提は計測を外しても変わらない。
+ * NOTE: the preset now affects **only the decode (M = 1) dispatches** (perf-ledger K-13 step 2).
+ * A prefill plan (M = `chunkLength` ≥ 16) picks ③ₜ regardless of the preset (shared V row tiles;
+ * the key carries the geometry fragment `:f32:reg…`) — it is bit-identical to ③, so it can sit on
+ * the default path. One chat therefore **always includes ③ₜ**, and what the preset swaps is the
+ * remaining ③ / ③' side.
+ * MUST: the source is `lastRunPipelines`, which does not depend on measurement (it runs on a device
+ * without measurement too). A run without a census FAILs unconditionally (`mergeCensus` — passing
+ * an empty one through would go green with nothing checked).
+ * NOTE: with `onRunDiagnostics` attached, the on-GPU greedy output path is not taken
+ * (`greedyOutput` in src/gemma/pipeline.ts). The census is that of the path with the hook, and this
+ * premise holds even without measurement.
  */
 describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
-  "gemma4 配布形: ③PV の縮約形は明示 > quant 宣言 > 参照経路の順で決まる（census）",
+  "gemma4 distribution: the ③PV reduction form is decided in the order explicit > quant declaration > reference path (census)",
   () => {
     const cases = [
-      { name: "i4（宣言なし）→ 参照経路", options: { quant: "i4" }, expect: "sequential" },
       {
-        name: "i4-gemvpar（宣言 parallel）→ ③'",
+        name: "i4 (no declaration) → reference path",
+        options: { quant: "i4" },
+        expect: "sequential",
+      },
+      {
+        name: "i4-gemvpar (declares parallel) → ③'",
         options: { quant: "i4-gemvpar" },
         expect: "parallel",
       },
       {
-        name: "i4-gemvpar + 明示 sequential → 参照経路",
+        name: "i4-gemvpar + explicit sequential → reference path",
         options: { quant: "i4-gemvpar", stateAttentionReduce: "sequential" },
         expect: "sequential",
       },
       {
-        name: "i4-fast（宣言 parallel-fused）→ ③ 無し",
+        name: "i4-fast (declares parallel-fused) → no ③",
         options: QAT_FAST_SEAT,
         expect: "parallel-fused",
       },
@@ -327,7 +366,8 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
     });
     for (const one of cases) {
       it(one.name, async () => {
-        // 実効の束（選んだ quant 席の宣言 + 明示指定を家族の合成に通した値）→ 束の census 表の行。
+        // The effective bundle (the chosen quant preset's declaration + the explicit options,
+        // passed through the family's merge) → the row of the bundle's census table.
         // Every case names its seat (the census reads the seat's declaration, not the default).
         const { quant, ...overrides }: { readonly quant: string } & SessionOverrides = one.options;
         const row = censusRowOf(
@@ -359,7 +399,7 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
               sampler: { temperature: 0 },
             });
             for await (const _ of stream) {
-              /* 走らせるだけ */
+              /* only run it */
             }
             await stream.done;
           } finally {
@@ -370,69 +410,83 @@ describe.skipIf(!QAT_AVAILABLE || !GPU_AVAILABLE)(
         }
         const keys = mergeCensus(runs, one.name).map((row) => row.key);
         const pv = keys.filter((key) => key.startsWith("attention_state_pv"));
-        assert(pv.length > 0, `内訳に ③PV のキーが無い（${keys.join(" / ")}）`);
-        // 3 経路へ分ける（幾何断片 `:f32:reg…` = ③ₜ / `:par` = ③' / 残り = ③ 参照経路）。
+        assert(pv.length > 0, `no ③PV key in the breakdown (${keys.join(" / ")})`);
+        // Split into three paths (geometry fragment `:f32:reg…` = ③ₜ / `:par` = ③' / the rest =
+        // the ③ reference path).
         const tiled = pv.filter((key) => key.includes(":f32:reg"));
         const parallel = pv.filter((key) => key.includes(":par"));
         const sequential = pv.filter((key) => !key.includes(":f32:reg") && !key.includes(":par"));
-        // 行統計と PV の融合（ADR 0102）は ③PV と別のキー族。
+        // The fusion of row statistics and PV (ADR 0102) is a key family separate from ③PV.
         const fused = keys.filter((key) => key.startsWith("attention_state_stats_pv"));
-        // prefill 計画は席に依らず ③ₜ（席の指定は decode 側にしか効かない）。
-        assert(tiled.length > 0, `③ₜ のキーが走っていない（${pv.join(" / ")}）`);
+        // A prefill plan takes ③ₜ regardless of the preset (the preset affects only the decode
+        // side).
+        assert(tiled.length > 0, `no ③ₜ key ran (${pv.join(" / ")})`);
         if (one.expect === "sequential") {
-          assert(sequential.length > 0, `③（逐次）のキーが走っていない（${pv.join(" / ")}）`);
-          assertEquals(parallel, [], `参照経路のはずが ③' のキーが混ざっている`);
-          assertEquals(fused, [], `参照経路のはずが融合のキーが混ざっている`);
+          assert(sequential.length > 0, `no ③ (sequential) key ran (${pv.join(" / ")})`);
+          assertEquals(parallel, [], `③' keys mixed into what should be the reference path`);
+          assertEquals(fused, [], `fused keys mixed into what should be the reference path`);
         } else if (one.expect === "parallel") {
-          assert(parallel.length > 0, `③' のキーが走っていない（${pv.join(" / ")}）`);
-          assertEquals(sequential, [], `parallel の宣言なのに ③（逐次）のキーが混ざっている`);
-          assertEquals(fused, [], `parallel の宣言なのに融合のキーが混ざっている`);
+          assert(parallel.length > 0, `no ③' key ran (${pv.join(" / ")})`);
+          assertEquals(
+            sequential,
+            [],
+            `③ (sequential) keys mixed in despite the parallel declaration`,
+          );
+          assertEquals(fused, [], `fused keys mixed in despite the parallel declaration`);
         } else {
           assert(
             parallel.length + fused.length > 0,
-            `③' も融合も走っていない（${keys.join(" / ")}）`,
+            `neither ③' nor the fused kernel ran (${keys.join(" / ")})`,
           );
-          assertEquals(sequential, [], `parallel-fused の宣言なのに ③（逐次）のキーが混ざっている`);
+          assertEquals(
+            sequential,
+            [],
+            `③ (sequential) keys mixed in despite the parallel-fused declaration`,
+          );
         }
-        // 束の census 表に行があれば、相ごと・run ごとに席の本数ちょうどで見る（③ の経路分けは
-        // 上の検査が持ち、表は並列 GEMV・RMS→add 融合・①'③' の本数を持つ）。
+        // If the bundle's census table has a row, check the preset's exact counts per phase and
+        // per run (the split of ③ paths is held by the checks above; the table holds the counts
+        // of the parallel GEMV, the RMS→add fusion and ①'③').
         if (row !== undefined) {
           const checked = assertRowCensus(row, byPhase, gemmaComponentOf, one.name);
-          assert(checked > 0, `${one.name}: 表の期待と突き合わせた run が 1 本も無い`);
+          assert(checked > 0, `${one.name}: no run was compared against the table's expectation`);
         }
       });
     }
   },
 );
 
-/** 触れた瞬間に落ちる CacheStorage（呼ばれた回数も数える — 診断へ化けても気づけるように）。 */
+/**
+ * A CacheStorage that fails the moment it is touched (it also counts the calls — so it is noticed
+ * even if the failure turns into a diagnostic).
+ */
 class HostileCacheStorage implements CacheStorage {
   calls = 0;
 
   open(): Promise<Cache> {
     this.calls += 1;
-    throw new Error("test: ローカル取得元が CacheStorage を開いた");
+    throw new Error("test: the local source opened CacheStorage");
   }
   match(): Promise<Response | undefined> {
     this.calls += 1;
-    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+    throw new Error("test: the local source looked up CacheStorage");
   }
   has(): Promise<boolean> {
     this.calls += 1;
-    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+    throw new Error("test: the local source looked up CacheStorage");
   }
   delete(): Promise<boolean> {
     this.calls += 1;
-    throw new Error("test: ローカル取得元が CacheStorage を消した");
+    throw new Error("test: the local source deleted from CacheStorage");
   }
   keys(): Promise<string[]> {
     this.calls += 1;
-    throw new Error("test: ローカル取得元が CacheStorage を引いた");
+    throw new Error("test: the local source looked up CacheStorage");
   }
 }
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "gemma4 ディレクトリ直読み: fromPretrained → chat が同じ golden を出す（実 GPU）",
+  "gemma4 direct directory read: fromPretrained → chat gives the same golden (real GPU)",
   () => {
     const caches = new HostileCacheStorage();
     let fetchCalls = 0;
@@ -440,7 +494,7 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       fetchCalls += 1;
       return Promise.reject(
         new Error(
-          `test: ローカル取得元が network へ出た（${input instanceof Request ? input.url : String(input)}）`,
+          `test: the local source went to the network (${input instanceof Request ? input.url : String(input)})`,
         ),
       );
     };
@@ -452,7 +506,8 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       pipeline = await Pipeline.fromPretrained(nodeDirectory(MIRROR_DIR), {
         ...BF16_SEAT,
         maxResidentPleBytes: await maxResidentPleBytes(),
-        // HTTP 取得元専用のノブ。ローカル取得元では 1 つも効かない = 触られない。
+        // Knobs only for the HTTP source. None of them applies to a local source = none is
+        // touched.
         fetch: fetchStub,
         caches,
         onCacheError: (diagnostic) => cacheDiagnostics.push(diagnostic.url),
@@ -464,11 +519,12 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       await pipeline?.dispose();
     });
 
-    it("① 温度 0 の chat が fromAssets / 疑似 HF 経路と同じ golden を出す", async () => {
+    it("① chat at temperature 0 gives the same golden as the fromAssets / fake HF paths", async () => {
       for (const { fixture: name, maxNewTokens, expected, stop } of DIRECTORY_CASES) {
         const { messages } = caseOf(name);
         const started = performance.now();
-        // 明示の温度 0 が配布形の推奨サンプラ（温度 1）を上書きする — golden は greedy の列。
+        // The explicit temperature 0 overrides the distribution's recommended sampler
+        // (temperature 1) — the golden is the greedy sequence.
         const stream = pipeline.chat(messages, { maxNewTokens, sampler: { temperature: 0 } });
         const parts: string[] = [];
         for await (const chunk of stream) parts.push(chunk);
@@ -477,18 +533,20 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
           `[e2e] gemma4 nodeDirectory ${name}: ${JSON.stringify(parts.join(""))} / ` +
             `${JSON.stringify(stopped)} / ${(performance.now() - started).toFixed(0)}ms`,
         );
-        assertEquals(parts.join(""), expected, `${name}: 温度 0 の出力`);
-        assertEquals(stopped, stop, `${name}: 停止理由`);
+        assertEquals(parts.join(""), expected, `${name}: output at temperature 0`);
+        assertEquals(stopped, stop, `${name}: stop reason`);
       }
     });
 
-    it("② network も CacheStorage も 1 度も通っていない", () => {
-      assertEquals(fetchCalls, 0, "ローカル取得元が fetch を呼んだ");
-      assertEquals(caches.calls, 0, "ローカル取得元が CacheStorage を触った");
-      // 触っていないので診断も 1 本も来ない（キャッシュ失敗を握り潰す経路に落ちていない）。
-      assertEquals(cacheDiagnostics, [], "キャッシュ診断が飛んでいる");
-      // 再試行も HTTP 取得元だけのもの（ローカル取得元は取得層を通らない）。
-      assertEquals(retryDiagnostics, [], "再試行の通知が飛んでいる");
+    it("② neither the network nor CacheStorage was touched even once", () => {
+      assertEquals(fetchCalls, 0, "the local source called fetch");
+      assertEquals(caches.calls, 0, "the local source touched CacheStorage");
+      // Nothing was touched, so not a single diagnostic arrives either (it did not fall onto a
+      // path that swallows cache failures).
+      assertEquals(cacheDiagnostics, [], "cache diagnostics were emitted");
+      // Retries belong to the HTTP source only too (a local source does not go through the fetch
+      // layer).
+      assertEquals(retryDiagnostics, [], "retry notifications were emitted");
     });
   },
 );

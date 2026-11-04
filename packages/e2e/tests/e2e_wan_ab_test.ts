@@ -1,35 +1,48 @@
 /**
- * Wan2.1 の**自機 A/B 門**（実 GPU・ADR 0110 決定 5 / ADR 0120 決定 4 / 5・段 4 と段 3 のノブ単位の記録）。実用席
- * `f16+dit8-a8-attn8-s16`（`session` に linear a8 / attention a8 / S の f16 格納を束ねた席）を、**同じ機・同じ i8 重み**で
- * `session` が空の参照席（manifest から導く — `referencePartnerOf`。今の配布形では `f16+dit8`）と比べる。比較相手は
- * 同機の参照層で、torch golden は使わない（`f16` 席は重みが違うので床が恒真になる — ADR 0110 決定 5 ②）。
+ * Wan2.1 **self A/B check** (real GPU; ADR 0110 decision 5 / ADR 0120 decisions 4 / 5; the per-knob
+ * record of steps 4 and 3). It compares the practical preset `f16+dit8-a8-attn8-s16` (a preset
+ * whose `session` bundles linear a8 / attention a8 / f16 storage of S), **on the same machine with
+ * the same i8 weights**, against the reference partner whose `session` is empty (derived from the
+ * manifest — `referencePartnerOf`; `f16+dit8` in the current distribution). The comparison partner
+ * is the same machine's reference path; no torch golden is used (the `f16` preset has different
+ * weights, so the floor would be trivially true — ADR 0110 decision 5 ②).
  *
- * 1 ケース（= フレーム数 1 つ）の手順（形は `e2e_anima_ab_test.ts` と同じ・本体は 2.2 と共有の
- * `helpers/wan-ab-gate.ts` の {@link registerWanAbCase}）:
+ * Steps of one case (= one frame count) (the same shape as `e2e_anima_ab_test.ts`; the body is
+ * {@link registerWanAbCase} of `helpers/wan-ab-gate.ts`, shared with 2.2):
  *
- * 1. 参照席の pipeline で **step 1 の潜在**（2 ステップの通しの 1 step 目 — 席が最初に効いた直後・決定 5-4）を採り、
- *    購読側の throw で生成を打ち切る（`captureThenAbort`）。dispose して解放を待つ。
- * 2. 実用席で同じことを **2 回**（独立の 2 pipeline）。
- * 3. 門を 3 つ掛ける:
- *    - **決定性**（決定 6 の MUST）— 実用席の 2 回の潜在がビット一致（`assertBitIdentical`）。
- *    - **census**（決定 5-1）— 実用席の DiT の各パスで linear 307 本ちょうどが i8a8・参照経路の linear 0 本（束の
- *      census 表の行 — `assertRowCensus`）。attention の 2 ノブは表に書かない規約（行ブロックの枚数が device の
- *      束縛上限で変わる）なので 1 本以上（`assertSeatsApplied`）。
- *    - **帯**（決定 5-2 / 5-3）— relRMS が {@link CASES} の上限の内・非有限なし・参照席と 1 bit 以上違う（`judgeAb`）。
+ * 1. With the reference partner's pipeline, capture the **step-1 latent** (step 1 of a 2-step run —
+ *    right after the preset first takes effect; decision 5-4) and stop the generation by throwing
+ *    from the subscriber (`captureThenAbort`). Dispose it and wait for the release.
+ * 2. Do the same **twice** with the practical preset (2 independent pipelines).
+ * 3. Apply 3 checks:
+ *    - **Determinism** (the MUST of decision 6) — the practical preset's 2 latents are
+ *      bit-identical (`assertBitIdentical`).
+ *    - **census** (decision 5-1) — in every pass of the practical preset's DiT exactly 307 linears
+ *      are i8a8 and 0 linears are on the reference path (the bundle's row of the census table —
+ *      `assertRowCensus`). The 2 attention knobs are by convention not written in the table (the
+ *      number of row blocks changes with the device's binding limit), so at least 1
+ *      (`assertSeatsApplied`).
+ *    - **Band** (decisions 5-2 / 5-3) — relRMS within the ceiling of {@link CASES}, no non-finite
+ *      values, at least 1 bit different from the reference partner (`judgeAb`).
  *
- * 33 フレームのケースは続けて故障注入 5 件（どれも「門が赤になる」ことを assert する — 決定 5-5）と、ノブ単位の記録
- * （段 3・{@link knobRungs}）を回す。81 フレームのノブ単位の記録は opt-in（`KARUME_WAN_FULL_PIPELINE=1`）。
+ * The 33-frame case then runs 5 fault injections (each asserts that "the check turns red" —
+ * decision 5-5) and the per-knob record (step 3, {@link knobRungs}). The 81-frame per-knob record
+ * is opt-in (`KARUME_WAN_FULL_PIPELINE=1`).
  *
- * 最終出力（フレーム）はここでは作らない — sha 行（`e2e_wan_pipeline_test.ts` の参照行 / 実用行）が持ち、帯にしない
- * （決定 5-4）。結果の席は `wan-ab`。
+ * The final output (frames) is not produced here — the sha rows (the reference / practical rows of
+ * `e2e_wan_pipeline_test.ts`) own it, and it gets no band (decision 5-4). The results directory is
+ * `wan-ab`.
  *
- * VRAM: pipeline は 1 本ずつ順に張る（同時に張らない — 構築では Session を張らず、DiT の Session は step 1 の打ち切りで
- * 畳まれる）。B570 は `destroy()` の解放が遅れる（ADR 0118 段 8 の結果・ADR 0120 リスク 6）ので、観測 1 回ごとに
- * {@link settleReleases} で解放を待ち、確保の大きい 81 フレームを先に回す。
+ * VRAM: pipelines are built one at a time (never at once — construction builds no Session, and the
+ * DiT Session is torn down by the step-1 abort). On the B570 the release of `destroy()` lags (the
+ * result of ADR 0118 step 8; ADR 0120 risk 6), so each observation waits for the release with
+ * {@link settleReleases}, and the 81 frames, which allocate the most, run first.
  *
- * MUST: 資産は `models/karume-wan2.1/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU 無し環境は理由を出して
- * **明示 SKIP** する（ADR 0005）。故障注入とノブ単位の席は同じ配布形を symlink で借りた一時 manifest
- * （`withManifestOverride`）で張り、元の配布形は 1 バイトも書き換えない。
+ * MUST: the assets are `models/karume-wan2.1/` (untracked; local assets of a real-GPU machine).
+ * Environments without them or without a GPU **SKIP explicitly** with the reason (ADR 0005). The
+ * fault injections and the per-knob presets are built from a temporary manifest that borrows the
+ * same distribution through symlinks (`withManifestOverride`); the original distribution is not
+ * changed by a single byte.
  */
 
 import { afterAll, beforeAll, describe, it } from "vite-plus/test";
@@ -64,53 +77,74 @@ import {
   type WanAbSubject,
 } from "./helpers/wan-ab-gate.ts";
 
-/** 配布形の置き場（`dist.py --pipeline wan` の出力先）。 */
+/** Location of the distribution (output directory of `dist.py --pipeline wan`). */
 const ASSETS_DIR = new URL("../../../models/karume-wan2.1/", import.meta.url);
-/** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_wan-ab/` — 消して安全）。 */
+/**
+ * Where measurements and outcomes go (`outputs/verify/<environment key>/<date>_wan-ab/` — safe to
+ * delete).
+ */
 const results = openResults("wan-ab");
 
-/** 対象のモデル（帯はモデル × 席 × フレーム数ごとの宣言なので明示する）。 */
+/**
+ * The model under test (the band is declared per model × preset × frame count, so it is explicit).
+ */
 const MODEL = "t2v-1.3b";
-/** 対象の実用席（ADR 0120 決定 1）。 */
+/** The practical preset under test (ADR 0120 decision 1). */
 const PRACTICAL = "f16+dit8-a8-attn8-s16";
 
-/** 50 ステップ級の重い記録の opt-in（81 フレームのノブ単位の記録 — `e2e_wan_pipeline_test.ts` と同じ変数）。 */
+/**
+ * Opt-in for the heavy 50-step-class records (the 81-frame per-knob record — same variable as
+ * `e2e_wan_pipeline_test.ts`).
+ */
 const FULL_PIPELINE = process.env.KARUME_WAN_FULL_PIPELINE === "1";
 
 /**
- * ケース（フレーム数）と帯。並びは確保の大きい 81 フレームが先（B570 の `destroy()` の遅れ — モジュール doc）。
+ * Cases (frame counts) and bands. The 81 frames, which allocate the most, come first (the lag of
+ * the B570's `destroy()` — module doc).
  *
- * 帯は**宣言**で、環境キー別の行にしない・`KARUME_REFERENCE` で書き換えない（ADR 0110 決定 4）。導出規則（決定 5）:
- * 上限 = 観測点の実測 relRMS × 2 程度をケースごとに独立に導く（33 フレームの値を 81 フレームへ外挿しない — attention a8
- * の誤差は行の長さ N で増える・ADR 0120 決定 4）。床 = 1 bit 以上違う（MUST — {@link judgeAb} が帯と無関係に常に見る）
- * で、`floor` を 0 より上に置くのはノブ 1 つを外した実測が全部入りより明確に小さいと示せたときだけ。
+ * The bands are **declarations**: they are not rows per environment key and are not rewritten by
+ * `KARUME_REFERENCE` (ADR 0110 decision 4). Derivation rule (decision 5): ceiling = about 2 × the
+ * measured relRMS at the observation point, derived independently per case (the 33-frame value is
+ * not extrapolated to 81 frames — the attention a8 error grows with the row length N; ADR 0120
+ * decision 4). Floor = at least 1 bit different (MUST — {@link judgeAb} always checks it,
+ * regardless of the band); `floor` is set above 0 only when the measurement with one knob removed
+ * is shown to be clearly smaller than with all of them.
  *
- * MUST: 導出前は `undefined` — {@link judgeAb} が実測を出して赤で止まる（ADR 0120 決定 4）。通る値を仮置きして検出力の
- * 無い門を増やさない（`ab-gate.ts` の MUST）。段 4 の B570 の実測 × 2 を導出表と一緒にここへ書く。anima の 1024² の値
- * （3.0e-2）は参考であって Wan の根拠にならない（attention a8 の誤差は行の長さ N で増える — 決定 4）。
+ * MUST: `undefined` before derivation — {@link judgeAb} prints the measurement and stops red (ADR
+ * 0120 decision 4). Do not add a check without detection power by putting in a value that passes
+ * (the MUST of `ab-gate.ts`). The B570 measurement of step 4 × 2 is written here together with the
+ * derivation table. The anima 1024² value (3.0e-2) is a reference only, not a basis for Wan (the
+ * attention a8 error grows with the row length N — decision 4).
  *
- * | ケース | 実測 relRMS | 実測 maxAbs | floor | ceiling          | 採った日・機 |
- * | ------ | ----------- | ----------- | ----- | ---------------- | ------------ |
- * | 81f    | 2.0956e-1   | 5.3956e-1   | 0     | 4.2e-1（× 2 切上） | 2026-10-03・B570 |
- * | 33f    | 1.0676e-1   | 2.8391e-1   | 0     | 2.2e-1（× 2 切上） | 2026-10-03・B570 |
+ * | Case | Measured relRMS | Measured maxAbs | floor | ceiling              | Date, machine    |
+ * | ---- | --------------- | --------------- | ----- | -------------------- | ---------------- |
+ * | 81f  | 2.0956e-1       | 5.3956e-1       | 0     | 4.2e-1 (× 2, ceiled) | 2026-10-03, B570 |
+ * | 33f  | 1.0676e-1       | 2.8391e-1       | 0     | 2.2e-1 (× 2, ceiled) | 2026-10-03, B570 |
  *
- * ノブ単位（33 フレーム・記録）: linear の a8 だけ 2.9991e-2 → + attention の a8 1.04e-1 → + s16 1.0676e-1。attention の a8 が
- * 誤差の大半で、81 フレーム（N = 32,760）では 33 フレーム（N = 14,040）の約 2 倍（ADR 0120 リスク 1 の実測）。故障注入 ③
- * （attention の a8 を外した席）は 3.0778e-2、⑤（別 seed）は 1.3828e+0。
+ * Per knob (33 frames, recorded): linear a8 alone 2.9991e-2 → + attention a8 1.04e-1 → + s16
+ * 1.0676e-1. Attention a8 is most of the error, and at 81 frames (N = 32,760) it is about twice
+ * that of 33 frames (N = 14,040) (the measurement of ADR 0120 risk 1). Fault injection ③ (the
+ * preset without attention a8) gives 3.0778e-2, ⑤ (another seed) 1.3828e+0.
  */
 const CASES: readonly { readonly frames: number; readonly band: AbBand | undefined }[] = [
   { frames: 81, band: { floor: 0, ceiling: 4.2e-1 } },
   { frames: 33, band: { floor: 0, ceiling: 2.2e-1 } },
 ];
 
-/** 故障注入を回すフレーム数（短い 33 — 門の空振りを示すのに長さは要らない）。 */
+/**
+ * Frame count the fault injections run at (the short 33 — showing a check that misses needs no
+ * length).
+ */
 const FAULT_FRAMES = 33;
 
 /**
- * ノブ単位の記録（ADR 0120 決定 5・段 3）の段 — 同じ i8 重みにノブを 1 つずつ足す（`a8` → `+ attn8` → `+ s16`）。
- * 値は manifest の実用席の宣言から引く（束の値をテストに書き写さない）。最後の段 = 実用席の宣言そのもの。
+ * Steps of the per-knob record (ADR 0120 decision 5, step 3) — the same i8 weights with knobs added
+ * one at a time (`a8` → `+ attn8` → `+ s16`). The values come from the manifest's declaration of
+ * the practical preset (the bundle's values are not copied into the test). The last step = the
+ * practical preset's declaration itself.
  *
- * MUST: 宣言が 3 ノブちょうどでなければ落とす（ノブが増減した束で段の並びを黙って作らない — 並びを決め直す）。
+ * MUST: fail unless the declaration has exactly 3 knobs (do not silently build a step order for a
+ * bundle whose knobs changed — decide the order again).
  */
 const knobRungs = (
   declared: SessionSpec,
@@ -124,9 +158,10 @@ const knobRungs = (
     Object.keys(rest).length > 0
   ) {
     throw new Error(
-      `${where}: 実用席の宣言 ${JSON.stringify(
+      `${where}: the practical preset's declaration ${JSON.stringify(
         declared,
-      )} が linear / attention / S の格納の 3 ノブちょうど` + "でない（段の並びを決め直す）",
+      )} is not exactly the 3 knobs linear / attention / S storage` +
+        " (decide the step order again)",
     );
   }
   return [
@@ -142,22 +177,25 @@ const knobRungs = (
 const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR));
 if (manifestText === undefined) {
   console.warn(
-    `[karume] ${ASSETS_DIR.pathname} に karume.json が無いため Wan の自機 A/B 門を SKIP する` +
-      `（組み立て: ${WAN_ASSEMBLE_COMMAND}）`,
+    `[karume] ${ASSETS_DIR.pathname} has no karume.json, so the Wan self A/B check is SKIPPED` +
+      ` (assemble: ${WAN_ASSEMBLE_COMMAND})`,
   );
 }
 const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
 
 /**
- * 2.1 の門の対象（共有の段 {@link registerWanAbCase} へ渡す）。要求の固定値（`request`）は省いて世代の既定（832×480・
- * guidance / shift は manifest の既定）に乗せる — `e2e_wan_pipeline_test.ts` の seed 経路の sha 行と同じ要求。
+ * The subject of the 2.1 check (passed to the shared {@link registerWanAbCase}). The fixed request
+ * values (`request`) are left out so the generation defaults apply (832×480; guidance / shift are
+ * the manifest defaults) — the same request as the sha row of the seed path of
+ * `e2e_wan_pipeline_test.ts`.
  *
- * MUST: 呼ぶのは {@link RUNNABLE} のテストの中だけ（配布形が無いのにここへ来たら ignore の判定の破れなので落とす）。
+ * MUST: call it only inside the tests of {@link RUNNABLE} (reaching it without a distribution
+ * means the skip decision broke, so it fails).
  */
 const subjectOf = (): WanAbSubject => {
   if (manifestText === undefined) {
     throw new Error(
-      `${ASSETS_DIR.pathname} に karume.json が無いのに A/B 門が走った（ignore の判定の破れ）`,
+      `${ASSETS_DIR.pathname} has no karume.json, yet the A/B check ran (the skip decision broke)`,
     );
   }
   return {
@@ -173,17 +211,21 @@ const subjectOf = (): WanAbSubject => {
 };
 
 /**
- * ノブ単位の記録（ADR 0120 決定 5・段 3 — **記録のみ・門ではない**）。同じ i8 重みに {@link knobRungs} の順でノブを
- * 1 つずつ足した席の step 1 の潜在の relRMS（参照席に対する値と、1 段前に対する値）を results.json の note と
- * comparisons に残す。最後の段（全部入り）は A/B 門の実用席の 1 回目をそのまま使う。
+ * Per-knob record (ADR 0120 decision 5, step 3 — **a record only, not a check**). Records in the
+ * note and the comparisons of results.json the step-1 latent relRMS of the presets that add knobs
+ * one at a time to the same i8 weights in the order of {@link knobRungs} (against the reference
+ * partner and against the previous step). The last step (all knobs) reuses the first run of the
+ * A/B check's practical preset.
  *
- * 赤にするのは記録が意味を失う形だけ: 段の席にそのノブが届いていない（`assertSeatsApplied`）と非有限。
+ * Only the shapes that make the record meaningless turn red: the knob not reaching the step's
+ * preset (`assertSeatsApplied`) and non-finite values.
  *
- * NOTE: 層ごとの差は採らない — i8 の重みで層別の出口を持つ計測用グラフ（`…-i8-dyn-probe`）がまだ無い（export 台本の
- * `--layers` は f16 系列だけ）。
+ * NOTE: per-layer differences are not taken — there is no measurement graph with per-layer outputs
+ * for the i8 weights yet (`…-i8-dyn-probe`) (`--layers` of the export script covers only the f16
+ * series).
  */
 const registerKnobLadder = (scope: WanAbScope, frames: number, run: () => WanAbRun): void => {
-  it(`ノブ単位の記録（${frames} フレーム・門ではない）`, async () => {
+  it(`per-knob record (${frames} frames, not a check)`, async () => {
     const gpu = scope.gpu();
     const subject = scope.subject();
     const { reference: referenceName, referenceRun, first: practical } = run();
@@ -201,7 +243,8 @@ const registerKnobLadder = (scope: WanAbScope, frames: number, run: () => WanAbR
             : await observeOverridden(gpu, subject, session, frames);
         const effective = effectiveSessionOf(subject, session, where);
         const census = mergeCensus(observed.passes, where);
-        // 段の席にそのノブが届いていなければ、その段の relRMS は名乗るものを測っていない。
+        // If the knob does not reach the step's preset, that step's relRMS does not measure what it
+        // claims to.
         assertSeatsApplied(census, effective, where);
         const toReference = measureAb(observed.latent, reference.observation.latent);
         const toPrevious = measureAb(observed.latent, previous.latent);
@@ -210,22 +253,22 @@ const registerKnobLadder = (scope: WanAbScope, frames: number, run: () => WanAbR
             {
               output: WAN_AB_OBSERVATION,
               reference: reference.name,
-              practical: `${PRACTICAL}（${label} まで）`,
+              practical: `${PRACTICAL} (up to ${label})`,
             },
             toReference,
             undefined,
           ),
         );
         notes.push(
-          `${label}: 参照席に対し ${describeAb(toReference)}・1 段前に対し ${describeAb(
+          `${label}: vs the reference partner ${describeAb(toReference)}, vs the previous step ${describeAb(
             toPrevious,
-          )}・census ${describeBundleCensus(census, effective)}`,
+          )}, census ${describeBundleCensus(census, effective)}`,
         );
-        assertEquals(Number.isFinite(toReference.relRms), true, `${where}: 非有限`);
+        assertEquals(Number.isFinite(toReference.relRms), true, `${where}: non-finite`);
         previous = observed;
       }
       const note = notes.join(" / ");
-      console.log(`[e2e] wan ノブ単位 ${frames} フレーム: ${note}`);
+      console.log(`[e2e] wan per knob, ${frames} frames: ${note}`);
       return { status: "pass", note };
     });
   });
@@ -236,9 +279,9 @@ for (const { frames, band } of CASES) {
   const faults = frames === FAULT_FRAMES;
   const knobs = frames === FAULT_FRAMES || FULL_PIPELINE;
   describe.skipIf(!RUNNABLE)(
-    `e2e(実GPU): Wan ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
-      (faults ? "・故障注入 5 件は赤" : "") +
-      (knobs ? "・ノブ単位の relRMS を記録" : ""),
+    `e2e (real GPU): Wan ${id} step-1 latent agrees with the reference partner in determinism, census and band (self A/B)` +
+      (faults ? ", 5 fault injections are red" : "") +
+      (knobs ? ", per-knob relRMS recorded" : ""),
     () => {
       // One device per case, shared by the case's its (acquired before, released after them all).
       let gpu: GpuContext | undefined;

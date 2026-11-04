@@ -24,26 +24,28 @@ const gemmaModel = () => seriesSource("embeddinggemma-300m");
 const GEMMA_AVAILABLE = SERIES_CHECKS && (await exists(gemmaModel().part0));
 if (SERIES_CHECKS && !GEMMA_AVAILABLE) {
   console.warn(
-    `[karume] ${gemmaModel().part0.pathname} が無いため EmbeddingGemma の融合ヒット数を SKIP する`,
+    `[karume] ${gemmaModel().part0.pathname} is missing, so the EmbeddingGemma fusion hit counts are SKIPPED`,
   );
 }
 
 /**
- * EmbeddingGemma-300m（24 層 × q / k の 2 本 = 48 鎖）。Anima と違い head 幅は 256 で、
- * cos / sin 表は θ 系統（local 1e4 / global 1e6）ごとに `sym_prefix_slice` で T へ縮められる。
- * その初出 2 箇所は鎖の隙間に落ちるので、窓内 passthrough を跨げないと 48 のうち 2 本が
- * 黙って外れる — **ヒット数 48 はそこまで含めた門**。
+ * EmbeddingGemma-300m (24 layers × 2 for q / k = 48 chains). Unlike Anima the head width is 256,
+ * and the cos / sin tables are cut down to T by `sym_prefix_slice` per θ family (local 1e4 /
+ * global 1e6). Their first two uses fall into gaps in a chain, so if the matcher cannot step over
+ * an in-window passthrough, 2 of the 48 silently drop out — **the hit count 48 is a check that
+ * covers that too**.
  *
- * identityExpand は **0**。SDPA を保存した資産（ADR 0023 改訂 — mask 付き attention）では
- * 分解由来の恒等 expand が IR ごと消える（決定 6 と同じ機序。分解資産の頃は 96 だった）。
+ * identityExpand is **0**. In an asset that keeps SDPA (ADR 0023 revision — attention with a mask)
+ * the identity expands that came from the decomposition disappear from the IR altogether (the
+ * same mechanism as decision 6; with the decomposed asset it was 96).
  */
 test.skipIf(!GEMMA_AVAILABLE)(
-  `実資産の EmbeddingGemma は rope 48（head 幅 256・窓内 passthrough 込み）を掴む${SERIES_CHECKS_OPT_IN}`,
+  `the real EmbeddingGemma asset matches rope 48 (head width 256, in-window passthrough included)${SERIES_CHECKS_OPT_IN}`,
   async () => {
     const source = gemmaModel();
     const graph = await readContainerGraph(source.part0, source.graph);
     const expected: FusionCounts = { ...NONE, rope: 48 };
-    // ヒット数は T に依存しない（Tmax = 512 の内側で 2 点）。
+    // The hit count does not depend on T (two points inside Tmax = 512).
     for (const sequence of [12, 318]) {
       assertEquals(
         fusionCounts(graph, { input_ids: [1, sequence], pool_mask: [1, sequence] }),

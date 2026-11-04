@@ -1,18 +1,21 @@
-// Irodori codec decoder の**タイル同値門**（実 GPU）。
+// The **tile-equivalence check** of the Irodori codec decoder (real GPU).
 //
-// タイル分割は「halo を捨てた採用区間は全長 decode と**ビット一致**する」という命題の上に
-// 立っている（`src/irodori/codec.ts` のモジュール doc — 因果層ゼロ・全層が対称 pad か厳密
-// `L·stride` の convT・karume の conv は出力要素ごとに固定順で縮約する gather 形）。命題が
-// 成り立たなければタイル長という**性能ノブが出力を変える**ので、そこは tolerance で緩めず
-// Uint32 の完全一致で縛る。
+// Tiling rests on the proposition "the kept span with the halo discarded is **bit-identical** to a
+// full-length decode" (the module doc of `src/irodori/codec.ts` — zero causal layers, every layer
+// either symmetric pad or a convT of exactly `L·stride`, and karume's conv is a gather form that
+// reduces in a fixed order per output element). If the proposition failed, the tile length, a
+// **performance knob, would change the output**, so it is pinned by an exact Uint32 match rather
+// than loosened with a tolerance.
 //
 // The input is a real z (`z` of the golden
 // `outputs/test-assets/goldens/irodori-v4-small/pipeline/case.full.safetensors`, S = 161); the
 // decoder is `codec_decoder` at f32 of the mirror `models/karume-irodori-v4-small/`.
-// 合成乱数ではなく実運用の値域を使うのは、Snake の `sin(αx)` が入力の値域に強く効くため
-// （`e2e_dacvae_test.ts`〈0.15 の選別で削除〉 の tolerance 導出と同じ理由）。
+// The real operating value range is used instead of synthetic random numbers because Snake's
+// `sin(αx)` depends strongly on the input's value range (the same reason as the tolerance
+// derivation of `e2e_dacvae_test.ts` (removed in the 0.15 triage)).
 //
-// 資産が欠けた環境と GPU 無し環境は生成コマンド付きで**明示 SKIP**する（ADR 0005）。
+// An environment missing the assets or without a GPU **SKIPs explicitly** with the generation
+// command (ADR 0005).
 
 import { test } from "vite-plus/test";
 import { assertEquals } from "@std/assert";
@@ -27,14 +30,15 @@ import {
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
-/** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
+/** The operating values of real-weight v4-small (the same numbers `pipelineConfig` carries). */
 const LATENT_DIM = 32;
 const HOP_LENGTH = 1920;
 const HALO_FRAMES = 8;
 
 /**
- * 門で使う小さいタイル長。既定（182）より**十分小さく**取るのは、S = 161 で複数枚に割れる
- * 必要があるから（既定のままだと 1 枚に縮退して命題を一度も試さない）。
+ * The small tile length the check uses. It is taken **well below** the default (182) because S =
+ * 161 has to split into several tiles (with the default it degenerates to one tile and never tests
+ * the proposition).
  */
 const GATE_TILE_FRAMES = 64;
 
@@ -76,7 +80,7 @@ if (!ASSETS_AVAILABLE) {
 
 const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 
-/** golden の `z`（`[1,S,32]`）を読む。 */
+/** Reads the golden's `z` (`[1,S,32]`). */
 const readLatent = (): Float32Array<ArrayBuffer> => {
   if (latentBytes === undefined) {
     throw new Error(
@@ -86,14 +90,14 @@ const readLatent = (): Float32Array<ArrayBuffer> => {
   }
   const file = parseSafetensors(latentBytes);
   const spec = file.tensors.get("z");
-  if (spec === undefined) throw new Error("full-loop golden に 'z' が無い");
+  if (spec === undefined) throw new Error("the full-loop golden has no 'z'");
   return new Float32Array(
     file.buffer.slice(spec.byteOffset, spec.byteOffset + spec.byteLength),
   ) as Float32Array<ArrayBuffer>;
 };
 
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): codec のタイル decode は単発 decode と全サンプルでビット一致する",
+  "e2e (real GPU): the codec's tiled decode is bit-identical to a single decode on every sample",
   async () => {
     const latent = readLatent();
     const frames = latent.length / LATENT_DIM;
@@ -113,7 +117,7 @@ test.skipIf(!RUNNABLE)(
           };
           const outputs = await session.run({ latent: input });
           const tensor = outputs[decoder.graph.outputs[0]];
-          if (tensor.dtype !== "f32") throw new Error(`decoder の出力が ${tensor.dtype}`);
+          if (tensor.dtype !== "f32") throw new Error(`the decoder output is ${tensor.dtype}`);
           return tensor.data;
         };
         const geometry = { latentDim: LATENT_DIM, hopLength: HOP_LENGTH };
@@ -130,17 +134,21 @@ test.skipIf(!RUNNABLE)(
         const tiled = await decodeTiles(latent, { ...geometry, tiles }, run);
 
         console.log(
-          `[e2e] irodori codec: S ${frames} / 単発 1 枚 vs タイル ${tiles.length} 枚` +
-            `（decode 長 ${GATE_TILE_FRAMES} / halo ${HALO_FRAMES}）/ ${single.length} サンプル`,
+          `[e2e] irodori codec: S ${frames} / single 1 tile vs tiled ${tiles.length} tiles` +
+            ` (decode length ${GATE_TILE_FRAMES} / halo ${HALO_FRAMES}) / ${single.length} samples`,
         );
-        assertEquals(tiles.length > 1, true, "タイルが 1 枚に縮退している（門が何も試していない）");
-        assertEquals(single.length, frames * HOP_LENGTH, "単発 decode の出力長");
-        // Uint32 で比べる — f32 の等値比較だと −0 と +0 の差を見逃す。
+        assertEquals(
+          tiles.length > 1,
+          true,
+          "the tiling degenerated to one tile (the check tests nothing)",
+        );
+        assertEquals(single.length, frames * HOP_LENGTH, "output length of the single decode");
+        // Compare as Uint32 — an f32 equality comparison misses the difference between −0 and +0.
         assertEquals(
           new Uint32Array(tiled.buffer),
           new Uint32Array(single.buffer),
-          "タイル decode が単発 decode と 1 ビットでも違う（halo が足りないか、貼り付けの幾何が" +
-            "ずれている — tolerance で緩めず幾何を疑う）",
+          "the tiled decode differs from the single decode by even one bit (the halo is too short or " +
+            "the paste geometry is off — suspect the geometry instead of loosening with a tolerance)",
         );
       } finally {
         await session.dispose();

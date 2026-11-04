@@ -1,37 +1,43 @@
-// 実重み Gemma 4 E2B の**製品グラフ**（PLE 外出し + 最終行 logits 出口）の検収門 — 段 1b。
+// Acceptance check of the real-weight Gemma 4 E2B **product graph** (PLE moved out + last-row
+// logits exit) — step 1b.
 //
-// 検収するのは ADR [0083](../../../docs/decisions/0083-generation-api-surface.md) 決定 6 と ADR
-// [0085](../../../docs/decisions/0085-ple-host-gather.md) を**同じ再 export に載せた**製品形
-// （案 α）で、既存の logits opt-in 系列は検収 fixture として残っている（the token-only exit series
-// was removed on 2026-10-17）。
+// What it accepts is the product form that puts ADR
+// [0083](../../../docs/decisions/0083-generation-api-surface.md) decision 6 and ADR
+// [0085](../../../docs/decisions/0085-ple-host-gather.md) **on the same re-export** (option α);
+// the existing logits opt-in series remains as an acceptance fixture (the token-only exit series
+// was removed on 2026-10-17).
 //
-// 門は 4 本:
+// Four checks:
 //
-// ① 形の前提（入力 7 本 = input_ids / **per_layer_inputs** / **rope 4 本** / last_row[R]・出力 2 本 =
-//    選んだ行の logits `[1,R,V]` + 最終 norm 後 hidden `[1,R,H]`・**argmax はグラフに無い**・
-//    PLE 表を引く embedding が無い・states 30 スロットは logits opt-in 系列と同一〈sliding は window + 8〉）
-// ② **PLE 逆量子化のビット一致**（ADR 0085 決定 4）: ホスト loader の gather が、台本が torch の
-//    35 表経路で採った `ple.probe.safetensors`（= PLE をグラフに残していたら `embedding` +
-//    直後の `mul` が出していた値そのもの）と**厳密一致**する。GPU を要さない。
-//    併せて「触った block だけ遅延ロード + LRU」（決定 3）を実測で見る。
+// ① Form premises (7 inputs = input_ids / **per_layer_inputs** / **4 rope inputs** / last_row[R];
+//    2 outputs = the selected row's logits `[1,R,V]` + the hidden after the final norm `[1,R,H]`;
+//    **no argmax in the graph**; no embedding that looks up the PLE table; the 30 states slots are
+//    identical to the logits opt-in series (sliding is window + 8))
+// ② **Bit identity of the PLE dequantization** (ADR 0085 decision 4): the host loader's gather is
+//    **exactly identical** to `ple.probe.safetensors`, which the script took through torch's
+//    35-table path (= exactly the values `embedding` + the `mul` right after it would have produced
+//    had the PLE stayed in the graph). No GPU needed. It also measures "lazy load of only the
+//    touched blocks + LRU" (decision 3).
 //    The container read here is the `bf16` preset's (schema 5): its "dequantization" is the exact
 //    widening of the bf16 bits to f32, then `× embedScale` — the policy checks walk whichever tables
 //    the index has (`values` alone here; `values` + `scales` on a quantized index).
-// ③ **交差 parity**: ホスト PLE gather + ホスト `argmax(logits)` の greedy ループが、logits
-//    opt-in 系列の `greedy.<case>.safetensors`（torch full re-forward の期待列）と 3 ケース ×
-//    K=16 で厳密一致する。PLE を外に出しても・出口から argmax を外しても**機能が不変**である
-//    ことの証明で、割れたら PLE gather / 逆量子化 / 行選択のどれかの誤り。
-// ④ **出所（provenance）の束縛**: 製品系列が書く `reference.json` が、元チェックポイントの
-//    指紋と③で流用する golden 1 本ずつの digest を持っていること（片方だけ古い組み合わせでも③は
-//    緑になれてしまう）。
+// ③ **Cross parity**: the greedy loop of host PLE gather + host `argmax(logits)` is exactly
+//    identical to the logits opt-in series' `greedy.<case>.safetensors` (the expected sequences of
+//    a torch full re-forward) over 3 cases × K=16. This proves that moving the PLE out and taking
+//    argmax off the exit **leave the function unchanged**; a split means an error in the PLE
+//    gather, the dequantization or the row selection.
+// ④ **Provenance binding**: the `reference.json` the product series writes holds the fingerprint
+//    of the source checkpoint and the digest of each golden ③ reuses (a combination where only one
+//    side is stale could still turn ③ green).
 //
-// ホスト側の greedy ループは**この門が自前で組む**。`src/generation/greedy.ts` はグラフ側 argmax
-// 出力を読む形（token-only 出口 — that exit series was removed on 2026-10-17）で、ホスト sampling を
-// 持たない MUST があるため通せない
-// （製品面の `GenerationSequence` は段 2〜3 の担当 — ADR 0083 決定 1〜8）。chunk の割り方だけは
-// `planPrefillChunks` を共有する（割り方の誤りを期待値側へ写さないため、割り方**以外**は書き下す）。
+// The host greedy loop is **built by this check itself**. `src/generation/greedy.ts` reads the
+// graph-side argmax output (the token-only exit — that exit series was removed on 2026-10-17) and
+// has a MUST of no host sampling, so it cannot be used
+// (the product surface's `GenerationSequence` belongs to steps 2–3 — ADR 0083 decisions 1–8). Only
+// the chunk split shares `planPrefillChunks` (so that a split error is not copied into the
+// expectations, everything **except** the split is written out).
 //
-// ## 資産
+// ## Assets
 //
 // The container is the distribution mirror's `model` component (`models/karume-gemma4/`, model
 // e2b, quant bf16 — the regular line's one preset since 2026-11-04: the graph and the checkpoint's
@@ -85,7 +91,8 @@ import {
 } from "../../models/tests/helpers/mirror.ts";
 import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
-// 全量常駐の予算は helper が正本（同じ式を e2e ごとに写さない）。
+// The helper is the source of truth for the fully resident budget (the same formula is not copied
+// into each e2e).
 import { allResidentBytes } from "../../models/tests/helpers/ple-budget.ts";
 // The PLE index and block readers of the mirror's `model` container (ADR 0109 decision 4).
 import { openGemma4Ple } from "../../models/tests/helpers/gemma-mirror.ts";
@@ -110,12 +117,18 @@ const GOLDEN_ROOT = goldenDir("gemma4-e2b-product-bf16");
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
-/** PLE の逆量子化参照（綴りの正本は `gemma4/export_product.py`）。索引は容器の資産側。 */
+/**
+ * The PLE dequantization reference (spelling source of truth: `gemma4/export_product.py`). The
+ * index is on the container-asset side.
+ */
 const PLE_PROBE_FILE = "ple.probe.safetensors";
 const PROBE_TOKENS_KEY = "tokens";
 const PROBE_INPUTS_KEY = "per_layer_inputs";
 
-/** 出所記録のファイル名と版（綴りの正本は `gemma4/provenance.py`）。 */
+/**
+ * The file name and version of the provenance record (spelling source of truth:
+ * `gemma4/provenance.py`).
+ */
 const REFERENCE_FILE = "reference.json";
 const REFERENCE_SCHEMA = 1;
 
@@ -127,17 +140,24 @@ const GENERATE_COMMAND =
   "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m gemma4.export_product" +
   " --storage bf16";
 
-/** 期待列の正本 = logits opt-in 系列の greedy golden（正典は export_decode.GREEDY_CASES）。 */
+/**
+ * The source of truth of the expected sequences = the logits opt-in series' greedy goldens
+ * (canonical list: export_decode.GREEDY_CASES).
+ */
 const EXPECTED_CASES = ["capital-en", "capital-ja", "context-en"] as const;
 const GREEDY_STEPS = 16;
 
-/** 実行条件は既存 2 系列の門と同値（同じ資産世代の裁定をそのまま使う）。 */
+/**
+ * The run conditions equal those of the two existing series' checks (the ruling for the same asset
+ * generation is reused as is).
+ */
 const CHUNK_LENGTH = 768;
 /**
- * 最長ケース（`context-en` = T:598）だけに使う刻み。768 では 3 ケースとも 1 chunk に収まり、
- * **製品グラフ固有の多 chunk prefill**（chunk ごとの `ple.gather` + LRU が跨ぐ形）が実重みで
- * 1 度も走らない。256 なら 3 chunk に割れるので、gather が chunk 境界で正しい token 範囲を
- * 引いているか（= 表を跨いだときの逆量子化と行選択）が交差 parity の値そのもので出る。
+ * The chunk length used only for the longest case (`context-en` = T:598). At 768 all three cases
+ * fit in one chunk, and **the multi-chunk prefill specific to the product graph** (a `ple.gather`
+ * per chunk + the LRU spanning them) never runs on the real weights. At 256 it splits into three
+ * chunks, so whether the gather looks up the right token range at chunk boundaries (= the
+ * dequantization and row selection across tables) shows up in the cross-parity values themselves.
  */
 const LONG_CASE = "context-en";
 const LONG_CASE_CHUNK_LENGTH = 256;
@@ -145,26 +165,37 @@ const CAPACITY_SYMBOL = "C";
 const CAPACITY = 4096;
 const MAX_POSITION = 131072;
 
-/** RoPE のパラメータ（配布形の宣言と同じ値 — 表は資産に無く cos / sin はホストが作る）。 */
+/**
+ * The RoPE parameters (the same values as the distribution's declaration — the asset has no table;
+ * the host builds cos / sin).
+ */
 const ROPE: RopeSpec = {
   sliding_attention: { theta: 10000, headDim: 256, rotaryDim: 256 },
   full_attention: { theta: 1000000, headDim: 512, rotaryDim: 128 },
 };
 
-/** グラフ入力の名前（正本は `export_decode` / `export_product` の定数）。 */
+/** Graph input names (source of truth: the constants of `export_decode` / `export_product`). */
 const INPUT_IDS = "input_ids";
 const PER_LAYER_INPUTS = "per_layer_inputs";
 const LAST_ROW = "last_row";
 
-/** 実資産の形（config の `num_hidden_layers` / `hidden_size_per_layer_input` / `vocab_size`）。 */
+/**
+ * The real asset's shape (`num_hidden_layers` / `hidden_size_per_layer_input` / `vocab_size` from
+ * the config).
+ */
 const LAYERS = 35;
 const PLE_DIM = 256;
 const VOCAB = 262144;
-/** 最終 norm 後 hidden の幅（config `hidden_size` — 出力 1 の最終軸）。 */
+/**
+ * The width of the hidden after the final norm (config `hidden_size` — the last axis of output 1).
+ */
 const HIDDEN = 1536;
-/** 行数記号（`last_row[R]` と出力 2 本の行軸 — exporter の `ROW_SYMBOL`）。 */
+/**
+ * The row-count symbol (`last_row[R]` and the row axis of both outputs — the exporter's
+ * `ROW_SYMBOL`).
+ */
 const ROW_SYMBOL = "R";
-/** states スロット本数（所有層 15 × k/v — logits opt-in 系列と同一）。 */
+/** The number of states slots (15 owning layers × k/v — identical to the logits opt-in series). */
 const SLOTS = 30;
 
 /**
@@ -256,23 +287,26 @@ test.skipIf(!MODEL_PRESENT)(
     const opened = await openProductContainer();
     assert(
       Object.hasOwn(opened.model?.assets ?? {}, PLE_INDEX_ASSET),
-      `${MODEL_GRAPH} に資産 '${PLE_INDEX_ASSET}' が無い（グラフはあるのに PLE が外出しされて` +
-        `いない — この資産では per_layer_inputs を作れない）`,
+      `${MODEL_GRAPH} has no asset '${PLE_INDEX_ASSET}' (the graph is there but the PLE was not` +
+        ` moved out — per_layer_inputs cannot be built from this asset)`,
     );
   },
 );
 
-/** 系列ディレクトリの名前（記録が名乗る `series` と突き合わせる側）。 */
+/** The name of the series directory (the side compared with the `series` the record names). */
 const seriesName = (root: URL): string =>
   root.pathname
     .split("/")
     .filter((part) => part !== "")
     .at(-1) ?? "";
 
-/** JSON の 1 段を「キー → 未検査の値」へ落とす（未知の形は明確な文言で落とす）。 */
+/**
+ * Turns one level of JSON into "key → unchecked value" (an unknown shape fails with a clear
+ * message).
+ */
 const objectAt = (value: unknown, where: string): Map<string, unknown> => {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${REFERENCE_FILE}: ${where} がオブジェクトでない`);
+    throw new Error(`${REFERENCE_FILE}: ${where} is not an object`);
   }
   return new Map(Object.entries(value));
 };
@@ -280,12 +314,12 @@ const objectAt = (value: unknown, where: string): Map<string, unknown> => {
 const stringAt = (entries: Map<string, unknown>, key: string, where: string): string => {
   const value = entries.get(key);
   if (typeof value !== "string" || value === "") {
-    throw new Error(`${REFERENCE_FILE}: ${where}.${key} が非空の文字列でない`);
+    throw new Error(`${REFERENCE_FILE}: ${where}.${key} is not a non-empty string`);
   }
   return value;
 };
 
-/** `{bytes, sha256}` の 1 件（sha256 は 64 桁の小文字 hex であることまで見る）。 */
+/** One `{bytes, sha256}` entry (it also checks that sha256 is 64 lowercase hex digits). */
 const digestAt = (
   entries: Map<string, unknown>,
   key: string,
@@ -294,11 +328,11 @@ const digestAt = (
   const digest = objectAt(entries.get(key), `${where}.${key}`);
   const bytes = digest.get("bytes");
   if (typeof bytes !== "number" || !Number.isSafeInteger(bytes) || bytes <= 0) {
-    throw new Error(`${REFERENCE_FILE}: ${where}.${key}.bytes が正の整数でない`);
+    throw new Error(`${REFERENCE_FILE}: ${where}.${key}.bytes is not a positive integer`);
   }
   const sha256 = stringAt(digest, "sha256", `${where}.${key}`);
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
-    throw new Error(`${REFERENCE_FILE}: ${where}.${key}.sha256 が 64 桁の hex でない`);
+    throw new Error(`${REFERENCE_FILE}: ${where}.${key}.sha256 is not 64 hex digits`);
   }
   return { bytes, sha256 };
 };
@@ -309,47 +343,52 @@ const sha256Hex = async (bytes: Uint8Array<ArrayBuffer>): Promise<string> => {
 };
 
 /**
- * ④ 出所の束縛。③が流用する golden は「この容器を作った実走がその場で digest を採ったもの」で
- * なければならない — logits opt-in 系列を採り直せば digest が動き、この門が落ちて製品系列の
- * 再 export を強制する（the token-only series' twin gate was removed on 2026-10-17）。
+ * ④ Provenance binding. The goldens ③ reuses must be "the ones whose digests the run that built
+ * this container took on the spot" — re-taking the logits opt-in series moves the digests, this
+ * check fails and forces a re-export of the product series (the token-only series' twin gate was
+ * removed on 2026-10-17).
  */
 test.skipIf(PROVENANCE_GATE.skip)(
-  `Gemma 4 E2B 製品資産: 出所記録が参照 golden を束ねている${PROVENANCE_GATE.title}`,
+  `Gemma 4 E2B product assets: the provenance record binds the reference goldens${PROVENANCE_GATE.title}`,
   async () => {
     const path = REFERENCE;
     assertGoldensPresent([REFERENCE, ...GREEDY_GOLDENS]);
-    const record = objectAt(JSON.parse(await readTextFile(path)), "根");
+    const record = objectAt(JSON.parse(await readTextFile(path)), "root");
 
-    assertEquals(record.get("schema"), REFERENCE_SCHEMA, `${REFERENCE_FILE} の schema`);
-    assertEquals(stringAt(record, "series", "根"), seriesName(PRODUCT_ROOT), "記録が名乗る系列");
+    assertEquals(record.get("schema"), REFERENCE_SCHEMA, `schema of ${REFERENCE_FILE}`);
+    assertEquals(
+      stringAt(record, "series", "root"),
+      seriesName(PRODUCT_ROOT),
+      "the series the record names",
+    );
     const checkpoint = objectAt(record.get("checkpoint"), "checkpoint");
     stringAt(checkpoint, "dir", "checkpoint");
     const fingerprint = objectAt(checkpoint.get("files"), "checkpoint.files");
-    assert(fingerprint.size > 0, `${REFERENCE_FILE}: checkpoint.files が空`);
+    assert(fingerprint.size > 0, `${REFERENCE_FILE}: checkpoint.files is empty`);
     for (const file of fingerprint.keys()) digestAt(fingerprint, file, "checkpoint.files");
 
     const reference = objectAt(record.get("reference"), "reference");
     assertEquals(
       stringAt(reference, "series", "reference"),
       seriesName(GOLDEN_ROOT),
-      "束ねられた golden 系列（③が読む系列と同じであること）",
+      "the bound golden series (the same series ③ reads)",
     );
     const goldens = objectAt(reference.get("goldens"), "reference.goldens");
     assertEquals(
       [...goldens.keys()].sort(),
       EXPECTED_CASES.map((name) => `${GREEDY_PREFIX}${name}${SUFFIX}`).sort(),
-      "束ねられた golden の集合（③が読む 3 本と過不足なく一致）",
+      "the set of bound goldens (exactly the 3 ③ reads)",
     );
     for (const name of EXPECTED_CASES) {
       const file = `${GREEDY_PREFIX}${name}${SUFFIX}`;
       const digest = digestAt(goldens, file, "reference.goldens");
       const bytes = await readFile(new URL(file, GOLDEN_ROOT));
-      assertEquals(bytes.byteLength, digest.bytes, `${file}: byte 数`);
+      assertEquals(bytes.byteLength, digest.bytes, `${file}: byte count`);
       assertEquals(
         await sha256Hex(bytes),
         digest.sha256,
-        `${file}: sha256（製品系列が束ねた golden と別物 — ` +
-          `どちらかの系列だけを作り直した組み合わせ — the test-asset dataset at the pin holds ` +
+        `${file}: sha256（differs from the golden the product series bound — ` +
+          `a combination where only one of the series was rebuilt — the test-asset dataset at the pin holds ` +
           `goldens of different runs: regenerate both (${GENERATE_COMMAND}), upload them to ` +
           `${TEST_ASSETS.repo} and move the pin; the container comes from the mirror）`,
       );
@@ -358,9 +397,9 @@ test.skipIf(PROVENANCE_GATE.skip)(
 );
 
 /**
- * ファイル 1 本を `ArrayBuffer` として読む。
- * MUST: view が buffer 全体を覆っているなら slice しない — この面で読む golden は 1 本
- * 数百 MB 級になり得るので、無条件の `slice` はピークを倍増させる。
+ * Reads one file as an `ArrayBuffer`.
+ * MUST: do not slice when the view covers the whole buffer — a golden read here can be several
+ * hundred MB, so an unconditional `slice` would double the peak.
  */
 const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
   const bytes = await readFile(new URL(file, root));
@@ -372,19 +411,19 @@ const readBuffer = async (root: URL, file: string): Promise<ArrayBuffer> => {
 
 const goldenI32 = (file: SafetensorsFile, name: string): Int32Array<ArrayBuffer> => {
   const view = file.tensors.get(name);
-  assert(view !== undefined, `golden に '${name}' が無い`);
-  assertEquals(view.dtype, "I32", `golden '${name}' の格納 dtype`);
+  assert(view !== undefined, `the golden has no '${name}'`);
+  assertEquals(view.dtype, "I32", `storage dtype of golden '${name}'`);
   return new Int32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
 const goldenF32 = (file: SafetensorsFile, name: string): Float32Array<ArrayBuffer> => {
   const view = file.tensors.get(name);
-  assert(view !== undefined, `golden に '${name}' が無い`);
-  assertEquals(view.dtype, "F32", `golden '${name}' の格納 dtype`);
+  assert(view !== undefined, `the golden has no '${name}'`);
+  assertEquals(view.dtype, "F32", `storage dtype of golden '${name}'`);
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
-/** 索引を読んで loader を組む（block reads go through the mirror's manifest source). */
+/** Reads the index and builds the loader (block reads go through the mirror's manifest source). */
 const openPle = async (maxResidentBytes: number): Promise<Gemma4Ple> => {
   const { index, openBlock } = await openGemma4Ple(MIRROR, PRODUCT_CHOICE);
   return createGemma4Ple({ index, openBlock, vocabSize: VOCAB, maxResidentBytes });
@@ -400,29 +439,34 @@ const readPleIndex = async (): Promise<Gemma4PleFloatIndex> => {
 };
 
 /**
- * 全量読みへ倒す一意行数の下限（`src/gemma/ple.ts` の `FULL_BLOCK_ROWS` の写し）。
+ * The minimum number of distinct rows that switches to a whole-block read (a copy of
+ * `FULL_BLOCK_ROWS` in `src/gemma/ple.ts`).
  *
- * 実装側は export していないので、ここは**方針表の写し**である。ずれたら下の期待値が実測と
- * 合わなくなって落ちるので、黙って別の方針を検収することはない。
+ * The implementation does not export it, so this is **a copy of the policy table**. If they drift,
+ * the expectations below stop matching the measurement and fail, so a different policy is never
+ * accepted silently.
  */
 const FULL_BLOCK_ROWS = 32;
 
-/** 表 1 本ぶんの方針（{@link planTable} の戻り）。 */
+/** The policy for one table (what {@link planTable} returns). */
 type TableExpectation = {
-  /** probe が踏んだ block 添字。 */
+  /** The block indices the probe touched. */
   readonly touched: readonly number[];
-  /** 全量読みへ倒れる block 添字（一意行数が下限に届いたもの）。 */
+  /** The block indices that switch to a whole-block read (distinct rows reached the minimum). */
   readonly full: readonly number[];
-  /** 行読みへ倒れる区間の本数（全量へ倒れなかった block の一意行数の合計）。 */
+  /** The number of ranges read row by row (the sum of distinct rows of blocks not read whole). */
   readonly rowReads: number;
 };
 
 /**
- * 索引と引く id から、`src/gemma/ple.ts` の方針表が倒す先を**表ごとに**数える。
+ * Counts, **per table**, where the policy table of `src/gemma/ple.ts` sends the index and the ids
+ * looked up.
  *
- * MUST: values と scales を別々に数える。2 表の block 境界は独立で（1 行 = 値 8,960B /
- * scale 140B なので同じ block 上限でも跨ぐ token 数が桁で違う）、「values は行読み・scales は
- * 同じ block に 32 行以上載るので全量読み」という**混在**が実資産の既定の姿である。
+ * MUST: count values and scales separately. The block boundaries of the two tables are
+ * independent (one row = 8,960 B of values / 140 B of scales, so under the same block limit the
+ * number of tokens a block spans differs by orders of magnitude), and the **mix** "values read by
+ * row, scales read whole because 32 or more rows land on the same block" is the default state of
+ * the real asset.
  */
 const planTable = (table: Gemma4PleTable, ids: readonly number[]): TableExpectation => {
   const grouped = new Map<number, Set<number>>();
@@ -436,14 +480,14 @@ const planTable = (table: Gemma4PleTable, ids: readonly number[]): TableExpectat
   let rowReads = 0;
   for (const [position, rows] of grouped) {
     const block = table.blocks[position];
-    // 下限は block の行数と小さい方（細い block は全行が下限）。
+    // The minimum is capped by the block's row count (for a narrow block, all its rows).
     if (rows.size >= Math.min(FULL_BLOCK_ROWS, block.stop - block.start)) full.push(position);
     else rowReads += rows.size;
   }
   return { touched: [...grouped.keys()], full, rowReads };
 };
 
-/** 全量読みへ倒れる block が占めるバイト（予算の頭打ちに掛からないことを見るため）。 */
+/** The bytes taken by the blocks read whole (to check that they do not hit the budget cap). */
 const fullBytesOf = (table: Gemma4PleTable, plan: TableExpectation): number =>
   plan.full.reduce((sum, position) => sum + gemma4PleBlockBytes(table, table.blocks[position]), 0);
 
@@ -469,28 +513,29 @@ const planTables = (
   );
 
 /**
- * ② PLE 逆量子化のビット一致（ADR 0085 決定 4）+ 遅延ロード / LRU（決定 3）。
+ * ② Bit identity of the PLE dequantization (ADR 0085 decision 4) + lazy load / LRU (decision 3).
  *
- * 参照は台本が **35 表経路の torch** で採った `ple.probe.safetensors` — PLE をグラフに残して
- * いれば `embedding` + 直後の `mul` がその値を出していた。ホスト側は `f32(i8) × per-row scale`
- * → `× embedScale` を同じ順序で組むので（for the bf16 index read here: the exact widening of the
- * bf16 bits, then `× embedScale`）、**1 bit も違ってはならない**。ここが割れると③の
- * token 列 parity も割れる（が、そのときどこが原因かは③からは読めない — 切り分けの線）。
+ * The reference is `ple.probe.safetensors`, which the script took with **torch on the 35-table
+ * path** — had the PLE stayed in the graph, `embedding` + the `mul` right after it would have
+ * produced those values. The host side builds `f32(i8) × per-row scale` → `× embedScale` in the
+ * same order (for the bf16 index read here: the exact widening of the bf16 bits, then
+ * `× embedScale`), so **not a single bit may differ**. If this splits, ③'s token-sequence parity
+ * splits too (but ③ cannot tell where the cause is — this is the line that isolates it).
  *
- * GPU を要さない（loader は Web 標準 API だけで閉じている）。
+ * No GPU needed (the loader is closed over Web standard APIs only).
  */
 test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
-  `Gemma 4 E2B 製品検収: PLE 逆量子化がグラフ内 embedding とビット一致（GPU 不要）${PROBE_GATE.title}`,
+  `Gemma 4 E2B product acceptance: the PLE dequantization is bit-identical to the in-graph embedding (no GPU needed)${PROBE_GATE.title}`,
   async () => {
     assertGoldensPresent([PLE_PROBE]);
     const index = await readPleIndex();
-    assertEquals(index.tokens, VOCAB, "索引の token 行数（= 主 embedding の vocab）");
-    assertEquals(index.layers, LAYERS, "索引の層数");
-    assertEquals(index.dim, PLE_DIM, "索引の層当たり次元");
+    assertEquals(index.tokens, VOCAB, "the index's token rows (= the main embedding's vocab)");
+    assertEquals(index.layers, LAYERS, "the index's layer count");
+    assertEquals(index.dim, PLE_DIM, "the index's per-layer dimension");
     assertEquals(index.embedScale, Math.sqrt(PLE_DIM), "embed scale（hidden_per_layer ** 0.5）");
     assert(
       index.values.blocks.length > 1,
-      `PLE の values が ${index.values.blocks.length} block（vocab レンジ分割が無い）`,
+      `the PLE values have ${index.values.blocks.length} block (no split by vocab range)`,
     );
 
     const probeFile = parseSafetensors(await readBuffer(PRODUCT_ROOT, PLE_PROBE_FILE));
@@ -499,21 +544,23 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     assertEquals(
       expected.length,
       tokens.length * LAYERS * PLE_DIM,
-      "参照 per_layer_inputs の要素数",
+      "element count of the reference per_layer_inputs",
     );
-    // probe は block 境界の両側を踏むので、全 block を触る（触らないと方針表の観測が空振りする）。
+    // The probe touches both sides of the block boundaries, so it touches every block (otherwise
+    // the policy-table observation would check nothing).
     const blockOf = (token: number): number =>
       index.values.blocks.findIndex((block) => token < block.stop);
     const touched = new Set(tokens.map(blockOf));
     assertEquals(
       touched.size,
       index.values.blocks.length,
-      "probe が踏む values block 数（全 block を踏むこと）",
+      "number of values blocks the probe touches (it touches every block)",
     );
 
-    // 既定の予算（= 最大 block 2 本ぶん）で引く。本数ではなくバイトで頭打ちになることを見る。
+    // Looked up with the default budget (= two of the largest blocks). Checks that the cap is in
+    // bytes, not in counts.
     const budget = defaultGemma4PleResidentBytes(index);
-    /** torch の 35 表経路との厳密一致（tolerance を持たない）。 */
+    /** Exact match with torch's 35-table path (no tolerance). */
     const assertProbeMatch = (data: Float32Array, where: string): void => {
       let mismatches = 0;
       let first = "";
@@ -524,21 +571,23 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
         const token = tokens[Math.floor(element / (LAYERS * PLE_DIM))];
         const layer = Math.floor(element / PLE_DIM) % LAYERS;
         first =
-          `token ${token} / 層 ${layer} / 列 ${element % PLE_DIM}: ` +
+          `token ${token} / layer ${layer} / column ${element % PLE_DIM}: ` +
           `${data[element]} ≠ ${expected[element]}`;
       }
       assertEquals(
         mismatches,
         0,
-        `${where}: PLE 逆量子化が torch の 35 表経路と違う` +
-          `（${mismatches} 要素 / 最初の食い違い ${first}）`,
+        `${where}: the PLE dequantization differs from torch's 35-table path` +
+          ` (${mismatches} elements / first disagreement ${first})`,
       );
     };
 
-    // ②-a 行読み経路 — 方針表は**表ごとに**倒れる（2 表の block 境界は独立）。values は block
-    // あたり数行なので全段が行読み。scales は 1 本の block が十数万 token を覆うので、probe の
-    // 大半が同じ block に載り、その block だけが下限（32 行）に届いて全量読みへ倒れる。
-    // 期待値は索引と probe の id から計算する（本数を定数で書くと資産世代で意味が変わる）。
+    // ②-a The row-read path — the policy table switches **per table** (the block boundaries of
+    // the two tables are independent). Values have a few rows per block, so every block is read
+    // by row. One scales block covers over a hundred thousand tokens, so most of the probe lands
+    // on the same block, and only that block reaches the minimum (32 rows) and is read whole.
+    // The expectations are computed from the index and the probe's ids (written as constant
+    // counts, they would change meaning with the asset generation).
     // A bf16 index has no scale table, so its row path reads every probe row by range.
     const distinctIds = [...new Set(tokens)];
     const distinct = distinctIds.length;
@@ -546,22 +595,23 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     const plans = planTables(index, distinctIds);
     const rows = await openPle(budget);
     const byRows = await rows.gather(tokens);
-    assertEquals(byRows.dtype, "f32", "gather の dtype");
-    assertEquals(byRows.shape, [1, tokens.length, LAYERS, PLE_DIM], "gather の shape");
+    assertEquals(byRows.dtype, "f32", "gather dtype");
+    assertEquals(byRows.shape, [1, tokens.length, LAYERS, PLE_DIM], "gather shape");
     assert("data" in byRows && byRows.data instanceof Float32Array);
-    assertProbeMatch(byRows.data, "行読み経路");
+    assertProbeMatch(byRows.data, "row-read path");
     const rowStats = rows.stats();
-    // 期待値の前提: 全量へ倒れるぶんが既定予算に収まること（溢れると方針表が諦めて行読みへ戻る）。
+    // Premise of the expectations: what is read whole fits in the default budget (if it
+    // overflowed, the policy table would give up and go back to row reads).
     const plannedFullBytes = plans.fullBytes;
     assert(
       plannedFullBytes <= budget,
-      `全量読みへ倒れる ${plannedFullBytes} バイトが既定予算 ${budget} バイトを超える` +
-        `（この門の期待値は「予算で諦めない」前提で立てている）`,
+      `the ${plannedFullBytes} bytes read whole exceed the default budget of ${budget} bytes` +
+        ` (this check's expectations assume "no giving up because of the budget")`,
     );
     assertEquals(
       valuePlan.full.length,
       0,
-      "values は block あたり数行しか踏まないのに全量読みへ倒れている（行読み経路が消えた）",
+      "values touch only a few rows per block yet are read whole (the row-read path is gone)",
     );
     assertEquals(
       rowStats.loads,
@@ -572,28 +622,30 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     assertEquals(
       rowStats.rowReads,
       plans.rowReads,
-      "行読みの区間数（表ごとに、全量へ倒れなかった block の一意行数の合計）",
+      "number of row-read ranges (per table, the sum of distinct rows of blocks not read whole)",
     );
     assertEquals(
       rowStats.resident,
       plans.full,
-      "常駐 block 数（全量読みへ倒れたぶんだけ常駐する）",
+      "number of resident blocks (only those read whole stay resident)",
     );
 
-    // ②-b 全量経路 — probe の token をその block の先頭 32 行と一緒に引くと、触った block は
-    // どれも下限（32 行）に届くので方針表が全量読みへ倒れる。probe の位置は列の先頭に置いて
-    // あるので、比べるのは同じ要素数の前半だけでよい。値が **1 bit も動かない**ことが門である。
+    // ②-b The whole-read path — looking up the probe's tokens together with the first 32 rows
+    // of their blocks makes every touched block reach the minimum (32 rows), so the policy table
+    // reads them whole. The probe sits at the front of the sequence, so only the first part of
+    // the same element count is compared. The check is that the values **do not move by a single
+    // bit**.
     const filler = [...touched].flatMap((position) =>
       Array.from({ length: 32 }, (_row, row) => index.values.blocks[position].start + row),
     );
     const full = await openPle(allResidentBytes(index));
     const byFull = await full.gather([...tokens, ...filler]);
     assert("data" in byFull && byFull.data instanceof Float32Array);
-    assertProbeMatch(byFull.data.subarray(0, expected.length), "全量経路");
+    assertProbeMatch(byFull.data.subarray(0, expected.length), "whole-read path");
     assertEquals(
       [...new Uint32Array(byFull.data.buffer, 0, expected.length)],
       [...new Uint32Array(byRows.data.buffer)],
-      "全量読みの値が行読みとビット一致しない",
+      "the whole-read values are not bit-identical to the row reads",
     );
     const fullStats = full.stats();
     const combined = [...new Set([...tokens, ...filler])];
@@ -601,82 +653,89 @@ test.skipIf(!MODEL_PRESENT || PROBE_GATE.skip)(
     assertEquals(
       fullPlans.rowReads,
       0,
-      "filler を足しても下限に届かない block がある（②-b の前提が崩れている）",
+      "some block stays below the minimum even with the filler (②-b's premise is broken)",
     );
     assertEquals(
       fullStats.loads,
       fullPlans.full,
       "whole-read blocks (the touched blocks of every table the index has)",
     );
-    assertEquals(fullStats.rowReads, 0, "全量読みへ倒れた gather で行読みが起きている");
+    assertEquals(fullStats.rowReads, 0, "row reads happened in a gather that should read whole");
 
     console.log(
-      `[e2e] gemma4 product PLE: probe ${tokens.length} token（一意 ${distinct}）× ${LAYERS} 層 ×` +
-        ` ${PLE_DIM} 次元が torch とビット一致 / 行読み経路 = 全量 ${rowStats.loads} 本・` +
-        `行 ${rowStats.rowReads} 区間（予算 ${(budget / 1024 / 1024).toFixed(0)} MiB）/ ` +
-        `全量経路 = block ${fullStats.loads} 本ロード・常駐 ${fullStats.resident} 本` +
+      `[e2e] gemma4 product PLE: probe ${tokens.length} token (distinct ${distinct}) × ${LAYERS} layers ×` +
+        ` ${PLE_DIM} dims bit-identical to torch / row-read path = whole ${rowStats.loads},` +
+        ` rows ${rowStats.rowReads} ranges (budget ${(budget / 1024 / 1024).toFixed(0)} MiB) / ` +
+        `whole-read path = ${fullStats.loads} blocks loaded, ${fullStats.resident} resident` +
         `（${(fullStats.residentBytes / 1024 / 1024).toFixed(0)} MiB）`,
     );
   },
 );
 
 /**
- * ① 形の前提。既存 2 系列との差分（入力 +2 本・出力は最終行 logits・argmax 不在・PLE 表の不在）を
- * ここで見る — states / 層種別 / 格納の本体検査は書き手側（`export_product.assert_ir_form_product`）
- * が持つ。ここが緩むと**別のグラフを検収してしまう**。
+ * ① Form premises. The differences from the two existing series (+2 inputs, the output is the
+ * last-row logits, no argmax, no PLE table) are checked here — the main checks of states / layer
+ * kinds / storage belong to the writing side (`export_product.assert_ir_form_product`). If this
+ * loosened, **a different graph would be accepted**.
  */
 const assertProductForm = (parsed: PreparedModel): void => {
   const graph = parsed.graph;
   assertEquals(
-    // 順序は書き手の宣言順に依らせない（名前で見る — 増えたのは rope 4 本で、`position_ids` は
-    // 消えた: 位置は「表を引く添字」ではなく「表そのもの」としてホストから渡る）。
+    // The order does not depend on the writer's declaration order (compared by name — what was
+    // added are the 4 rope inputs, and `position_ids` is gone: positions come from the host as
+    // "the tables themselves", not as "indices into the tables").
     [...graph.inputs.map((spec) => spec.name)].sort(),
     [INPUT_IDS, PER_LAYER_INPUTS, LAST_ROW, ...gemma4RopeInputNames()].sort(),
-    "グラフ入力（製品形は per_layer_inputs / rope 4 本 / last_row）",
+    "graph inputs (the product form has per_layer_inputs / 4 rope inputs / last_row)",
   );
   const perLayer = graph.inputs.find((spec) => spec.name === PER_LAYER_INPUTS);
-  assert(perLayer !== undefined, `'${PER_LAYER_INPUTS}' が無い`);
-  assertEquals(perLayer.dtype, "f32", `'${PER_LAYER_INPUTS}' の dtype`);
+  assert(perLayer !== undefined, `'${PER_LAYER_INPUTS}' is missing`);
+  assertEquals(perLayer.dtype, "f32", `dtype of '${PER_LAYER_INPUTS}'`);
   assertEquals(
     perLayer.shape,
     [1, "M", LAYERS, PLE_DIM],
-    `'${PER_LAYER_INPUTS}' の shape（ホストが供給する [1,M,35,256]）`,
+    `shape of '${PER_LAYER_INPUTS}' (the [1,M,35,256] the host supplies)`,
   );
 
-  // 出口は 2 本・順序が契約（出力 0 = 選んだ行の logits・出力 1 = 同じ行の最終 norm 後 hidden —
-  // ADR 0068 追記 7 / 0096 決定 5）。行軸は `last_row[R]` が束縛する記号 R で、通常の decode は R=1。
-  assertEquals(graph.outputs.length, 2, "graph.outputs の本数（logits + hidden の 2 本）");
+  // Two outputs, and the order is the contract (output 0 = the selected row's logits, output 1 =
+  // the same row's hidden after the final norm — ADR 0068 addendum 7 / 0096 decision 5). The row
+  // axis is the symbol R bound by `last_row[R]`; a normal decode has R=1.
+  assertEquals(graph.outputs.length, 2, "number of graph.outputs (logits + hidden)");
   assertEquals(
     graph.values[graph.outputs[0]].shape,
     [1, ROW_SYMBOL, VOCAB],
-    "出力 0 の shape（選んだ**行**のみ — 全行 logits への退行検出）",
+    "shape of output 0 (the selected **rows** only — detects a regression to all-row logits)",
   );
   assertEquals(
     graph.values[graph.outputs[1]].shape,
     [1, ROW_SYMBOL, HIDDEN],
-    "出力 1 の shape（選んだ行の最終 norm 後 hidden — logits と入れ替わっていないこと）",
+    "shape of output 1 (the selected rows' hidden after the final norm — not swapped with the logits)",
   );
   const lastRow = graph.inputs.find((spec) => spec.name === LAST_ROW);
-  assert(lastRow !== undefined, `'${LAST_ROW}' が無い`);
-  assertEquals(lastRow.shape, [ROW_SYMBOL], `'${LAST_ROW}' の shape（記号 R の唯一の束縛点）`);
+  assert(lastRow !== undefined, `'${LAST_ROW}' is missing`);
+  assertEquals(
+    lastRow.shape,
+    [ROW_SYMBOL],
+    `shape of '${LAST_ROW}' (the only binding point of the symbol R)`,
+  );
   const producer = new Map<string, (typeof graph.nodes)[number]>();
   for (const node of graph.nodes) {
     for (const out of node.outs) producer.set(out, node);
   }
   const exit = producer.get(graph.outputs[0]);
-  assert(exit !== undefined, "出力 0 がノード出力でない");
+  assert(exit !== undefined, "output 0 is not a node output");
   assert(
     exit.op !== "argmax",
-    "出力 0 の供給元が argmax（製品出口は logits で、sampling はホスト — ADR 0083 決定 6）",
+    "output 0 comes from argmax (the product exit is logits, and sampling is on the host — ADR 0083 decision 6)",
   );
   assertEquals(
     graph.nodes.filter((node) => node.op === "argmax").length,
     0,
-    "argmax ノードの本数（グラフに 1 本も無いこと）",
+    "number of argmax nodes (none in the graph)",
   );
 
-  // PLE 表がグラフに残っていないこと（常駐 2,240MiB が戻る形）。embedding の重みスロットは
-  // ins[0]（`WEIGHT_SLOTS[embedding] = 0`）。
+  // The PLE table is not left in the graph (the form that would bring back 2,240 MiB resident).
+  // The embedding's weight slot is ins[0] (`WEIGHT_SLOTS[embedding] = 0`).
   const embeddings = graph.nodes.filter((node) => node.op === "embedding");
   assertEquals(
     embeddings.filter((node) => {
@@ -684,33 +743,36 @@ const assertProductForm = (parsed: PreparedModel): void => {
       return shape.length === 2 && shape[0] === VOCAB && shape[1] === PLE_DIM;
     }).length,
     0,
-    `PLE 表 [${VOCAB},${PLE_DIM}] を引く embedding が残っている（ホスト gather へ出し切れていない）`,
+    `an embedding that looks up the PLE table [${VOCAB},${PLE_DIM}] remains (not fully moved out to the host gather)`,
   );
-  // 主 embedding 1 + 最終行の行選択 1（RoPE の cos / sin は表引きでなくホスト供給の派生入力 —
-  // ADR 0091 — なので gather は無い）。
+  // The main embedding + the last-row selection (RoPE's cos / sin are derived inputs the host
+  // supplies, not table lookups — ADR 0091 — so there is no gather for them).
   assertEquals(
     embeddings.length,
     2,
-    "embedding ノードの本数（PLE 35 本と RoPE 表 4 本が消えた形）",
+    "number of embedding nodes (the 35 PLE ones and the 4 RoPE tables are gone)",
   );
 
   assertEquals(
     Object.keys(graph.states).length,
     SLOTS,
-    "states スロットの本数（既存 2 系列と同一）",
+    "number of states slots (identical to the two existing series)",
   );
-  // 記号は 3 本（chunk 行 M / 選ぶ行 R / full スロット容量 C）。
+  // Three symbols (chunk rows M / selected rows R / full-slot capacity C).
   assertEquals([...graph.symbols].sort(), ["C", "M", ROW_SYMBOL], "graph.symbols");
 };
 
-/** i32 の入力テンソル 1 本（token id 列も絶対位置列も `[1, rows]`）。 */
+/** One i32 input tensor (both the token ids and the absolute positions are `[1, rows]`). */
 const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
   dtype: "i32",
   shape: [1, rows],
   data,
 });
 
-/** 行選択入力（`[1]` の i32 — the shape the token-only exit, removed on 2026-10-17, also used）。 */
+/**
+ * The row-selection input (an i32 of `[1]` — the shape the token-only exit, removed on 2026-10-17,
+ * also used).
+ */
 const lastRowInput = (row: number): Tensor => ({
   dtype: "i32",
   shape: [1],
@@ -718,15 +780,16 @@ const lastRowInput = (row: number): Tensor => ({
 });
 
 /**
- * 最終行 logits `[1,1,V]` からホスト側 argmax で次 token を読む。
+ * Reads the next token from the last-row logits `[1,1,V]` with a host-side argmax.
  *
- * MUST: 最大値は**先に出た方**を採る（`>` で更新）— torch の `argmax` と同じ tie-break で、
- * `>=` にすると同値の並びで列が割れる。
- * MUST: dtype と shape を検査する（出力名の取り違えは例外も警告も出ないまま別の列を返す）。
+ * MUST: on ties take **the first one** (update on `>`) — the same tie-break as torch's `argmax`;
+ * with `>=` the sequence would split on runs of equal values.
+ * MUST: check the dtype and the shape (a mixed-up output name returns a different sequence with
+ * neither an exception nor a warning).
  */
 const argmaxToken = (tensor: Tensor, where: string): number => {
-  assertEquals(tensor.dtype, "f32", `${where}: logits の dtype`);
-  assertEquals(tensor.shape, [1, 1, VOCAB], `${where}: logits の shape`);
+  assertEquals(tensor.dtype, "f32", `${where}: logits dtype`);
+  assertEquals(tensor.shape, [1, 1, VOCAB], `${where}: logits shape`);
   const data = tensor.data;
   let best = 0;
   let bestValue = data[0];
@@ -736,21 +799,25 @@ const argmaxToken = (tensor: Tensor, where: string): number => {
       best = index;
     }
   }
-  // 非有限（位置表の外の gather / 壊れた PLE）は「もっともらしい token id」に畳まれるので、
-  // 畳まれる**前**にここで落とす。
-  assert(Number.isFinite(bestValue), `${where}: logits の最大値が非有限（${bestValue}）`);
+  // A non-finite value (a gather outside the position table / a broken PLE) would fold into "a
+  // plausible token id", so it fails here **before** folding.
+  assert(Number.isFinite(bestValue), `${where}: the logits maximum is non-finite (${bestValue})`);
   return best;
 };
 
-/** 生成 1 本ぶんの実測（遅延ロードが効いていることを恒真でなく見るための欄）。 */
+/**
+ * The measurements of one generation (fields that show, non-tautologically, that the lazy load
+ * works).
+ */
 type GenerationRecord = { readonly tokens: number[]; readonly gathers: number };
 
 /**
- * ホスト PLE gather + ホスト argmax の greedy ループ（製品面の縮退形）。
+ * The greedy loop of host PLE gather + host argmax (a reduced form of the product surface).
  *
- * MUST: pad 行にも `input_ids` と同じ 0 の PLE を渡す — グラフ内で引いていたときは pad 行が
- * token 0 の行を引いていたので、0 埋めにすると pad 行の値が別物になる（ADR 0066 追記 6 の
- * 値契約は「ホストが 0 で埋める」であって「PLE を 0 にする」ではない）。
+ * MUST: pad rows get the PLE of id 0 too, the same as `input_ids` — when the lookup was inside the
+ * graph, pad rows looked up token 0's row, so zero-filling would make the pad rows' values
+ * different (the value contract of ADR 0066 addendum 6 is "the host fills with 0", not "the PLE
+ * is 0").
  */
 const generate = async (
   session: Awaited<ReturnType<PreparedModel["createContainerSession"]>>,
@@ -762,8 +829,11 @@ const generate = async (
 ): Promise<GenerationRecord> => {
   const chunks = planPrefillChunks(prompt.length, chunkLength);
   const lastPosition = prompt.length + maxNewTokens - 2;
-  assert(lastPosition < MAX_POSITION, `最終位置 ${lastPosition} がモデルの位置上限の外`);
-  assert(prompt.length + maxNewTokens <= CAPACITY, `T + K が容量 ${CAPACITY} を超える`);
+  assert(
+    lastPosition < MAX_POSITION,
+    `the last position ${lastPosition} is beyond the model's position limit`,
+  );
+  assert(prompt.length + maxNewTokens <= CAPACITY, `T + K exceeds the capacity ${CAPACITY}`);
 
   const context = await session.createGenerationContext({
     bindings: { [CAPACITY_SYMBOL]: CAPACITY },
@@ -813,7 +883,7 @@ const generate = async (
     }
     return { tokens, gathers };
   } finally {
-    // MUST: 途中で落ちても返す（KV 容量ぶんの VRAM を抱えたままにしない）。
+    // MUST: released even on a failure midway (do not hold on to the VRAM of the KV capacity).
     await context.dispose();
   }
 };
@@ -823,7 +893,7 @@ const generate = async (
  * checks that do not compare against torch goldens, so they stay in the default run.
  */
 describe.skipIf(!MODEL_PRESENT || !GPU_AVAILABLE)(
-  "Gemma 4 E2B 製品検収: 形の前提と常駐の上限（実 GPU）",
+  "Gemma 4 E2B product acceptance: form premises and the residency ceiling (real GPU)",
   () => {
     let parsed: PreparedModel;
     beforeAll(async () => {
@@ -831,27 +901,31 @@ describe.skipIf(!MODEL_PRESENT || !GPU_AVAILABLE)(
       parsed = prepareContainer(opened, MODEL_GRAPH);
     });
 
-    it("① 形の前提: PLE 外出し + 最終行 logits 出口である", () => {
+    it("① form premises: the PLE is moved out and the exit is the last-row logits", () => {
       assertProductForm(parsed);
     });
 
     // This section was the test body after the step (no step title of its own); it owns the GPU
     // session it opens, so the acquire / dispose pair stays inside this one case.
-    it("常駐の上限: PLE を外した容器は常駐が半分以下になる", async () => {
+    it("residency ceiling: a container with the PLE moved out keeps half or less resident", async () => {
       const gpu = await acquireGpu();
       const session = await parsed.createContainerSession(gpu);
       try {
         const storage = session.diagnostics().storage;
-        assert(storage !== undefined, "diagnostics.storage が無い");
-        assertEquals(storage.hostExpandedBytes, 0, "hostExpandedBytes（適格落ちの CPU 展開）");
-        // ADR 0085 の主張そのもの: PLE を外した容器は常駐が半分以下になる。
+        assert(storage !== undefined, "diagnostics.storage is missing");
+        assertEquals(
+          storage.hostExpandedBytes,
+          0,
+          "hostExpandedBytes (CPU expansion of ineligible weights)",
+        );
+        // ADR 0085's claim itself: a container with the PLE moved out keeps half or less resident.
         assert(
           storage.residentCompressedBytes < RESIDENT_CEILING,
-          `residentCompressedBytes ${storage.residentCompressedBytes} が ${RESIDENT_CEILING} 以上` +
-            `（PLE がグラフに残った容器を読んでいる — ADR 0085 の常駐削減が効いていない）`,
+          `residentCompressedBytes ${storage.residentCompressedBytes} is ${RESIDENT_CEILING} or more` +
+            ` (reading a container with the PLE left in the graph — ADR 0085's residency reduction is not in effect)`,
         );
         console.log(
-          `[e2e] gemma4 product 常駐: 圧縮 ${storage.residentCompressedBytes} バイト` +
+          `[e2e] gemma4 product residency: compressed ${storage.residentCompressedBytes} bytes` +
             ` (kept in the graph, the bf16 PLE would add 4.70e9 B)`,
         );
       } finally {
@@ -868,7 +942,7 @@ describe.skipIf(!MODEL_PRESENT || !GPU_AVAILABLE)(
  * case keeps the LRU policy check in the default run.
  */
 describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
-  `Gemma 4 E2B 製品検収: 交差 parity（実 GPU / ホスト PLE + ホスト argmax）${UPSTREAM_PARITY_OPT_IN}`,
+  `Gemma 4 E2B product acceptance: cross parity (real GPU / host PLE + host argmax)${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     let logitsName: string;
     let index: Gemma4PleFloatIndex;
@@ -881,8 +955,8 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
       logitsName = parsed.graph.outputs[0];
 
       index = await readPleIndex();
-      // 全 block 常駐（LRU の観測は GPU 不要の②が持つ — こちらは生成の往復で block を
-      // 読み直さないことだけを見る）。
+      // Every block resident (the LRU observation belongs to the GPU-free ② — this side only
+      // checks that the generation round trips do not re-read blocks).
       ple = await openPle(allResidentBytes(index));
       gpu = await acquireGpu();
       session = await parsed.createContainerSession(gpu);
@@ -892,7 +966,7 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
       gpu?.destroy();
     });
 
-    it("③ 3 ケース × 16 step が opt-in 系列の期待列と厳密一致", async () => {
+    it("③ 3 cases × 16 steps exactly match the opt-in series' expected sequences", async () => {
       assert(session !== undefined, "session was not created in beforeAll");
       let totalGathers = 0;
       for (const caseName of EXPECTED_CASES) {
@@ -901,16 +975,17 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
         );
         const prompt = [...goldenI32(golden, "prompt")];
         const expected = [...goldenI32(golden, "expected")];
-        assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
+        assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden step count`);
 
-        // 最長ケースだけ細かい刻みで流す（多 chunk prefill = chunk を跨ぐ PLE gather を
-        // 実重みで踏む唯一の経路 — `LONG_CASE_CHUNK_LENGTH` の doc）。
+        // Only the longest case runs with a finer chunk length (multi-chunk prefill = the only
+        // path that runs a PLE gather across chunks on the real weights — the doc of
+        // `LONG_CASE_CHUNK_LENGTH`).
         const chunkLength = caseName === LONG_CASE ? LONG_CASE_CHUNK_LENGTH : CHUNK_LENGTH;
         const chunks = planPrefillChunks(prompt.length, chunkLength).length;
         if (caseName === LONG_CASE) {
           assert(
             chunks > 1,
-            `${caseName}: 刻み ${chunkLength} で 1 chunk に収まる（chunk を跨ぐ gather が走らない）`,
+            `${caseName}: fits in one chunk at length ${chunkLength} (no gather across chunks runs)`,
           );
         }
 
@@ -927,21 +1002,22 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
         assertEquals(
           generated.tokens,
           expected,
-          `${caseName}: 生成 token 列（対 logits opt-in 系列 golden）`,
+          `${caseName}: generated token sequence (vs the logits opt-in series golden)`,
         );
         console.log(
-          `[e2e] gemma4 product ${caseName}: T=${prompt.length}（刻み ${chunkLength} = ` +
-            `${chunks} chunk）+ K=${GREEDY_STEPS} step / PLE gather ${generated.gathers} 回 / ` +
+          `[e2e] gemma4 product ${caseName}: T=${prompt.length} (chunk length ${chunkLength} = ` +
+            `${chunks} chunks) + K=${GREEDY_STEPS} steps / PLE gather ${generated.gathers} times / ` +
             `${(performance.now() - started).toFixed(0)}ms`,
         );
       }
-      // 遅延ロードが実効（恒真でない）: gather は数十回走るのに、block の取得は最大でも
-      // 本数ぶん。毎回読み直す実装ならここが gather 回数まで伸びる。
+      // The lazy load is in effect (not a tautology): the gather runs dozens of times, yet the
+      // blocks are fetched at most once each. An implementation that re-reads every time would
+      // grow this up to the gather count.
       const stats = ple.stats();
       assert(
         totalGathers > stats.loads,
-        `PLE gather ${totalGathers} 回に対し block 取得 ${stats.loads} 回` +
-          `（キャッシュが効いていない）`,
+        `${totalGathers} PLE gathers but ${stats.loads} block fetches` +
+          ` (the cache is not working)`,
       );
       const blocks = gemma4PleTables(index).reduce(
         (sum, [, table]) => sum + table.blocks.length,
@@ -949,11 +1025,11 @@ describe.skipIf(!UPSTREAM_PARITY || !AVAILABLE || !GPU_AVAILABLE)(
       );
       assert(
         stats.loads <= blocks,
-        `block 取得 ${stats.loads} 回が本数 ${blocks} を超える（読み直しが起きている）`,
+        `${stats.loads} block fetches exceed the ${blocks} blocks (re-reads are happening)`,
       );
       console.log(
-        `[e2e] gemma4 product PLE 遅延ロード: gather ${totalGathers} 回 / block 取得 ` +
-          `${stats.loads} 回（全 ${blocks} 本中）`,
+        `[e2e] gemma4 product PLE lazy load: ${totalGathers} gathers / ` +
+          `${stats.loads} block fetches (of ${blocks} blocks)`,
       );
     });
   },

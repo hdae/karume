@@ -1,14 +1,16 @@
-// 相対位置注意の `(T,T)` 表について、**ホスト TS 生成器と Python 側生成器のバイト一致**を
-// 実データで固定する（ADR 0013 の「新しい検証責務」そのもの）。
+// Pins, on real data, the **byte parity of the host TS generator and the Python generator** for
+// the `(T,T)` tables of the relative-position attention (exactly the "new verification
+// responsibility" of ADR 0013).
 //
-// flow / voice は表を焼き込まず**グラフ入力**で受ける。つまり実行時に表を作るのはホストで、
-// ゴールデンの表を作るのは Python（`tools/export-recipes/sbv2/patch.py` の
-// `build_relattn_tables`）— 式が割れると
-// **shape は合ったまま値だけが誤る**。しかも誤り方によっては「ホストとゴールデンが同じ
-// 誤りを共有して E2E がすり抜ける」ので、E2E とは別にここで両者を直接突き合わせる。
+// flow / voice do not bake the tables in but take them as **graph inputs**. So at run time the
+// host builds the tables, while Python (`build_relattn_tables` in
+// `tools/export-recipes/sbv2/patch.py`) builds the golden ones — if the formulas diverge,
+// **the shape still matches and only the values are wrong**. Worse, some kinds of error "are
+// shared by the host and the golden and slip through the E2E", so the two are compared directly
+// here, apart from the E2E.
 //
-// このテストが緑である限り、E2E がゴールデン由来の表で走ることと、ホスト生成の表で走る
-// ことは**同じ計算**になる（バイト一致なので入れ替えても値が動かない）。
+// As long as this test is green, the E2E running on the golden's tables and on host-built tables
+// is **the same computation** (byte parity, so swapping them does not move a value).
 //
 // No GPU. Where the assets come from (ADR 0139): the golden tables are read from the test-asset
 // root, `goldenDir("sbv2-F1")` = `outputs/test-assets/goldens/sbv2-F1/{flow,voice}/io.*` (fetched
@@ -42,8 +44,8 @@ import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/
 import { buildRelattnTables, RELATTN_WINDOW_SIZE } from "../../models/src/sbv2/relattn-tables.ts";
 
 /**
- * 系列 root。綴りの `sbv2-F1` は `sbv2/export.py` の `default_out_root()` が `--model-dir` の
- * ディレクトリ名から導いたもので、**当面この 1 話者を決め打ち**する。
+ * The series root. The spelling `sbv2-F1` is what `default_out_root()` in `sbv2/export.py`
+ * derives from the `--model-dir` directory name; **for now this one speaker is hard-coded**.
  */
 const SERIES_NAME = "sbv2-F1";
 /** The goldens of the series (`outputs/test-assets/goldens/sbv2-F1/`). */
@@ -62,10 +64,13 @@ const FETCH_COMMAND = "node tools/test-assets/fetch.ts";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
 
-/** 表を**グラフ入力**で受けるターゲット（front は焼き込みなので対象外 — ADR 0013）。 */
+/**
+ * The targets that take the tables as **graph inputs** (front bakes them, so it is out of scope —
+ * ADR 0013).
+ */
 const TABLE_INPUT_TARGETS = ["flow", "voice"] as const;
 
-/** io に格納された表のテンソルキー（= グラフ入力名）。 */
+/** The tensor keys of the tables stored in io (= the graph input names). */
 const IDX_K_KEY = "input.idx_k";
 const VALID_KEY = "input.valid";
 
@@ -118,45 +123,45 @@ for (const target of MISSING_TARGETS) {
 }
 
 /**
- * 要素ごとの厳密一致（`Object.is`）。`0` と `-0` を区別するので f32 でもビット同一を主張
- * できる（`===` は `-0 === 0` が真になり、符号付きゼロの取り違えを見逃す）。
+ * Exact element-wise equality (`Object.is`). It tells `0` from `-0`, so it can claim bit identity
+ * even for f32 (`===` holds for `-0 === 0` and would miss a mixed-up signed zero).
  */
 const assertSameElements = (
   actual: ArrayLike<number>,
   expected: ArrayLike<number>,
   where: string,
 ): void => {
-  assertEquals(actual.length, expected.length, `${where}: 要素数`);
+  assertEquals(actual.length, expected.length, `${where}: element count`);
   for (let index = 0; index < expected.length; index += 1) {
     if (!Object.is(actual[index], expected[index])) {
       throw new Error(
-        `${where}: 要素 ${index} が食い違う（TS=${actual[index]} / Python=${expected[index]}）`,
+        `${where}: element ${index} differs (TS=${actual[index]} / Python=${expected[index]})`,
       );
     }
   }
 };
 
 for (const { target, ioFile } of AVAILABLE) {
-  test(`相対位置表パリティ: ${target} / ${ioFile}（TS 生成 ↔ golden の Python 生成）`, async () => {
+  test(`relative-position table parity: ${target} / ${ioFile} (TS generator ↔ the golden's Python generator)`, async () => {
     const bytes = await readFile(new URL(`${target}/${ioFile}`, GOLDEN_ROOT));
     const io = parseSafetensors(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
     );
     const idxKView = io.tensors.get(IDX_K_KEY);
     const validView = io.tensors.get(VALID_KEY);
-    assert(idxKView !== undefined && validView !== undefined, `${ioFile} に表の入力が無い`);
-    assertEquals(idxKView.dtype, "I32", `${IDX_K_KEY} の格納 dtype`);
-    assertEquals(validView.dtype, "F32", `${VALID_KEY} の格納 dtype`);
+    assert(idxKView !== undefined && validView !== undefined, `${ioFile} has no table input`);
+    assertEquals(idxKView.dtype, "I32", `${IDX_K_KEY} storage dtype`);
+    assertEquals(validView.dtype, "F32", `${VALID_KEY} storage dtype`);
 
-    // 実長はゴールデン側の shape から採る（TS 側で長さを決め打ちすると、ケースが
-    // 増えたときに「同じ長さどうしを比べて常に緑」になる）。
-    assertEquals(idxKView.shape.length, 2, `${IDX_K_KEY} の rank`);
-    assertEquals(idxKView.shape, validView.shape, "2 本の表の shape");
+    // The actual length is taken from the golden's shape (fixing the length on the TS side would,
+    // once cases are added, "compare equal lengths with each other and always be green").
+    assertEquals(idxKView.shape.length, 2, `${IDX_K_KEY} rank`);
+    assertEquals(idxKView.shape, validView.shape, "shape of the two tables");
     const [rows, columns] = idxKView.shape;
-    assertEquals(rows, columns, "相対位置表は正方（self-attention）");
+    assertEquals(rows, columns, "the relative-position table is square (self-attention)");
 
     const built = buildRelattnTables(rows);
-    assertEquals(built.idxK.shape, [...idxKView.shape], `${target}/${ioFile}: idx_k の shape`);
+    assertEquals(built.idxK.shape, [...idxKView.shape], `${target}/${ioFile}: idx_k shape`);
     assertSameElements(
       built.idxK.data,
       new Int32Array(io.buffer, idxKView.byteOffset, idxKView.byteLength / 4),
@@ -233,10 +238,11 @@ for (const { target, runnable, suffix, open } of WINDOW_SOURCES) {
   test.skipIf(!runnable)(
     `relative-position window: the baked ${target} table matches the TS constant${suffix}`,
     async () => {
-      // 沈黙誤値クラスの門（ADR 0013）。key 側の表はホストが作るが、**value 側の表
-      // `idx_v` はコンテナに焼き込まれていて幅が `2w+1`**。ここが TS の窓幅定数と食い違えば
-      // ホストは違う幅の埋め込みを前提に添字を作っている — shape エラーにならず黙って
-      // 誤るクラスなので、コンテナから読んだ幅で TS 側の定数を検算する。
+      // The check for the silent-wrong-value class (ADR 0013). The host builds the key-side
+      // tables, but **the value-side table `idx_v` is baked into the container, with width
+      // `2w+1`**. If that disagrees with the TS window-width constant, the host builds indices
+      // assuming embeddings of another width — a class that goes silently wrong without a shape
+      // error, so the TS constant is cross-checked against the width read from the container.
       // The graph descriptor is in part 0 of the container (container-v1 §8) — no weight block
       // is read.
       const model = await open();
@@ -244,11 +250,16 @@ for (const { target, runnable, suffix, open } of WINDOW_SOURCES) {
         .filter((node) => node.op === "sym_prefix_slice")
         .map((node) => model.graph.values[node.ins[0]].shape);
 
-      // 表が入力へ昇格した後に焼き込みが残るのは value 側の 1 本だけ（key 側の 2 本が
-      // 残っていたら昇格が効いていない＝ 134MB の定数を抱えている）。
-      assertEquals(baked.length, 1, `${target} の焼き込み表の本数`);
-      assertEquals(baked[0].length, 4, `${target} の焼き込み表の rank`);
-      assertEquals(baked[0][3], 2 * RELATTN_WINDOW_SIZE + 1, `${target} の相対位置埋め込みの幅`);
+      // After the tables were promoted to inputs, only the one value-side table stays baked (if
+      // the two key-side ones remained, the promotion did not take effect = 134 MB of constants
+      // are carried).
+      assertEquals(baked.length, 1, `${target}: count of baked tables`);
+      assertEquals(baked[0].length, 4, `${target}: rank of the baked table`);
+      assertEquals(
+        baked[0][3],
+        2 * RELATTN_WINDOW_SIZE + 1,
+        `${target}: width of the relative-position embedding`,
+      );
     },
   );
 }

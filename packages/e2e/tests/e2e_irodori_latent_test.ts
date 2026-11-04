@@ -1,47 +1,55 @@
 /**
- * Irodori の**移植の門**（実 GPU）。配布形 → `Pipeline.fromAssets` → `generateLatent`
- * まで通し、出た latent を **full-loop golden の `z` と全要素突合**する（SBV2 の WAV sha256 門
- * `e2e_sbv2_wav_test.ts` の latent 版 — こちらは codec がまだ無いので波形では閉じられない）。
+ * Irodori's **port check** (real GPU). It goes through distribution → `Pipeline.fromAssets` →
+ * `generateLatent` and **compares every element** of the resulting latent **with the full-loop
+ * golden's `z`** (the latent version of SBV2's WAV sha256 check `e2e_sbv2_wav_test.ts` — there
+ * is no codec here yet, so it cannot close on the waveform).
  *
  * The golden is `outputs/test-assets/goldens/irodori-v4-small/pipeline/` (`case.full` /
  * `case.no-ref` / `meta.json`), written by `tools/export-recipes/irodori/pipeline_ref.py`.
- * あちらは**上流の `sample_euler_rf_cfg` との突合を毎回通ってから**書かれるので、この門が閉じる
- * ことは「TS のホスト実装が上流と同じ latent を出す」の 2 段目にあたる。
+ * That script writes them only **after passing a comparison with the upstream
+ * `sample_euler_rf_cfg` every time**, so this check closing is the second stage of "the TS host
+ * implementation emits the same latent as upstream".
  *
- * ## 何をビット一致で縛り、何を tolerance で見るか
+ * ## What is pinned by bit identity and what is checked with a tolerance
  *
- * - **S（latent 長）と forward 数は完全一致**を要求する。どちらも整数の判断（expm1 → 銀行家
- *   丸め → clamp / CFG を掛ける t の区間）で、1 でもずれたら式が違う。
- * - **`z` は tolerance 付き**。グラフ経路は golden 側（torch のグラフラッパ）と「条件 KV を
- *   毎 forward 再計算するか」「縮約の順序」「WGSL と ATen の丸め」が構造的に違うので、
- *   ビット一致は原理的に出ない。閾値の導出は {@link Z_ATOL} を参照。
- * - **初期ノイズは golden のものを注入**する（`initialNoise`）。TS の `Randn` と torch の
- *   Philox は別系列なので、乱数まで一致させると門が「乱数の写経」を要求してしまう。乱数列
- *   そのものの決定性は別のテスト（同一 seed で 2 回生成 → バイト同一）で見る。
+ * - **S (the latent length) and the forward count must match exactly**. Both are integer decisions
+ *   (expm1 → banker's rounding → clamp / the t interval where CFG applies), and being off by even
+ *   1 means the formula differs.
+ * - **`z` has a tolerance**. The graph path differs structurally from the golden side (torch's
+ *   graph wrapper) in "whether the condition KV is recomputed every forward", "the reduction order"
+ *   and "the rounding of WGSL vs ATen", so bit identity cannot arise in principle. See
+ *   {@link Z_ATOL} for the threshold's derivation.
+ * - **The golden's initial noise is injected** (`initialNoise`). TS's `Randn` and torch's Philox
+ *   are different sequences, so matching the random numbers too would make the check demand "a
+ *   transcription of the RNG". The determinism of the random sequence itself is checked by another
+ *   test (two generations with the same seed → byte-identical).
  *
- * ## 実効値 drift（門の前提）
+ * ## Effective-value drift (the check's premise)
  *
- * golden と配布形は**別々に焼かれる**（`tools/export-recipes/irodori/pipeline_ref.py` と `tools/export-recipes/dist.py`）ので、
- * サンプラのノブがどちらか片方で動くと「z が合わない」という形でしか出てこない。前提が
- * 崩れたことを先に言うために、`pipelineConfig` と `meta.json` の突合を独立した門に置く。
+ * The golden and the distribution are **baked separately** (`tools/export-recipes/irodori/pipeline_ref.py` and `tools/export-recipes/dist.py`),
+ * so a sampler knob moving on only one side would only show as "z does not match". To state first
+ * that the premise broke, the comparison of `pipelineConfig` with `meta.json` is its own check.
  *
- * ## 格納 dtype の系列でパラメタ化する（ADR 0018 / 0027 の型）
+ * ## Parameterized by storage-dtype series (the pattern of ADR 0018 / 0027)
  *
- * 配布形の quant 席（`f32` / `f16` / `i8`）と full-loop golden の系列は **1 対 1** で、系列ごとに
- * ①golden を fake-quant 済みの重みで焼き直し ②tolerance を**素の実測から独立導出**する
- * （系列間で流用しない — 片方の再導出がもう片方を黙って動かす）。圧縮系列の golden も
- * 丸めた重みで採ってあるので、どの系列でも見ているのは「実装差だけ」で、量子化そのものの
- * 質は聴感ゲート（ユーザー裁定）の領分。
+ * The distribution's quant seats (`f32` / `f16` / `i8`) and the full-loop golden series are
+ * **one to one**, and per series ① the golden is re-baked with the fake-quantized weights and ② the
+ * tolerance is **derived independently from the raw measurement** (not shared across series — one
+ * re-derivation would silently move the other). The compressed series' goldens are also taken with
+ * the rounded weights, so every series looks at "implementation differences only"; the quality of
+ * the quantization itself belongs to the listening check (the user's ruling).
  *
- * NOTE: 席名と系列 root の綴りは**必ずしも同じではない**（`i8+dit4` 席 ↔ `-i4` 系列 — 席名は
- * 実行構成の名前、系列 root は格納 dtype の名前で、`i8` / `i8-a8` は同じバイトを共有する）。
- * この門が見るのは格納 dtype までの席で、活性量子化の `i8-a8` 席は数値パリティ網に**できない**
- * ため別の門が持つ（`e2e_irodori_ab_test.ts` — ADR 0025 決定 6 / 0026）。
+ * NOTE: the seat name and the series root are **not always spelled the same** (seat `i8+dit4` ↔
+ * series `-i4` — a seat name names the execution configuration, a series root the storage dtype,
+ * and `i8` / `i8-a8` share the same bytes). This check covers seats up to the storage dtype; the
+ * activation-quantized `i8-a8` seat **cannot** be part of the numeric-parity net, so another check
+ * owns it (`e2e_irodori_ab_test.ts` — ADR 0025 decision 6 / 0026).
  *
- * **S と forward 数の完全一致は系列に依らず要求する** — 格納 dtype を落としても duration の
- * 出力を動かす軸は無い（重み格納だけの変更で、S を決める式もホストのまま）ので、ここが
- * 割れたら tolerance ではなく経路を疑う。**i8 で S が動くかどうかは別軸の実測**
- * （`tools/export-recipes/irodori/measure_quant.py` の S ドリフト表）で、割れたらそちらを先に読む。
+ * **The exact match of S and the forward count is required whatever the series** — lowering the
+ * storage dtype has no axis that moves the duration output (it changes only the weight storage, and
+ * the formula deciding S stays on the host), so if this breaks, suspect the path, not the
+ * tolerance. **Whether S moves with i8 is a measurement on another axis** (the S drift table of
+ * `tools/export-recipes/irodori/measure_quant.py`); read that first if it breaks.
  *
  * MUST: the assets are the mirror `models/karume-irodori-v4-small/` and the goldens above. An
  * environment without the mirror, without the goldens, or without a GPU SKIPs explicitly with the
@@ -49,8 +57,8 @@
  * absent from a complete fetch of the pinned test assets (the dataset at the pin lacks it — ADR
  * 0139), and a case file absent beside a present `meta.json` (an inconsistent golden set).
  *
- * NOTE: ローカル読みに `Deno.readFile` を使うのはテストだけ。パッケージ本体は Web 標準 API
- * のみ（横断不変条件）で、`fromAssets` はバイト列を受け取るだけの面。
+ * NOTE: only the tests use `Deno.readFile` for local reads. The package itself uses Web standard
+ * APIs only (a cross-cutting invariant), and `fromAssets` is a surface that only receives bytes.
  */
 
 import { test } from "vite-plus/test";
@@ -94,126 +102,155 @@ const FETCH_HINT = (seriesRoot: string): string =>
   `--include 'goldens/${seriesRoot}/pipeline/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone`;
 
 /**
- * `z` の全要素突合に使う許容誤差（**f32 系列**）。
+ * The tolerance for comparing every element of `z` (**f32 series**).
  *
- * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-12 / 実 GPU）:
+ * Measured (a plain comparison with `atol = rtol = 0` — the values this check logs every time;
+ * 2026-08-12, real GPU):
  *
- * | ケース   | S   | 要素数 | z の maxAbs 差 | \|z\| 上端 | 比        |
- * | -------- | --- | ------ | -------------- | ---------- | --------- |
- * | full     | 161 | 5,152  | **1.9050e-4**  | 5.10       | 値域の 1/26,800 |
- * | no-ref   | 116 | 3,712  | **7.8994e-4**  | 4.33       | 値域の 1/5,480  |
+ * | Case     | S   | Elements | z maxAbs diff  | \|z\| max | Ratio     |
+ * | -------- | --- | -------- | -------------- | ---------- | --------- |
+ * | full     | 161 | 5,152    | **1.9050e-4**  | 5.10       | 1/26,800 of the range |
+ * | no-ref   | 116 | 3,712    | **7.8994e-4**  | 4.33       | 1/5,480 of the range  |
  *
- * atol 5e-3 は実測最悪 7.8994e-4 の **6.3 倍**で、値域（\|z\| 上端 4.33）の 1/870。差は
- * **構造的**なもので、golden 側（torch のグラフラッパ）と WGSL とで縮約の順序と丸めが違い、
- * それを 40 step の Euler が積み上げた結果（S も forward 数も完全一致しているので、経路の
- * 違いはここしか残らない）。**式の取り違え**（CFG の符号やスケール・t スケジュール・マスクの
- * 区間割り）は値域と同じ O(1) で出る — golden 側の実測で、CFG の有無だけで z は 5.56 / 3.23
- * 動く（`meta.json` の `cfgEffectMaxAbs`）ので、この閾値との間には 3 桁以上の隔たりがある。
+ * atol 5e-3 is **6.3 times** the measured worst 7.8994e-4 and 1/870 of the range (\|z\| max
+ * 4.33). The difference is **structural**: the reduction order and rounding differ between the
+ * golden side (torch's graph wrapper) and WGSL, accumulated over 40 Euler steps (S and the forward
+ * count match exactly, so this is the only path difference left). **A wrong formula** (the CFG sign
+ * or scale, the t schedule, the mask's interval split) shows at O(1), the same as the range — in
+ * the golden side's measurement, CFG alone moves z by 5.56 / 3.23 (`cfgEffectMaxAbs` in
+ * `meta.json`), more than 3 orders of magnitude away from this threshold.
  *
- * MUST: 合わないときにここを緩めない。上流突合の閾値（`tools/export-recipes/irodori/pipeline_ref.py` の
- * `EULER_REFERENCE_ATOL` = 1e-3）と同じ性格の数で、動かすと「移植できた」の意味が消える。
+ * MUST: do not loosen this when it does not match. It is a number of the same character as the
+ * upstream comparison's threshold (`EULER_REFERENCE_ATOL` = 1e-3 in
+ * `tools/export-recipes/irodori/pipeline_ref.py`); moving it erases the meaning of "the port
+ * works".
  */
 const Z_ATOL = 5e-3;
 
 /**
- * **f16 系列**（`--dtype f16` — 適格な重みスロットだけ f16 格納・計算は f32）の `z` の許容誤差。
+ * The tolerance of `z` for the **f16 series** (`--dtype f16` — only eligible weight slots stored
+ * as f16, computed in f32).
  *
- * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-12 / 実 GPU）:
+ * Measured (a plain comparison with `atol = rtol = 0` — the values this check logs every time;
+ * 2026-08-12, real GPU):
  *
- * | ケース   | S   | 要素数 | z の maxAbs 差 | \|z\| 上端 | 比       |
- * | -------- | --- | ------ | -------------- | ---------- | -------- |
- * | full     | 161 | 5,152  | 2.1321e-4      | 5.10272    | 1/23,933 |
- * | no-ref   | 116 | 3,712  | 1.8516e-4      | 4.33354    | 1/23,404 |
+ * | Case     | S   | Elements | z maxAbs diff  | \|z\| max | Ratio    |
+ * | -------- | --- | -------- | -------------- | ---------- | -------- |
+ * | full     | 161 | 5,152    | 2.1321e-4      | 5.10272    | 1/23,933 |
+ * | no-ref   | 116 | 3,712    | 1.8516e-4      | 4.33354    | 1/23,404 |
  *
- * 1.5e-3 = 実測最悪 2.1321e-4 の **7.0 倍**（f32 の 6.3 倍と同じ採り方）・\|z\| 上端の約
- * 1/3,400。golden は fake-quant 済みの重みで採ってあるので、この差も f32 系列と同じ
- * 「実装差だけ」— 実測が f32（7.9e-4）より小さいのは偶然の範囲で、系列間に順序関係は無い。
+ * 1.5e-3 = **7.0 times** the measured worst 2.1321e-4 (taken the same way as f32's 6.3 times),
+ * about 1/3,400 of the \|z\| max. The golden is taken with the fake-quantized weights, so this
+ * difference is also "implementation differences only", as in the f32 series — the measurement
+ * being smaller than f32's (7.9e-4) is within chance; there is no ordering between series.
  *
- * MUST: **f32 の値を流用しない**（ADR 0027 の型 — 系列ごとに素の実測から独立導出する。
- * 流用すると、片方の再導出がもう片方を黙って動かす）。再導出の手順は f32 と同じ:
- * ①f16 系列の資産を焼く（`--dtype f16` の export 3 本 + `karume dist`）②この定数を
- * `undefined` に戻してこの門を走らせ、ログの素の `maxAbs` を表へ書く ③実測最悪の
- * 5〜10 倍を閾値に採り、値域との比を添える。
+ * MUST: **do not reuse the f32 value** (the pattern of ADR 0027 — derive independently from the raw
+ * measurement per series; reusing it lets one re-derivation silently move the other). The
+ * re-derivation procedure is the same as f32's: ① bake the f16 series' assets (the 3 exports with
+ * `--dtype f16` + `karume dist`) ② set this constant back to `undefined`, run this check and
+ * write the raw `maxAbs` from the log into the table ③ take 5–10 times the measured worst as the
+ * threshold and add its ratio to the range.
  *
- * `undefined` のまま資産だけが揃った環境では、この門は**緑にならない**（実測を出してから
- * 赤で止まる）— 未導出の tolerance を「とりあえず f32 と同じ」で埋めて緑にすると、
- * 検出力の無い門が黙って増えるため。
+ * In an environment where only the assets are present with this still `undefined`, this check
+ * **does not turn green** (it prints the measurement and stops red) — filling an underived
+ * tolerance with "the same as f32 for now" and going green would silently add checks without
+ * detection power.
  */
 const F16_Z_ATOL: number | undefined = 1.5e-3;
 
 /**
- * **i8 席**（`--dtype i8` — 適格な重みスロットだけ per-channel i8 格納・計算は f32）の `z` の
- * 許容誤差。
+ * The tolerance of `z` for the **i8 seat** (`--dtype i8` — only eligible weight slots stored as
+ * per-channel i8, computed in f32).
  *
- * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-12 / 実 GPU）:
+ * Measured (a plain comparison with `atol = rtol = 0` — the values this check logs every time;
+ * 2026-08-12, real GPU):
  *
- * | ケース   | S   | 要素数 | z の maxAbs 差 | \|z\| 上端 | 比      |
- * | -------- | --- | ------ | -------------- | ---------- | ------- |
- * | full     | 161 | 5,152  | **1.8429e-3**  | 5.11886    | 1/2,777 |
- * | no-ref   | 116 | 3,712  | 1.6475e-4      | 4.33821    | 1/26,331 |
+ * | Case     | S   | Elements | z maxAbs diff  | \|z\| max | Ratio   |
+ * | -------- | --- | -------- | -------------- | ---------- | ------- |
+ * | full     | 161 | 5,152    | **1.8429e-3**  | 5.11886    | 1/2,777 |
+ * | no-ref   | 116 | 3,712    | 1.6475e-4      | 4.33821    | 1/26,331 |
  *
- * 1e-2 = 実測最悪 1.8429e-3 の **5.4 倍**・\|z\| 上端の約 1/512。f16 より 1 桁大きい差が
- * 出るのは i8 格子の粗さがそのまま（golden も同じ丸めた重みなので「実装差」に載る係数が
- * 大きくなる）— S / forwards は完全一致しているので経路は同一。
+ * 1e-2 = **5.4 times** the measured worst 1.8429e-3, about 1/512 of the \|z\| max. The difference
+ * an order of magnitude larger than f16's is the coarseness of the i8 grid itself (the golden has
+ * the same rounded weights, so the coefficient riding on the "implementation differences" grows) —
+ * S / forwards match exactly, so the path is the same.
  *
- * MUST: **f32 / f16 の値を流用しない**（ADR 0027 / 0029 の型 — 系列ごとに素の実測から独立
- * 導出する）。再導出の手順は f16 と同じ: ①i8 系列の資産を焼く（`--dtype i8` の export 3 本 +
- * `karume dist`）②この定数を `undefined` に戻してこの門を走らせ、ログの素の `maxAbs` を上の表へ
- * 書く ③実測最悪の 5〜10 倍を閾値に採り、値域との比を添える。
+ * MUST: **do not reuse the f32 / f16 values** (the pattern of ADR 0027 / 0029 — derive
+ * independently from the raw measurement per series). The re-derivation procedure is the same as
+ * f16's: ① bake the i8 series' assets (the 3 exports with `--dtype i8` + `karume dist`) ② set this
+ * constant back to `undefined`, run this check and write the raw `maxAbs` from the log into the
+ * table above ③ take 5–10 times the measured worst as the threshold and add its ratio to the range.
  *
- * `undefined` のまま資産だけが揃った環境では、この門は**緑にならない**（実測を出してから
- * 赤で止まる — ADR 0050 決定 4）。
+ * In an environment where only the assets are present with this still `undefined`, this check
+ * **does not turn green** (it prints the measurement and stops red — ADR 0050 decision 4).
  *
- * NOTE: **S / forwards が割れた場合は tolerance の問題ではない** ので、閾値を触る前に
- * `tools/export-recipes/irodori/measure_quant.py` の S ドリフト表を読む。
+ * NOTE: **if S / forwards break, it is not a tolerance problem**, so read the S drift table of
+ * `tools/export-recipes/irodori/measure_quant.py` before touching the threshold.
  */
 const W8_Z_ATOL: number | undefined = 1e-2;
 
 /**
- * **i8+dit4 席**（`--dtype i4` — `dit` だけ i4 g32・GPTQ 校正付き。他 7 役は `i8` と同じ i8 バイトを
- * 共有する唯一の混成席）の `z` の許容誤差。
+ * The tolerance of `z` for the **i8+dit4 seat** (`--dtype i4` — `dit` alone is i4 g32 with GPTQ
+ * calibration; the only mixed seat, whose other 7 roles share the same i8 bytes as `i8`).
  *
- * golden は**出荷バイトから**焼かれる（`irodori.pipeline_ref` が export 済み i4 コンテナを
- * 読み戻す — 校正を 2 度走らせない）ので、この差も他系列と同じ「実装差だけ」。
+ * The golden is baked **from the shipped bytes** (`irodori.pipeline_ref` reads the exported i4
+ * container back — calibration does not run twice), so this difference too is "implementation
+ * differences only", as in the other series.
  *
- * 実測（`atol = rtol = 0` の素の突合 — この門が毎回ログに出す値。2026-08-23 / 実 GPU）:
+ * Measured (a plain comparison with `atol = rtol = 0` — the values this check logs every time;
+ * 2026-08-23, real GPU):
  *
- * | ケース   | S   | 要素数 | z の maxAbs 差 | \|z\| 上端 | 比       |
- * | -------- | --- | ------ | -------------- | ---------- | -------- |
- * | full     | 161 | 5,152  | **1.1522e-3**  | 5.03657    | 1/4,371  |
- * | no-ref   | 116 | 3,712  | 2.8908e-5      | 4.99839    | 1/172,907 |
+ * | Case     | S   | Elements | z maxAbs diff  | \|z\| max | Ratio    |
+ * | -------- | --- | -------- | -------------- | ---------- | -------- |
+ * | full     | 161 | 5,152    | **1.1522e-3**  | 5.03657    | 1/4,371  |
+ * | no-ref   | 116 | 3,712    | 2.8908e-5      | 4.99839    | 1/172,907 |
  *
- * 6e-3 = 実測最悪 1.1522e-3 の **5.2 倍**（i8 の 5.4 倍と同じ採り方）・\|z\| 上端の約 1/839。
- * 実測が i8（1.8429e-3）より小さいのは GPTQ 校正の帰結ではなく偶然の範囲 — 系列間に順序
- * 関係は無い（i8 の同注記と同文）。
+ * 6e-3 = **5.2 times** the measured worst 1.1522e-3 (taken the same way as i8's 5.4 times), about
+ * 1/839 of the \|z\| max. The measurement being smaller than i8's (1.8429e-3) is within chance,
+ * not a consequence of the GPTQ calibration — there is no ordering between series (the same note
+ * as i8's).
  *
- * MUST: **f32 / f16 / i8 の値を流用しない**（ADR 0027 / 0050 の型 — 系列ごとに素の実測から
- * 独立導出する）。再導出の手順は i8 と同じ: ①i4 系列の資産を焼く（`--dtype i4` の export +
- * `pipeline_ref --dtype i4` + `karume dist`）②この定数を `undefined` に戻してこの門を走らせ、
- * ログの素の `maxAbs` を表へ書く ③実測最悪の 5〜10 倍を閾値に採り、値域との比を添える。
+ * MUST: **do not reuse the f32 / f16 / i8 values** (the pattern of ADR 0027 / 0050 — derive
+ * independently from the raw measurement per series). The re-derivation procedure is the same as
+ * i8's: ① bake the i4 series' assets (the export with `--dtype i4` + `pipeline_ref --dtype i4` +
+ * `karume dist`) ② set this constant back to `undefined`, run this check and write the raw
+ * `maxAbs` from the log into the table ③ take 5–10 times the measured worst as the threshold and
+ * add its ratio to the range.
  *
- * NOTE: **S / forwards が割れた場合は tolerance の問題ではない**（i8 と同文)。i4 で S が
- * 動かないことは J-2 第 2 段の実測（gptq 3 構成とも S 予測完全一致 —
- * research 2026-08-20 §6）が根拠で、上の実測でも S / forwards は完全一致だった。
+ * NOTE: **if S / forwards break, it is not a tolerance problem** (the same as i8's note). That S
+ * does not move with i4 rests on the measurement of J-2 stage 2 (the S prediction matched exactly
+ * for all 3 gptq configurations — research 2026-08-20 §6), and S / forwards also matched exactly in
+ * the measurement above.
  */
 const W4_Z_ATOL: number | undefined = 6e-3;
 
-/** 決定性の門で使う発話長（秒）。`duration` を回さず S を小さく固定して 2 回生成する。 */
+/**
+ * The utterance length (seconds) of the determinism check. S is fixed small without running
+ * `duration`, and it generates twice.
+ */
 const DETERMINISM_SECONDS = 1;
 
 /**
- * 格納 dtype ごとの系列（配布形の quant 席 × full-loop golden の系列 — 1 対 1）。
+ * The series per storage dtype (the distribution's quant seat × the full-loop golden series — one
+ * to one).
  *
- * MUST: golden の置き場を系列ごとに分ける。f32 の golden で f16 資産を突き合わせると、差に
- * 量子化誤差そのものが混ざって tolerance の意味が消える（しかも緩める方向にしか作用しない
- * ので、緑のまま検出力だけが落ちる — `karume.quantize` のモジュール docstring と同じ罠）。
+ * MUST: keep the goldens in a separate place per series. Comparing f16 assets against the f32
+ * golden mixes the quantization error itself into the difference and erases the tolerance's
+ * meaning (and it only ever acts in the loosening direction, so the detection power drops while
+ * staying green — the same trap as in `karume.quantize`'s module docstring).
  */
 type IrodoriSeries = {
-  /** テスト名に出る名前（= 配布形の quant 席の綴り — 系列 root の綴りとは別軸）。 */
+  /**
+   * The name shown in test titles (= the spelling of the distribution's quant seat — a different
+   * axis from the series root's spelling).
+   */
   readonly name: string;
   /** The series root of its full-loop goldens (`goldens/<root>/pipeline/` of the test assets). */
   readonly seriesRoot: string;
-  /** `z` の全要素突合に使う許容誤差（**系列ごとに実測導出** — `undefined` は未導出）。 */
+  /**
+   * The tolerance for comparing every element of `z` (**derived from measurement per series** —
+   * `undefined` means not derived yet).
+   */
   readonly zAtol: number | undefined;
 };
 
@@ -229,16 +266,18 @@ const SERIES: readonly IrodoriSeries[] = [
     zAtol: F16_Z_ATOL,
   },
   {
-    // 席の綴りは `i8`・系列 root は `-i8`（`i8-a8` 席も同じバイトを指すが、あちらは活性量子化が
-    // 効くので数値パリティ網にならず、別の門が持つ）。
+    // The seat is spelled `i8`, the series root `-i8` (the `i8-a8` seat points at the same bytes,
+    // but activation quantization applies there, so it is not part of the numeric-parity net and
+    // another check owns it).
     name: "i8",
     seriesRoot: "irodori-v4-small-i8",
     zAtol: W8_Z_ATOL,
   },
   {
-    // 席の綴りは `i8+dit4`・系列 root は `-i4`。`dit` だけ i4 で他 7 役は `i8` の i8 バイトを共有する
-    // 唯一の混成席（席表の裁定 2026-08-23）。golden の生成は export 済み系列が前提
-    // （`pipeline_ref --dtype i4` が出荷バイトを読み戻す）。
+    // The seat is spelled `i8+dit4`, the series root `-i4`. The only mixed seat: `dit` alone is
+    // i4 and the other 7 roles share `i8`'s i8 bytes (the seat table's ruling 2026-08-23).
+    // Generating the golden presupposes the exported series (`pipeline_ref --dtype i4` reads the
+    // shipped bytes back).
     name: "i8+dit4",
     seriesRoot: "irodori-v4-small-i4",
     zAtol: W4_Z_ATOL,
@@ -246,11 +285,12 @@ const SERIES: readonly IrodoriSeries[] = [
 ];
 
 /**
- * golden の 1 ケースを配布形で再現して突き合わせる。
+ * Reproduces one golden case with the distribution and compares them.
  *
- * ノブは 1 つも渡さない（`pipelineConfig` の宣言がそのまま実効値）。参照 latent と初期ノイズ
- * だけが golden 由来で、S は `duration` グラフに決めさせる — S が違えば `initialNoise` の長さで
- * 落ちるので、ここは「S も含めて同じ経路を通った」ことの検査になっている。
+ * No knob is passed (the declarations of `pipelineConfig` are the effective values as is). Only
+ * the reference latent and the initial noise come from the golden, and S is left to the
+ * `duration` graph — a different S fails on the length of `initialNoise`, so this checks that
+ * "the same path was taken, S included".
  */
 const runCase = async (
   series: IrodoriSeries,
@@ -280,27 +320,36 @@ const runCase = async (
   console.log(
     `[e2e] irodori ${MODEL}/${series.name} ${name}: ${elapsed}s / S ${latent.frames} / ` +
       `forwards ${latent.forwards} / z maxAbs ${maxAbs.toExponential(4)} ` +
-      `(atol ${series.zAtol ?? "未導出"} / |z| 上端 ${expected.zAbsMax}）`,
+      `(atol ${series.zAtol ?? "not derived"} / |z| max ${expected.zAbsMax})`,
   );
-  // 整数の判断（S の決定式・CFG を掛ける t の区間）は系列に依らず完全一致を要求する。
-  assertEquals(latent.frames, expected.S, `${name}: S が golden と違う`);
-  assertEquals(latent.forwards, expected.forwards, `${name}: dit の forward 数が golden と違う`);
-  assertEquals(latent.latentDim, z.length / expected.S, `${name}: latentDim が golden と違う`);
+  // The integer decisions (the formula deciding S, the t interval where CFG applies) must match
+  // exactly whatever the series.
+  assertEquals(latent.frames, expected.S, `${name}: S differs from the golden`);
+  assertEquals(
+    latent.forwards,
+    expected.forwards,
+    `${name}: dit's forward count differs from the golden`,
+  );
+  assertEquals(
+    latent.latentDim,
+    z.length / expected.S,
+    `${name}: latentDim differs from the golden`,
+  );
   if (series.zAtol === undefined) {
     throw new Error(
-      `${series.name} 席の tolerance が未導出（実測 maxAbs ${maxAbs.toExponential(4)} / ` +
-        `|z| 上端 ${expected.zAbsMax}）— 上のログの実測を全ケースぶん集めて、この席の ` +
-        "`*_Z_ATOL` 定数の表を埋める（他の席の値を流用しない — ADR 0027 の型）",
+      `the tolerance of seat ${series.name} is not derived yet (measured maxAbs ${maxAbs.toExponential(4)} / ` +
+        `|z| max ${expected.zAbsMax}) — collect the measurements in the log above for every case and fill ` +
+        "in the table of this seat's `*_Z_ATOL` constant (do not reuse another seat's value — the pattern of ADR 0027)",
     );
   }
   if (maxAbs > series.zAtol) {
     const frame = Math.floor(at / latent.latentDim);
     throw new Error(
-      `${name}: latent が golden と ${maxAbs.toExponential(4)} 違う（許容 ${series.zAtol}）\n` +
-        `  最悪は フレーム ${frame} / 列 ${at % latent.latentDim}: ` +
-        `golden ${z[at]} → 実測 ${latent.data[at]}\n` +
-        "  tolerance を上げるのではなく、CFG 合成式 / t スケジュール / マスク区間 / 条件の " +
-        "右 pad のどれが動いたかを先に確かめる",
+      `${name}: the latent differs from the golden by ${maxAbs.toExponential(4)} (tolerance ${series.zAtol})\n` +
+        `  the worst is at frame ${frame} / column ${at % latent.latentDim}: ` +
+        `golden ${z[at]} → measured ${latent.data[at]}\n` +
+        "  instead of raising the tolerance, first check which of the CFG combination formula / t schedule / mask interval / " +
+        "the conditions' right pad moved",
     );
   }
 };
@@ -313,7 +362,10 @@ for (const series of SERIES) {
     if (metaText === undefined) throw lostAsset([metaUrl.pathname]);
     return JSON.parse(metaText) as GoldenMeta;
   };
-  /** 配布形にこの席があるか（席の綴りと golden の系列は 1 対 1 だが、綴りは別軸）。 */
+  /**
+   * Whether the distribution has this seat (the seat spelling and the golden series are one to
+   * one, but the spellings are separate axes).
+   */
   const seated = hasQuantSeat(series.name);
   const mirrorReady = manifestText !== undefined && seated;
   // Every case reads the mirror's quant seat and `meta.json`; a parity case also reads its own
@@ -348,11 +400,12 @@ for (const series of SERIES) {
   const parityRunnable = runnable && UPSTREAM_PARITY;
 
   test.skipIf(!parityRunnable)(
-    `e2e(実GPU): 配布形の latent が full-loop golden と一致する（${series.name} / 参照 + caption あり）${UPSTREAM_PARITY_OPT_IN}`,
+    `e2e (real GPU): the distribution's latent matches the full-loop golden (${series.name} / with reference + caption)${UPSTREAM_PARITY_OPT_IN}`,
     async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
-      // `await using` は [Symbol.asyncDispose] 経由の解放をこの実 GPU 経路で検査する意図込み。
+      // `await using` also intends to check the release via [Symbol.asyncDispose] on this real-GPU
+      // path.
       await using pipeline = await Pipeline.fromAssets(
         { manifest, assets },
         {
@@ -365,7 +418,7 @@ for (const series of SERIES) {
   );
 
   test.skipIf(!parityRunnable)(
-    `e2e(実GPU): 参照なし / caption 空でも latent が full-loop golden と一致する（${series.name}）${UPSTREAM_PARITY_OPT_IN}`,
+    `e2e (real GPU): without a reference / with an empty caption the latent still matches the full-loop golden (${series.name})${UPSTREAM_PARITY_OPT_IN}`,
     async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
@@ -376,13 +429,14 @@ for (const series of SERIES) {
           quant: series.name,
         },
       );
-      // speaker のゼロ短絡と caption 空の CFG off が効く経路（forward が 100 → 60 に落ちる）。
+      // The path where the speaker's zero short-circuit and CFG off for the empty caption apply
+      // (forwards drop from 100 to 60).
       await runCase(series, pipeline, "no-ref", readMeta().cases["no-ref"]);
     },
   );
 
   test.skipIf(!runnable)(
-    `e2e(実GPU): 同じ seed の生成は 2 回ともバイト同一（${series.name} / 乱数もホストグルーも決定的）`,
+    `e2e (real GPU): two generations with the same seed are byte-identical (${series.name} / the RNG and the host glue are deterministic)`,
     async () => {
       const manifest = readManifest();
       const assets = await loadLocalAssets(manifest, series.name);
@@ -393,8 +447,9 @@ for (const series of SERIES) {
           quant: series.name,
         },
       );
-      // `initialNoise` を渡さない = 内部の `Randn` を通る唯一の経路。`durationSeconds` で S を
-      // 固定するのは `duration` を回さず短く保つため（見たいのは長さではなく再現性）。
+      // Not passing `initialNoise` = the only path through the internal `Randn`. S is fixed with
+      // `durationSeconds` to keep it short without running `duration` (what matters is
+      // reproducibility, not length).
       const request = {
         text: readMeta().cases["full"].text,
         seed: 7,
@@ -407,20 +462,21 @@ for (const series of SERIES) {
       assertEquals(
         new Uint8Array(second.data.buffer),
         new Uint8Array(first.data.buffer),
-        "同じ seed・同じ要求で latent が変わった（乱数かホストグルーに非決定性がある）",
+        "the latent changed with the same seed and the same request (the RNG or the host glue is non-deterministic)",
       );
     },
   );
 
   test.skipIf(!available)(
-    `e2e(資産): 配布形の pipelineConfig が golden の生成条件と一致する（${series.name}）`,
+    `e2e (assets): the distribution's pipelineConfig matches the golden's generation conditions (${series.name})`,
     () => {
-      // GPU は要らない — 門の**前提**（golden 再生成と dist 再生成がずれていないこと）だけを見る。
+      // No GPU needed — it only checks the check's **premise** (that the golden regeneration and
+      // the dist regeneration have not drifted apart).
       const meta = readMeta();
       const config = parseIrodoriPipelineConfig(modelEntry(readManifest()).pipelineConfig);
       const drifted: string[] = [];
       const check = (key: string, expected: number, actual: number): void => {
-        if (expected !== actual) drifted.push(`${key} golden ${expected} → 配布形 ${actual}`);
+        if (expected !== actual) drifted.push(`${key} golden ${expected} → distribution ${actual}`);
       };
       check("steps", meta.steps, config.steps);
       check("initScale", meta.initScale, config.initScale);
@@ -436,9 +492,9 @@ for (const series of SERIES) {
       check("maxCaptionLen", meta.caps.caption, config.maxCaptionLen);
       if (drifted.length > 0) {
         throw new Error(
-          `${series.name}: 配布形の pipelineConfig が golden の生成条件と違う: ` +
+          `${series.name}: the distribution's pipelineConfig differs from the golden's generation conditions: ` +
             `${drifted.join(" / ")}\n` +
-            "（門の前提が崩れている — z の突合を疑う前に、どちらを焼き直したのかを確かめる）",
+            "(the check's premise is broken — before suspecting the z comparison, find out which side was re-baked)",
         );
       }
     },

@@ -1,58 +1,66 @@
-// 実重み Irodori-TTS v4-Small の**条件エンコーダ + DiT 1 step**の実 GPU golden E2E
-// （ADR 0005 の段 3）。
+// Real-GPU golden E2E of real-weight Irodori-TTS v4-Small's **condition encoders + one DiT step**
+// (stage 3 of ADR 0005).
 //
-// tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、実重み SBV2
-// （tests/e2e_sbv2_test.ts）が「音響チェーン側の実重み」を、EmbeddingGemma
-// （tests/e2e_embeddinggemma_test.ts）が「単一ベクトル出力のテキスト系」を受け持つのに対し、
-// こちらは **token 列を返すテキスト条件エンコーダ**（`[1,T,H]` の系列出力）を受け持つ。
+// Where the tiny golden (tests/e2e_golden_test.ts) owns "coverage of the op contracts", real-weight
+// SBV2 (tests/e2e_sbv2_test.ts) "real weights on the acoustic-chain side" and EmbeddingGemma
+// (tests/e2e_embeddinggemma_test.ts) "text models with a single-vector output", this one owns
+// **text condition encoders that return a token sequence** (a sequence output `[1,T,H]`).
 // The containers are the f32 graphs of the distribution mirror `models/karume-irodori-v4-small/`
 // (opened through its manifest — ADR 0139 decision 1); the per-target torch goldens are
 // `outputs/test-assets/goldens/irodori-v4-small/<target>/io.<case>.safetensors` (decision 2 — fetch
 // them as FETCH_HINT below says), written by `tools/export-recipes/irodori/export.py`.
 //
-// ターゲットは 7 本（recon の G1 / G1a / G1b / G2 / G3 と、ADR 0047 の G5'、ADR 0114 で G5' から
-// 割り出した条件側 K/V 射影）:
+// There are 7 targets (the recon's G1 / G1a / G1b / G2 / G3, ADR 0047's G5', and the
+// condition-side K/V projection ADR 0114 split out of G5'):
 //
-// - `backbone`     — 同梱 ModernBERT-ja-310m（25 層）。`[1,T]` ids → `[1,T,768]`
-// - `text-proj`    — text 側 projector。`[1,T,768]` → `[1,T,512]`
-// - `caption-proj` — caption 側 projector（同形・別重み）。**出力 2 本** — 第 2 出力は
-//   `caption_norm` を掛けた系列で、`duration` の `caption_vec`（masked mean）をホストが
-//   採るためだけに足してある（第 1 出力は `text-proj` と同じ生の projector 出力）
-// - `speaker`      — 参照 latent エンコーダ（8 層）+ `speaker_norm`。`[1,S,128]` → `[1,S,768]`
-// - `duration`     — `text_norm` + duration predictor。`[1,T,512]` ほか 4 本 → `[1]`
-// - `dit-context`  — DiT の条件側 K/V 射影（12 ブロック × text / speaker / caption）。条件 state
-//   3 本 → **出力 24 本**（ブロックごとの K / V、各 `[1,1519,20,64]`）。形は全て静的
-// - `dit`          — DiT 1 step（12 層・G4 畳み込み形）。`x_t` / `t_embed` / `mask` + 条件側
-//   K/V 24 本 → `[1,S,32]`
+// - `backbone`     — the bundled ModernBERT-ja-310m (25 layers). `[1,T]` ids → `[1,T,768]`
+// - `text-proj`    — the text-side projector. `[1,T,768]` → `[1,T,512]`
+// - `caption-proj` — the caption-side projector (same shape, different weights). **2 outputs** —
+//   the second is the sequence with `caption_norm` applied, added only so the host can take
+//   `duration`'s `caption_vec` (a masked mean) (the first is the raw projector output, as in
+//   `text-proj`)
+// - `speaker`      — the reference latent encoder (8 layers) + `speaker_norm`. `[1,S,128]` →
+//   `[1,S,768]`
+// - `duration`     — `text_norm` + the duration predictor. `[1,T,512]` and 4 more → `[1]`
+// - `dit-context`  — the DiT's condition-side K/V projection (12 blocks × text / speaker /
+//   caption). 3 condition states → **24 outputs** (K / V per block, each `[1,1519,20,64]`). Every
+//   shape is static
+// - `dit`          — one DiT step (12 layers, G4 folded form). `x_t` / `t_embed` / `mask` + the
+//   24 condition-side K/V → `[1,S,32]`
 //
-// `dit` だけは**実行時 bool マスク**（`[1,1,1,S+1519]`）を入力に取り、SDPA を分解経路 +
-// `safe_softmax`（ADR 0044）で通す。K/V の連結軸が記号次元になる形（ADR 0046 の `S+1519`）を
-// 実資産で踏む唯一のターゲットでもある。
+// Only `dit` takes a **runtime bool mask** (`[1,1,1,S+1519]`) as input and runs SDPA through the
+// decomposed path + `safe_softmax` (ADR 0044). It is also the only target that exercises, on real
+// assets, the shape where the K/V concatenation axis is a symbolic dimension (ADR 0046's
+// `S+1519`).
 //
-// backbone を projector と融合していないのは **backbone が text / caption で共有**だから
-// （融合すると 1.26GB の重みが 2 部できる）。ホストは backbone を 2 回回して各 projector へ
-// 流すので、この E2E も projector の入力に **backbone の torch 期待値**をそのまま食わせる。
-// `duration` も同じ鎖で、text 系列の入力は **`text-proj` の torch 期待値そのもの**、
-// speaker / caption のベクトルは `speaker` / `caption-proj` の torch 期待値から実装の
-// メソッドで作ったもの（生成は `tools/export-recipes/irodori/export.py` の `_duration_cases`）。
+// The backbone is not fused with the projectors because **the backbone is shared by text and
+// caption** (fusing would make 2 copies of 1.26GB of weights). The host runs the backbone twice and
+// feeds each projector, so this E2E also feeds **the backbone's torch expected values** to the
+// projectors' inputs as is. `duration` follows the same chain: the text sequence input is **the
+// torch expected value of `text-proj` itself**, and the speaker / caption vectors are built with the
+// implementation's methods from the torch expected values of `speaker` / `caption-proj` (generated
+// by `_duration_cases` in `tools/export-recipes/irodori/export.py`).
 //
-// `dit-context` と `dit` も同じ鎖で、`dit-context` の条件 state は `text-proj` / `caption-proj` /
-// `speaker` の torch 期待値を Tmax へ右 pad したもの（生成は `irodori/export.py` の `_dit_cases`）、
-// `dit` の K/V 24 本は **`dit-context` の torch 期待値そのもの**（`_dit_graph_inputs`）。**uncond
-// 3 変種は cond と x_t / t / 条件 state を共有し、違うのはマスクだけ**（ADR 0047 決定 1）— 条件
-// state が全ケースで同じなので、`dit-context` の golden は代表 1 本（`dit-cond-min`）になる
-// （`_dit_context_cases` が値の同一性で束ねる）。
+// `dit-context` and `dit` follow the same chain: `dit-context`'s condition states are the torch
+// expected values of `text-proj` / `caption-proj` / `speaker` right-padded to Tmax (generated by
+// `_dit_cases` in `irodori/export.py`), and `dit`'s 24 K/V are **the torch expected values of
+// `dit-context` itself** (`_dit_graph_inputs`). **The 3 uncond variants share x_t / t / the
+// condition states with cond and differ only in the mask** (ADR 0047 decision 1) — the condition
+// states are the same in every case, so `dit-context` has a single representative golden
+// (`dit-cond-min`) (`_dit_context_cases` groups them by value identity).
 //
-// 記号次元はターゲットで違う（テキスト系と `duration` は T ≤ 512、`speaker` / `dit` は S ≤ 750）。
-// ケース名もターゲットで違うので、期待表は**ターゲット別**に持つ（下の EXPECTED_CASES）。
+// The symbolic dimensions differ per target (the text models and `duration` have T ≤ 512,
+// `speaker` / `dit` have S ≤ 750). The case names also differ per target, so the expectation table
+// is kept **per target** (EXPECTED_CASES below).
 //
-// SBV2 と違い格納 dtype 系列は f32 の 1 本のみ（f16 / i8 は別系列で決める話）なので、
-// 系列パラメタ化はしない。
+// Unlike SBV2 there is only one storage-dtype series, f32 (f16 / i8 are decided by other series),
+// so there is no series parameterization.
 //
-// 資産が無い環境では**明示 SKIP**する。ADR 0005 の「全 SKIP は明示 FAIL」門番
-// （tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。
-// 逆に資産が**中途半端に**（ターゲット欠け / ケース欠け）存在する場合は SKIP ではなく
-// FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
+// Without the assets the cases **SKIP explicitly**. ADR 0005's "an all-SKIP run is an explicit
+// FAIL" guard (tests/gpu_gate_test.ts) looks only at *whether a GPU adapter exists*, independent of
+// this SKIP. Conversely, assets that are **partially** present (missing targets / missing cases)
+// FAIL rather than SKIP (the "asset completeness" test below) — that would otherwise be a silent
+// apparent success.
 
 import {
   type DirEntry,
@@ -85,11 +93,12 @@ import {
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
- * 実重み Irodori backbone（ModernBERT-ja-310m 25 層）の torch CPU 期待値との突合に使う許容誤差。
+ * The tolerance for comparing the real-weight Irodori backbone (ModernBERT-ja-310m, 25 layers) with
+ * the torch CPU expected values.
  *
- * 実測（`atol=rtol=0` の素の突合、6 ケース × 出力 1 本 `[1,T,768]`）:
+ * Measured (a plain comparison with `atol=rtol=0`, 6 cases × 1 output `[1,T,768]`):
  *
- * | ケース       | T   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | Case         | T   | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
  * | ------------ | --- | ------- | ------- | ------------ | ------------------ |
  * | text-short   | 7   | 2.43e-5 | 6.42e-3 | 34.55        | 5.31e-5            |
  * | text-formal  | 13  | 1.53e-5 | 9.80e-2 | 34.37        | 8.24e-7            |
@@ -98,29 +107,32 @@ import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-pari
  * | text-long    | 144 | 2.67e-5 | 8.84e-2 | 34.21        | 1.13e-5            |
  * | caption-long | 404 | 2.72e-5 | 8.66e-1 | 34.22        | 2.06e-6            |
  *
- * **判定の主役は atol**。出力は隠れ状態そのもの（0 を跨ぐ値域で、最小の非ゼロ \|ref\| が
- * 8.24e-7 まで下がる）なので、rtol を主役にすると 0 近傍で発散する — 実測 maxRel は 0.866 に
- * 達するが、その要素の絶対誤差は 2e-6 級でしかない。rtol 1e-6 は値域上端 \|ref\| = 34.55 でも
- * 寄与が 3.5e-5（atol の 1/6）で、判定を主導しない。
+ * **atol drives the decision**. The output is the hidden state itself (a range that straddles 0,
+ * with the smallest nonzero \|ref\| down to 8.24e-7), so letting rtol drive would diverge near 0 —
+ * the measured maxRel reaches 0.866, but that element's absolute error is only around 2e-6. rtol
+ * 1e-6 contributes 3.5e-5 (1/6 of atol) even at the top of the range \|ref\| = 34.55, so it does
+ * not drive the decision.
  *
- * atol 2e-4 は実測最悪 2.72e-5（caption-long）の約 7.4 倍。誤差の出所は他の実重み E2E と
- * 同じ（fma 融合・linear / attention の縮約順序が torch と違う・超越関数の実装差）で、
- * T を 7 → 404 と 58 倍にしても maxAbs は 1.1 倍にしかならない（層方向の縮約長は T に
- * 依らず、T は独立な列方向にしか効かない — SBV2 flow と同じ構造）。実装バグ（RoPE の
- * θ 2 系統の取り違え・sliding window の窓幅取り違え・qkv 分割の取り違え）の誤差は出力の
- * 値域と同じ O(10) で、この閾値の 4〜5 桁上に出る。
+ * atol 2e-4 is about 7.4 times the measured worst 2.72e-5 (caption-long). The error comes from
+ * the same sources as the other real-weight E2Es (fma fusion, a reduction order of linear /
+ * attention different from torch's, implementation differences of transcendental functions), and
+ * growing T 58-fold from 7 to 404 only grows maxAbs 1.1-fold (the reduction length along the
+ * layers does not depend on T, which acts only along independent columns — the same structure as
+ * the SBV2 flow). Implementation bugs (mixing up RoPE's 2 θ sets, the sliding window's width, the
+ * qkv split) give errors of O(10), the same as the output's range, 4–5 orders of magnitude above
+ * this threshold.
  *
- * NOTE: この値は **`|ref|` 上端が 34 という値域**の上に立っている。同じ 2e-4 を値域 O(1) の
- * 出力へ流用してはならない（同じ手順で実測し直すこと）。
+ * NOTE: this value stands on **a range whose `|ref|` max is 34**. Do not reuse the same 2e-4 for an
+ * output with a range of O(1) (re-measure with the same procedure).
  */
 const BACKBONE_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-6 };
 
 /**
- * text 側 projector（`[1,T,768]` → `[1,T,512]` の residual_mlp）の許容誤差。
+ * The tolerance of the text-side projector (the residual_mlp `[1,T,768]` → `[1,T,512]`).
  *
- * 実測（`atol=rtol=0`、6 ケース × 出力 1 本）:
+ * Measured (`atol=rtol=0`, 6 cases × 1 output):
  *
- * | ケース       | T   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | Case         | T   | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
  * | ------------ | --- | ------- | ------- | ------------ | ------------------ |
  * | text-short   | 7   | 7.15e-6 | 2.68e-4 | 11.89        | 3.00e-3            |
  * | text-formal  | 13  | 8.11e-6 | 7.88e-4 | 12.76        | 2.00e-4            |
@@ -129,22 +141,25 @@ const BACKBONE_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-6 };
  * | text-long    | 144 | 1.14e-5 | 1.57e-1 | 14.95        | 7.21e-6            |
  * | caption-long | 404 | 1.29e-5 | 2.32e-1 | 13.35        | 1.65e-5            |
  *
- * backbone と同じく **atol 主役**（最小の非ゼロ \|ref\| が 7.21e-6 まで下がる）。atol 1e-4 は
- * 実測最悪 1.29e-5 の約 7.8 倍で、rtol 1e-6 の寄与は上端 \|ref\| = 14.95 でも 1.5e-5。
+ * As with the backbone, **atol drives** (the smallest nonzero \|ref\| drops to 7.21e-6). atol
+ * 1e-4 is about 7.8 times the measured worst 1.29e-5, and rtol 1e-6 contributes 1.5e-5 even at the
+ * top \|ref\| = 14.95.
  *
- * **backbone より 1 桁近く小さい**のは、この graph が 3 本の linear + rms_norm + sigmoid の
- * 7 ノードしかなく、25 層ぶんの縮約誤差の蓄積が無いから（入力は torch が出した backbone の
- * 期待値そのもので、backbone 側の誤差はここには入らない）。
+ * **Nearly an order of magnitude smaller than the backbone** because this graph has only 7 nodes —
+ * 3 linears + rms_norm + sigmoid — with no accumulation of 25 layers of reduction error (the input
+ * is the torch-produced backbone expected value itself, so the backbone side's error does not enter
+ * here).
  */
 const TEXT_PROJ_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 1e-6 };
 
 /**
- * caption 側 projector の許容誤差。**`TEXT_PROJ_TOLERANCE` は流用しない** — 同形の graph でも
- * 重みが別なので、縮約の丸まり方も出力の値域も同じにはならない（実測が実際に違う）。
+ * The tolerance of the caption-side projector. **`TEXT_PROJ_TOLERANCE` is not reused** — even with
+ * the same graph shape, the weights differ, so neither the reduction's rounding nor the output's
+ * range is the same (the measurements actually differ).
  *
- * 実測（`atol=rtol=0`、6 ケース × 出力 1 本）:
+ * Measured (`atol=rtol=0`, 6 cases × 1 output):
  *
- * | ケース       | T   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | Case         | T   | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
  * | ------------ | --- | ------- | ------- | ------------ | ------------------ |
  * | text-short   | 7   | 1.14e-5 | 1.16e-3 | 15.82        | 1.12e-3            |
  * | text-formal  | 13  | 1.05e-5 | 3.39e-3 | 16.16        | 4.57e-4            |
@@ -153,19 +168,21 @@ const TEXT_PROJ_TOLERANCE: Tolerance = { atol: 1e-4, rtol: 1e-6 };
  * | text-long    | 144 | 1.53e-5 | 1.37e-2 | 18.04        | 8.25e-5            |
  * | caption-long | 404 | 1.14e-5 | 7.85e-2 | 18.09        | 2.29e-5            |
  *
- * atol 2e-4 は実測最悪 3.05e-5（caption-ja）の約 6.6 倍。最悪ケースが caption-ja なのは、
- * **本物の caption を食わせたときだけ出力の値域が 2 倍近く伸びる**（\|ref\| 上端 32.8 対
- * 他の 16〜18）ためで、誤差は値域に比例して伸びている。text 側 projector が同じケースで
- * 8.11e-6 に留まるのと対照的 — 2 本の tolerance を分けている理由がここに出ている。
+ * atol 2e-4 is about 6.6 times the measured worst 3.05e-5 (caption-ja). The worst case is
+ * caption-ja because **only when fed a real caption does the output's range grow nearly 2-fold**
+ * (\|ref\| max 32.8 vs 16–18 for the others), and the error grows in proportion to the range. In
+ * contrast, the text-side projector stays at 8.11e-6 on the same case — this is why the 2
+ * tolerances are kept separate.
  */
 const CAPTION_PROJ_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-6 };
 
 /**
- * caption 側 projector の**第 2 出力**（`caption_norm` = RMSNorm 512 を掛けた系列）の許容誤差。
+ * The tolerance of the caption-side projector's **second output** (the sequence with
+ * `caption_norm` = RMSNorm 512 applied).
  *
- * 実測（`atol=rtol=0`、6 ケース × 出力 1 本 `[1,T,512]`）:
+ * Measured (`atol=rtol=0`, 6 cases × 1 output `[1,T,512]`):
  *
- * | ケース       | T   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | Case         | T   | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
  * | ------------ | --- | ------- | ------- | ------------ | ------------------ |
  * | text-short   | 7   | 4.77e-6 | 1.16e-3 | 4.37         | 3.87e-4            |
  * | text-formal  | 13  | 2.62e-6 | 3.39e-3 | 3.68         | 1.53e-4            |
@@ -174,63 +191,71 @@ const CAPTION_PROJ_TOLERANCE: Tolerance = { atol: 2e-4, rtol: 1e-6 };
  * | text-long    | 144 | 3.34e-6 | 1.37e-2 | 5.36         | 1.25e-5            |
  * | caption-long | 404 | 3.34e-6 | 7.85e-2 | 5.29         | 6.42e-6            |
  *
- * **第 1 出力（`CAPTION_PROJ_TOLERANCE`）の値を流用してはならない**。RMSNorm は行ごとに
- * `rsqrt(mean(x²))` で割るので値域が 1 桁縮み（\|ref\| 上端 32.8 → 4.24）、絶対誤差も
- * 同じ割合で縮む（3.05e-5 → 3.34e-6）。maxRel が 2 出力で**桁まで一致**している
- * （caption-ja 4.21e-2 / caption-long 7.85e-2）のがその証拠 — 誤差は第 1 出力から相対量として
- * 持ち越され、norm の縮約自体はほとんど誤差を足していない。
+ * **Do not reuse the first output's value (`CAPTION_PROJ_TOLERANCE`)**. RMSNorm divides each row
+ * by `rsqrt(mean(x²))`, so the range shrinks by an order of magnitude (\|ref\| max 32.8 → 4.24)
+ * and the absolute error shrinks in the same proportion (3.05e-5 → 3.34e-6). The evidence is that
+ * maxRel **matches down to the digits** between the 2 outputs (caption-ja 4.21e-2 / caption-long
+ * 7.85e-2) — the error is carried over from the first output as a relative quantity, and the norm's
+ * reduction itself adds almost no error.
  *
- * atol 3e-5 は実測最悪 4.77e-6（text-short）の約 6.3 倍。rtol 1e-6 の寄与は上端
- * \|ref\| = 5.36 でも 5.4e-6（atol の 1/5.6）で、判定を主導しない。norm の掛け違い
- * （`text_norm` との取り違え・weight 無しの素の RMS）は値域と同じ O(1) で出る
- * （export 台本の `_norm_divergence` が実測する weight 差は 0.318）。
+ * atol 3e-5 is about 6.3 times the measured worst 4.77e-6 (text-short). rtol 1e-6 contributes
+ * 5.4e-6 (1/5.6 of atol) even at the top \|ref\| = 5.36, so it does not drive the decision. A
+ * wrongly applied norm (mixed up with `text_norm`, a plain RMS without the weight) shows at O(1),
+ * the same as the range (the weight difference the export script's `_norm_divergence` measures is
+ * 0.318).
  */
 const CAPTION_NORM_TOLERANCE: Tolerance = { atol: 3e-5, rtol: 1e-6 };
 
 /**
- * 参照 latent エンコーダ（`ReferenceLatentEncoder` 8 層 + `speaker_norm`）の許容誤差。
+ * The tolerance of the reference latent encoder (`ReferenceLatentEncoder` 8 layers +
+ * `speaker_norm`).
  *
- * 実測（`atol=rtol=0`、7 ケース × 出力 1 本 `[1,S,768]`）。`ref-real-*` の 2 本が**実音声の
- * DACVAE latent 由来**（公式サンプル参照音声 7.6 秒を上流の決定的 encode に通した 190
- * フレームを patch した 47 行 / その先頭 6 行）で、残る 5 本が合成（標準正規）:
+ * Measured (`atol=rtol=0`, 7 cases × 1 output `[1,S,768]`). The 2 `ref-real-*` cases **come from
+ * the DACVAE latent of real speech** (the 47 rows from patching the 190 frames of the official
+ * 7.6-second sample reference audio passed through upstream's deterministic encode / its first 6
+ * rows), and the other 5 are synthetic (standard normal):
  *
- * | ケース         | S   | 入力   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | Case           | S   | Input  | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
  * | -------------- | --- | ------ | ------- | ------- | ------------ | ------------------ |
- * | ref-min        | 2   | 合成   | 6.14e-6 | 6.87e-3 | 3.60         | 1.09e-4            |
- * | ref-1s         | 6   | 合成   | 9.80e-5 | 2.99e-2 | 3.85         | 1.22e-4            |
- * | ref-real-short | 6   | 実     | 6.82e-6 | 3.40e-3 | 4.14         | 7.10e-4            |
- * | ref-5s         | 31  | 合成   | 2.24e-5 | 3.18e-2 | 4.42         | 1.81e-4            |
- * | ref-real-full  | 47  | 実     | 4.96e-5 | 7.22e-1 | 4.74         | 2.84e-6            |
- * | ref-30s        | 187 | 合成   | 5.34e-5 | 1.11e-1 | 4.94         | 7.60e-6            |
- * | ref-max        | 750 | 合成   | 5.83e-5 | 5.20e-1 | 5.30         | 1.70e-6            |
+ * | ref-min        | 2   | synth. | 6.14e-6 | 6.87e-3 | 3.60         | 1.09e-4            |
+ * | ref-1s         | 6   | synth. | 9.80e-5 | 2.99e-2 | 3.85         | 1.22e-4            |
+ * | ref-real-short | 6   | real   | 6.82e-6 | 3.40e-3 | 4.14         | 7.10e-4            |
+ * | ref-5s         | 31  | synth. | 2.24e-5 | 3.18e-2 | 4.42         | 1.81e-4            |
+ * | ref-real-full  | 47  | real   | 4.96e-5 | 7.22e-1 | 4.74         | 2.84e-6            |
+ * | ref-30s        | 187 | synth. | 5.34e-5 | 1.11e-1 | 4.94         | 7.60e-6            |
+ * | ref-max        | 750 | synth. | 5.83e-5 | 5.20e-1 | 5.30         | 1.70e-6            |
  *
- * atol 7e-4 は実測最悪 9.80e-5（ref-1s）の約 7.1 倍。**backbone / projector より 1 桁緩い**
- * のは、値域が O(5) と小さいのに絶対誤差が同程度出るから — 入力の `in_proj` 出力を 6 で
- * 割ってから 8 段の RMSNorm 付き残差を通す構造で、正規化のたびに小さな中間値の相対差が
- * 拡大する。rtol 1e-6 の寄与は上端 \|ref\| = 5.30 でも 5.3e-6（atol の 1/132）で、判定を
- * 主導しない。
+ * atol 7e-4 is about 7.1 times the measured worst 9.80e-5 (ref-1s). **An order of magnitude looser
+ * than the backbone / projectors** because the absolute error is about the same while the range is
+ * a small O(5) — the structure divides the input's `in_proj` output by 6 and then passes it through
+ * 8 residual stages with RMSNorm, and each normalisation amplifies the relative difference of small
+ * intermediate values. rtol 1e-6 contributes 5.3e-6 (1/132 of atol) even at the top \|ref\| = 5.30,
+ * so it does not drive the decision.
  *
- * **実 latent は合成より緩くない**（実測最悪 4.96e-5 対 9.80e-5）ので、実 latent を入れても
- * 閾値は緩まない。同じ S=6 で並べた ref-1s（合成 9.80e-5）と ref-real-short（実 6.82e-6）が
- * 1 桁違うのは長さではなく**入力の値域**の差で、実 latent 側は RMS 0.68 / \|入力\| 上端 2.91、
- * 合成側は RMS 0.95 / 同 2.92（全長の ref-real-full でも RMS 0.94 / 上端 5.31）— DACVAE の
- * latent はほぼ単位分散に載っており、合成の標準正規が値域の性格を外していなかったことが
- * ここで確かめられた（W2 時点の「合成前提の暫定」という留保はこの実測で解消済み）。
+ * **Real latents are not looser than synthetic ones** (measured worst 4.96e-5 vs 9.80e-5), so
+ * adding real latents does not loosen the threshold. The order-of-magnitude difference between
+ * ref-1s (synthetic, 9.80e-5) and ref-real-short (real, 6.82e-6) at the same S=6 comes from **the
+ * input's range**, not the length: the real latent has RMS 0.68 / \|input\| max 2.91, the synthetic
+ * one RMS 0.95 / max 2.92 (even the full-length ref-real-full has RMS 0.94 / max 5.31) — the DACVAE
+ * latent sits at nearly unit variance, which confirmed here that the synthetic standard normal did
+ * not miss the character of the range (the reservation "provisional, assumes synthetic input" from
+ * W2 is resolved by this measurement).
  *
- * 誤差の伸びが S に単調でない（S=6 が最悪で S=750 が 5.8e-5）のは、層方向の縮約長が S に
- * 依らず、S は独立な列方向にしか効かないため（backbone と同じ構造）。実装バグ
- * （RoPE の実数化の取り違え・q/k ノルムの head ごと weight の取り違え・sigmoid ゲートの
- * 掛け違い）の誤差は値域と同じ O(5) で、この閾値の 3〜4 桁上に出る。
+ * The error does not grow monotonically with S (S=6 is the worst and S=750 is 5.8e-5) because the
+ * reduction length along the layers does not depend on S, which acts only along independent
+ * columns (the same structure as the backbone). Implementation bugs (a wrong real-valued form of
+ * RoPE, mixed-up per-head weights of the q/k norms, a wrongly applied sigmoid gate) give errors of
+ * O(5), the same as the range, 3–4 orders of magnitude above this threshold.
  */
 const SPEAKER_TOLERANCE: Tolerance = { atol: 7e-4, rtol: 1e-6 };
 
 /**
- * duration predictor（`text_norm` + token-sum 形）の許容誤差。出力は `[1]` の
- * **log frames** 1 要素だけ。
+ * The tolerance of the duration predictor (`text_norm` + the token-sum form). The output is a
+ * single **log frames** element `[1]`.
  *
- * 実測（`atol=rtol=0`、5 ケース × 出力 1 本 `[1]`）:
+ * Measured (`atol=rtol=0`, 5 cases × 1 output `[1]`):
  *
- * | ケース            | T   | maxAbs  | maxRel  | \|ref\|  |
+ * | Case              | T   | maxAbs  | maxRel  | \|ref\|  |
  * | ----------------- | --- | ------- | ------- | -------- |
  * | dur-both          | 7   | 0       | 0       | 4.658    |
  * | dur-speaker-only  | 13  | 0       | 0       | 5.312    |
@@ -238,25 +263,25 @@ const SPEAKER_TOLERANCE: Tolerance = { atol: 7e-4, rtol: 1e-6 };
  * | dur-caption-only  | 29  | 0       | 0       | 5.365    |
  * | dur-long          | 144 | 0       | 0       | 6.998    |
  *
- * **5 ケース中 4 本がビット一致**で、残る 1 本の 4.77e-7 も値域 5.12 における
- * **1 ulp ちょうど**（f32）。`log1p(Σ softplus)` の縮約が T 個の非負値の和なので、
- * 桁落ちの起きようが無い形になっている。
+ * **4 of the 5 cases are bit-identical**, and the remaining one's 4.77e-7 is **exactly 1 ulp**
+ * (f32) at the value 5.12. The reduction of `log1p(Σ softplus)` is a sum of T non-negative values,
+ * a shape where cancellation cannot happen.
  *
- * atol 5e-6 は実測最悪の約 10 倍（≈ 10 ulp）。ホストはこの値を `expm1` してフレーム数に
- * するので、意味のある単位に直すと `e^7 × 5e-6 ≈ 5.5e-3` フレーム — 四捨五入で
- * 整数フレームに落とす下流には 1 ミリも届かない。逆に条件ベクトルの取り違え
- * （speaker / caption の入れ替え・`null_*` 選択の反転）は、上の表で
- * `dur-both` と `dur-neither` が 0.46 も違うことから分かるとおり **O(0.1〜1)** で出る。
+ * atol 5e-6 is about 10 times the measured worst (≈ 10 ulp). The host turns this value into a
+ * frame count with `expm1`, so in a meaningful unit it is `e^7 × 5e-6 ≈ 5.5e-3` frames — nowhere
+ * near reaching the downstream rounding to integer frames. Conversely, mixing up the condition
+ * vectors (swapping speaker / caption, inverting the `null_*` selection) shows at **O(0.1–1)**, as
+ * the 0.46 difference between `dur-both` and `dur-neither` in the table above shows.
  */
 const DURATION_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 1e-6 };
 
 /**
- * DiT 1 step（12 層 JointAttention + SwiGLU + LowRankAdaLN）の許容誤差。出力は速度場
- * `v_pred[1,S,32]`。
+ * The tolerance of one DiT step (12 layers of JointAttention + SwiGLU + LowRankAdaLN). The output
+ * is the velocity field `v_pred[1,S,32]`.
  *
- * 実測（`atol=rtol=0`、7 ケース × 出力 1 本）:
+ * Measured (`atol=rtol=0`, 7 cases × 1 output):
  *
- * | ケース             | S   | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | Case               | S   | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
  * | ------------------ | --- | ------- | ------- | ------------ | ------------------ |
  * | dit-cond-min       | 2   | 4.53e-6 | 6.57e-5 | 2.43         | 5.19e-3            |
  * | dit-cond-1s        | 25  | 4.77e-6 | 4.41e-3 | 3.49         | 1.60e-4            |
@@ -266,65 +291,75 @@ const DURATION_TOLERANCE: Tolerance = { atol: 5e-6, rtol: 1e-6 };
  * | dit-uncond-caption | 25  | 6.32e-6 | 5.24e-4 | 3.37         | 2.20e-3            |
  * | dit-cond-max       | 750 | 8.34e-6 | 6.57e-2 | 4.56         | 1.65e-5            |
  *
- * 他の 5 本と同じく **atol 主役**（S=750 では最小の非ゼロ \|ref\| が 1.65e-5 まで下がり、
- * maxRel はそこで 6.6e-2 に跳ねるが、その要素の絶対誤差は 1e-6 級でしかない）。
- * atol 5e-5 は実測最悪 8.34e-6（dit-cond-max）の約 6.0 倍で、rtol 1e-6 の寄与は
- * 上端 \|ref\| = 4.56 でも 4.6e-6（atol の 1/11）。
+ * As with the other 5, **atol drives** (at S=750 the smallest nonzero \|ref\| drops to 1.65e-5
+ * and maxRel jumps to 6.6e-2 there, but that element's absolute error is only around 1e-6). atol
+ * 5e-5 is about 6.0 times the measured worst 8.34e-6 (dit-cond-max), and rtol 1e-6 contributes
+ * 4.6e-6 (1/11 of atol) even at the top \|ref\| = 4.56.
  *
- * **値域は O(5) と小さいのに絶対誤差は speaker と同オーダー**で、12 層ぶんの縮約誤差に
- * 加えて条件側 1519 トークンの縮約が毎層乗る（K/V の縮約長は S + 1519 で、S=2 でも 1521）。
- * S を 2 → 750 と 375 倍にしても maxAbs が 1.8 倍にしか伸びないのはこのため（縮約長の
- * 支配項が条件側）。実装バグ（マスクの区間割りの取り違え・RoPE を掛ける先頭 10 head の
- * 取り違え・条件 KV の連結順の入れ替え）の誤差は値域と同じ O(1) で、この閾値の 4〜5 桁上に
- * 出る（export 台本の `_dit_uncond_divergence` が実測する 4 本の相互差は 0.75〜1.92）。
+ * **The range is a small O(5), yet the absolute error is of the same order as speaker's**: on top
+ * of 12 layers of reduction error, every layer adds a reduction over the 1519 condition-side tokens
+ * (the K/V reduction length is S + 1519, 1521 even at S=2). That is why growing S 375-fold from 2
+ * to 750 grows maxAbs only 1.8-fold (the condition side dominates the reduction length).
+ * Implementation bugs (a wrong interval split of the mask, the wrong first 10 heads for RoPE,
+ * swapping the concatenation order of the condition KV) give errors of O(1), the same as the range,
+ * 4–5 orders of magnitude above this threshold (the mutual differences of the 4 the export script's
+ * `_dit_uncond_divergence` measures are 0.75–1.92).
  *
- * ADR 0114 でグラフを割った後（条件側 K/V 24 本を `dit-context` の torch 期待値のまま入力で
- * 受ける形）の再実測（2026-09-27・Arc B570）は maxAbs 4.53e-6〜7.99e-6（最悪 dit-uncond-speaker）で、
- * 閾値との比は割る前と変わらない（条件側の射影誤差は入力が torch 値なのでここには入らない）。
+ * The re-measurement (2026-09-27, Arc B570) after ADR 0114 split the graph (taking the 24
+ * condition-side K/V as inputs, as the torch expected values of `dit-context`) gives maxAbs
+ * 4.53e-6–7.99e-6 (worst dit-uncond-speaker), and the ratio to the threshold is the same as before
+ * the split (the condition side's projection error does not enter here, as the inputs are torch
+ * values).
  *
- * NOTE: 他ターゲットの値を流用してはならない（同じ手順で実測し直すこと）。
+ * NOTE: do not reuse another target's value (re-measure with the same procedure).
  */
 const DIT_TOLERANCE: Tolerance = { atol: 5e-5, rtol: 1e-6 };
 
 /**
- * DiT の条件側 K/V 射影（`dit-context` — 12 ブロックぶんの `project_context_kv` を text /
- * speaker / caption の連結順で並べたもの・ADR 0114）の許容誤差。出力 24 本の**全てに同じ値**を
- * 使う（下の理由）。
+ * The tolerance of the DiT's condition-side K/V projection (`dit-context` — 12 blocks of
+ * `project_context_kv` laid out in the concatenation order text / speaker / caption, ADR 0114).
+ * **The same value is used for all** 24 outputs (the reason below).
  *
- * 実測（`atol=rtol=0` 相当の maxAbs・ケースは代表 1 本 `dit-cond-min`・出力 24 本
- * `[1,1519,20,64]`・2026-09-27・Arc B570）。`|ref|` は全出力で 0 を含む（条件 state の右 pad 行が
- * 0 に射影される）ので最小非ゼロを併記する:
+ * Measured (maxAbs equivalent to `atol=rtol=0`, one representative case `dit-cond-min`, 24 outputs
+ * `[1,1519,20,64]`, 2026-09-27, Arc B570). `|ref|` contains 0 in every output (the condition
+ * states' right-pad rows project to 0), so the smallest nonzero is listed too:
  *
- * | 出力            | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
+ * | Output          | maxAbs  | maxRel  | \|ref\| max  | \|ref\| min nonzero |
  * | --------------- | ------- | ------- | ------------ | ------------------ |
  * | context_k_0     | 6.48e-5 | 8.49e-2 | 64.21        | 3.08e-6            |
  * | context_k_11    | 6.10e-5 | 2.62e-2 | 183.74       | 3.50e-6            |
  * | context_v_11    | 3.43e-5 | 3.33e-2 | 43.65        | 8.11e-6            |
  * | context_v_10    | 2.10e-5 | 1.72e-1 | 15.32        | 9.79e-6            |
- * | 残る 20 本      | ≤1.53e-5 | ≤9.66e-1 | 7.46〜36.49 | ≥3.68e-7           |
+ * | other 20        | ≤1.53e-5 | ≤9.66e-1 | 7.46–36.49  | ≥3.68e-7           |
  *
- * 他の実重みターゲットと同じく **atol 主役**（最小の非ゼロ \|ref\| が 3.68e-7 まで下がり、
- * maxRel はそこ〈context_k_3〉で 0.97 に跳ねるが、その出力の maxAbs は 7.39e-6 でしかない）。
- * atol 5e-4 は実測最悪 6.48e-5（context_k_0）の約 7.7 倍で、rtol 1e-6 の寄与は最大の上端
- * \|ref\| = 183.74 でも 1.8e-4（atol の 1/2.7）。
+ * As with the other real-weight targets, **atol drives** (the smallest nonzero \|ref\| drops to
+ * 3.68e-7 and maxRel jumps to 0.97 there (context_k_3), but that output's maxAbs is only 7.39e-6).
+ * atol 5e-4 is about 7.7 times the measured worst 6.48e-5 (context_k_0), and rtol 1e-6 contributes
+ * 1.8e-4 (1/2.7 of atol) even at the largest top \|ref\| = 183.74.
  *
- * **`dit` の 5e-5 より 1 桁緩い**のは値域が 1〜2 桁大きいから（`dit` の出力は O(5)・ここは
- * O(10〜180)）— 絶対誤差は値域に比例して伸びており（上端 64 と 184 の 2 本が最悪の 2 本）、
- * \|ref\| 上端に対する比はどの出力も 1e-6 級に収まる。出力ごとに閾値を分けないのは、実測が代表
- * 1 ケースしか無く、出力別の値はそのケースの値域への過適合になるため。実装バグ（K / V の
- * 取り違え・ブロックの順序違い・条件 3 本の連結順の入れ替え・`text_norm` / `caption_norm` の
- * 掛け忘れ）の誤差は値域と同じ O(1〜10) で、この閾値の 3〜4 桁上に出る。
+ * **An order of magnitude looser than `dit`'s 5e-5** because the range is 1–2 orders of magnitude
+ * larger (`dit`'s output is O(5), here O(10–180)) — the absolute error grows in proportion to the
+ * range (the 2 with max 64 and 184 are the worst 2), and the ratio to the \|ref\| max stays around
+ * 1e-6 for every output. The thresholds are not split per output because the measurement has only
+ * one representative case, and per-output values would overfit that case's ranges. Implementation
+ * bugs (mixing up K / V, a wrong block order, swapping the concatenation order of the 3 conditions,
+ * forgetting `text_norm` / `caption_norm`) give errors of O(1–10), the same as the range, 3–4
+ * orders of magnitude above this threshold.
  *
- * NOTE: 他ターゲットの値を流用してはならない（同じ手順で実測し直すこと）。
+ * NOTE: do not reuse another target's value (re-measure with the same procedure).
  */
 const DIT_CONTEXT_TOLERANCE: Tolerance = { atol: 5e-4, rtol: 1e-6 };
 
-/** `dit-context` の出力本数（12 ブロック × K / V — 並びは `context_k_<i>`, `context_v_<i>` の交互）。 */
+/**
+ * The output count of `dit-context` (12 blocks × K / V — ordered alternately `context_k_<i>`,
+ * `context_v_<i>`).
+ */
 const DIT_CONTEXT_OUTPUTS = 24;
 
 /**
- * ターゲット別 tolerance（**出力位置ごとの配列**）。表の穴は「別ターゲット / 別出力の値で
- * 突合する」沈黙誤りになるので、本数が IR の出力数と合っているかもケースごとに検査する。
+ * Per-target tolerances (**an array per output position**). A hole in the table would become the
+ * silent error "compared with another target's / output's value", so each case also checks that
+ * the count matches the IR's output count.
  */
 const TOLERANCES: Readonly<Record<string, readonly Tolerance[]>> = {
   backbone: [BACKBONE_TOLERANCE],
@@ -363,9 +398,12 @@ const GRAPH_NAMES: Readonly<Record<string, string>> = {
   "text-proj": "text_proj",
 };
 
-/** ターゲットのグラフ名（表に無いターゲットは fail loudly — 黙って別のグラフを読まない）。 */
+/**
+ * The target's graph name (a target not in the table fails loudly — no silent read of another
+ * graph).
+ */
 const graphName = (target: string): string => {
-  assert(Object.hasOwn(GRAPH_NAMES, target), `${target} のグラフ名が表に無い`);
+  assert(Object.hasOwn(GRAPH_NAMES, target), `the table has no graph name for ${target}`);
   return GRAPH_NAMES[target];
 };
 const IO_PREFIX = "io.";
@@ -377,12 +415,13 @@ const FETCH_HINT =
   `--include 'goldens/${SERIES_NAME}/**' with KARUME_ALLOW_NO_ASSETS=1 runs this file alone`;
 
 /**
- * 生成されているはずのターゲットとケース。**列挙結果ではなくここで固定する** — 列挙だけに
- * 頼ると生成を一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
- * `tools/export-recipes/irodori/export.py` の TARGETS / GOLDEN_CASES / SPEAKER_CASES /
- * SPEAKER_REAL_CASES / DURATION_CASES / DIT_CASES。
+ * The targets and cases that should have been generated. **Fixed here, not taken from the listing**
+ * — relying on the listing alone makes tests silently vanish in an environment where only part of
+ * the generation ran, giving "green but unverified". The source of truth is TARGETS / GOLDEN_CASES
+ * / SPEAKER_CASES / SPEAKER_REAL_CASES / DURATION_CASES / DIT_CASES in
+ * `tools/export-recipes/irodori/export.py`.
  *
- * MUST: ターゲット（G6 / G7 = codec）を足すときはこの表と TOLERANCES を同時に伸ばす。
+ * MUST: when adding a target (G6 / G7 = codec), extend this table and TOLERANCES together.
  */
 const TEXT_CASES = [
   "caption-ja",
@@ -393,7 +432,9 @@ const TEXT_CASES = [
   "text-short",
 ] as const;
 
-/** ターゲット別の期待ケース（ソート済み — 列挙結果と `assertEquals` で突き合わせる）。 */
+/**
+ * The expected cases per target (sorted — compared with the listing by `assertEquals`).
+ */
 const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
   backbone: TEXT_CASES,
   "caption-proj": TEXT_CASES,
@@ -415,9 +456,9 @@ const EXPECTED_CASES: Readonly<Record<string, readonly string[]>> = {
 const EXPECTED_TARGETS = Object.keys(EXPECTED_CASES).sort();
 
 /**
- * 資産ディレクトリの列挙。存在しない場合だけ空に縮退する。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
- * 実行されていない検証が SKIP として静かに緑になる。
+ * Lists the asset directory. Degrades to empty only when it does not exist.
+ * MUST: propagate anything other than NotFound — reading a permission error or the like as "no
+ * assets" turns checks that never ran quietly green as SKIPs.
  */
 const listDir = (url: URL): readonly DirEntry[] => {
   try {
@@ -431,12 +472,13 @@ const listDir = (url: URL): readonly DirEntry[] => {
 };
 
 /**
- * 系列ディレクトリ直下にある**グラフ以外**の生成物。ここは IR ターゲットの列挙なので、
- * 別の台本が書くホスト側資産は除く（`tools/export-recipes/irodori/tokenizer_ref.py` のトークナイザ資産と
- * `tools/export-recipes/irodori/pipeline_ref.py` の full-loop latent golden）。
+ * The **non-graph** outputs directly under the series directory. This lists IR targets, so it
+ * excludes the host-side assets other scripts write (the tokenizer assets of
+ * `tools/export-recipes/irodori/tokenizer_ref.py` and the full-loop latent golden of
+ * `tools/export-recipes/irodori/pipeline_ref.py`).
  *
- * MUST: 「知らないディレクトリは無視」にしない — 除外は名前で明示する。未知の名前が
- * 増えたらこのテストが落ちて、門の対象から漏れていることに気づける。
+ * MUST: do not make it "ignore unknown directories" — exclusions are explicit by name. When an
+ * unknown name appears this test fails, revealing that something escaped the check.
  */
 const NON_GRAPH_DIRS: ReadonlySet<string> = new Set(["pipeline", "tokenizer"]);
 
@@ -465,7 +507,10 @@ const openTarget = async (target: string) =>
     await selectMirrorComponent(MIRROR, graphName(target), MIRROR_CHOICE),
   );
 
-/** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
+/**
+ * Listed synchronously, as it is needed at registration time (the same reason as Deno.test's
+ * ignore decision).
+ */
 const TARGETS = discoverTargets(GOLDEN_ROOT);
 /**
  * Whether the goldens are present. None at all = not fetched, so the golden cases SKIP (a partial
@@ -492,25 +537,36 @@ if (!MIRROR_AVAILABLE) {
 
 // Golden-side checks only (no mirror needed): they run whenever goldens are present, and on a
 // complete fetch of the pin with none present.
-test.skipIf(!AVAILABLE && !FETCHED)("Irodori 資産: 期待するターゲットとケースが揃っている", () => {
-  if (!AVAILABLE) {
-    throw new Error(
-      `no golden targets under ${GOLDEN_ROOT.pathname}, but outputs/test-assets/ holds a complete ` +
-        "fetch of the pinned revision: the test-asset dataset at the pin lacks them",
-    );
-  }
-  assertEquals(TARGETS, EXPECTED_TARGETS, `${GOLDEN_ROOT.pathname} のターゲット`);
-  assertEquals(Object.keys(TOLERANCES).sort(), EXPECTED_TARGETS, "ターゲット別 tolerance の表");
-  assertEquals(Object.keys(GRAPH_NAMES).sort(), EXPECTED_TARGETS, "ターゲット別グラフ名の表");
-  for (const target of TARGETS) {
-    assert(Object.hasOwn(EXPECTED_CASES, target), `${target} の期待ケース表が無い`);
+test.skipIf(!AVAILABLE && !FETCHED)(
+  "Irodori assets: the expected targets and cases are all present",
+  () => {
+    if (!AVAILABLE) {
+      throw new Error(
+        `no golden targets under ${GOLDEN_ROOT.pathname}, but outputs/test-assets/ holds a complete ` +
+          "fetch of the pinned revision: the test-asset dataset at the pin lacks them",
+      );
+    }
+    assertEquals(TARGETS, EXPECTED_TARGETS, `targets of ${GOLDEN_ROOT.pathname}`);
     assertEquals(
-      discoverCases(GOLDEN_ROOT, target),
-      [...EXPECTED_CASES[target]],
-      `${target} の golden ケース`,
+      Object.keys(TOLERANCES).sort(),
+      EXPECTED_TARGETS,
+      "the per-target tolerance table",
     );
-  }
-});
+    assertEquals(
+      Object.keys(GRAPH_NAMES).sort(),
+      EXPECTED_TARGETS,
+      "the per-target graph name table",
+    );
+    for (const target of TARGETS) {
+      assert(Object.hasOwn(EXPECTED_CASES, target), `no expected case table for ${target}`);
+      assertEquals(
+        discoverCases(GOLDEN_ROOT, target),
+        [...EXPECTED_CASES[target]],
+        `golden cases of ${target}`,
+      );
+    }
+  },
+);
 
 test.skipIf(!MIRROR_AVAILABLE)(
   `Irodori assets: the mirror declares every target graph at ${QUANT}`,
@@ -529,22 +585,25 @@ test.skipIf(!MIRROR_AVAILABLE)(
 );
 
 /**
- * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_irodori-golden/` — 消して安全）。
+ * Where the settlements and measurements go
+ * (`outputs/verify/<environment key>/<date>_irodori-golden/` — safe to delete).
  *
- * 系列名を `<family>-golden` にするのは、models 側の e2e（`irodori`）が同じ根へ書くため
- * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ * The series is named `<family>-golden` because the models-side e2e (`irodori`) writes to the
+ * same root (two modules writing to the same slot overwrite each other's `cases`).
  */
 const results = openResults("irodori-golden");
 
 for (const target of TARGETS) {
   for (const caseName of discoverCases(GOLDEN_ROOT, target)) {
-    /** ケース ID（ターゲットが違えば同じケース名があるので組で持つ）。 */
+    /**
+     * The case ID (different targets can have the same case name, so it is kept as a pair).
+     */
     const caseId = `${target}/${caseName}`;
     // The whole case is upstream parity (per-component torch goldens under a tolerance), so it is
     // opt-in. Its io-key / shape / dtype assertions only check the golden file against the graph
     // as preconditions of that comparison, so they stay with it rather than in a default case.
     test.skipIf(!AVAILABLE || !MIRROR_AVAILABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-      `Irodori golden 突合: ${target} / ${caseName}（実 GPU / torch CPU 期待値）${UPSTREAM_PARITY_OPT_IN}`,
+      `Irodori golden comparison: ${target} / ${caseName} (real GPU / torch CPU expected values)${UPSTREAM_PARITY_OPT_IN}`,
       async () => {
         await runRecordedCase(results, { id: caseId }, async ({ measurements }) => {
           const ioFile = `${IO_PREFIX}${caseName}${IO_SUFFIX}`;
@@ -554,49 +613,55 @@ for (const target of TARGETS) {
           ]);
           const parsed = prepareContainer(opened, graphName(target));
           const io = parseSafetensors(ioBytes);
-          // Object.hasOwn で見る（素の `TOLERANCES[target]` はプロトタイプ由来のキーを拾う）。
-          assert(Object.hasOwn(TOLERANCES, target), `${target} の tolerance が無い`);
+          // Checked with Object.hasOwn (a plain `TOLERANCES[target]` picks up keys from the
+          // prototype).
+          assert(Object.hasOwn(TOLERANCES, target), `no tolerance for ${target}`);
           const tolerances = TOLERANCES[target];
-          // 出力ごとに値域が違う（caption-proj の第 2 出力は norm 済みで 1 桁小さい）ので、
-          // 本数が合っていない表は「別の出力の閾値で突合する」形で静かに通ってしまう。
+          // The range differs per output (caption-proj's second output is normalised and an order
+          // of magnitude smaller), so a table with the wrong count would silently pass in the shape
+          // "compared with another output's threshold".
           assertEquals(
             tolerances.length,
             parsed.graph.outputs.length,
-            `${target} の tolerance 本数が IR 出力数と違う`,
+            `${target}'s tolerance count differs from the IR output count`,
           );
 
-          // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+          // Every io tensor corresponds exactly to the graph's inputs and outputs (nothing extra,
+          // nothing missing).
           const expectedKeys = [
             ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
             ...parsed.graph.outputs.map((_, index) => `output.${index}`),
           ].sort();
-          assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${ioFile} のテンソルキー`);
+          assertEquals([...io.tensors.keys()].sort(), expectedKeys, `tensor keys of ${ioFile}`);
 
-          // 記号次元は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-          // ケースごとに長さが違う（テキスト系と duration は T = 7 / 13 / 22 / 29 / 144 / 404、
-          // speaker は S = 2 / 6 / 31 / 47 / 187 / 750、dit は S = 2 / 25 / 750）ので、宣言上限
-          // （テキスト系 Tmax = 512 = irodori/export.py の SYM_MAX / speaker Smax = 750 =
-          // speaker_sym_max / dit Smax = 750 = dit_sym_max — 帯マスクと RoPE 表の焼き付け点）に
-          // 依存した実装はここで値か shape が壊れる。speaker と dit は**上限そのもの**を踏む
-          // ケース（ref-max / dit-cond-max）を持たせてある（テキスト系の最長は 404）。
+          // The symbolic dimensions are bound from the actual lengths of the golden's input shapes
+          // (no explicit bindings are passed). The lengths differ per case (T = 7 / 13 / 22 / 29 /
+          // 144 / 404 for the text models and duration, S = 2 / 6 / 31 / 47 / 187 / 750 for
+          // speaker, S = 2 / 25 / 750 for dit), so an implementation that depends on the declared
+          // upper bound (text Tmax = 512 = SYM_MAX in irodori/export.py / speaker Smax = 750 =
+          // speaker_sym_max / dit Smax = 750 = dit_sym_max — where the band mask and the RoPE tables
+          // are baked) breaks in value or shape here. speaker and dit have cases that hit **the
+          // bound itself** (ref-max / dit-cond-max) (the longest text case is 404).
           //
-          // dit の `mask` は**派生次元** `S+1519`（ADR 0046）で宣言されており、束縛源は
-          // `x_t` の次元 1 だけ。bindSymbols の 2 巡目が `mask` の実 shape（S+1519）を
-          // 評価し直して照合するので、派生形の評価が壊れればここで落ちる。
+          // dit's `mask` is declared with the **derived dimension** `S+1519` (ADR 0046), and its
+          // only binding source is dimension 1 of `x_t`. The second pass of bindSymbols re-evaluates
+          // and checks `mask`'s actual shape (S+1519), so a broken evaluation of the derived form
+          // fails here.
           const inputs: Record<string, Tensor> = {};
           for (const spec of parsed.graph.inputs) {
             const view = io.tensors.get(`input.${spec.name}`);
-            assert(view !== undefined, `input.${spec.name} が ${ioFile} に無い`);
+            assert(view !== undefined, `input.${spec.name} is not in ${ioFile}`);
             inputs[spec.name] = ioTensor(io, view, spec.dtype);
           }
 
           const gpu = await acquireGpu();
-          // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
-          // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
-          // （known-issues の遅延解放）。
+          // MUST: destroying the device also covers failures of the adapter check and of
+          // `createSession`. If missed, the rest of that run proceeds holding an undestroyed device
+          // and later tests go red with OOM (the deferred release in known-issues).
           try {
-            // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-            // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+            // This path records reference values and results as this machine's rows, so the
+            // identity of the adapter the key was taken from and the adapter that runs is checked
+            // here (a mix-up on a multi-GPU machine would measure against another machine's band).
             assertAdapterMatchesEnvironment(gpu);
             const session = await parsed.createContainerSession(gpu);
             try {
@@ -605,7 +670,7 @@ for (const target of TARGETS) {
 
               parsed.graph.outputs.forEach((name, index) => {
                 const view = io.tensors.get(`output.${index}`);
-                assert(view !== undefined, `output.${index} が ${ioFile} に無い`);
+                assert(view !== undefined, `output.${index} is not in ${ioFile}`);
                 const where = `${target}/${caseName} output.${index} ('${name}')`;
                 const declared = parsed.graph.values[name].dtype;
                 assertEquals(outputs[name].shape, view.shape, `${where}: shape`);

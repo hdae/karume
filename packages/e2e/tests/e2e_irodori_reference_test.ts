@@ -1,16 +1,18 @@
-// 参照音声 → 話者 latent の**鎖ぜんぶ**の門（実 GPU）。
+// The check of **the whole chain** from reference audio to the speaker latent (real GPU).
 //
-// `irodori_reference_test.ts` がホスト前処理だけを golden と突き合わせるのに対し、こちらは
-// **生波形から latent まで**を 1 本に繋いで golden の `latent` と突き合わせる —
-// 正規化 → reflect pad → `[1,T,1920]` へのフレーム化 → `codec_encoder`（実 GPU）。
+// Where `irodori_reference_test.ts` compares only the host preprocessing with the golden, this
+// one connects **from the raw waveform to the latent** in one go and compares with the golden's
+// `latent` — normalisation → reflect pad → framing into `[1,T,1920]` → `codec_encoder` (real
+// GPU).
 //
-// フレーム化はテンソルの読み替えでしかないが、**幅を取り違えても shape は合う**（1920 の
-// 代わりに別の数で割ると T が変わるだけで例外は出ない）。ここが唯一その取り違えを掴む席。
+// Framing is only a reinterpretation of the tensor, but **a wrong width still fits the shape**
+// (dividing by another number instead of 1920 only changes T and raises no exception). This is the
+// only place that catches that mix-up.
 //
-// golden 側の `latent` は上流 `codec.encode_waveform` の出力そのもの
-// （`tools/export-recipes/irodori/dacvae/host.py` が「ホスト鎖 → グラフ」と上流とのビット一致を
-// 実測してから書く）なので、この門が閉じることは
-// 「TS の参照音声経路が上流と同じ話者条件を作る」を意味する。
+// The golden's `latent` is upstream `codec.encode_waveform`'s output itself
+// (`tools/export-recipes/irodori/dacvae/host.py` measures bit identity between "host chain →
+// graph" and upstream before writing it), so this check closing means
+// "the TS reference-audio path produces the same speaker condition as upstream".
 //
 // An environment without the assets or without a GPU SKIPs explicitly, naming what is missing
 // (ADR 0005); a host golden absent from a complete fetch of the pinned test assets FAILs (ADR 0139).
@@ -29,39 +31,45 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { readFileIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
-/** 実重み v4-small の運用値（`pipelineConfig` が運ぶ数と同じ）。 */
+/** The operating values of real-weight v4-small (the same numbers `pipelineConfig` carries). */
 const SAMPLE_RATE = 48000;
 const HOP_LENGTH = 1920;
 const LATENT_DIM = 32;
 
 /**
- * 生波形 → latent の全経路に使う許容誤差（絶対）。
+ * The (absolute) tolerance for the whole path from the raw waveform to the latent.
  *
- * 実測（`atol = rtol = 0` の素の突合。2026-08-12 / 実 GPU・golden の LUFS 正規化 3 ケース）:
+ * Measured (a plain comparison with `atol = rtol = 0`; 2026-08-12, real GPU, the golden's 3 LUFS
+ * normalisation cases):
  *
- * | ケース      | T   | 複合 maxAbs   | encoder 単体 maxAbs | 前処理だけの寄与 | \|latent\| 上端 |
- * | ----------- | --- | ------------- | ------------------- | ---------------- | --------------- |
+ * | Case        | T   | Chain maxAbs  | Encoder-only maxAbs | Preprocessing only | \|latent\| max  |
+ * | ----------- | --- | ------------- | ------------------- | ------------------ | --------------- |
  * | ref-default | 190 | 2.1979e-5     | 2.5570e-5           | 1.1742e-5        | 5.31            |
  * | ref-short   | 10  | 8.7023e-6     | 8.1062e-6           | 2.2054e-6        | 3.44            |
  * | ref-odd     | 76  | **2.8685e-5** | 2.7344e-5           | 1.2457e-5        | 3.93            |
  *
- * 「encoder 単体」は golden の `padded` をそのままグラフへ流したときの差、「前処理だけの
- * 寄与」は TS 前処理の出力と golden の `padded` をそれぞれ流した結果どうしの差。
- * **前処理の寄与（1.25e-5）は encoder 自身の差（2.73e-5）より小さく**、複合が encoder 単体と
- * ほぼ同じ大きさに留まる — LUFS の f64/f32 差（利得の相対 2.5e-6）が conv の縮約順序差に
- * 埋もれている、というのがこの 3 行の読み。
+ * "Encoder-only" is the difference when the golden's `padded` goes into the graph as is;
+ * "preprocessing only" is the difference between the results of feeding the TS preprocessing's
+ * output and the golden's `padded`. **The preprocessing's contribution (1.25e-5) is smaller than
+ * the encoder's own difference (2.73e-5)**, and the chain stays about the same size as the encoder
+ * alone — the reading of these 3 rows is that LUFS's f64/f32 difference (a relative 2.5e-6 in the
+ * gain) is buried in the conv's reduction-order difference.
  *
- * atol 2e-4 は実測最悪 2.8685e-5（ref-odd）の **7.0 倍**。runtime の encoder 単体門
- * （`e2e_dacvae_test.ts`〈0.15 の選別で削除〉の `ENCODER_TOLERANCE`）と同じ値になったのは偶然ではなく、上の
- * 「前処理の寄与が encoder の差に埋もれる」の帰結（それでも**独立に導出**する — 前処理側が
- * 悪化したときに、こちらの実測表が先に動く）。
+ * atol 2e-4 is **7.0 times** the measured worst 2.8685e-5 (ref-odd). Landing on the same value as
+ * the runtime's encoder-only check (`ENCODER_TOLERANCE` of `e2e_dacvae_test.ts` (removed in the
+ * 0.15 triage)) is not chance but a consequence of "the preprocessing's contribution is buried in
+ * the encoder's difference" above (it is still **derived independently** — if the preprocessing
+ * side worsens, this measurement table moves first).
  *
- * **式の取り違え**（目標 dB・pad の向き・フレーム幅）は latent の値域（±5.3）と同じ
- * O(0.1〜1) で出る。
+ * **A wrong formula** (the target dB, the pad direction, the frame width) shows at O(0.1–1), the
+ * same as the latent's range (±5.3).
  */
 const LATENT_ATOL = 2e-4;
 
-/** LUFS 正規化を通る golden ケース（`normalizeDb: -16` の 3 本 — この経路が持つ枝の全部）。 */
+/**
+ * The golden cases that go through LUFS normalisation (the 3 with `normalizeDb: -16` — every branch
+ * this path has).
+ */
 const CASES: readonly string[] = ["ref-default", "ref-short", "ref-odd"];
 
 /** The host goldens (`outputs/test-assets/goldens/dacvae-32dim/host/` — ADR 0139 decision 2). */
@@ -115,7 +123,7 @@ const RUNNABLE = GPU_AVAILABLE && ASSETS_AVAILABLE;
 const tensorOf = (buffer: ArrayBuffer, key: string, where: string): Float32Array<ArrayBuffer> => {
   const file = parseSafetensors(buffer);
   const spec = file.tensors.get(key);
-  if (spec === undefined) throw new Error(`${where}: '${key}' が無い`);
+  if (spec === undefined) throw new Error(`${where}: '${key}' is missing`);
   return new Float32Array(
     file.buffer.slice(spec.byteOffset, spec.byteOffset + spec.byteLength),
   ) as Float32Array<ArrayBuffer>;
@@ -153,14 +161,14 @@ const runChainOverCases = async (
         const raw = tensorOf(buffer, "raw", `golden case.${name}`);
         const expected = tensorOf(buffer, "latent", `golden case.${name}`);
 
-        // ここがパイプラインと同じ鎖（`pipeline.ts` の `encodeReferenceAudio`）。
+        // This is the same chain as the pipeline's (`encodeReferenceAudio` in `pipeline.ts`).
         const padded = reflectPadToHop(normalizeReference(raw, SAMPLE_RATE).data, HOP_LENGTH);
         const frames = padded.length / HOP_LENGTH;
         const outputs = await session.run({
           wav: { dtype: "f32", shape: [1, frames, HOP_LENGTH], data: padded },
         });
         const tensor = outputs[encoder.graph.outputs[0]];
-        if (tensor.dtype !== "f32") throw new Error(`encoder の出力が ${tensor.dtype}`);
+        if (tensor.dtype !== "f32") throw new Error(`the encoder output is ${tensor.dtype}`);
         check(name, { rawLength: raw.length, frames, actual: tensor.data, expected });
       }
     } finally {
@@ -175,21 +183,21 @@ const assertLatentShape = (name: string, { frames, actual, expected }: ChainResu
   assertEquals(
     actual.length,
     expected.length,
-    `${name}: latent の要素数（フレーム幅 ${HOP_LENGTH} の取り違えはここに出る）`,
+    `${name}: latent element count (a mix-up of the frame width ${HOP_LENGTH} shows here)`,
   );
-  assertEquals(actual.length / LATENT_DIM, frames, `${name}: latent のフレーム数`);
+  assertEquals(actual.length / LATENT_DIM, frames, `${name}: latent frame count`);
 };
 
 // The shape gate stays in the default run: a wrong frame width still yields a valid tensor, and
 // only the element count against the golden latent catches it. The value comparison (atol) is
 // upstream parity and is opt-in.
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder の latent の形が golden と一致する",
+  "e2e (real GPU): the latent shape of reference audio → normalisation → pad → codec encoder matches the golden",
   () => runChainOverCases(assertLatentShape),
 );
 
 test.skipIf(!RUNNABLE || !UPSTREAM_PARITY)(
-  "e2e(実GPU): 参照音声 → 正規化 → pad → codec encoder が golden の latent と一致する" +
+  "e2e (real GPU): reference audio → normalisation → pad → codec encoder matches the golden latent" +
     UPSTREAM_PARITY_OPT_IN,
   async () => {
     let worst = 0;
@@ -204,17 +212,17 @@ test.skipIf(!RUNNABLE || !UPSTREAM_PARITY)(
       }
       worst = Math.max(worst, maxAbs);
       console.log(
-        `[e2e] irodori 参照音声 ${name}: T ${frames} / ${rawLength} サンプル → ` +
-          `latent ${actual.length} 要素 / maxAbs ${maxAbs.toExponential(4)}` +
-          `（|latent| 上端 ${absMax.toFixed(2)}）`,
+        `[e2e] irodori reference audio ${name}: T ${frames} / ${rawLength} samples → ` +
+          `latent ${actual.length} elements / maxAbs ${maxAbs.toExponential(4)}` +
+          ` (|latent| max ${absMax.toFixed(2)})`,
       );
       assertEquals(
         maxAbs < LATENT_ATOL,
         true,
-        `${name}: latent の最大絶対差 ${maxAbs} が atol ${LATENT_ATOL} を超えた` +
-          "（緩めず、前処理と encoder のどちらが動いたかを分けて実測する）",
+        `${name}: the latent's maximum absolute difference ${maxAbs} exceeds atol ${LATENT_ATOL}` +
+          " (do not loosen it; measure separately whether the preprocessing or the encoder moved)",
       );
     });
-    console.log(`[e2e] irodori 参照音声: 最悪 maxAbs ${worst.toExponential(4)}`);
+    console.log(`[e2e] irodori reference audio: worst maxAbs ${worst.toExponential(4)}`);
   },
 );

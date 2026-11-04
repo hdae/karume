@@ -1,16 +1,21 @@
 /**
- * Irodori の**自機 A/B 門**（実 GPU・ADR 0110 決定 5）。実用席 `i8-a8`（既定席 — `dit` の linear を
- * 活性まで整数内積で回す `linearCompute: "a8"`）を、**同じ機・同じ i8 重み**で `session` が空の
- * 参照席（manifest から導く — {@link referencePartnerOf}。今の配布形では `i8`）と比べる。
+ * Irodori's **self A/B check** (real GPU, ADR 0110 decision 5). It compares the practical seat
+ * `i8-a8` (the default seat — `linearCompute: "a8"`, which runs `dit`'s linears with integer dot
+ * products down to the activations) with the reference seat whose `session` is empty (derived from
+ * the manifest — {@link referencePartnerOf}; `i8` in today's distribution) **on the same machine
+ * with the same i8 weights**.
  *
- * 形は `e2e_anima_ab_test.ts` と同じ（手順・門・故障注入の対応はそちらのモジュール doc）。違いは:
+ * The shape is the same as `e2e_anima_ab_test.ts` (the procedure, the checks and the fault
+ * injection mapping are in that module's doc). The differences:
  *
- * - 観測点は **step 1 の latent**（`denoise-step` の `copyLatents()` — CFG の内側の forward 数では
- *   なく 1 step 完了後の潜在 `[frames, latentDim]`）。`durationSeconds` で S を固定し、`duration`
- *   グラフを回さない（quant の `session` は `dit` にだけ渡るので、S の決定は席に依らない）。
- * - 束のノブは `linearCompute` の 1 つだけなので、故障注入は ①（`session` を空にした manifest →
- *   床）と ②（2 回目だけ別 seed → 決定性）の 2 本。「1 ノブだけ外す」③ は束が 1 ノブの席では ① と
- *   同じ形になるので置かない。
+ * - The observation point is **the step-1 latent** (`copyLatents()` of `denoise-step` — the latent
+ *   `[frames, latentDim]` after one step completes, not a forward count inside CFG).
+ *   `durationSeconds` fixes S and the `duration` graph does not run (the quant's `session` reaches
+ *   only `dit`, so deciding S does not depend on the seat).
+ * - The bundle has a single knob, `linearCompute`, so there are 2 fault injections: ① (a manifest
+ *   with `session` emptied → floor) and ② (a different seed only for the second run →
+ *   determinism). ③ "remove just one knob" takes the same shape as ① on a one-knob seat, so it is
+ *   not included.
  * - The exact key census of the practical seat lives here too (the "key census" test below): over
  *   one full generation on the resident DiT path, every `dit` / `dit_context` run dispatches
  *   exactly the census-table number of i8a8 GEMMs and `quantize_rows`, zero f32 linear kernels,
@@ -18,12 +23,13 @@
  *   activation quantization cannot be a numeric-parity gate (ADR 0025 decision 6 / ADR 0026), and
  *   the silent-f32-fallback floor that band guarded is covered by the census and fault injection ①.
  *
- * 帯の導出規則は `e2e_anima_ab_test.ts` の `CASES` の doc と同じ（上限 = 実測 × 2 程度・床 =
- * 1 bit 以上違う MUST + 示せたときだけ係数）。
+ * The band derivation rule is the same as the doc of `CASES` in `e2e_anima_ab_test.ts` (ceiling =
+ * about measured × 2, floor = MUST differ by at least 1 bit + a coefficient only when it can be
+ * shown).
  *
- * MUST: 資産は `models/karume-irodori-v4.1-small/`（untracked・実 GPU 機のローカル資産 —
- * examples の台本既定の配布形）。無い環境と GPU 無し環境は理由を出して**明示 SKIP** する
- * （ADR 0005）。
+ * MUST: the assets are `models/karume-irodori-v4.1-small/` (untracked, local assets of the
+ * real-GPU machine — the distribution the examples' scripts default to). An environment without
+ * them or without a GPU **SKIPs explicitly** with the reason (ADR 0005).
  */
 
 import { test } from "vite-plus/test";
@@ -68,7 +74,7 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 import { withManifestOverride } from "../../models/tests/helpers/manifest-override.ts";
 import { readTextIfPresent } from "../../models/tests/helpers/read-if-present.ts";
 
-/** 配布形の置き場（`karume dist --pipeline irodori` の v4.1 の出力先）。 */
+/** Where the distribution lives (the v4.1 output of `karume dist --pipeline irodori`). */
 const ASSETS_DIR = new URL("../../../models/karume-irodori-v4.1-small/", import.meta.url);
 /**
  * v4.1-small references the components it shares with v4-small in v4-small's repository (ADR 0038
@@ -80,17 +86,20 @@ const V4_ASSETS_DIR = new URL("../../../models/karume-irodori-v4-small/", import
 const CROSS_REPO = { crossRepo: { [V4_REPO]: nodeDirectory(V4_ASSETS_DIR) } };
 /** The v4.1-small distribution with its cross-repository mapping. */
 const assetsSource = (): DistributionSource => nodeDirectory(ASSETS_DIR, CROSS_REPO);
-/** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_irodori-ab/` — 消して安全）。 */
+/**
+ * Where the measurements and settlements go (`outputs/verify/<environment key>/<date>_irodori-ab/`
+ * — safe to delete).
+ */
 const results = openResults("irodori-ab");
 
 const MODEL = "v4.1-small";
 const PRACTICAL = "i8-a8";
 const OBSERVATION = "step1-latent";
-/** 発話長（秒）。S を固定して `duration` グラフを回さない。 */
+/** Utterance length (seconds). S is fixed so the `duration` graph does not run. */
 const DURATION_SECONDS = 3;
 const SEED = 1235;
 
-/** 1 ケースの入力と帯。 */
+/** One case's input and band. */
 type AbCase = {
   readonly name: string;
   readonly text: string;
@@ -99,13 +108,15 @@ type AbCase = {
 };
 
 /**
- * ケースと帯（`band: undefined` = 未導出 — 門は実測を出して赤で止まる）。テキストと caption は
- * `e2e_irodori_wav_test.ts` と同じ文（参照音声は使わない — speaker 経路は席に依らない）。
+ * Cases and bands (`band: undefined` = not derived yet — the check prints the measurement and
+ * stops red). The text and caption are the same sentences as `e2e_irodori_wav_test.ts` (no
+ * reference audio — the speaker path does not depend on the seat).
  *
- * 導出表（2026-09-26・Intel Arc B570 / Deno・参照席 `i8`・上限 = 実測 × 2 を有効数字 2 桁へ）:
+ * Derivation table (2026-09-26, Intel Arc B570 / Deno, reference seat `i8`, ceiling = measured × 2
+ * to 2 significant digits):
  *
- * | ケース  | 実測 relRMS | 実測 maxAbs | floor | ceiling | 採った日・機 |
- * | ------- | ----------- | ----------- | ----- | ------- | ------------ |
+ * | Case    | relRMS      | maxAbs      | floor | ceiling | Date, machine   |
+ * | ------- | ----------- | ----------- | ----- | ------- | --------------- |
  * | no-ref  | 3.5879e-3   | 1.4885e-2   | 0     | 7.2e-3  | 2026-09-26 B570 |
  * | caption | 5.8457e-3   | 2.2464e-2   | 0     | 1.2e-2  | 2026-09-26 B570 |
  */
@@ -124,13 +135,13 @@ const CASES: readonly AbCase[] = [
   },
 ];
 
-/** 故障注入を回すケース（最小構成の no-ref）。 */
+/** The case the fault injection runs (no-ref, the minimal setup). */
 const FAULT_CASE = CASES[0];
 
 const manifestText = await readTextIfPresent(new URL("karume.json", ASSETS_DIR));
 if (manifestText === undefined) {
   console.warn(
-    `[karume] ${ASSETS_DIR.pathname} に karume.json が無いため Irodori の自機 A/B 門を SKIP する` +
+    `[karume] ${ASSETS_DIR.pathname} has no karume.json, so Irodori's self A/B check SKIPs` +
       "（cd tools/export-recipes && uv run python dist.py --pipeline irodori --model v4.1-small --resolve-refs hf）",
   );
 }
@@ -168,8 +179,9 @@ type Observation = {
 };
 
 /**
- * `quant` の pipeline を組み、step 1 の潜在を採って打ち切る。census は `dit` の run だけ
- * （`onEvent` を渡すと DiT ループはホスト経路で回り、forward ごとに観測席へ届く）。
+ * Builds the `quant` pipeline, takes the step-1 latent and aborts. The census covers `dit`'s runs
+ * only (passing `onEvent` makes the DiT loop take the host path, delivering to the observer per
+ * forward).
  */
 const observeStep1 = async (
   source: DistributionSource,
@@ -197,7 +209,7 @@ const observeStep1 = async (
       },
     }),
   );
-  return { latent, census: mergeCensus(runs, `${where} の dit`) };
+  return { latent, census: mergeCensus(runs, `dit of ${where}`) };
 };
 
 const errorText = (cause: unknown): string =>
@@ -206,7 +218,7 @@ const errorText = (cause: unknown): string =>
 for (const input of CASES) {
   const id = `${PRACTICAL}-${input.name}`;
   test.skipIf(!RUNNABLE)(
-    `e2e(実GPU): ${id} の step 1 潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）`,
+    `e2e (real GPU): ${id}'s step-1 latent agrees with the reference seat on determinism, census and band (self A/B)`,
     async () => {
       await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
         const manifest = readManifest();
@@ -229,8 +241,8 @@ for (const input of CASES) {
           `[e2e] irodori A/B ${id}: ${reference} → ${PRACTICAL} ${describeAb(measured)} ` +
             `/ census ${census}`,
         );
-        assertBitIdentical(first.latent, second.latent, `${id}: 実用席の 2 回`);
-        assertSeatsApplied(first.census, declared, `${id}: 実用席の dit`);
+        assertBitIdentical(first.latent, second.latent, `${id}: two runs of the practical seat`);
+        assertSeatsApplied(first.census, declared, `${id}: dit of the practical seat`);
         judgeAb(measured, input.band, id);
         return { status: "pass", note: `census ${census}` };
       });
@@ -240,30 +252,39 @@ for (const input of CASES) {
 
 // --- Key census of the practical seat (exact dispatch counts per run) -----------------
 
-/** census の生成で使う発話長（秒）。`duration` を回さず S を小さく固定する。 */
+/**
+ * The utterance length (seconds) of the census generation. S is fixed small without running
+ * `duration`.
+ */
 const CENSUS_SECONDS = 1;
 
-/** census を採る部品（quant の `session` が降りる 2 本 — 観測席の綴り）。 */
+/**
+ * The components the census is taken from (the 2 the quant's `session` reaches — spelled as the
+ * observer names them).
+ */
 type CensusComponent = Extract<RunComponent, "dit" | "dit-context">;
 const CENSUS_COMPONENTS: readonly CensusComponent[] = ["dit", "dit-context"];
 const isCensusComponent = (component: RunComponent): component is CensusComponent =>
   (CENSUS_COMPONENTS as readonly RunComponent[]).includes(component);
-/** census 表の相（`dit` は denoise の step ごと・`dit_context` は生成 1 回の run）。 */
+/**
+ * The census table's phases (`dit` per denoise step, `dit_context` one run per generation).
+ */
 const PHASE_OF: Readonly<Record<CensusComponent, string>> = { dit: "step", "dit-context": "run" };
 
 /**
- * 部品ごとの run 1 回あたりに走る `quantize_rows` の dispatch 数（`dit` は 1 forward・
- * `dit_context` は生成 1 回の 1 run）。
+ * The `quantize_rows` dispatch count per run of each component (`dit` = one forward,
+ * `dit_context` = the single run of one generation).
  *
- * DiT の linear は分割前の 1 グラフで 317 本（k ∈ {32, 192, 512, 768, 1280, 3680} — 全て 4 の
- * 倍数で i8-a8 適格・量子化 recon の sizeBreakdown）。ADR 0114 で条件側 K/V 射影 72 本〈12
- * ブロック × text / speaker / caption × K / V〉を `dit_context` へ割り出したので、`dit` 245 本 +
- * `dit_context` 72 本になった — **グラフが変わったための期待値の変更**で、本数を緩めたのでは
- * ない。合計 317 の検査は置かない（部品ごとにちょうどで縛れば足り、合計は片方の取り違えを
- * 打ち消しうる）。i8a8 の linear は「活性を per-token i8 へ落とす `quantize_rows` → 整数内積の
- * GEMM」の対で走るので、期待は本数の関数として書ける。GEMM 側（席 `linearCompute: "a8"` の
- * 変種キー）の本数は束の census 表（`helpers/census-table.ts`）が持つ — 席の本数の正本を
- * 1 か所にするため。
+ * The DiT has 317 linears in the single graph before the split (k ∈ {32, 192, 512, 768, 1280,
+ * 3680} — all multiples of 4, so i8-a8 eligible; the sizeBreakdown of the quantization recon). ADR
+ * 0114 split the 72 condition-side K/V projections (12 blocks × text / speaker / caption × K / V)
+ * out into `dit_context`, giving `dit` 245 + `dit_context` 72 — **an expected value changed
+ * because the graph changed**, not a loosened count. No check on the total of 317 is kept (pinning
+ * each component exactly is enough, and a total could cancel out a mix-up on one side). An i8a8
+ * linear runs as the pair "`quantize_rows`, which drops the activations to per-token i8 → the
+ * integer dot-product GEMM", so the expectation can be written as a function of the count. The
+ * GEMM side's count (the variant key of the seat `linearCompute: "a8"`) is held by the bundle
+ * census table (`helpers/census-table.ts`) — to keep one source of truth for the seat's counts.
  *
  * To re-derive after a graph change, read the measured counts from the census log line this test
  * prints (the source is `lastRunPipelines`, which does not depend on timing).
@@ -273,12 +294,15 @@ const QUANTIZE_ROWS_PER_RUN: Readonly<Record<CensusComponent, number>> = {
   "dit-context": 72,
 };
 
-/** パイプラインキーの分類（綴りの正本は `src/kernels/linear{,-i8a8}.ts` / `quantize-rows.ts`）。 */
+/**
+ * Classification of pipeline keys (the spelling's source of truth is
+ * `src/kernels/linear{,-i8a8}.ts` / `quantize-rows.ts`).
+ */
 const isLinearKey = (key: string): boolean => key.startsWith("linear:");
 const isI8a8 = SEAT_SIGNATURES.linearCompute.a8;
 const isQuantizeRows = (key: string): boolean => key.startsWith("quantize_rows:");
 
-/** 1 run ぶんの分類済み dispatch 数。 */
+/** The classified dispatch counts of one run. */
 type KeyCensus = {
   readonly i8a8Linear: number;
   readonly quantizeRows: number;
@@ -286,8 +310,8 @@ type KeyCensus = {
 };
 
 const censusOf = (diagnostics: SessionDiagnostics, component: CensusComponent): KeyCensus => {
-  // MUST: census の無い run を「0 本」として数えない — キー検査が黙って空振りする
-  //（requireCensus が undefined / 空を落とす）。
+  // MUST: do not count a run without a census as "0" — the key check would silently pass vacuously
+  // (requireCensus fails on undefined / empty).
   const entries = requireCensus(diagnostics.lastRunPipelines, component);
   let i8a8Linear = 0;
   let quantizeRows = 0;
@@ -304,18 +328,22 @@ const censusOf = (diagnostics: SessionDiagnostics, component: CensusComponent): 
 };
 
 test.skipIf(!RUNNABLE)(
-  `e2e(実GPU): dit / dit_context の run が i8a8 GEMM と quantize_rows だけで回る（キー census）`,
+  `e2e (real GPU): the dit / dit_context runs use only i8a8 GEMMs and quantize_rows (key census)`,
   async () => {
     const manifest = readManifest();
-    // 束の census 表の行（鍵は quant 席の宣言を家族の合成に通した実効設定）。この門は `i8-a8`
-    // 席そのものの門なので、行が無いのは表の欠落として落とす。
+    // The bundle census table's row (the key is the effective setting: the quant seat's
+    // declaration passed through the family's composition). This check is the check of the `i8-a8`
+    // seat itself, so a missing row fails as a gap in the table.
     const where = `irodori ${MODEL}/${PRACTICAL}`;
     const row = censusRowOf(
       "irodori",
       MODEL,
       effectiveSessionOptions("irodori", quantOf(manifest, MODEL, PRACTICAL).session, {}, where),
     );
-    assert(row !== undefined, `${where}: 束の census 表（helpers/census-table.ts）に行が無い`);
+    assert(
+      row !== undefined,
+      `${where}: no row in the bundle census table (helpers/census-table.ts)`,
+    );
     const observed: Record<CensusComponent, KeyCensus[]> = { dit: [], "dit-context": [] };
     const runs: Record<CensusComponent, SessionDiagnostics["lastRunPipelines"][]> = {
       dit: [],
@@ -333,59 +361,70 @@ test.skipIf(!RUNNABLE)(
         runs[component].push(diagnostics.lastRunPipelines);
       },
     });
-    // `durationSeconds` で S を固定するのは `duration` を回さず短く保つため（見たいのは
-    // 長さではなく「何が走ったか」）。参照も caption も無い最小構成で足りる。
+    // S is fixed with `durationSeconds` to keep it short without running `duration` (what matters
+    // is "what ran", not the length). The minimal setup without a reference or a caption is enough.
     await pipeline.generateLatent({
       text: FAULT_CASE.text,
       seed: SEED,
       durationSeconds: CENSUS_SECONDS,
     });
 
-    if (observed.dit.length === 0) throw new Error("dit の run が 1 回も観測されなかった");
-    // 条件側 K/V は生成 1 回に 1 run（forward ごとに回っていたら ADR 0114 のホイストが外れている）。
-    assertEquals(observed["dit-context"].length, 1, "dit_context の run が生成 1 回に 1 回でない");
+    if (observed.dit.length === 0) throw new Error("no dit run was observed");
+    // The condition-side K/V is one run per generation (if it ran per forward, ADR 0114's hoist
+    // has come off).
+    assertEquals(
+      observed["dit-context"].length,
+      1,
+      "dit_context does not run exactly once per generation",
+    );
     for (const component of CENSUS_COMPONENTS) {
       const first = observed[component][0];
       const count = observed[component].length;
       console.log(
-        `[e2e] irodori ${MODEL}/${PRACTICAL} census: ${component} run ${count} 回 / ` +
-          `i8a8 linear ${first.i8a8Linear} 本 / quantize_rows ${first.quantizeRows} 本 / ` +
-          `f32 linear ${first.plainLinear} 本`,
+        `[e2e] irodori ${MODEL}/${PRACTICAL} census: ${component} runs ${count} / ` +
+          `i8a8 linear ${first.i8a8Linear} / quantize_rows ${first.quantizeRows} / ` +
+          `f32 linear ${first.plainLinear}`,
       );
-      // 全 forward が同じ計画で走る（uncond はマスク還元 — ADR 0047 決定 1）ので、本数は
-      // run ごとに揺れない。揺れたら「一部の run だけ別の経路へ落ちた」の直接の証拠になる。
+      // Every forward runs the same plan (uncond is a mask reduction — ADR 0047 decision 1), so
+      // the counts do not vary per run. A variation is direct evidence that "only some runs fell to
+      // another path".
       for (const [index, census] of observed[component].entries()) {
-        assertEquals(census, first, `${component} の run ${index} だけ dispatch の内訳が違う`);
+        assertEquals(
+          census,
+          first,
+          `${component}: only run ${index} has a different dispatch breakdown`,
+        );
       }
       assertEquals(
         first.plainLinear,
         0,
-        `${component}: f32 骨格の linear が走っている（適格判定が外れて一部が黙って f32 経路へ落ちた）`,
+        `${component}: f32-skeleton linears are running (eligibility came off and some silently fell to the f32 path)`,
       );
     }
-    // 席の変種（i8a8 GEMM）と参照経路に残った linear を run ごとにちょうどの本数で見る
-    // （相 → 部品は census 表の軸の綴り — `dit` は step・`dit_context` は run）。
+    // Checks the seat's variant (i8a8 GEMM) and the linears left on the reference path at the
+    // exact count per run (phase → component is spelled as the census table's axis — `dit` is
+    // step, `dit_context` is run).
     const checked = assertRowCensus(
       row,
       new Map(CENSUS_COMPONENTS.map((component) => [PHASE_OF[component], runs[component]])),
       (phase) => (phase === PHASE_OF.dit ? "dit" : "dit-context"),
       where,
     );
-    assert(checked > 0, `${where}: 表の期待と突き合わせた run が 1 本も無い`);
+    assert(checked > 0, `${where}: no run was compared against the table's expectation`);
     for (const component of CENSUS_COMPONENTS) {
       assertEquals(
         observed[component][0].quantizeRows,
         QUANTIZE_ROWS_PER_RUN[component],
-        `${component} の quantize_rows の dispatch 数が期待と違う（DiT の linear 本数か融合が動いた）`,
+        `${component}'s quantize_rows dispatch count differs from the expectation (the DiT's linear count or fusion moved)`,
       );
     }
   },
 );
 
-// --- 故障注入（ADR 0110 決定 5-5 — 門が赤になることを assert する）-------------------
+// --- Fault injection (ADR 0110 decision 5-5 — asserts that the checks go red) -------------------
 
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 故障注入 ① 実用席の session を空にした manifest は床で赤になる",
+  "e2e (real GPU): fault injection ① a manifest with the practical seat's session emptied goes red on the floor",
   async () => {
     const id = `fault1-empty-session-${FAULT_CASE.name}`;
     await runRecordedCase(results, { id, failureNote: errorText }, async (recorded) => {
@@ -407,27 +446,27 @@ test.skipIf(!RUNNABLE)(
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(
         comparisonOf(
-          { output: OBSERVATION, reference, practical: `${PRACTICAL}（session 空）` },
+          { output: OBSERVATION, reference, practical: `${PRACTICAL} (empty session)` },
           measured,
           FAULT_CASE.band,
         ),
       );
-      console.log(`[e2e] irodori 故障注入 ① ${describeAb(measured)}`);
-      assertThrows(() => judgeAb(measured, FAULT_CASE.band, id), Error, "床の失敗");
+      console.log(`[e2e] irodori fault injection ① ${describeAb(measured)}`);
+      assertThrows(() => judgeAb(measured, FAULT_CASE.band, id), Error, "floor failure");
     });
   },
 );
 
 test.skipIf(!RUNNABLE)(
-  "e2e(実GPU): 故障注入 ② 実用席の 2 回目だけ別 seed にすると決定性の門が赤になる",
+  "e2e (real GPU): fault injection ② a different seed for only the practical seat's second run turns the determinism check red",
   async () => {
     const source = assetsSource();
     const first = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED);
     const second = await observeStep1(source, PRACTICAL, FAULT_CASE, SEED + 1);
     assertThrows(
-      () => assertBitIdentical(first.latent, second.latent, "故障注入 ②"),
+      () => assertBitIdentical(first.latent, second.latent, "fault injection ②"),
       Error,
-      "ビット一致しない",
+      "not bit-identical",
     );
   },
 );

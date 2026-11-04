@@ -1,21 +1,25 @@
-// 実重み Gemma 4 E2B の **③PV 縮約順 A/B**（K-12・ADR 0058 決定 4 ②のモデル面）。
+// **③PV reduction order A/B** on the real Gemma 4 E2B weights (K-12; the model side of ADR 0058
+// decision 4 ②).
 //
-// [limitations](../../../docs/limitations.md) は「`Pipeline` の既定は KV 並列縮約
-// （`"parallel"`）で、runtime の参照経路 `"sequential"` とは縮約順が違うが、**gemma4 の golden は
-// 両者で同一**」と書く。K-12 を既定へ昇格した根拠がこの主張なので、機械で守る門をここに置く。
+// [limitations](../../../docs/limitations.md) says "the `Pipeline` default is the KV-parallel
+// reduction (`"parallel"`), whose reduction order differs from the runtime's reference path
+// `"sequential"`, but **the gemma4 goldens are identical under both**". That claim is the basis for
+// promoting K-12 to the default, so the check that guards it mechanically lives here.
 //
-// 既存の門はこれを担保しない: カーネル単位の A/B 帯（`gpu_state_attention_parallel_test.ts`）は
-// 帯の内側であることしか見ず、census（`e2e_gemma4_pretrained_test.ts`）は**キーの有無**しか見ず、
-// 2 本の golden（greedy = sequential 経由 / chat = parallel 経由）は別々の期待値で別々に緑になる
-// だけで「両者が同一」は導けない。
+// The existing checks do not guarantee it: the per-kernel A/B band
+// (`gpu_state_attention_parallel_test.ts`) only checks that it stays inside the band, the census
+// (`e2e_gemma4_pretrained_test.ts`) only checks **whether a key is present**, and the two goldens
+// (greedy = through sequential / chat = through parallel) each go green against their own
+// expectation, which does not establish "the two are identical".
 //
-// MUST: この門は census へ相乗りさせない。census は `timestamp-query` を要求し、Metal はその
-// feature を**広告する**ので走ってしまい、query set を多数同時に生かした時点で device が落ちる
-// （2026-09-03 M2 実測 — `docs/known-issues.md` の `--diagnostics` 節）。相乗りさせると等式の門まで
-// Mac で道連れになる（W-G7-4 / Pass2）。ここは計測を要求しないので、SKIP 条件は**資産と GPU の
-// 有無だけ**である。
+// MUST: this check does not ride along with the census. The census requires `timestamp-query`, and
+// Metal **advertises** that feature, so the census runs there and the device is lost once many
+// query sets are alive at once (measured on M2 on 2026-09-03 — the `--diagnostics` section of
+// `docs/known-issues.md`). Riding along would take the equality check down with it on a Mac
+// (W-G7-4 / Pass2). This file requires no measurement, so its SKIP conditions are **only the asset
+// and the GPU**.
 //
-// ## 資産と経路
+// ## Asset and path
 //
 // The q4_0 QAT line's mirror `models/karume-gemma4-qat/` (E2B, its `i4-fast` seat — the `gemma4`
 // pipeline's int4 seats since the regular line ships `bf16` alone, 2026-11-04), read directly
@@ -39,19 +43,21 @@ const MIRROR_DIR = GEMMA4_QAT_MIRROR;
  */
 const INT4_SEAT = { quant: "i4-fast" } as const;
 
-/** SKIP 時にそのまま貼れる組み立てコマンド。 */
+/** The assembly command, ready to paste when the cases SKIP. */
 const ASSEMBLE_COMMAND = "cd tools/export-recipes && uv run python dist.py --pipeline gemma4-qat";
 
 /**
- * 比べる 2 つの縮約順。**両方を明示的に渡す**（省略時の実効〈quant 宣言 → 参照経路〉は census の
- * 担当で、ここが見るのは「2 つの経路が同じ列を出す」ことだけ）。
+ * The two reduction orders compared. **Both are passed explicitly** (the effective value when it
+ * is omitted — quant declaration → reference path — is the census's job; this file only checks
+ * that "the two paths produce the same sequence").
  */
 const REDUCERS = ["parallel", "sequential"] as const;
 
 /**
- * 検収ケース。prompt は chat フィクスチャの token 列（描画の正本は `gemma4_chat_test.ts`）を
- * そのまま使う — この門は描画でも復号でもなく**縮約順**だけを問うので、tokenizer を挟まずに
- * token 列 in → token 列 out で回す。日本語ケースを混ぜるのは decode step を伸ばすため。
+ * Acceptance cases. The prompt is the token sequence of the chat fixture as is (the source of
+ * truth for the rendering is `gemma4_chat_test.ts`) — this check asks only about the **reduction
+ * order**, not the rendering or the decoding, so it runs token sequence in → token sequence out
+ * without a tokenizer. The Japanese case is mixed in to lengthen the decode steps.
  */
 const CASES = [
   { fixture: "single-user", maxNewTokens: 24 },
@@ -70,7 +76,7 @@ const fixture = JSON.parse(
 
 const promptOf = (name: string): readonly number[] => {
   const found = fixture.chat.find((row) => row.name === name);
-  assert(found !== undefined, `フィクスチャに chat ケース '${name}' が無い`);
+  assert(found !== undefined, `the fixture has no chat case '${name}'`);
   return found.ids;
 };
 
@@ -85,20 +91,23 @@ const AVAILABLE = ((): boolean => {
 
 if (!AVAILABLE) {
   console.warn(
-    `[karume] 配布形ミラー models/karume-gemma4-qat/ が無いため ③PV 縮約順の A/B を SKIP する。` +
-      `組み立て: ${ASSEMBLE_COMMAND}`,
+    `[karume] the distribution mirror models/karume-gemma4-qat/ is missing, so the ③PV reduction order A/B is SKIPPED. ` +
+      `Assemble it: ${ASSEMBLE_COMMAND}`,
   );
 }
 
-/** 1 会話ぶんの生成結果（`token` イベントの id 列と停止理由）。 */
+/**
+ * The generation result of one conversation (the id sequence of the `token` events and the stop
+ * reason).
+ */
 type Run = {
   readonly ids: number[];
   readonly stop: { readonly reason: string; readonly tokens: number };
 };
 
 /**
- * 1 ケースを 1 本の sequence で回す。**温度 0** なので抽選の揺れは無く、列が動いたら原因は
- * 縮約順しかない。
+ * Runs one case on one sequence. At **temperature 0** there is no sampling noise, so if the
+ * sequence moves, the only cause is the reduction order.
  */
 const runCase = async (
   pipeline: Pipeline,
@@ -120,7 +129,7 @@ const runCase = async (
 };
 
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  "gemma4: ③PV の縮約順（parallel / sequential）で token 列が 1 個も動かない（実 GPU）",
+  "gemma4: the ③PV reduction order (parallel / sequential) does not move a single token (real GPU)",
   () => {
     let maxResidentPleBytes: number;
     const runs: Run[][] = [];
@@ -156,21 +165,21 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
 
     // The comparison was the tail of the former test body, after both steps; it runs after the
     // per-reducer its (Vitest runs a file's its in order and keeps going past a failure).
-    it("両方の縮約順の token 列と停止理由が一致する", () => {
+    it("the token sequences and stop reasons of both reduction orders match", () => {
       const [parallel, sequential] = runs;
-      assertEquals(runs.length, REDUCERS.length, "両方の縮約順で走っていない");
+      assertEquals(runs.length, REDUCERS.length, "did not run under both reduction orders");
       for (const [index, { fixture: name }] of CASES.entries()) {
-        // 陽性対照 — 「どちらも 0 個だった」形で等式が成立するのを塞ぐ。
-        assert(parallel[index].ids.length > 0, `${name}: 1 token も生成していない`);
+        // Positive control — rules out the equality holding because "both were empty".
+        assert(parallel[index].ids.length > 0, `${name}: generated not a single token`);
         assertEquals(
           parallel[index].ids,
           sequential[index].ids,
-          `${name}: 縮約順で割れた token 列`,
+          `${name}: token sequence split by the reduction order`,
         );
         assertEquals(
           parallel[index].stop,
           sequential[index].stop,
-          `${name}: 縮約順で割れた停止理由`,
+          `${name}: stop reason split by the reduction order`,
         );
       }
     });

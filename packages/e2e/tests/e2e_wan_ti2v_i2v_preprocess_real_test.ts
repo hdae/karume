@@ -1,17 +1,20 @@
-// Wan2.2 TI2V の I2V の条件画像の前処理 —— **実画像**編（ADR 0121 段 9a・GPU 不要）。
+// Preprocessing of the Wan2.2 TI2V I2V conditioning image — the **real-image** part (ADR 0121 stage 9a, no GPU).
 //
-// 合成画像の側（`wan_ti2v_i2v_preprocess_test.ts`）が式と並びと Pillow の LANCZOS を部品ごとに縛るのに対し、こちらは
-// テスト画像（Wan2.1 の視認の先頭フレーム 3 枚・832×480）の実画素を、recipe が上流の Python（Pillow の LANCZOS・公式の
-// 中央クロップ / diffusers の直接の伸縮・diffusers の `patchify`・I2V パイプラインの正規化）で採った golden と
-// **ビット一致**で比べる。帯は置かない（どの段も整数か f32 の 1 回の丸めで、上流と同じ値になる — 割れれば写し間違い）。
+// The synthetic-image side (`wan_ti2v_i2v_preprocess_test.ts`) pins the formulas, the ordering and Pillow's LANCZOS
+// piece by piece; this file compares the real pixels of the test images (the first frames of three Wan2.1 visual-check
+// clips, 832×480) **bit for bit** against goldens the recipe took with the upstream Python (Pillow's LANCZOS, the
+// official center crop / diffusers' direct resize, diffusers' `patchify`, the I2V pipeline's normalization). No
+// tolerance band (every stage is integer or a single f32 rounding and gives upstream's value — a mismatch is a copy
+// mistake).
 //
-// 比べるのは 3 か所: 寸法合わせの RGB8（`rgb8` — LANCZOS と切り出しの位置）、encoder の入力（`encoder_input` —
-// `[-1, 1]` と patchify の並び）、encoder の出口の正規化（`mu` → `latent`）。寸法は golden のもの（明示）で、受理集合の
-// 外の縮小の経路（256×160）も通す — 受理集合の門は `selectWanI2vSize` の側で、ここが見るのは前処理の値。そのため鎖は
-// 部品の合成（`fitWanI2vImage` → `wanI2vPixels` → `patchifyWanImage`）で回す（`preprocessWanI2vImage` が同じ合成で
-// あることはホストテストが縛る）。
+// Three places are compared: the resized RGB8 (`rgb8` — LANCZOS and the crop position), the encoder input
+// (`encoder_input` — `[-1, 1]` and the patchify ordering), and the normalization at the encoder output (`mu` →
+// `latent`). The sizes are the golden's (explicit), and the downscale path outside the accepted set (256×160) runs
+// too — the accepted-set check lives in `selectWanI2vSize`; this file looks at the preprocessing values. So the chain
+// runs as the composition of the pieces (`fitWanI2vImage` → `wanI2vPixels` → `patchifyWanImage`) (a host test pins
+// that `preprocessWanI2vImage` is the same composition).
 //
-// ## 資産が無い環境
+// ## Environments without the assets
 //
 // The goldens (in the test-asset root `outputs/test-assets/` — ADR 0139 decision 2; written together with the encoder's
 // three graphs) are not tracked by git. **None present → explicit SKIP**, **some → FAIL** (a set that broke off while
@@ -43,7 +46,7 @@ import {
 import { readBuffer, viewOf } from "../../models/tests/helpers/safetensors.ts";
 import { TEST_ASSETS, testAssetsFetched } from "@karume/test-support/test-assets";
 
-/** 登録時点で必要なので同期で数える（`ignore` の判定に使う）。 */
+/** Counted synchronously because it is needed at registration time (it decides `ignore`). */
 const present = WAN_I2V_GOLDEN_CASES.filter((testCase) =>
   filePresent(wanI2vGoldenUrl(testCase)),
 ).length;
@@ -65,11 +68,11 @@ if (present === 0) {
 
 const metadataOf = (file: SafetensorsFile, key: string, where: string): string => {
   const value = file.metadata.get(key);
-  if (value === undefined) throw new Error(`${where}: __metadata__.${key} が無い`);
+  if (value === undefined) throw new Error(`${where}: __metadata__.${key} is missing`);
   return value;
 };
 
-/** U8 のテンソルを形の検査つきで読む。 */
+/** Reads a U8 tensor, checking its shape. */
 const bytesOf = (
   file: SafetensorsFile,
   key: string,
@@ -77,14 +80,14 @@ const bytesOf = (
   where: string,
 ): Uint8Array<ArrayBuffer> => {
   const view = viewOf(file, key, where);
-  assertEquals(view.dtype, "U8", `${where}: ${key} の dtype`);
-  assertEquals([...view.shape], [...shape], `${where}: ${key} の形`);
+  assertEquals(view.dtype, "U8", `${where}: ${key} dtype`);
+  assertEquals([...view.shape], [...shape], `${where}: ${key} shape`);
   return new Uint8Array(file.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
 };
 
 /**
- * F32 のテンソルを形の検査つきで読む。写してから読む（U8 のテンソルが前に並ぶと、F32 の開始位置が 4 バイト境界に
- * 載る保証が無い）。
+ * Reads an F32 tensor, checking its shape. It copies before reading (with U8 tensors placed before it, the F32 start
+ * is not guaranteed to fall on a 4-byte boundary).
  */
 const floatsOf = (
   file: SafetensorsFile,
@@ -93,14 +96,14 @@ const floatsOf = (
   where: string,
 ): Float32Array<ArrayBuffer> => {
   const view = viewOf(file, key, where);
-  assertEquals(view.dtype, "F32", `${where}: ${key} の dtype`);
-  assertEquals([...view.shape], [...shape], `${where}: ${key} の形`);
+  assertEquals(view.dtype, "F32", `${where}: ${key} dtype`);
+  assertEquals([...view.shape], [...shape], `${where}: ${key} shape`);
   return new Float32Array(file.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
 };
 
-describe("I2V の実画像の前処理と encoder の出口の正規化 × 上流の golden（ビット一致）", () => {
+describe("I2V real-image preprocessing and encoder-output normalization × upstream goldens (bit-identical)", () => {
   it.skipIf(present === 0 && !FETCHED)(
-    `golden が ${WAN_I2V_GOLDEN_CASES.length} 本揃っている（1 本も無ければ SKIP・一部だけなら FAIL）`,
+    `all ${WAN_I2V_GOLDEN_CASES.length} goldens are present (none → SKIP, only some → FAIL)`,
     () => {
       const missing = WAN_I2V_GOLDEN_CASES.map(wanI2vGoldenUrl)
         .filter((url) => !filePresent(url))
@@ -113,25 +116,25 @@ describe("I2V の実画像の前処理と encoder の出口の正規化 × 上�
     const where = wanI2vGoldenName(testCase);
     it.skipIf(present === 0 && !FETCHED)(where, async () => {
       const url = wanI2vGoldenUrl(testCase);
-      assert(filePresent(url), `${where}: golden ${url.pathname} が無い`);
+      assert(filePresent(url), `${where}: golden ${url.pathname} is missing`);
       const file = parseSafetensors(await readBuffer(url));
       const meta = WAN_I2V_GOLDEN_METADATA;
       const { width, height, fit } = testCase;
-      assertEquals(metadataOf(file, meta.image, where), testCase.image, `${where}: 画像`);
+      assertEquals(metadataOf(file, meta.image, where), testCase.image, `${where}: image`);
       assertEquals(
         metadataOf(file, meta.imageSha256, where),
         WAN_I2V_IMAGE_SHA256[testCase.image],
-        `${where}: 画像の sha256 が表と違う`,
+        `${where}: image sha256 differs from the table`,
       );
       assertEquals(metadataOf(file, meta.fit, where), fit, `${where}: fit`);
       assertEquals(
         [metadataOf(file, meta.width, where), metadataOf(file, meta.height, where)],
         [String(width), String(height)],
-        `${where}: 出力寸法`,
+        `${where}: output size`,
       );
-      assert(metadataOf(file, meta.pillow, where).length > 0, `${where}: Pillow の版が空`);
+      assert(metadataOf(file, meta.pillow, where).length > 0, `${where}: Pillow version is empty`);
 
-      // 寸法合わせ（Pillow の RGB8）。
+      // Resize (Pillow's RGB8).
       const source = {
         data: bytesOf(file, WAN_I2V_GOLDEN_KEYS.source, [480, 832, 3], where),
         width: 832,
@@ -143,13 +146,13 @@ describe("I2V の実画像の前処理と encoder の出口の正規化 × 上�
       assertEquals(
         firstRgbMismatch,
         -1,
-        `${where}: RGB8 が Pillow と割れる（最初は ${firstRgbMismatch}: ${
+        `${where}: RGB8 differs from Pillow (first at ${firstRgbMismatch}: ${
           fitted.data[firstRgbMismatch]
-        } 対 ${expectedRgb[firstRgbMismatch]}）`,
+        } vs ${expectedRgb[firstRgbMismatch]})`,
       );
-      if (fit !== "crop") return; // stretch の golden は前処理の RGB8 だけを持つ（encoder を回さない）。
+      if (fit !== "crop") return; // A stretch golden holds only the preprocessed RGB8 (the encoder is not run).
 
-      // encoder の入力（`[-1, 1]` → patchify）。
+      // Encoder input (`[-1, 1]` → patchify).
       const patchSize = WAN22_TI2V_GENERATION.vaePatchSize;
       const expectedInput = floatsOf(
         file,
@@ -162,13 +165,13 @@ describe("I2V の実画像の前処理と encoder の出口の正規化 × 上�
       assertEquals(
         firstInputMismatch,
         -1,
-        `${where}: encoder の入力が上流と割れる（最初は ${firstInputMismatch}: ${
+        `${where}: encoder input differs from upstream (first at ${firstInputMismatch}: ${
           input[firstInputMismatch]
-        } 対 ${expectedInput[firstInputMismatch]}）`,
+        } vs ${expectedInput[firstInputMismatch]})`,
       );
 
-      // encoder の出口の正規化（上流の mu → 条件の潜在）。
-      // 空間の圧縮 16 = encoder のグラフの比 8 × patchify 2（`wanSpatialCompression` と同じ値）。
+      // Normalization at the encoder output (upstream's mu → the conditioning latent).
+      // Spatial compression 16 = the encoder graph's ratio 8 × patchify 2 (the same value as `wanSpatialCompression`).
       const compression = 8 * patchSize;
       const latentShape = [
         WAN22_TI2V_GENERATION.latents.mean.length,
@@ -183,9 +186,9 @@ describe("I2V の実画像の前処理と encoder の出口の正規化 × 上�
       assertEquals(
         firstLatentMismatch,
         -1,
-        `${where}: 正規化が上流と割れる（最初は ${firstLatentMismatch}: ${
+        `${where}: normalization differs from upstream (first at ${firstLatentMismatch}: ${
           latent[firstLatentMismatch]
-        } 対 ${expectedLatent[firstLatentMismatch]}）`,
+        } vs ${expectedLatent[firstLatentMismatch]})`,
       );
     });
   }

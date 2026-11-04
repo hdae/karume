@@ -1,10 +1,12 @@
-// 実重み DeBERTa-v2（SBV2 text front が使う BERT）の実 GPU golden E2E（ADR 0005 の段 3）。
+// The real-GPU golden E2E of the real-weight DeBERTa-v2 (the BERT used by the SBV2 text front)
+// (stage 3 of ADR 0005).
 //
-// tiny golden（tests/e2e_golden_test.ts）が「op 契約の被覆」を、実重み SBV2 / Irodori が
-// 「音響チェーン側の実重み」を受け持つのに対し、こちらは**テキスト側 24 層の数値一致**を
-// 受け持つ。この門が無い間、text_encoder の回帰は SBV2 の WAV sha256 門の「1 bit 差」と
-// してしか現れず原因の局在ができなかった（ADR 0026 の「検出器の現況」/ ADR 0045 の
-// Consequences / docs/research/2026-08-11-deberta-size-recon.md「既知の欠落」）。
+// Where the tiny golden (tests/e2e_golden_test.ts) covers "the op contracts" and the real-weight
+// SBV2 / Irodori cover "the real weights of the acoustic chain", this one covers **the numeric
+// agreement of the 24 layers on the text side**. While this check was missing, a regression of the
+// text_encoder showed up only as a "1-bit difference" in SBV2's WAV sha256 check and could not be
+// localised (the "state of the detectors" of ADR 0026 / the Consequences of ADR 0045 /
+// docs/research/2026-08-11-deberta-size-recon.md "known gaps").
 //
 // The containers and goldens are outside the repository (weights of 307 MB to 1.3 GB); where each
 // variant reads them from — the distribution mirror and the test-asset dataset, or the exporter's
@@ -12,30 +14,35 @@
 // `tools/export-recipes/deberta/export.py` (each series variant's `container.generate` below is
 // the source of the command, spelled as in tools/export-recipes/deberta/README.md).
 //
-// ## 実走する variant（格納 dtype 系列 × 層数）
+// ## The variants that run (storage dtype series × layer count)
 //
-// 系列は格納 dtype で分かれる（ADR 0019 — f32 は `deberta/`・i8 は `deberta-i8/`。同居させると
-// f32 の tolerance が黙って i8 資産に掛かる）。層数 variant は同じグラフの長短で、**24 層は
-// 全層の hidden_states 25 本出し**（層別に誤差の伸びが読めるので tolerance の導出がここで
-// 実測になる — ADR 0026 決定 2）、**22 層は SBV2 の配布形で最終層 1 本出し**（ADR 0045）。
-// **tolerance は variant ごとに独立に実測から導く**（系列間・variant 間で流用しない）。
+// The series are split by storage dtype (ADR 0019 — f32 is `deberta/`, i8 is `deberta-i8/`. Putting
+// them together would silently apply the f32 tolerance to the i8 assets). The layer-count variants
+// are longer and shorter versions of the same graph: **24 layers output all 25 hidden_states** (the
+// growth of the error can be read per layer, so the tolerance derivation becomes a measurement here
+// — ADR 0026 decision 2), and **22 layers is SBV2's distribution, outputting only the last layer**
+// (ADR 0045). **The tolerances are derived from measurement independently per variant** (not reused
+// across series or variants).
 //
-// `deberta/{dev-2layer,sbv2-22layer}` と `deberta-i8/dev-2layer` は**宣言しない** — 参照環境に
-// 資産が無く tolerance を実測から導けないため（値を発明しない）。足すときは下の 3 本と同じ
-// 手順（`atol=rtol=0` の素の突合 → 実測最悪の 5〜10 倍）で導いてから宣言する。
+// `deberta/{dev-2layer,sbv2-22layer}` and `deberta-i8/dev-2layer` are **not declared** — the
+// reference environment has no assets for them, so no tolerance can be derived from measurement (no
+// values are invented). To add one, derive it by the same steps as the 3 below (a plain comparison
+// with `atol=rtol=0` → 5 to 10 × the measured worst) and then declare it.
 //
-// ## w8a8 の鏡像 io は拾わない
+// ## The w8a8 mirror io is not picked up
 //
-// `--act-quant` が書く `io-i8a8.<case>` は w8a8（`SessionOptions.linearCompute: "a8"`）の
-// torch 鏡像で、**この門の期待値ではない**（w8 = f32 計算の期待値として読むと活性量子化ごと
-// 汚染される）。通常ケースの列挙が `io.` の startsWith なのはそのため（正本は
-// `deberta/export.py` の `IO_PREFIX` / `ACT_IO_PREFIX` の docstring）。鏡像を消費する
-// `e2e_deberta_w8a8_test.ts`（ADR 0026 決定 3）が受け持つ。
+// The `io-i8a8.<case>` that `--act-quant` writes is the torch mirror of w8a8
+// (`SessionOptions.linearCompute: "a8"`) and **not the expected values of this check** (read as the
+// expected values of w8 = f32 compute, they would be contaminated by the activation quantisation as
+// a whole). That is why the normal cases are listed with a startsWith on `io.` (the source of truth
+// is the docstrings of `IO_PREFIX` / `ACT_IO_PREFIX` in `deberta/export.py`). The mirror is
+// consumed by `e2e_deberta_w8a8_test.ts` (ADR 0026 decision 3).
 //
-// 資産が無い環境では**その variant を SKIP** する。ADR 0005 の「全 SKIP は明示 FAIL」門番
-// （tests/gpu_gate_test.ts）は *GPU アダプタの有無* だけを見ており、この SKIP とは独立。
-// 逆に、資産が**中途半端に**存在する場合（ケース欠け）は SKIP ではなく FAIL にする（下の
-// 「資産の完全性」テスト）— そこは無音の見かけ成功になる。
+// Where the assets are absent **that variant SKIPs**. The gate of ADR 0005's "all cases SKIP =
+// explicit FAIL" (tests/gpu_gate_test.ts) looks only at *whether a GPU adapter exists*,
+// independently of this SKIP. Conversely, when the assets are present **only in part** (missing
+// cases) it is a FAIL rather than a SKIP (the "asset completeness" test below) — there it would be
+// a silent apparent success.
 //
 // Upstream parity is opt-in (helpers/upstream-parity.ts): the default run keeps the asset
 // completeness gates and the per-case structure checks (output count, storage dtype set, io keys,
@@ -87,92 +94,110 @@ import { SERIES_CHECKS, SERIES_CHECKS_OPT_IN } from "../../models/tests/helpers/
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
- * **f32 系列 / full-24layer**（全層 hidden_states 25 本出し）の torch CPU 期待値との突合に
- * 使う許容誤差。
+ * The tolerance of the comparison of the **f32 series / full-24layer** (all 25 hidden_states of
+ * every layer) with the torch CPU expected values.
  *
- * 実測（`atol=rtol=0` の素の突合、4 ケース × 出力 25 本・maxAbs は 25 本の最悪と、それが
- * 出た出力番号）:
+ * Measured (a plain comparison with `atol=rtol=0`, 4 cases × 25 outputs; maxAbs is the worst of the
+ * 25 outputs, with the number of the output it came from):
  *
- * | ケース   | T  | maxAbs           | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | -------- | -- | ---------------- | ------- | ------------ | ------------------ |
- * | case0    | 11 | 3.08e-5 (out22)  | 7.88    | 28.659       | 1.22e-7            |
- * | case1    | 26 | 2.48e-5 (out23)  | 5.31e-1 | 28.856       | 1.01e-6            |
- * | case2    | 35 | 8.32e-5 (out19)  | 5.31e-1 | 28.903       | 6.77e-6            |
- * | padded   | 16 | 2.58e-5 (out18)  | 3.30    | 28.892       | 1.96e-7            |
+ * | Case     | T  | maxAbs           | maxRel  | \|ref\| upper end | \|ref\| smallest nonzero |
+ * | -------- | -- | ---------------- | ------- | ----------------- | ------------------------ |
+ * | case0    | 11 | 3.08e-5 (out22)  | 7.88    | 28.659            | 1.22e-7                  |
+ * | case1    | 26 | 2.48e-5 (out23)  | 5.31e-1 | 28.856            | 1.01e-6                  |
+ * | case2    | 35 | 8.32e-5 (out19)  | 5.31e-1 | 28.903            | 6.77e-6                  |
+ * | padded   | 16 | 2.58e-5 (out18)  | 3.30    | 28.892            | 1.96e-7                  |
  *
- * atol 5e-4 は実測最悪 8.32e-5（case2 の output.19）の約 6.0 倍。
+ * atol 5e-4 is about 6.0 × the measured worst 8.32e-5 (output.19 of case2).
  *
- * **rtol は 0**（判定は atol 単独）。rtol を主役に据えられないのは \|ref\| 最小非ゼロが
- * 1.22e-7 まで薄く広がるからで、実測 maxRel 7.88 はその 0 近傍要素の見かけでしかない
- * （その要素の絶対誤差は 1e-6 級）。下限項として rtol 1e-6 を足しても \|ref\| 上端 28.9 で
- * 寄与は 2.9e-5 = atol の 1/17 と判定を動かさないので置かない。
+ * **rtol is 0** (the verdict is atol alone). rtol cannot be the main term because the \|ref\|
+ * smallest nonzero thins out down to 1.22e-7; the measured maxRel 7.88 is only the appearance of
+ * those near-zero elements (their absolute error is at the 1e-6 level). Adding rtol 1e-6 as a floor
+ * term contributes 2.9e-5 at the \|ref\| upper end 28.9 = 1/17 of atol and does not move the
+ * verdict, so it is not set.
  *
- * 誤差の出所は tiny golden と同じ（fma 融合・linear / layer_norm / attention の縮約順序が
- * torch と違う・超越関数（gelu / exp / rsqrt）の実装差）。**層数で単調に伸びる**のがこの
- * モデルの性質で、埋め込み出力（output.0）は 9.54e-7 なのに対し 18〜23 層目で 2〜8e-5 に
- * なる（SBV2 の dp のように P を 256 倍にしても伸びない形とは構造が違う）。全層出しの
- * variant を残しているのはこの伸びを実測で読むため。実装バグ（相対位置表の添字ずれ・
- * head 分割誤り・マスク経路の取りこぼし）の誤差は出力の値域と同じ O(1)〜O(29) で、この
- * 閾値の 4 桁以上上に出る。
+ * The sources of error are the same as the tiny golden (fma fusion, a different reduction order of
+ * linear / layer_norm / attention from torch, implementation differences of the transcendental
+ * functions (gelu / exp / rsqrt)). **Growing monotonically with the layer count** is a property of
+ * this model: the embedding output (output.0) is 9.54e-7, while layers 18 to 23 reach 2 to 8e-5 (a
+ * different structure from SBV2's dp, which does not grow even when P is multiplied by 256). The
+ * all-layer variant is kept to read this growth from measurement. The error of an implementation
+ * bug (an index shift in the relative-position table, a wrong head split, a missed mask path) is
+ * O(1) to O(29), the same as the output's value range, four or more orders of magnitude above this
+ * threshold.
  */
 const DEBERTA_TOLERANCE: Tolerance = { atol: 5e-4, rtol: 0 };
 
 /**
- * **i8 系列 / full-24layer**（per-channel i8 格納・計算は f32 = w8 — ADR 0019）の許容誤差。
+ * The tolerance of the **i8 series / full-24layer** (per-channel i8 storage, f32 compute = w8 — ADR
+ * 0019).
  *
- * MUST: f32 系列の値を流用しない。golden は fake-quant 後の重みで採ってあるので**量子化誤差は
- * 差に入らない**（ADR 0006 の方法論）が、丸め後の重みは値そのものが変わるため縮約の丸め方も
- * 変わる。
+ * MUST: do not reuse the value of the f32 series. The goldens are taken with the fake-quantised
+ * weights, so **the quantisation error is not in the difference** (the methodology of ADR 0006),
+ * but the rounded weights have different values themselves, so the rounding of the reductions
+ * changes too.
  *
- * 実測（`atol=rtol=0`、4 ケース × 出力 25 本）:
+ * Measured (`atol=rtol=0`, 4 cases × 25 outputs):
  *
- * | ケース   | T  | maxAbs           | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | -------- | -- | ---------------- | ------- | ------------ | ------------------ |
- * | case0    | 11 | 4.44e-5 (out18)  | 2.82e-1 | 28.661       | 4.67e-6            |
- * | case1    | 26 | 2.67e-5 (out18)  | 1.25    | 28.855       | 3.72e-7            |
- * | case2    | 35 | 1.23e-4 (out19)  | 4.54e-1 | 28.898       | 1.71e-7            |
- * | padded   | 16 | 4.10e-5 (out18)  | 4.88e-1 | 28.913       | 4.23e-6            |
+ * | Case     | T  | maxAbs           | maxRel  | \|ref\| upper end | \|ref\| smallest nonzero |
+ * | -------- | -- | ---------------- | ------- | ----------------- | ------------------------ |
+ * | case0    | 11 | 4.44e-5 (out18)  | 2.82e-1 | 28.661            | 4.67e-6                  |
+ * | case1    | 26 | 2.67e-5 (out18)  | 1.25    | 28.855            | 3.72e-7                  |
+ * | case2    | 35 | 1.23e-4 (out19)  | 4.54e-1 | 28.898            | 1.71e-7                  |
+ * | padded   | 16 | 4.10e-5 (out18)  | 4.88e-1 | 28.913            | 4.23e-6                  |
  *
- * atol 7e-4 は実測最悪 1.23e-4（case2 の output.19）の約 5.7 倍。rtol が 0 な理由は f32 系列と
- * 同じ（\|ref\| 最小非ゼロ 1.71e-7 で rtol は主役になれず、1e-6 の寄与 2.9e-5 は atol の 1/24）。
+ * atol 7e-4 is about 5.7 × the measured worst 1.23e-4 (output.19 of case2). rtol is 0 for the same
+ * reason as the f32 series (with the \|ref\| smallest nonzero at 1.71e-7 rtol cannot be the main
+ * term, and the 2.9e-5 contribution of 1e-6 is 1/24 of atol).
  *
- * 実測最悪 1.23e-4 が f32 系列の 8.32e-5 と**同桁**なのは「golden が量子化後の重みで採れて
- * いる」ことの裏取りでもある（掛け忘れなら差は i8 の量子化誤差そのもの = 1e-1 級で 3 桁上に
- * 出る）。この 2 値は ADR 0026 の歴史値（f32 8.32e-5 / i8 1.23e-4・atol 7e-4）と一致した。
+ * That the measured worst 1.23e-4 is **of the same order** as the f32 series' 8.32e-5 also confirms
+ * that "the goldens are taken with the quantised weights" (had it been forgotten, the difference
+ * would be the i8 quantisation error itself = the 1e-1 level, three orders of magnitude above).
+ * These 2 values agreed with the historical values of ADR 0026 (f32 8.32e-5 / i8 1.23e-4, atol
+ * 7e-4).
  */
 const DEBERTA_I8_TOLERANCE: Tolerance = { atol: 7e-4, rtol: 0 };
 
 /**
- * **i8 系列 / sbv2-22layer**（22 層カットの配布形・最終層 1 本出し — ADR 0045）の許容誤差。
+ * The tolerance of the **i8 series / sbv2-22layer** (the distribution cut at 22 layers, outputting
+ * only the last layer — ADR 0045).
  *
- * MUST: full-24layer の値を流用しない（層数が違えば誤差の積み上がりも違う）。実測
- * （`atol=rtol=0`、4 ケース × 出力 1 本）:
+ * MUST: do not reuse the value of full-24layer (a different layer count accumulates error
+ * differently). Measured (`atol=rtol=0`, 4 cases × 1 output):
  *
- * | ケース   | T  | maxAbs  | maxRel  | \|ref\| 上端 | \|ref\| 最小非ゼロ |
- * | -------- | -- | ------- | ------- | ------------ | ------------------ |
- * | case0    | 11 | 2.26e-5 | 4.29e-2 | 16.143       | 3.19e-5            |
- * | case1    | 26 | 1.48e-5 | 4.83e-2 | 20.244       | 1.77e-5            |
- * | case2    | 35 | 1.62e-5 | 4.35e-1 | 21.244       | 4.69e-6            |
- * | padded   | 16 | 2.17e-5 | 1.63e-2 | 28.913       | 3.21e-5            |
+ * | Case     | T  | maxAbs  | maxRel  | \|ref\| upper end | \|ref\| smallest nonzero |
+ * | -------- | -- | ------- | ------- | ----------------- | ------------------------ |
+ * | case0    | 11 | 2.26e-5 | 4.29e-2 | 16.143            | 3.19e-5                  |
+ * | case1    | 26 | 1.48e-5 | 4.83e-2 | 20.244            | 1.77e-5                  |
+ * | case2    | 35 | 1.62e-5 | 4.35e-1 | 21.244            | 4.69e-6                  |
+ * | padded   | 16 | 2.17e-5 | 1.63e-2 | 28.913            | 3.21e-5                  |
  *
- * atol 1.5e-4 は実測最悪 2.26e-5（case0）の約 6.6 倍。rtol が 0 な理由は他 2 variant と同じ
- * （\|ref\| 最小非ゼロ 4.69e-6 で maxRel 4.35e-1 はその要素の見かけ・絶対誤差は 2e-6 級）。
+ * atol 1.5e-4 is about 6.6 × the measured worst 2.26e-5 (case0). rtol is 0 for the same reason as
+ * the other 2 variants (with the \|ref\| smallest nonzero at 4.69e-6 the maxRel 4.35e-1 is the
+ * appearance of that element; its absolute error is at the 2e-6 level).
  *
- * full-24layer（i8）より 1 桁近く小さいのは、この variant の出力が**そちらの output.22 に
- * 相当する層**で止まっており、誤差が最大になる 18〜19 層目を出力に持たないから。実測でも
- * 4 ケースとも full-24layer(i8) の output.22 の maxAbs と一致した（case0 2.26e-5 / case1
- * 1.48e-5 / case2 1.62e-5 / padded 2.17e-5）— ADR 0045 が torch で採った「22 層モデルの最終
- * 出力は 24 層モデルの hidden_states[-3] とビット一致」がランタイム側でも保たれている傍証。
+ * It is nearly an order of magnitude smaller than full-24layer (i8) because this variant's output
+ * stops at **the layer that corresponds to output.22 there**, and it does not have layers 18 to 19,
+ * where the error peaks, among its outputs. The measurement also matched the maxAbs of output.22 of
+ * full-24layer(i8) on all 4 cases (case0 2.26e-5 / case1 1.48e-5 / case2 1.62e-5 / padded 2.17e-5)
+ * — corroborating that what ADR 0045 established with torch, "the final output of the 22-layer
+ * model is bit-identical to hidden_states[-3] of the 24-layer model", holds on the runtime side
+ * too.
  */
 const DEBERTA_I8_22LAYER_TOLERANCE: Tolerance = { atol: 1.5e-4, rtol: 0 };
 
 const MODEL_FILE = "model.krm";
 const IO_PREFIX = "io.";
 const IO_SUFFIX = ".safetensors";
-/** w8a8 鏡像 io の prefix（`deberta/export.py` の `ACT_IO_PREFIX`）— この門は読まない。 */
+/**
+ * The prefix of the w8a8 mirror io (`ACT_IO_PREFIX` of `deberta/export.py`) — this check does not
+ * read it.
+ */
 const ACT_IO_PREFIX = "io-i8a8.";
 
-/** SKIP 時にそのまま貼れる生成コマンドの共通部（tools/export-recipes/deberta/README.md）。 */
+/**
+ * The common part of the generation commands pasted as is on SKIP
+ * (tools/export-recipes/deberta/README.md).
+ */
 const GENERATE_COMMAND =
   "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m deberta.export";
 /** The command that fetches the goldens (pasted into the skip warnings). */
@@ -189,7 +214,7 @@ type VariantContainer =
       readonly kind: "series";
       /** The representative path of the series container. */
       readonly model: URL;
-      /** SKIP 時にそのまま貼れる生成コマンド。 */
+      /** The generation command pasted as is on SKIP. */
       readonly generate: string;
     }
   | {
@@ -198,9 +223,9 @@ type VariantContainer =
       readonly choice: MirrorChoice;
     };
 
-/** 格納 dtype 系列 × 層数 variant 1 本の宣言。 */
+/** The declaration of one storage dtype series × layer-count variant. */
 type DebertaVariant = {
-  /** テスト名に出る綴り（`<系列>/<variant ディレクトリ>`）。 */
+  /** The spelling shown in the test name (`<series>/<variant directory>`). */
   readonly name: string;
   /** The directory of the variant's io goldens (`io.<case>.safetensors`). */
   readonly goldens: URL;
@@ -211,30 +236,33 @@ type DebertaVariant = {
    * selected by.
    */
   readonly graph: string;
-  /** **variant ごとに実測導出**（上の MUST）。 */
+  /** **Derived from measurement per variant** (the MUST above). */
   readonly tolerance: Tolerance;
   /**
-   * `graph.outputs` の本数（全層出し 25 / 配布形 1）。
+   * The number of `graph.outputs` (25 for all layers / 1 for the distribution).
    *
-   * MUST: この検査を落とさない。配布形（1 本出し）と検証用（全層出し）は**同じ shape の
-   * テンソルを出す**ので、variant を取り違えた資産はロードも実行も突合も通ってしまう
-   * （`deberta/export.py` の `Variant` docstring が名指しする沈黙誤り）。
+   * MUST: do not drop this check. The distribution (one output) and the verification graph (all
+   * layers) **output tensors of the same shape**, so assets of the wrong variant pass loading,
+   * execution and comparison (the silent error that the `Variant` docstring of `deberta/export.py`
+   * names).
    */
   readonly outputs: number;
   /**
-   * この variant の資産が宣言しているべき圧縮格納 dtype（無ければ `undefined` = 全て f32）。
+   * The compressed storage dtype this variant's assets should declare (`undefined` = all f32).
    *
-   * MUST: この検査を落とさない。**系列 root の取り違えは数値では検出できない** — 実測最悪は
-   * f32 8.32e-5 / i8 1.23e-4 と同桁で、互いの tolerance を素通りする。同じ理由で
-   * 「`--dtype i8` のつもりが f32 で書けていた」も数値では見えない（ADR 0027 が SBV2 で
-   * 故障注入まで含めて確定した検出限界と同じ形）。格納宣言だけが区別する。
+   * MUST: do not drop this check. **A mix-up of the series root cannot be detected numerically** —
+   * the measured worst is f32 8.32e-5 / i8 1.23e-4, of the same order, and each passes the other's
+   * tolerance. For the same reason, "meant `--dtype i8` but it was written as f32" is invisible
+   * numerically too (the same form as the detection limit ADR 0027 established on SBV2, fault
+   * injection included). Only the storage declaration tells them apart.
    */
   readonly compressedStorage?: "i8";
 };
 
 /**
- * 実走する variant。**列挙ではなくここで固定する** — 生成済みのものを拾う形にすると、
- * variant ごと生成し忘れた環境で「緑だが未検証」になる。
+ * The variants that run. **They are pinned here, not enumerated** — picking up whatever was
+ * generated would make it "green but unverified" in an environment that forgot to generate a whole
+ * variant.
  */
 const VARIANTS: readonly DebertaVariant[] = [
   {
@@ -304,18 +332,18 @@ const openVariant = async (variant: DebertaVariant) =>
       );
 
 /**
- * 生成されているはずのケース。**列挙結果ではなくここで固定する** — 列挙だけに頼ると生成を
- * 一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
- * `tools/export-recipes/deberta/export.py` の `GOLDEN_SENTENCES` + `padded`（T = 11 / 26 /
- * 35 / 16）。`padded` だけが `attention_mask=0` を混ぜ、マスク経路（mul → cast →
- * bitwise_not → masked_fill）を踏む。
+ * The cases that should have been generated. **They are pinned here, not enumerated** — relying on
+ * enumeration alone, tests silently vanish in an environment where only part of the generation ran,
+ * and it becomes "green but unverified". The source of truth is `GOLDEN_SENTENCES` + `padded` of
+ * `tools/export-recipes/deberta/export.py` (T = 11 / 26 / 35 / 16). Only `padded` mixes in
+ * `attention_mask=0` and exercises the mask path (mul → cast → bitwise_not → masked_fill).
  */
 const EXPECTED_CASES = ["case0", "case1", "case2", "padded"] as const;
 
 /**
- * 資産ディレクトリの列挙。存在しない場合だけ空に縮退する。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
- * 実行されていない検証が SKIP として静かに緑になる。
+ * Lists an asset directory. It degrades to empty only when the directory does not exist.
+ * MUST: anything other than NotFound propagates — reading a permission error and the like as "no
+ * assets" would turn a verification that did not run into a quietly green SKIP.
  */
 const listDir = (url: URL): readonly DirEntry[] => {
   try {
@@ -328,7 +356,10 @@ const listDir = (url: URL): readonly DirEntry[] => {
   }
 };
 
-/** 通常ケースの golden ファイル名（`io.<case>.safetensors`）。鏡像は prefix で外れる。 */
+/**
+ * The golden file names of the normal cases (`io.<case>.safetensors`). The mirror is excluded by
+ * its prefix.
+ */
 const goldenFiles = (root: URL): readonly string[] =>
   listDir(root)
     .filter(
@@ -360,7 +391,8 @@ const missingAtPin = (path: string): Error =>
 
 /**
  * Reads one golden. A mirror variant's golden (a test asset) is read only when present or when the
- * fetch is complete, so its NotFound here is a file the dataset at the pin lacks — reported as such.
+ * fetch is complete, so its NotFound here is a file the dataset at the pin lacks — reported as
+ * such.
  */
 const readGolden = async (variant: DebertaVariant, file: string): Promise<ArrayBuffer> => {
   try {
@@ -373,12 +405,13 @@ const readGolden = async (variant: DebertaVariant, file: string): Promise<ArrayB
   }
 };
 
-test("DeBERTa golden: w8a8 鏡像 io が通常ケースの列挙に紛れない", () => {
-  // 正本は `deberta/export.py` の `ACT_IO_PREFIX` の MUST。`io.` の startsWith で通常ケースを
-  // 拾う以上、鏡像の prefix が `io.` で始まった時点で w8 の期待値が汚染される。
+test("DeBERTa golden: the w8a8 mirror io does not slip into the listing of the normal cases", () => {
+  // The source of truth is the MUST of `ACT_IO_PREFIX` in `deberta/export.py`. As long as normal
+  // cases are picked up with a startsWith on `io.`, a mirror prefix starting with `io.` would
+  // contaminate the w8 expected values.
   assert(
     !ACT_IO_PREFIX.startsWith(IO_PREFIX),
-    `鏡像 prefix '${ACT_IO_PREFIX}' が通常ケースの prefix '${IO_PREFIX}' で始まっている`,
+    `the mirror prefix '${ACT_IO_PREFIX}' starts with the normal cases' prefix '${IO_PREFIX}'`,
   );
 });
 
@@ -400,7 +433,7 @@ test.skipIf(!SERIES_CHECKS)(
       for (const file of goldenFiles(directory)) {
         assert(
           !file.startsWith(ACT_IO_PREFIX),
-          `${directory.pathname}: 鏡像 golden '${file}' が通常ケースとして拾われている`,
+          `${directory.pathname}: the mirror golden '${file}' is picked up as a normal case`,
         );
       }
     }
@@ -418,19 +451,22 @@ const runGoldenCase = async (variant: DebertaVariant, file: string) => {
   const parsed = prepareContainer(opened, variant.graph);
   const io = parseSafetensors(ioBytes);
 
-  // 出力の本数で variant を見分ける（配布形 1 本出しと検証用 25 本出しの取り違えは
-  // shape が同じで数値にも出ない — 上の `outputs` の MUST）。
+  // Tell the variants apart by the output count (mixing up the one-output distribution and the
+  // 25-output verification graph has the same shape and does not show numerically — the MUST of
+  // `outputs` above).
   assertEquals(
     parsed.graph.outputs.length,
     variant.outputs,
-    `${variant.name}: graph.outputs の本数`,
+    `${variant.name}: count of graph.outputs`,
   );
 
-  // 系列と資産の格納 dtype が一致する（root 取り違え / 圧縮の掛け忘れの唯一の検出器
-  // — 上の `compressedStorage` の MUST）。「現れた圧縮 dtype の集合」が宣言とちょうど
-  // 一致することを見る（本数ではなく集合で見るのは、i8 系列に f16 資産が混ざる形を
-  // 「圧縮が 1 本以上ある」で通さないため）。
-  // NOTE: `i32` 格納（記号依存定数 — ADR 0010）は圧縮ではないのでここでは数えない。
+  // The storage dtype of the series and of the assets agree (the only detector of a root mix-up / a
+  // forgotten compression — the MUST of `compressedStorage` above). It checks that "the set of
+  // compressed dtypes that appear" equals the declaration exactly (the set rather than the count,
+  // so that an i8 series with f16 assets mixed in does not pass as "there is at least one
+  // compression").
+  // NOTE: `i32` storage (symbol-dependent constants — ADR 0010) is not a compression, so it is not
+  // counted here.
   const compressed = [
     ...new Set(
       Object.values(parsed.graph.initializers)
@@ -443,37 +479,41 @@ const runGoldenCase = async (variant: DebertaVariant, file: string) => {
   assertEquals(
     compressed,
     variant.compressedStorage === undefined ? [] : [variant.compressedStorage],
-    `${variant.name}: 圧縮格納 dtype の集合が宣言と食い違う`,
+    `${variant.name}: the set of compressed storage dtypes disagrees with the declaration`,
   );
-  // NOTE: i8 の companion scale（ADR 0019）の実在はここでは見ない。容器では束縛表が
-  // scale を block id で指し、`openContainer` の合流層が目次との突合と長さ検査
-  // （行数 × group 数 × 4）まで済ませている（container-v1 §5 / §7）ので、宣言と実体を
-  // 別々に見る門は恒真になる。旧 shard 形ではこの 2 つが独立だったため門があった。
+  // NOTE: the existence of the i8 companion scales (ADR 0019) is not checked here. In a container
+  // the binding table points at the scales by block id, and the merge layer of `openContainer`
+  // already compares them with the table of contents and checks their lengths (rows × groups × 4)
+  // (container-v1 §5 / §7), so a check that looks at the declaration and the data separately would
+  // be tautological. The old shard form had the check because the two were independent there.
 
-  // io の全テンソルがグラフの入出力とちょうど対応する（余りも欠けも無い）。
+  // Every tensor of io corresponds exactly to the graph's inputs and outputs (nothing extra,
+  // nothing missing).
   const expectedKeys = [
     ...parsed.graph.inputs.map((spec) => `input.${spec.name}`),
     ...parsed.graph.outputs.map((_, index) => `output.${index}`),
   ].sort();
-  assertEquals([...io.tensors.keys()].sort(), expectedKeys, `${file} のテンソルキー`);
+  assertEquals([...io.tensors.keys()].sort(), expectedKeys, `tensor keys of ${file}`);
 
-  // 記号次元 T は golden の入力 shape の実長から束縛される（明示 bindings を渡さない）。
-  // ケースごとに T が違う（11 / 26 / 35 / 16）ので、宣言上限 Tmax = 512 に依存した実装
-  // （プランを Tmax で組む・相対位置表を Tmax で焼く等）はここで値か shape が壊れる。
+  // The symbolic dimension T is bound from the actual length of the golden's input shape (no
+  // explicit bindings are passed). T differs per case (11 / 26 / 35 / 16), so an implementation
+  // that depends on the declared upper bound Tmax = 512 (building the plan with Tmax, baking the
+  // relative-position table with Tmax and so on) breaks a value or a shape here.
   const inputs: Record<string, Tensor> = {};
   for (const spec of parsed.graph.inputs) {
     const view = io.tensors.get(`input.${spec.name}`);
-    assert(view !== undefined, `input.${spec.name} が ${file} に無い`);
+    assert(view !== undefined, `input.${spec.name} is missing from ${file}`);
     inputs[spec.name] = ioTensor(io, view, spec.dtype);
   }
 
   const gpu = await acquireGpu();
-  // MUST: device の破棄は adapter 検査と `createSession` の失敗も通す。取り逃がすと、
-  // その走行の残りが破棄されない device を抱えたまま進み、後続が OOM で赤くなる
-  // （known-issues の遅延解放）。
+  // MUST: the device is destroyed on failures of the adapter check and `createSession` too. Missing
+  // that, the rest of the run carries on holding a device that is never destroyed, and later tests
+  // turn red with OOM (the delayed release of known-issues).
   try {
-    // 参照値・結果をこの機の行として残す経路なので、キーを採ったアダプタと実行アダプタの
-    // 同一性をここで見る（複数 GPU の機で取り違えると、別の機の帯で測ることになる）。
+    // This route keeps reference values and results as this machine's rows, so check here that the
+    // adapter the key was taken from is the running adapter (mixing them up on a multi-GPU machine
+    // would measure against another machine's band).
     assertAdapterMatchesEnvironment(gpu);
     const session = await parsed.createContainerSession(gpu);
     try {
@@ -482,7 +522,7 @@ const runGoldenCase = async (variant: DebertaVariant, file: string) => {
 
       parsed.graph.outputs.forEach((name, index) => {
         const view = io.tensors.get(`output.${index}`);
-        assert(view !== undefined, `output.${index} が ${file} に無い`);
+        assert(view !== undefined, `output.${index} is missing from ${file}`);
         const where = `${variant.name}/${caseNameOf(file)} output.${index} ('${name}')`;
         const declared = parsed.graph.values[name].dtype;
         assertEquals(outputs[name].shape, view.shape, `${where}: shape`);
@@ -498,17 +538,21 @@ const runGoldenCase = async (variant: DebertaVariant, file: string) => {
 };
 
 /**
- * 決着と実測の置き場（`outputs/verify/<環境キー>/<日付>_deberta-golden/` — 消して安全）。
+ * Where the outcomes and measurements go (`outputs/verify/<environment key>/<date>_deberta-golden/`
+ * — safe to delete).
  *
- * 系列名を `<family>-golden` にするのは、models 側の e2e が素の family 名で同じ根へ書くため
- * （同じ席に 2 モジュールが書くと互いの `cases` を上書きする）。
+ * The series name is `<family>-golden` because the models-side e2e writes to the same root under
+ * the bare family name (two modules writing to the same directory overwrite each other's `cases`).
  */
 const results = openResults("deberta-golden");
 
 for (const variant of VARIANTS) {
   const canRead = readable(variant);
   const suffix = suffixOf(variant);
-  /** 登録時点で必要なので同期列挙する（Deno.test の ignore 判定と同じ理由）。 */
+  /**
+   * Listed synchronously because it is needed at registration (the same reason as the Deno.test
+   * ignore decision).
+   */
   const files = canRead ? goldenFiles(variant.goldens) : [];
   const hasContainer = canRead && containerPresent(variant);
   /**
@@ -517,17 +561,18 @@ for (const variant of VARIANTS) {
    */
   const missingAtPinned = variant.container.kind === "mirror" && files.length === 0 && FETCHED;
   /**
-   * 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。
-   * A mirror variant also needs its mirror (the goldens and the container are separate sources:
-   * each one's absence SKIPs); a series variant's missing container is caught by the
-   * completeness case instead.
+   * Whether the assets exist. None at all = an environment that did not generate them, so every
+   * case SKIPs (a partial absence is on the FAIL side). A mirror variant also needs its mirror (the
+   * goldens and the container are separate sources: each one's absence SKIPs); a series variant's
+   * missing container is caught by the completeness case instead.
    */
   const available =
     (files.length > 0 || missingAtPinned) && (variant.container.kind === "series" || hasContainer);
   /**
-   * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
-   * golden が全滅してモデルだけ残った欠損は `available` では偽になり、`ignore: !available`
-   * だと完全性テスト自身が SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+   * Whether **anything at all** remains (the SKIP predicate of the completeness test — Codex
+   * iteration H finding H-02). A loss where every golden is gone but the model remains makes
+   * `available` false, and with `ignore: !available` the completeness test itself would SKIP — the
+   * predicate that makes a loss a FAIL may sleep only when things are "completely empty".
    * For a mirror variant the goldens are a separate source (the test-asset dataset): their
    * absence SKIPs while the fetch is not complete, and FAILs once it is ({@link missingAtPinned}).
    */
@@ -543,9 +588,9 @@ for (const variant of VARIANTS) {
   if (canRead && files.length === 0 && !missingAtPinned) {
     console.warn(
       variant.container.kind === "series"
-        ? `[karume] ${variant.goldens.pathname} に export 済み資産が無いため実重み DeBERTa E2E ` +
-            `（${variant.name}）を SKIP する（重み 307MB〜1.3GB につきリポジトリ管理外）。` +
-            `生成: ${variant.container.generate}`
+        ? `[karume] ${variant.goldens.pathname} has no exported assets, so the real-weight DeBERTa E2E ` +
+            `(${variant.name}) SKIPs (the weights, 307MB to 1.3GB, are outside the repository). ` +
+            `Generate: ${variant.container.generate}`
         : `[karume] skipping the real-weight DeBERTa E2E (${variant.name}): no goldens under ` +
             `${variant.goldens.pathname}. Fetch: ${FETCH_COMMAND}`,
     );
@@ -570,14 +615,14 @@ for (const variant of VARIANTS) {
       // The mirror's presence is not asserted here: it is a separate source, whose absence SKIPs
       // the cases (and whose completeness is the distribution gate's).
       if (variant.container.kind === "series") {
-        assert(modelPresent(variant.container.model), `${MODEL_FILE} が無い`);
+        assert(modelPresent(variant.container.model), `${MODEL_FILE} is missing`);
       }
     },
   );
 
   for (const file of caseFiles) {
     const caseName = caseNameOf(file);
-    /** ケース ID（variant が違えば同じケース名があるので組で持つ）。 */
+    /** The case ID (the same case name exists in other variants, so it is held as a pair). */
     const caseId = `${variant.name}/${caseName}`;
     // Default run: everything except the tolerance comparison (output count, storage dtype set,
     // io key correspondence, output keys / shape / dtype).
@@ -596,7 +641,7 @@ for (const variant of VARIANTS) {
           const { parsed, io, outputs } = await runGoldenCase(variant, file);
           parsed.graph.outputs.forEach((name, index) => {
             const view = io.tensors.get(`output.${index}`);
-            assert(view !== undefined, `output.${index} が ${file} に無い`);
+            assert(view !== undefined, `output.${index} is missing from ${file}`);
             const where = `${variant.name}/${caseName} output.${index} ('${name}')`;
             const declared = parsed.graph.values[name].dtype;
             const report = compareTensors(

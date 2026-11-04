@@ -1,48 +1,60 @@
-// 実重み MiniCPM5-1B（states 形 decode グラフ）の実 GPU 検収門 — **固定 token id 列の parity**。
+// Real-GPU acceptance check of the real-weight MiniCPM5-1B (states-form decode graph) — **parity
+// of a fixed token id sequence**.
 //
-// 波 A の `e2e_minicpm5_test.ts`（0.15 の選別で削除） が 1-shot 形（prefill 相当の 1 本道）で
-// GQA の数値を受け持つのに対し、こちらは**生成ループ全体**（ADR 0066 決定 4 の prefill-chunk と
-// decode の 2 形 + GenerationContext の KV スロット）が実重みで**torch と同じ token を同じ順で
-// 吐く**ことを受け持つ。検収の形は tolerance ではなく**離散の一致**で、`.lab` / PNG sha256 門と
-// 同じ哲学（出口の成果物そのものを固定する — 数値がどれだけ動いても列が割れなければ緑、
-// 割れたら赤）。
+// Where wave A's `e2e_minicpm5_test.ts` (removed in the 0.15 triage) covered GQA's numerics in the
+// 1-shot form (a single pass, equivalent to prefill), this one covers that **the whole generation
+// loop** (the two forms of ADR 0066 decision 4, prefill-chunk and decode, + the GenerationContext's
+// KV slots) **emits the same tokens in the same order as torch** on real weights. The acceptance is
+// not a tolerance but **discrete agreement**, the same philosophy as the `.lab` / PNG sha256 checks
+// (pin the output artifact itself — however much the values move, green as long as the sequence
+// does not diverge, red once it does).
 //
-// 門は 5 本:
+// There are 5 checks:
 //
-// ① 形の前提（入力 2 本 / 出力 2 本 / 出力 1 の供給元が argmax / states 48 スロット / 記号 M・C）
-// ② **greedy parity**（3 ケース × K=16 step が torch の期待列と厳密一致） — この門の主張
-// ③ prefill logits の tolerance 突合（`generateGreedy` を通さない手組みの 3 chunk・診断線）
-// ④ census（states 形カーネル族が実際に走り、q 側だけ `:gqa` が付く）
-// ⑤ decode 経路の計画性質（PreparedPlan が prefill 形 / decode 形の 2 本で安定する）
+// ① form preconditions (2 inputs / 2 outputs / output 1 produced by argmax / 48 state slots /
+//   symbols M and C)
+// ② **greedy parity** (3 cases × K=16 steps exactly match torch's expected sequence) — this
+//   check's claim
+// ③ tolerance comparison of the prefill logits (3 hand-built chunks that bypass `generateGreedy` —
+//   a diagnostic line)
+// ④ census (the states-form kernel families actually run, and only the q side gets `:gqa`)
+// ⑤ the plan properties of the decode path (PreparedPlan settles at 2: the prefill form and the
+//   decode form)
 //
-// ホスト側の生成ループ（`src/generation/greedy.ts`）は models の実装なので、この門は models 側に
-// ある（`e2e_vowel_detector_chain_test.ts` と同じ分担 — runtime のテストが models の実装を
-// 相対 import する逆向きの依存を作らない）。逆に runtime 側は合成グラフで states 形カーネルの
-// 受入条件（`tests/gpu_state_acceptance_test.ts`）を持っており、そちらは実重みを要らない。
+// The host-side generation loop (`src/generation/greedy.ts`) is a models implementation, so this
+// check sits on the models side (the same split as `e2e_vowel_detector_chain_test.ts` — no
+// backwards dependency of a runtime test importing the models implementation by a relative path).
+// The runtime side, in turn, holds the acceptance conditions of the states-form kernels on
+// synthetic graphs (`tests/gpu_state_acceptance_test.ts`), which need no real weights.
 //
-// ## 資産
+// ## Assets
 //
-// `outputs/series/minicpm5-1b-decode/`（f32 重み 4.03GiB につきリポジトリ管理外 — `.gitignore` の
-// `outputs/`）。生成台本は `tools/export-recipes/minicpm5/export_decode.py` で、コマンドは下の
-// {@link GENERATE_COMMAND} がそのまま正本。
+// `outputs/series/minicpm5-1b-decode/` (outside the repository because the f32 weights are
+// 4.03 GiB — `outputs/` in `.gitignore`). The generation script is
+// `tools/export-recipes/minicpm5/export_decode.py`, and {@link GENERATE_COMMAND} below is the
+// command's source of truth as is.
 //
-// - `io.<case>.safetensors` — **無 pad 全長 1 回**の入出力（4 ケース）。chunk 形のグラフを
-//   全長 1 発で回した参照ではなく「同じ重み・同じ位置で torch が出す値」の表で、こちらは
-//   chunk へ割って**有効行だけ**を突き合わせる（pad 行で 0 に固定されるのは states 形
-//   attention の出力だけ — ADR 0066 追記 8。後段の MLP / lm_head は pad 行にも意味のない値を
-//   書くので、pad 行のグラフ出力は**読んではならない** — 参照側に対応物も無い）。
-// - `greedy.<case>.safetensors` — decode 検収の正本（3 ケース）。`prompt` i32 `[T]` /
-//   `expected` i32 `[K]` / `margin` f32 `[K]`。期待列は**全長 full re-forward** で採ってあり
-//   （KV cache 経路を通さない — `export_decode.greedy_continuation` の MUST）、検収したい機構と
-//   期待値を作る機構が独立している。
+// - `io.<case>.safetensors` — inputs and outputs of **one unpadded full-length pass** (4 cases).
+//   Not a reference that ran the chunk-form graph over the full length in one go but a table of
+//   "the values torch gives with the same weights at the same positions"; this side splits it into
+//   chunks and compares **only the valid rows** (only the states-form attention's output is pinned
+//   to 0 on pad rows — ADR 0066 addendum 8. The later MLP / lm_head write meaningless values to pad
+//   rows as well, so the graph outputs of pad rows **must not be read** — the reference side has no
+//   counterpart either).
+// - `greedy.<case>.safetensors` — the source of truth for the decode acceptance (3 cases).
+//   `prompt` i32 `[T]` / `expected` i32 `[K]` / `margin` f32 `[K]`. The expected sequences were
+//   taken with a **full-length full re-forward** (bypassing the KV cache path — the MUST of
+//   `export_decode.greedy_continuation`), so the mechanism under acceptance and the mechanism that
+//   makes the expected values are independent.
 //
 // MiniCPM5 has no distribution, so every case here is an implementation-time series check
 // (ADR 0139 decision 6 and Rulings D2): it runs only with KARUME_SERIES=1 (on top of the
 // low-priority lane's KARUME_ALL_FAMILIES=1) and SKIPs explicitly otherwise.
 //
-// 資産が無い環境では**明示 SKIP** する。ADR 0005 の「全 SKIP は明示 FAIL」門番は *GPU アダプタの
-// 有無* だけを見ており、この SKIP とは独立。資産が**中途半端に**（ケース欠け）存在する場合は
-// SKIP ではなく FAIL にする（下の「資産の完全性」テスト）— そこは無音の見かけ成功になる。
+// Where the assets are absent it **SKIPs explicitly**. ADR 0005's "all-SKIP is an explicit FAIL"
+// guard looks only at *whether a GPU adapter exists*, independent of this SKIP. Assets that are
+// **partially** present (missing cases) FAIL rather than SKIP (the "asset completeness" test below)
+// — that would be a silent apparent success.
 
 import { type DirEntry, isNotFound, readDirSync, readFile } from "@karume/test-support/fs";
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
@@ -68,87 +80,106 @@ import { GPU_AVAILABLE } from "../../models/tests/helpers/gpu.ts";
 const SERIES_NAME = "minicpm5-1b-decode";
 const SERIES_ROOT = new URL(`../../../outputs/series/${SERIES_NAME}/`, import.meta.url);
 const MODEL_FILE = "model.krm";
-/** 容器の中のグラフ名（表は helpers/series-graphs.ts の 1 本 — 門番と同じ正本から引く）。 */
+/**
+ * The graph name in the container (the table is the one in helpers/series-graphs.ts — looked up
+ * from the same source of truth as the guard).
+ */
 const MODEL_GRAPH = seriesGraph(SERIES_NAME);
 const IO_PREFIX = "io.";
 const GREEDY_PREFIX = "greedy.";
 const SUFFIX = ".safetensors";
 
-/** SKIP 時にそのまま貼れる生成コマンド（tools/export-recipes/minicpm5/README.md と同じ綴り）。 */
+/**
+ * The generation command, ready to paste on a SKIP (spelled the same as
+ * tools/export-recipes/minicpm5/README.md).
+ */
 const GENERATE_COMMAND =
   "cd tools/export-recipes && uv run --with 'transformers==5.14.1' python -m minicpm5.export_decode";
 
 /**
- * 生成されているはずのケース。**列挙結果ではなくここで固定する** — 列挙だけに頼ると生成を
- * 一部だけ流した環境でテストが黙って消え、「緑だが未検証」になる。正本は
- * `export_decode.py` の `GOLDEN_CASES`（io・T = 6 / 12 / 87 / 61）と `GREEDY_CASES`
- * （greedy — `capital-ja` は継続の余裕が足りず除外されている）。
+ * The cases that should have been generated. **Fixed here rather than enumerated** — relying on an
+ * enumeration alone, tests would silently vanish in an environment that ran only part of the
+ * generation, giving "green but unchecked". The source of truth is `GOLDEN_CASES` (io, T = 6 / 12
+ * / 87 / 61) and `GREEDY_CASES` (greedy — `capital-ja` is excluded for lack of continuation
+ * margin) in `export_decode.py`.
  */
 const EXPECTED_IO_CASES = ["capital-en", "capital-ja", "context-en", "context-ja"] as const;
 const EXPECTED_GREEDY_CASES = ["capital-en", "context-en", "context-ja"] as const;
 
-/** greedy golden の step 数（正本は `export_decode.GREEDY_STEPS`）。 */
+/** The step count of the greedy goldens (the source of truth is `export_decode.GREEDY_STEPS`). */
 const GREEDY_STEPS = 16;
 
 /**
- * 固定長 prefill chunk の行数（ADR 0066 決定 4 の計画時定数）。
+ * The row count of a fixed-length prefill chunk (the plan-time constant of ADR 0066 decision 4).
  *
- * **32 は「多 chunk prefill を必ず踏む」ための値**。context ケース（T = 87 / 61）が 3 本 / 2 本の
- * chunk に割れ、2 本目以降が `pastLength > 0` の prefill（`M > 1` かつ過去を持つ形 — decode の
- * `M = 1` とも 1 本目の `P = 0` とも別の経路）になる。全ケースが 1 chunk に収まる値にすると、
- * states 形 attention の「過去 + 今 chunk の両側述語」が実重みで 1 度も踏まれない。
+ * **32 is the value that "always exercises multi-chunk prefill"**. The context cases (T = 87 / 61)
+ * split into 3 / 2 chunks, and the 2nd chunk onwards is a prefill with `pastLength > 0` (`M > 1`
+ * with a past — a path distinct from decode's `M = 1` and from the 1st chunk's `P = 0`). With a
+ * value that fits every case in 1 chunk, the states-form attention's "two-sided predicate over the
+ * past + the current chunk" would never be exercised on real weights.
  */
 const CHUNK_LENGTH = 32;
 
 /**
- * KV スロットの容量記号（`export_decode.CAPACITY_SYMBOL`）と、この門が束縛する値。
+ * The capacity symbol of the KV slots (`export_decode.CAPACITY_SYMBOL`) and the value this check
+ * binds.
  *
- * 128 は全ケースの `T + K`（最長は context-en の 87 + 16 = 103）を覆う。覆えているかは
- * ケースごとに実測で見る（下の {@link CAPACITY} 検査）— prompt が伸びた再エクスポートで
- * 容量が足りなくなったとき、無音で丸まらず落ちる位置をここに置く。
+ * 128 covers every case's `T + K` (the longest is context-en's 87 + 16 = 103). Whether it covers
+ * them is measured per case (the {@link CAPACITY} check below) — when a re-export with a longer
+ * prompt runs out of capacity, this is where it fails instead of being silently rounded.
  */
 const CAPACITY_SYMBOL = "C";
 const CAPACITY = 128;
 
 /**
- * この系列が引ける絶対位置の排他的上限（正本は `export_decode.ROPE_TABLE_POSITIONS` = RoPE 表の
- * 行数）。表の外の gather は非有限を返し argmax が沈黙誤 token に畳むので、`generateGreedy` は
- * この値を要求して入口で落とす。
+ * The exclusive upper bound of the absolute positions this series can look up (the source of truth
+ * is `export_decode.ROPE_TABLE_POSITIONS` = the RoPE table's row count). A gather outside the table
+ * returns non-finite values that argmax folds into a silently wrong token, so `generateGreedy`
+ * requires this value and fails at the entry point.
  */
 const MAX_POSITION = 512;
 
-/** グラフ入力の名前（正本は `export_decode.INPUT_IDS` / `POSITION_IDS`）。 */
+/** The graph input names (the source of truth is `export_decode.INPUT_IDS` / `POSITION_IDS`). */
 const INPUT_IDS = "input_ids";
 const POSITION_IDS = "position_ids";
 
-/** 層数（config の `num_hidden_layers`）と state スロット本数（層ごとに k / v の 2 本）。 */
+/**
+ * The layer count (the config's `num_hidden_layers`) and the state slot count (2 per layer, k /
+ * v).
+ */
 const LAYERS = 24;
 const SLOTS = LAYERS * 2;
 
-/** q 側 / k・v 側の head 数（16:2 = 真の GQA 形。census の `:gqa` の根拠）。 */
+/**
+ * The head counts of the q side / the k and v side (16:2 = true GQA form; the grounds for `:gqa`
+ * in the census).
+ */
 const HEADS = 16;
 const KV_HEADS = 2;
 
 /**
- * prefill logits（`[1,M,130560]`）の torch CPU 期待値との突合に使う許容誤差。
+ * The tolerance for comparing the prefill logits (`[1,M,130560]`) against the torch CPU expected
+ * values.
  *
- * 波 A の 1-shot 門（`e2e_minicpm5_test.ts` の `MINICPM5_TOLERANCE`）と**同じ閾値**にしてある —
- * 比べているものが同じ（同じ重み・同じ位置の logits）で、違うのは経路（1 本道 か chunk +
- * KV スロット）だけなので、閾値が違うと「経路差なのか閾値差なのか」が読めなくなる。
+ * It is **the same threshold** as wave A's 1-shot check (`MINICPM5_TOLERANCE` in
+ * `e2e_minicpm5_test.ts`) — what is compared is the same (logits of the same weights at the same
+ * positions), and only the path differs (a single pass vs chunks + KV slots), so a different
+ * threshold would make it impossible to tell "a path difference or a threshold difference".
  *
- * 実測（2026-08-18・context-en / T=87 を 3 chunk で流した有効 87 行）は **maxAbs 7.439e-5** で、
- * 1-shot 門が同じケースで測った 7.44e-5 と**同値**（atol 1e-3 の 13 分の 1）。chunk 分割 +
- * KV スロット経由でも 1 本道と同じ誤差しか出ない、が実測の中身。
+ * Measured (2026-08-18, the 87 valid rows of context-en / T=87 run in 3 chunks): **maxAbs
+ * 7.439e-5**, **the same value** as the 7.44e-5 the 1-shot check measured on the same case (1/13
+ * of atol 1e-3). What the measurement says: chunk splitting + the KV slots give no more error than
+ * a single pass.
  *
- * **rtol は 0**（判定は atol 単独 — 理由は 1-shot 側の docstring に書いた「参照値ちょうど 0.0 の
- * 要素が数本ある」がそのまま当てはまる）。
+ * **rtol is 0** (atol alone decides — the reason written in the 1-shot side's docstring, "a few
+ * elements have a reference value of exactly 0.0", applies as is).
  */
 const PREFILL_ATOL = 1e-3;
 
 /**
- * ディレクトリの列挙。存在しない場合だけ空に縮退する。
- * MUST: NotFound 以外は伝播させる — 権限エラー等を「資産が無い」と読み替えると、
- * 実行されていない検証が SKIP として静かに緑になる。
+ * Lists a directory. Only a missing directory degrades to empty.
+ * MUST: anything other than NotFound propagates — reading a permission error or the like as "no
+ * asset" would quietly turn a check that never ran green as a SKIP.
  */
 const listDir = (url: URL): readonly DirEntry[] => {
   try {
@@ -168,33 +199,37 @@ const discoverCases = (prefix: string): readonly string[] =>
     .sort();
 
 /**
- * 登録時点で必要なので同期列挙する（`Deno.test` の ignore 判定と同じ理由）。Without
- * KARUME_SERIES=1 the series is not read at all.
+ * Enumerated synchronously, as registration needs it (the same reason as `Deno.test`'s ignore).
+ * Without KARUME_SERIES=1 the series is not read at all.
  */
 const IO_CASES = SERIES_CHECKS ? discoverCases(IO_PREFIX) : [];
 const GREEDY_CASES = SERIES_CHECKS ? discoverCases(GREEDY_PREFIX) : [];
 
-/** 資産の有無。1 件も無い = 生成していない環境なので全 SKIP（部分的な欠けは FAIL 側）。 */
+/**
+ * Whether assets are present. None at all = an environment that did not generate them, so
+ * everything SKIPs (a partial gap goes to FAIL).
+ */
 const AVAILABLE = IO_CASES.length > 0 || GREEDY_CASES.length > 0;
 /**
- * **何か 1 つでも**残っているか（完全性テストの SKIP 述語 — Codex 波 H 指摘 H-02）。
- * golden が全滅してモデルだけ残った欠損は `AVAILABLE` では偽になり、完全性テスト自身が
- * SKIP される — 欠損を FAIL にする述語は「完全に空」でだけ寝てよい。
+ * Whether **anything at all** is left (the SKIP predicate of the completeness test — Codex wave H
+ * finding H-02). A gap where every golden is gone and only the model is left makes `AVAILABLE`
+ * false, which would SKIP the completeness test itself — the predicate that FAILs a gap may sleep
+ * only when everything is empty.
  */
 const ANY_PRESENT = SERIES_CHECKS && (AVAILABLE || modelPresent(new URL(MODEL_FILE, SERIES_ROOT)));
 
 if (SERIES_CHECKS && !AVAILABLE) {
   console.warn(
-    `[karume] ${SERIES_ROOT.pathname} に export 済み資産が無いため MiniCPM5-1B decode 検収を ` +
-      `SKIP する（f32 重み 4.03GiB につきリポジトリ管理外）。生成: ${GENERATE_COMMAND}`,
+    `[karume] ${SERIES_ROOT.pathname} has no exported assets, so the MiniCPM5-1B decode acceptance ` +
+      `is SKIPped (outside the repository because the f32 weights are 4.03 GiB). Generate: ${GENERATE_COMMAND}`,
   );
 }
 
 /**
- * ファイル 1 本を `ArrayBuffer` として読む。
+ * Reads one file as an `ArrayBuffer`.
  *
- * MUST: view が buffer 全体を覆っているなら slice しない — golden は 1 本で GB 級になるので、
- * 無条件の `slice` は峰値を倍増させる（1-shot 門と同じ理由）。
+ * MUST: do not slice when the view covers the whole buffer — one golden is GB-sized, so an
+ * unconditional `slice` doubles the peak (the same reason as the 1-shot check).
  */
 const readBuffer = async (file: string): Promise<ArrayBuffer> => {
   const bytes = await readFile(new URL(file, SERIES_ROOT));
@@ -205,28 +240,28 @@ const readBuffer = async (file: string): Promise<ArrayBuffer> => {
 };
 
 /**
- * golden の 1 テンソルを宣言 dtype の view で取る（コピーしない）。
+ * Takes one golden tensor as a view of the declared dtype (no copy).
  *
- * MUST: 格納 dtype が食い違ったら落とす — 要素は f32 も i32 も 4 バイトなので、黙って読み替えると
- * ビット列の再解釈が「通ってしまう」。runtime 側テストの同名ヘルパ（`helpers/golden-io.ts`）は
- * import しない（パッケージのテストが他パッケージのテスト内部に依存しない — `helpers/gpu.ts` の
- * NOTE と同じ分担）。
+ * MUST: fail when the storage dtype disagrees — f32 and i32 elements are both 4 bytes, so silently
+ * reading one as the other would let a reinterpretation of the bits "pass". The runtime-side test
+ * helper of the same name (`helpers/golden-io.ts`) is not imported (a package's tests do not
+ * depend on another package's test internals — the same split as the NOTE in `helpers/gpu.ts`).
  */
 const goldenF32 = (file: SafetensorsFile, name: string): Float32Array<ArrayBuffer> => {
   const view = file.tensors.get(name);
-  assert(view !== undefined, `golden に '${name}' が無い`);
-  assertEquals(view.dtype, "F32", `golden '${name}' の格納 dtype`);
+  assert(view !== undefined, `'${name}' is not in the golden`);
+  assertEquals(view.dtype, "F32", `golden '${name}' storage dtype`);
   return new Float32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
 const goldenI32 = (file: SafetensorsFile, name: string): Int32Array<ArrayBuffer> => {
   const view = file.tensors.get(name);
-  assert(view !== undefined, `golden に '${name}' が無い`);
-  assertEquals(view.dtype, "I32", `golden '${name}' の格納 dtype`);
+  assert(view !== undefined, `'${name}' is not in the golden`);
+  assertEquals(view.dtype, "I32", `golden '${name}' storage dtype`);
   return new Int32Array(file.buffer, view.byteOffset, view.byteLength / 4);
 };
 
-/** `greedy.<case>.safetensors`（decode 検収の正本）。 */
+/** `greedy.<case>.safetensors` (the source of truth for the decode acceptance). */
 type GreedyGolden = {
   readonly prompt: Int32Array<ArrayBuffer>;
   readonly expected: Int32Array<ArrayBuffer>;
@@ -238,7 +273,7 @@ const loadGreedy = async (caseName: string): Promise<GreedyGolden> => {
   assertEquals(
     [...file.tensors.keys()].sort(),
     ["expected", "margin", "prompt"],
-    `${GREEDY_PREFIX}${caseName}${SUFFIX} のテンソルキー`,
+    `${GREEDY_PREFIX}${caseName}${SUFFIX} tensor keys`,
   );
   return {
     prompt: goldenI32(file, "prompt"),
@@ -247,7 +282,7 @@ const loadGreedy = async (caseName: string): Promise<GreedyGolden> => {
   };
 };
 
-/** `io.<case>.safetensors`（無 pad 全長 1 回の入出力）。 */
+/** `io.<case>.safetensors` (inputs and outputs of one unpadded full-length pass). */
 type IoGolden = {
   readonly ids: Int32Array<ArrayBuffer>;
   readonly positions: Int32Array<ArrayBuffer>;
@@ -260,7 +295,7 @@ const loadIo = async (caseName: string): Promise<IoGolden> => {
   assertEquals(
     [...file.tensors.keys()].sort(),
     [`input.${INPUT_IDS}`, `input.${POSITION_IDS}`, "output.0", "output.1"].sort(),
-    `${IO_PREFIX}${caseName}${SUFFIX} のテンソルキー`,
+    `${IO_PREFIX}${caseName}${SUFFIX} tensor keys`,
   );
   return {
     ids: goldenI32(file, `input.${INPUT_IDS}`),
@@ -271,94 +306,101 @@ const loadIo = async (caseName: string): Promise<IoGolden> => {
 };
 
 /**
- * states 形 decode グラフの形の前提（**数値が合ったまま静かに壊れる**性質だけを見る）。
+ * The form preconditions of the states-form decode graph (it looks only at properties that **break
+ * silently while the values still match**).
  *
- * 完全な形検査は書き手側（`export_decode.assert_ir_form_decode`）が持つ。読み手側で要るのは
- * 「この門が回している 2 形が、期待どおりの入口・出口・スロットを持つグラフか」の確認だけで、
- * ここが緩むと**別のグラフを検収してしまう**（例: mask 入力の残った従来形は chunk 局所の
- * causal になり、prompt が 1 chunk に収まるケースだけ数値が合う）。
+ * The complete form check is held by the writer side (`export_decode.assert_ir_form_decode`). The
+ * reader side only needs to confirm "the 2 forms this check runs are graphs with the expected entry
+ * points, exits and slots"; if this loosened, **another graph would get accepted** (e.g. the older
+ * form with a mask input left over becomes chunk-local causal, and the values match only for cases
+ * whose prompt fits in 1 chunk).
  */
 const assertDecodeForm = (parsed: PreparedModel): void => {
   const graph = parsed.graph;
   assertEquals(
     graph.inputs.map((spec) => spec.name),
     [INPUT_IDS, POSITION_IDS],
-    "グラフ入力",
+    "graph inputs",
   );
-  assertEquals(graph.outputs.length, 2, "graph.outputs の本数（logits / token の 2 本）");
+  assertEquals(graph.outputs.length, 2, "graph.outputs count (2: logits / token)");
 
-  // 出力 1 の供給元が argmax（ADR 0068 決定 4 の decode 出口）。`generateGreedy` はこの出力を
-  // そのまま次 step の入力にするので、ここが別 op（例: 1-shot 形の logits）だと「形の合う
-  // 別テンソルを読んだ token 列」が例外なしに出来上がる。
+  // Output 1 is produced by argmax (the decode exit of ADR 0068 decision 4). `generateGreedy`
+  // feeds this output straight into the next step's input, so if this were another op (e.g. the
+  // 1-shot form's logits), "a token sequence read from another tensor of a matching shape" would
+  // come out without any exception.
   const producer = new Map<string, string>();
   for (const node of graph.nodes) {
     for (const out of node.outs) producer.set(out, node.op);
   }
-  assertEquals(producer.get(graph.outputs[1]), "argmax", `出力 1 ('${graph.outputs[1]}') の供給元`);
+  assertEquals(
+    producer.get(graph.outputs[1]),
+    "argmax",
+    `producer of output 1 ('${graph.outputs[1]}')`,
+  );
 
-  // states は層ごとに k / v の 2 本。attention は全て states 欄を持ち、真の GQA 形（16:2）。
-  assertEquals(Object.keys(graph.states).length, SLOTS, "states スロットの本数");
+  // The states are 2 per layer, k / v. Every attention has a states field, in true GQA form
+  // (16:2).
+  assertEquals(Object.keys(graph.states).length, SLOTS, "states slot count");
   const attentions = graph.nodes.filter((node) => node.op === "attention");
-  assertEquals(attentions.length, LAYERS, "attention ノードの本数（= 層数）");
+  assertEquals(attentions.length, LAYERS, "attention node count (= layer count)");
   attentions.forEach((node, index) => {
     assertEquals(
       Object.keys(node.states).sort(),
       ["k", "v"],
-      `attention[${index}]: states 欄（mask 込みの従来形が残っていないこと）`,
+      `attention[${index}]: states field (no older form with a mask left over)`,
     );
     const heads = node.ins.map((name) => graph.values[name].shape[1]);
-    assertEquals(heads, [HEADS, KV_HEADS, KV_HEADS], `attention[${index}]: head 軸`);
+    assertEquals(heads, [HEADS, KV_HEADS, KV_HEADS], `attention[${index}]: head axis`);
   });
   assertEquals(
     graph.nodes.filter((node) => node.op === "state_append").length,
     SLOTS,
-    "state_append ノードの本数（スロット 1 本につき 1 本）",
+    "state_append node count (one per slot)",
   );
 
-  // 記号は 2 つ: `M`（物理 chunk 行数 — 入力 shape から解ける）と `C`（容量 — states にしか
-  // 現れない専用記号で、束縛点は createGenerationContext だけ・ADR 0066 追記 7）。
+  // Two symbols: `M` (the physical chunk row count — solvable from the input shape) and `C` (the
+  // capacity — a dedicated symbol that appears only in the states, bound only by
+  // createGenerationContext; ADR 0066 addendum 7).
   assertEquals([...graph.symbols].sort(), ["C", "M"], "graph.symbols");
 };
 
-/** chunk 1 本ぶんの i32 入力（token id 列も絶対位置列も `[1, rows]`）。 */
+/** The i32 inputs of one chunk (both the token ids and the absolute positions are `[1, rows]`). */
 const i32Row = (rows: number, data: Int32Array<ArrayBuffer>): Tensor => ({
   dtype: "i32",
   shape: [1, rows],
   data,
 });
 
-/** 実行後の診断から PreparedPlan の実績を取る（未実行なら fail loudly）。 */
+/** Takes the PreparedPlan record from the diagnostics after a run (fails loudly if none ran). */
 const preparedOf = (diagnostics: SessionDiagnostics, where: string) => {
   const prepared = diagnostics.lastRunPrepared;
-  assert(prepared !== undefined, `${where}: lastRunPrepared が無い（run が決着していない）`);
+  assert(prepared !== undefined, `${where}: no lastRunPrepared (the run has not settled)`);
   return prepared;
 };
 
-// 完全に空の環境だけ SKIP。**何か 1 つでも**あれば欠けは FAIL（`ANY_PRESENT` の JSDoc）。
+// Only a completely empty environment SKIPs. If **anything at all** is present, a gap is a FAIL
+// (the JSDoc of `ANY_PRESENT`).
 test.skipIf(!ANY_PRESENT)(
-  `MiniCPM5 decode 資産: 期待するケースとモデル本体が揃っている${SERIES_CHECKS_OPT_IN}`,
+  `MiniCPM5 decode assets: the expected cases and the model are complete${SERIES_CHECKS_OPT_IN}`,
   () => {
-    assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname} の io ケース`);
-    assertEquals(
-      GREEDY_CASES,
-      [...EXPECTED_GREEDY_CASES],
-      `${SERIES_ROOT.pathname} の greedy ケース`,
-    );
-    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} が無い`);
+    assertEquals(IO_CASES, [...EXPECTED_IO_CASES], `${SERIES_ROOT.pathname}: io cases`);
+    assertEquals(GREEDY_CASES, [...EXPECTED_GREEDY_CASES], `${SERIES_ROOT.pathname}: greedy cases`);
+    assert(modelPresent(new URL(MODEL_FILE, SERIES_ROOT)), `${MODEL_FILE} is missing`);
   },
 );
 
 /**
- * ①形 / ②greedy parity / ③prefill logits / ⑤計画性質。
+ * ① form / ② greedy parity / ③ prefill logits / ⑤ plan properties.
  *
- * MUST: Session は **1 本だけ組んで全ステップで共有する**。この資産は 4.03GiB の f32 重みで、
- * ステップごとに組み直すと同じアップロードを何度も払う（1-shot 門が 4 ケースで 1 Session に
- * したのと同じ理由）。ステップ間で共有するのは Session（不変の重みと計画キャッシュ）だけで、
- * **GenerationContext は用途ごとに作り分ける** — 生成 1 本 = context 1 本（ADR 0066 決定 6）で、
- * 使い回すと前の生成の KV が残った状態から prefill を始めることになる。
+ * MUST: **build only one Session and share it across all steps**. This asset is 4.03 GiB of f32
+ * weights, and rebuilding per step would pay the same upload again and again (the same reason the
+ * 1-shot check used 1 Session for 4 cases). Only the Session (the immutable weights and the plan
+ * cache) is shared between steps; **a GenerationContext is made per use** — one generation = one
+ * context (ADR 0066 decision 6), and reusing one would start prefill with the previous
+ * generation's KV still in it.
  */
 describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  `MiniCPM5 decode 検収: 固定 token id 列の parity（実 GPU / torch CPU 期待値）${SERIES_CHECKS_OPT_IN}`,
+  `MiniCPM5 decode acceptance: parity of a fixed token id sequence (real GPU / torch CPU expected values)${SERIES_CHECKS_OPT_IN}`,
   () => {
     // Assigned in beforeAll; the its do not run when beforeAll throws.
     let parsed!: PreparedModel;
@@ -381,98 +423,108 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       gpu?.destroy();
     });
 
-    it("① 形の前提: states 形 chunk グラフである", () => {
+    it("① form preconditions: it is a states-form chunk graph", () => {
       assertDecodeForm(parsed);
     });
 
-    it("② greedy parity: 3 ケース × 16 step が torch の期待列と厳密一致", async () => {
-      /** ケースごとの prefill chunk 本数（多 chunk prefill を踏んだことの実測）。 */
+    it("② greedy parity: 3 cases × 16 steps exactly match torch's expected sequence", async () => {
+      /** The prefill chunk count per case (the measurement that multi-chunk prefill was exercised). */
       const chunkCounts: number[] = [];
       for (const caseName of EXPECTED_GREEDY_CASES) {
         const golden = await loadGreedy(caseName);
         const prompt = [...golden.prompt];
         const expected = [...golden.expected];
-        assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden の step 数`);
+        assertEquals(expected.length, GREEDY_STEPS, `${caseName}: golden step count`);
 
-        // golden 側の資格（**恒真でない**）: torch 側の 1 位 / 2 位の差が atol の 2 倍を
-        // 超えていれば、③の許容内の数値差では 1 位が動けない = この列は数値差で割れない。
-        // 台本側は `MARGIN_FLOOR = 1e-2` で採るケースを選んでおり、実測の最小余裕は
-        // context-ja の 0.0261（step 15）= atol 1e-3 の 26 倍。
+        // The golden side's eligibility (**not vacuous**): if the gap between torch's top 1 and
+        // top 2 exceeds twice atol, a numerical difference within ③'s tolerance cannot move the
+        // top 1 = numerical differences cannot split this sequence. The script picks cases with
+        // `MARGIN_FLOOR = 1e-2`; the smallest measured margin is context-ja's 0.0261 (step 15) =
+        // 26× atol 1e-3.
         const minMargin = Math.min(...golden.margin);
         assert(
           minMargin > 2 * PREFILL_ATOL,
-          `${caseName}: golden の最小余裕 ${minMargin} が atol と同程度 — ` +
-            `この形では token 列の一致が数値差で反転しうる（門として成立しない）`,
+          `${caseName}: the golden's smallest margin ${minMargin} is on the order of atol — ` +
+            `in this form a numerical difference could flip the token sequence's agreement (it does not work as a check)`,
         );
-        // 容量が prompt + 継続を覆っていること（覆えないと state スロットが溢れる）。
+        // The capacity covers the prompt + the continuation (otherwise the state slots overflow).
         assert(
           prompt.length + GREEDY_STEPS <= CAPACITY,
-          `${caseName}: T ${prompt.length} + K ${GREEDY_STEPS} が容量 ${CAPACITY} を超える`,
+          `${caseName}: T ${prompt.length} + K ${GREEDY_STEPS} exceeds the capacity ${CAPACITY}`,
         );
 
         const started = performance.now();
         const generated = await generateGreedy({
           session,
           inputIds: INPUT_IDS,
-          // この系列は RoPE 表を焼いたままなのでグラフ入力は今も `position_ids` 1 本だが、
-          // 位置の供給口は `GreedySpec.derive` に一本化された（ADR 0091 決定 1 — gemma4 側が
-          // 位置から cos / sin を組む形になり、`positionIds` 欄は退役した）。
+          // This series still has the RoPE table baked in, so the graph input is still the one
+          // `position_ids`, but the supply of positions was unified into `GreedySpec.derive` (ADR
+          // 0091 decision 1 — the gemma4 side builds cos / sin from the positions, and the
+          // `positionIds` field was retired).
           derive: (_ids, positions) => ({ [POSITION_IDS]: i32Row(positions.length, positions) }),
           token: tokenName,
           chunkLength: CHUNK_LENGTH,
           maxPosition: MAX_POSITION,
-          // 容量記号は context 生成だけへ渡る（run の bindings には出ない — 追記 7）。
+          // The capacity symbol goes only to the context creation (it does not appear in the
+          // run's bindings — addendum 7).
           bindings: { [CAPACITY_SYMBOL]: CAPACITY },
           prompt,
           maxNewTokens: GREEDY_STEPS,
         });
         const elapsed = performance.now() - started;
 
-        // 検収そのもの。tolerance を持たない離散の一致で、GQA の head 写像違い・RoPE の
-        // 位置ずれ・KV スロットの行写像違い・pad 行の混入はどれもここで列を割る。
-        assertEquals(generated, expected, `${caseName}: 生成 token 列`);
+        // The acceptance itself. A discrete agreement without a tolerance: a wrong GQA head
+        // mapping, a RoPE position shift, a wrong KV-slot row mapping, or pad rows leaking in all
+        // split the sequence here.
+        assertEquals(generated, expected, `${caseName}: generated token sequence`);
 
         const chunks = Math.ceil(prompt.length / CHUNK_LENGTH);
         chunkCounts.push(chunks);
         console.log(
           `[e2e] minicpm5 decode greedy ${caseName}: T=${prompt.length} ` +
-            `(prefill ${chunks} chunk) + K=${GREEDY_STEPS} step / 最小余裕 ` +
+            `(prefill ${chunks} chunk) + K=${GREEDY_STEPS} step / smallest margin ` +
             `${minMargin.toExponential(3)} / ${elapsed.toFixed(0)}ms`,
         );
 
-        // ⑤ decode 経路の計画性質: 生成 1 本で導出される計画は **prefill 形（M=32）と
-        // decode 形（M=1）の 2 本だけ**（ADR 0066 決定 4）。ここが step 数に比例して伸びる
-        // 形（例: queryLength が計画鍵に混ざる）は、値は正しいまま毎 step 再導出になる。
-        // ケースを跨いでも 2 本のまま（プロンプト長は計画鍵に効かない）。
+        // ⑤ The plan properties of the decode path: one generation derives **only 2 plans, the
+        // prefill form (M=32) and the decode form (M=1)** (ADR 0066 decision 4). A form where this
+        // grows with the step count (e.g. queryLength mixed into the plan key) re-derives every
+        // step while the values stay correct. It stays at 2 across cases too (the prompt length
+        // does not affect the plan key).
         const prepared = preparedOf(session.diagnostics(), caseName);
-        assertEquals(prepared.cachedPlans, 2, `${caseName}: 導出済み計画の本数`);
-        assertEquals(prepared.hit, true, `${caseName}: 最終 decode step が計画キャッシュに当たる`);
+        assertEquals(prepared.cachedPlans, 2, `${caseName}: derived plan count`);
+        assertEquals(prepared.hit, true, `${caseName}: the final decode step hits the plan cache`);
       }
-      // 多 chunk prefill（`pastLength > 0` かつ `M > 1`）を最低 1 ケースが踏んだこと。
+      // At least one case exercised multi-chunk prefill (`pastLength > 0` and `M > 1`).
       assert(
         Math.max(...chunkCounts) >= 2,
-        `全ケースが 1 chunk に収まっている（chunk 本数 ${chunkCounts}）— ` +
-          `chunkLength ${CHUNK_LENGTH} では過去つき prefill が 1 度も走らない`,
+        `every case fits in 1 chunk (chunk counts ${chunkCounts}) — ` +
+          `with chunkLength ${CHUNK_LENGTH} a prefill with a past never runs`,
       );
     });
 
-    it("③ prefill logits: context-en の 3 chunk を有効行だけ突合（診断線）", async () => {
-      // ②が離散の一致だけを見るのに対し、ここは**連続値**を見る。列が割れないまま数値が
-      // じわりとずれる変更（融合の外れ・縮約順序の変化）は②を素通りするので、その線を
-      // ここが受け持つ。`generateGreedy` は通さず、chunk の組み立て（pad 0・絶対位置・
-      // 物理行数固定）を**この場で書く** — 生成ループと同じヘルパを使うと、割り方の誤りが
-      // 期待値の側にも同じように入って恒真化する。
+    it("③ prefill logits: compare only the valid rows of context-en's 3 chunks (diagnostic line)", async () => {
+      // Where ② looks only at discrete agreement, this looks at **continuous values**. A change
+      // that drifts the values without splitting the sequence (a fusion falling off, a change of
+      // reduction order) passes ② untouched, so this line covers it. It does not go through
+      // `generateGreedy` and writes the chunk assembly (pad 0, absolute positions, a fixed
+      // physical row count) **right here** — using the same helper as the generation loop would
+      // put a splitting error into the expected side the same way and make it vacuous.
       //
-      // 故障注入の実測（2026-08-18）: 2 本目以降の chunk だけ絶対位置を +1 すると、最初に
-      // ずれた行（位置 33）の argmax が即座に割れる。一方**全行を一様に +1** しても
-      // maxAbs 8.9e-5 で素通りする — RoPE は相対位置しか見ないので、これは門の弱さでは
-      // なく不変性そのもの（この経路で捕まえられるのは chunk 間の相対ずれ・行の取り違え・
-      // pad 行の混入で、絶対位置の一様なオフセットではない）。
+      // Measured fault injection (2026-08-18): adding +1 to the absolute positions of the 2nd
+      // chunk onwards only breaks the argmax of the first shifted row (position 33) at once. On
+      // the other hand, **+1 on every row uniformly** passes untouched at maxAbs 8.9e-5 — RoPE
+      // looks only at relative positions, so this is not a weakness of the check but the
+      // invariance itself (what this path can catch is a relative shift between chunks, mixed-up
+      // rows and pad rows leaking in, not a uniform offset of the absolute positions).
       const io = await loadIo("context-en");
       const total = io.ids.length;
       const vocab = io.logits.length / total;
-      assertEquals(io.tokens.length, total, "io の token 行数");
-      assert(Number.isSafeInteger(vocab), `io の logits 長 ${io.logits.length} が行数で割れない`);
+      assertEquals(io.tokens.length, total, "io token row count");
+      assert(
+        Number.isSafeInteger(vocab),
+        `io logits length ${io.logits.length} is not divisible by the row count`,
+      );
 
       const context = await session.createGenerationContext({
         bindings: { [CAPACITY_SYMBOL]: CAPACITY },
@@ -486,7 +538,8 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
         for (let position = 0; position < total; position += CHUNK_LENGTH) {
           const queryLength = Math.min(CHUNK_LENGTH, total - position);
           totalQueryLength += queryLength;
-          // pad 行は 0 のまま（ADR 0066 追記 6 の値契約）— `Int32Array` の初期値がその契約。
+          // Pad rows stay 0 (the value contract of ADR 0066 addendum 6) — the initial value of
+          // `Int32Array` is that contract.
           const ids = new Int32Array(CHUNK_LENGTH);
           const positions = new Int32Array(CHUNK_LENGTH);
           for (let row = 0; row < queryLength; row += 1) {
@@ -504,51 +557,59 @@ describe.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
           chunks += 1;
 
           const logits = outputs[logitsName];
-          assertEquals(logits.dtype, "f32", "logits の dtype");
-          assertEquals(logits.shape, [1, CHUNK_LENGTH, vocab], "logits の shape（物理 chunk 形）");
+          assertEquals(logits.dtype, "f32", "logits dtype");
+          assertEquals(
+            logits.shape,
+            [1, CHUNK_LENGTH, vocab],
+            "logits shape (the physical chunk form)",
+          );
           const tokens = outputs[tokenName];
-          assertEquals(tokens.dtype, "i32", "token の dtype");
-          assertEquals(tokens.shape, [1, CHUNK_LENGTH, 1], "token の shape");
+          assertEquals(tokens.dtype, "i32", "token dtype");
+          assertEquals(tokens.shape, [1, CHUNK_LENGTH, 1], "token shape");
 
           for (let row = 0; row < queryLength; row += 1) {
-            const where = `位置 ${position + row}`;
-            // token は離散なので厳密一致（②と同じ判定を chunk の途中行にも掛ける）。
+            const where = `position ${position + row}`;
+            // Tokens are discrete, so exact agreement (the same decision as ② applied to the
+            // rows in the middle of a chunk too).
             assertEquals(tokens.data[row], io.tokens[position + row], `${where}: argmax token`);
             const base = row * vocab;
             const reference = (position + row) * vocab;
             for (let column = 0; column < vocab; column += 1) {
               const delta = Math.abs(logits.data[base + column] - io.logits[reference + column]);
-              // MUST: NaN を「最悪値」として**残す**書き方にする（`!(delta <= worst)` だと
-              // 一度 NaN を掴んでも次の有限値で上書きされ、非有限が黙って消える）。
+              // MUST: written so a NaN **stays** as "the worst value" (with `!(delta <= worst)`,
+              // a NaN caught once would be overwritten by the next finite value and the
+              // non-finite would silently vanish).
               if (Number.isNaN(delta) || delta > worst) {
                 worst = delta;
-                worstAt = `${where} / 列 ${column}`;
+                worstAt = `${where} / column ${column}`;
               }
             }
           }
         }
       } finally {
-        // MUST: 途中で落ちても返す（KV 容量ぶんの VRAM を抱えたままにしない）。
+        // MUST: release it even on a failure midway (do not keep holding the VRAM of the KV
+        // capacity).
         await context.dispose();
       }
-      // 恒真回避: `chunks` はループ反復数そのものなので自己比較になる（G4 L-4）。
-      // 各 chunk の queryLength の総和が有効行数 total と一致することを実効に検査する。
-      assertEquals(totalQueryLength, total, "chunk の queryLength 総和");
+      // Avoiding a vacuous check: `chunks` is the loop's own iteration count, so comparing it
+      // would be self-comparison (G4 L-4). Check effectively that the sum of each chunk's
+      // queryLength equals the valid row count total.
+      assertEquals(totalQueryLength, total, "sum of the chunks' queryLength");
       console.log(
-        `[e2e] minicpm5 decode prefill context-en: ${chunks} chunk / 有効 ${total} 行 / ` +
-          `logits maxAbs ${worst.toExponential(3)}（最悪 ${worstAt}）`,
+        `[e2e] minicpm5 decode prefill context-en: ${chunks} chunk / ${total} valid rows / ` +
+          `logits maxAbs ${worst.toExponential(3)} (worst ${worstAt})`,
       );
-      // 非有限（NaN / inf）はここで必ず落ちる（`worst` が NaN なら `<=` は偽）。
+      // Non-finite values (NaN / inf) always fail here (if `worst` is NaN, `<=` is false).
       assert(
         worst <= PREFILL_ATOL,
-        `context-en: prefill logits の maxAbs ${worst} が atol ${PREFILL_ATOL} を超えた` +
-          `（最悪 ${worstAt}）`,
+        `context-en: prefill logits maxAbs ${worst} exceeded atol ${PREFILL_ATOL}` +
+          ` (worst ${worstAt})`,
       );
     });
   },
 );
 
-/** census 1 回ぶんの内訳（states 形カーネル族の dispatch 数）。 */
+/** The breakdown of one census (the dispatch counts of the states-form kernel families). */
 type StateCensus = {
   readonly qk: number;
   readonly stats: number;
@@ -557,21 +618,24 @@ type StateCensus = {
 };
 
 /**
- * ④census（ADR 0058 決定 4 / 0067 受入条件 ③）。states 形の 4 族が**実際に走った**ことと、
- * q 側の 2 族に `:gqa` が付いたことをパイプラインキーの側から見る。
+ * ④ census (ADR 0058 decision 4 / 0067 acceptance condition ③). It checks, from the pipeline
+ * keys, that the 4 states-form families **actually ran** and that the 2 q-side families got
+ * `:gqa`.
  *
- * 数値（②③）はキーを区別しない — `repeat_kv` を実体化した形も、融合 attention の従来形も、
- * 正しく実装されていれば同じ値を出す。**キーだけがこの区別をする**。
+ * The values (② ③) do not tell the keys apart — the form that materializes `repeat_kv` and the
+ * older fused-attention form give the same values when implemented correctly. **Only the keys make
+ * this distinction**.
  *
- * NOTE: `:gqa` が付くのは ①QK と ③PV だけ。②行統計と `state_append` は GQA の軸を持たない
- * （キー生成が `stateVariantKeyPart(sliding, false)` — src/kernels/state-attention.ts）ので、
- * 「4 族すべてに `:gqa`」は成立しない。ここは**付くべき 2 族に付き、付かないべき 2 族に
- * 付かない**の両側で見る。
+ * NOTE: only ①QK and ③PV get `:gqa`. ② the row statistics and `state_append` have no GQA axis
+ * (their key comes from `stateVariantKeyPart(sliding, false)` — src/kernels/state-attention.ts),
+ * so "`:gqa` on all 4 families" does not hold. This checks both sides: **present on the 2 families
+ * that should have it, absent on the 2 that should not**.
  */
 const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): StateCensus => {
-  // MUST: census の無い run を「0 本」として数えない — キー検査が黙って空振りする。
-  // NOTE: 源は計画上の本数（states 形の仕事量ゼロの dispatch も 1 本）。ここの本数検査は全て
-  // 下限なので、発行より多く出る側の差は検査を緩めない。
+  // MUST: do not count a run without a census as "0" — the key checks would silently do nothing.
+  // NOTE: the source is the planned count (a states-form dispatch with zero work also counts as
+  // 1). Every count check here is a lower bound, so a difference toward more than issued does not
+  // loosen the check.
   const entries = requireCensus(diagnostics.lastRunPipelines, where);
 
   const family = (prefix: string) => entries.filter((entry) => entry.key.startsWith(prefix));
@@ -589,41 +653,44 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
   };
 
   const shown = entries.map((entry) => `${entry.key}×${entry.dispatchCount}`).join(" / ");
-  // ① 4 族が実効（0 本の族があれば、その段は別経路で走ったか走っていない）。
+  // ① The 4 families are in effect (a family with 0 means that stage ran another path or did not
+  // run).
   assert(
     census.qk > 0 && census.stats > 0 && census.pv > 0 && census.append > 0,
-    `${where}: states 形の族に 0 本がある ${JSON.stringify(census)}（走った内訳: ${shown}）`,
+    `${where}: a states-form family has 0 ${JSON.stringify(census)} (what ran: ${shown})`,
   );
-  // 全層ぶん出ている（行ブロック分割 — ADR 0060 / 0067 決定 7 — は増える側なので下限で見る）。
+  // Every layer is there (row-block splitting — ADR 0060 / 0067 decision 7 — only adds, so lower
+  // bounds).
   assert(
     census.qk >= LAYERS && census.stats >= LAYERS && census.pv >= LAYERS,
-    `${where}: attention の dispatch が層数 ${LAYERS} に足りない ${JSON.stringify(census)}`,
+    `${where}: attention dispatches fall short of the layer count ${LAYERS} ${JSON.stringify(census)}`,
   );
   assert(
     census.append >= SLOTS,
-    `${where}: state_append の dispatch がスロット数 ${SLOTS} に足りない ${JSON.stringify(census)}`,
+    `${where}: state_append dispatches fall short of the slot count ${SLOTS} ${JSON.stringify(census)}`,
   );
 
-  // ② 16:2 なので ①QK / ③PV は全て `:gqa` 変種。1 本でも素のキーが出たら、その層は k / v を
-  // H まで広げた形で走ったか、GQA 判定が落ちている。
+  // ② With 16:2, ①QK / ③PV are all `:gqa` variants. A single bare key means that layer ran with
+  // k / v widened to H, or the GQA detection failed.
   assertEquals(
     [...qk, ...pv].filter((entry) => !entry.key.endsWith(":gqa")).map((entry) => entry.key),
     [],
-    `${where}: 16:2 の GQA なのに非 GQA キーが走った（走った内訳: ${shown}）`,
+    `${where}: non-GQA keys ran despite 16:2 GQA (what ran: ${shown})`,
   );
-  // 逆側 — 行統計と append に `:gqa` は付かない（GQA の軸を持たない）。
+  // The other side — the row statistics and append do not get `:gqa` (they have no GQA axis).
   assertEquals(
     [...stats, ...append].filter((entry) => entry.key.includes(":gqa")).map((entry) => entry.key),
     [],
-    `${where}: 行統計 / state_append に GQA 変種が出た（走った内訳: ${shown}）`,
+    `${where}: GQA variants appeared in the row statistics / state_append (what ran: ${shown})`,
   );
-  // `window` attrs を持たない full 形なので sliding 変種は 1 本も出ない（出たら窓外を切る）。
+  // The full form without `window` attrs, so no sliding variant appears (one would cut outside
+  // the window).
   assertEquals(
     entries.filter((entry) => entry.key.includes(":sliding")).map((entry) => entry.key),
     [],
-    `${where}: full 形なのに sliding 変種が走った（走った内訳: ${shown}）`,
+    `${where}: sliding variants ran despite the full form (what ran: ${shown})`,
   );
-  // ③ 非 states の attention 系が 0 本（融合 attention の別族へ落ちていない）。
+  // ③ Zero non-states attention kernels (it did not fall to another fused-attention family).
   assertEquals(
     entries
       .filter(
@@ -631,26 +698,27 @@ const assertStateCensus = (diagnostics: SessionDiagnostics, where: string): Stat
       )
       .map((entry) => entry.key),
     [],
-    `${where}: states 形でない attention のキーが混ざっている（走った内訳: ${shown}）`,
+    `${where}: attention keys that are not states-form are mixed in (what ran: ${shown})`,
   );
   return census;
 };
 
 /**
- * ④census（実 GPU）。
+ * ④ census (real GPU).
  *
- * MUST: 源は計測に依らない `lastRunPipelines`（計測の無い device でも走る）。undefined / 空は
- * 上の {@link assertStateCensus} が落とす。
+ * MUST: the source is `lastRunPipelines`, which does not depend on timing (it works on a device
+ * without timing). {@link assertStateCensus} above fails on undefined / empty.
  */
 test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
-  `MiniCPM5 decode census: states 形カーネル族が GQA 変種で走る（実 GPU）${SERIES_CHECKS_OPT_IN}`,
+  `MiniCPM5 decode census: the states-form kernel families run as GQA variants (real GPU)${SERIES_CHECKS_OPT_IN}`,
   async () => {
     const opened = await openSeriesContainer(new URL(MODEL_FILE, SERIES_ROOT));
     const parsed = prepareContainer(opened, MODEL_GRAPH);
     const [, tokenName] = parsed.graph.outputs;
-    // 最短ケース（T=6）で足りる — 見るのは走ったパイプラインの種類と本数。
+    // The shortest case (T=6) is enough — what is checked is the kinds and counts of pipelines that
+    // ran.
     const golden = await loadGreedy("capital-en");
-    assert(golden.prompt.length <= CHUNK_LENGTH, "census は 1 chunk で踏むケースを使う");
+    assert(golden.prompt.length <= CHUNK_LENGTH, "the census uses a case exercised in 1 chunk");
 
     const gpu = await acquireGpu();
     const session = await parsed.createContainerSession(gpu);
@@ -675,9 +743,14 @@ test.skipIf(!AVAILABLE || !GPU_AVAILABLE)(
       );
       const prefillCensus = assertStateCensus(session.diagnostics(), "prefill");
 
-      // decode 形（M=1）は prefill とは別の計画なので、キーの検査も 1 度ずつ要る。
+      // The decode form (M=1) is a plan separate from prefill, so the key check is needed once
+      // for each.
       const first = prefill[tokenName].data[golden.prompt.length - 1];
-      assertEquals(first, golden.expected[0], "prefill の最終有効行が greedy golden の 1 手目");
+      assertEquals(
+        first,
+        golden.expected[0],
+        "prefill's last valid row is the greedy golden's first token",
+      );
       await session.run(
         {
           [INPUT_IDS]: i32Row(1, Int32Array.of(first)),

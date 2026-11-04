@@ -1,18 +1,22 @@
-// 配布形ミラー（`models/*/karume.json`）の**全 model × 全 quant** について、共通の合成
-// `resolveSessionOptions(家族の受理表, quant.session, {})` が 1 本化前の写像と同じ
-// `SessionOptions` を返すことの門（GPU も重みも要らない — manifest を読むだけ）。
+// A check that, for **every model × every quant** of the distribution mirrors
+// (`models/*/karume.json`), the shared composition `resolveSessionOptions(family policy,
+// quant.session, {})` returns the same `SessionOptions` as the mapping before the unification (no
+// GPU and no weights needed — it only reads manifests).
 //
-// 1 本化前は、gemma 以外の 7 家族が `toSessionOptions(quant.session)` を直接 Session へ渡し、
-// gemma は明示指定 `{}` のとき宣言の 4 欄をそのまま写していた（= 受理される宣言については
-// `toSessionOptions` と同じ値）。ここで両者が一致すれば、Session へ渡る設定は 1 バイトも
-// 動いていない = 既存の参照値（sha 行）が動かないことの根拠になる。受理表が宣言を拒否する
-// quant が 1 つでもあれば、それは配布済みの資産を読めなくする退行としてここで落ちる。
+// Before the unification, the 7 families other than gemma passed `toSessionOptions(quant.session)`
+// straight to the Session, and gemma, given an explicit `{}`, copied the declaration's 4 fields as
+// they were (= the same values as `toSessionOptions` for an accepted declaration). If the two agree
+// here, the settings that reach the Session have not moved by a single byte = the grounds that the
+// existing reference values (sha rows) do not move. If the policy refuses the declaration of even
+// one quant, that fails here as a regression that makes already-distributed assets unreadable.
 //
-// 併せて、全家族が GPU へ要求する feature（`sessionGpuFeatures` — 宣言 ∪ 実効設定が要る feature）も
-// 宣言そのままであることを見る（要求が増えると、同じ資産を読む device の条件が黙って厳しくなる）。
+// It also checks that the features every family requests from the GPU (`sessionGpuFeatures` —
+// the declared ones ∪ the features the effective settings need) are exactly the declared ones (more
+// requests would silently tighten the device requirements for reading the same asset).
 //
-// ミラーが無い機では理由を出して**明示 SKIP** する（`runtime/tests/e2e_*_fusion_counts_test.ts`
-// と同じ規律 — ミラーごと無い形は `runtime/tests/distribution_gate_test.ts` が FAIL にする）。
+// On a machine without the mirrors it **SKIPs explicitly** with a reason (the same rule as
+// `runtime/tests/e2e_*_fusion_counts_test.ts` — the shape with no mirror at all is FAILed by
+// `runtime/tests/distribution_gate_test.ts`).
 
 import { isNotFound, readDir, readTextFile } from "@karume/test-support/fs";
 import { test } from "vite-plus/test";
@@ -42,10 +46,11 @@ import { WAN_SESSION_POLICY } from "../../models/src/wan/family.ts";
 const MODELS_ROOT = new URL("../../../models/", import.meta.url);
 
 /**
- * manifest の pipeline 名 → 家族の受理表。
+ * The manifest's pipeline name → the family's policy.
  *
- * MUST: 未知の pipeline 名は SKIP せず落とす — 新しい家族のミラーを足した日に、この門が
- * 黙ってその家族を外すと、受理表の追随漏れ（配布済みの宣言を拒否する表）が見えなくなる。
+ * MUST: an unknown pipeline name fails rather than SKIPs — if this check silently left out a new
+ * family on the day its mirror is added, a policy that has not caught up (one that refuses
+ * already-distributed declarations) would go unseen.
  */
 const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   anima: ANIMA_SESSION_POLICY,
@@ -60,15 +65,15 @@ const POLICIES: Readonly<Record<string, FamilySessionPolicy>> = {
   "umt5-encoder": UMT5_ENCODER_SESSION_POLICY,
   "vowel-detector": VOWEL_DETECTOR_SESSION_POLICY,
   wan: WAN_SESSION_POLICY,
-  // Wan2.2 TI2V は 2.1 と同じ受理表を共有する（共通の admission — `family.ts`）。
+  // Wan2.2 TI2V shares the policy of 2.1 (the shared admission — `family.ts`).
   "wan-ti2v": WAN_SESSION_POLICY,
 };
 
 /**
- * ミラー 1 本の manifest を読む（無ければ `undefined`）。
+ * Reads one mirror's manifest (`undefined` when there is none).
  *
- * MUST: NotFound 以外は伝播させる — I/O 異常を「ミラーが無い」に丸めると、実行されていない
- * 検証が SKIP の顔で緑になる。
+ * MUST: anything other than NotFound propagates — folding an I/O failure into "no mirror" would
+ * turn a check that never ran green under the guise of a SKIP.
  */
 const readMirror = async (dir: URL): Promise<Manifest | undefined> => {
   try {
@@ -96,13 +101,13 @@ const listMirrors = async (): Promise<readonly (readonly [string, Manifest])[]> 
 const MIRRORS = await listMirrors();
 if (MIRRORS.length === 0) {
   console.warn(
-    `[karume] ${MODELS_ROOT.pathname} に配布形ミラーの karume.json が 1 本も無いため、` +
-      "SessionOptions の合成と 1 本化前の写像の同値検査を SKIP する",
+    `[karume] ${MODELS_ROOT.pathname} has no distribution-mirror karume.json, so the equivalence` +
+      " check of the SessionOptions composition against the pre-unification mapping is SKIPped",
   );
 }
 
 test.skipIf(MIRRORS.length === 0)(
-  "配布形ミラーの全 quant で、共通の合成が 1 本化前の写像と同じ SessionOptions を返す",
+  "for every quant of the distribution mirrors, the shared composition returns the same SessionOptions as the pre-unification mapping",
   () => {
     let checked = 0;
     for (const [mirror, manifest] of MIRRORS) {
@@ -110,7 +115,7 @@ test.skipIf(MIRRORS.length === 0)(
         const family = entry.pipeline.name;
         if (!Object.hasOwn(POLICIES, family)) {
           throw new Error(
-            `${mirror}: pipeline '${family}' の受理表がこの門に無い（POLICIES へ足す）`,
+            `${mirror}: this check has no policy for pipeline '${family}' (add it to POLICIES)`,
           );
         }
         const policy = POLICIES[family];
@@ -119,7 +124,8 @@ test.skipIf(MIRRORS.length === 0)(
           const resolved = resolveSessionOptions(policy, quant.session, {}, where);
           assertEquals(resolved, toSessionOptions(quant.session), where);
           if (policy === GEMMA_SESSION_POLICY) {
-            // gemma の入口が実際に呼ぶ包みも同じ値（resolveGemmaSessionOptions の呼び方は変えていない）。
+            // The wrapper gemma's entry point actually calls gives the same value (the way
+            // resolveGemmaSessionOptions is called is unchanged).
             assertEquals(resolveGemmaSessionOptions(quant.session, {}, where), resolved, where);
           }
           assertEquals(sessionGpuFeatures(quant.gpuFeatures, resolved), quant.gpuFeatures, where);
@@ -127,7 +133,7 @@ test.skipIf(MIRRORS.length === 0)(
         }
       }
     }
-    // 0 件で緑になる形（manifest はあるが quant を 1 つも読めていない）を通さない。
-    if (checked === 0) throw new Error("ミラーはあるが quant を 1 つも検査していない");
+    // Do not let a zero-count run go green (manifests exist but not one quant was read).
+    if (checked === 0) throw new Error("mirrors exist but not one quant was checked");
   },
 );

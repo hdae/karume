@@ -1,37 +1,52 @@
 /**
- * Wan2.1 の umT5（`text_encoder`）の**部品差し替え**（`components` — ADR 0122 決定 7・ADR 0108 決定 19）を、
- * 手元の配布形ミラーで実 GPU の生成まで通す e2e。
+ * E2E that runs a **component replacement** (`components` — ADR 0122 decision 7, ADR 0108 decision
+ * 19) of Wan2.1's umT5 (`text_encoder`) through to real-GPU generation with local distribution
+ * mirrors.
  *
- * ホストテスト（`wan_components_test.ts`）は疑似 HF とメモリ上のディレクトリで admission と取得を押さえるが、
- * 差し替え先が**手元のディレクトリ**のとき、重みの block は Session の構築（`generate` の text 段）で区間読み
- * されるので、ホストテストでは観測できない（ADR 0122 追記「段 d の結果」の残り）。ここで押さえるのは 4 点:
+ * The host test (`wan_components_test.ts`) covers admission and fetching with a fake HF and an
+ * in-memory directory, but when the replacement is a **local directory**, the weight blocks are
+ * read by range during Session construction (the text stage of `generate`), which the host test
+ * cannot observe (the remainder of the ADR 0122 addendum "result of step d"). Four points are
+ * covered here:
  *
- * ① **構築**: Wan の配布形の取得元に umT5 の越境先の `crossRepo` mapping を 1 本も渡さずに、`text_encoder` を
- *    差し替えた `Pipeline.fromPretrained` が通る。
- * ② **出所**: 差し替え先の取得元を、読んだ path と区間を記録する読み口で包む。差し替え先の `text_encoder` の
- *    グラフが束縛する block（実体・scale・zero point — 差し替え先の descriptor から引く）の区間が全部、text 段の
- *    中の差し替え先からの読みで隙間なく覆われ、構築中に差し替え先から読まれたのは manifest と part 0
- *    （descriptor）だけで、text 段の後には 1 度も読まれない。Wan の取得元は text encoder の part の path を
- *    1 度も読まない（= 差し替え先のほかに text encoder のバイト列を供給したものが無い — 越境先は mapping が
- *    無いので、そもそも開けない）。前提: 差し替え先の実体を持つ重みの part（part 1 以降）は全部、グラフの
- *    束縛する block を持つ（資産だけの part を持つ差し替え先は対象外 — GPU に触る前に見て落とす）。
- * ③ **生成**: `e2e_wan_pipeline_test.ts` の GPU 経路の 1 本目と同じ要求（固定プロンプト `boxing-cats` の原文・
- *    seed 42・2 ステップ・832×480・33 フレーム・既定の negative・`f16` 席）が完走し、非有限 0・宣言どおりの形。
- * ④ **対照**（GPU 不要 — 模擬 GPU）: 同じ取得元で差し替えず mapping も無ければ、umT5 の part 0 の事前取得で
- *    hub の「越境先が無い」の案内を cause に持つ失敗で落ちる（① が mapping の残りで通ったのではないことの確認）。
+ * ① **Construction**: `Pipeline.fromPretrained` with `text_encoder` replaced passes without giving
+ *    the source of the Wan distribution a single `crossRepo` mapping for umT5's cross-repository
+ *    target.
+ * ② **Provenance**: the replacement's source is wrapped in a reader that records the paths and
+ *    ranges it read. The ranges of all blocks bound by the replacement's `text_encoder` graph (data,
+ *    scale, zero point — taken from the replacement's descriptor) are covered without gaps by reads
+ *    from the replacement inside the text stage; during construction only the manifest and part 0
+ *    (the descriptor) are read from the replacement, and after the text stage it is never read. The
+ *    Wan source never reads the path of a text-encoder part (= nothing but the replacement supplied
+ *    the text encoder's bytes — the cross-repository target has no mapping, so it cannot be opened
+ *    at all). Assumption: every weight part of the replacement that holds data (part 1 onward)
+ *    holds blocks the graph binds (a replacement with asset-only parts is out of scope — checked
+ *    and failed before touching the GPU).
+ * ③ **Generation**: the same request as the first GPU-path case of `e2e_wan_pipeline_test.ts` (the
+ *    original text of the fixed prompt `boxing-cats`, seed 42, 2 steps, 832×480, 33 frames, the
+ *    default negative, the `f16` preset) completes, with 0 non-finite values and the declared
+ *    shape.
+ * ④ **Control** (no GPU — fake GPU): with the same source, no replacement and no mapping, it fails
+ *    in the prefetch of umT5's part 0 with a failure whose cause carries hub's "no cross-repository
+ *    target" guidance (confirming that ① did not pass through a leftover mapping).
  *
- * 差し替え先は利用者が選ぶ手元の配布形（実験用ミラー）で、ディレクトリを環境変数 {@link SWAP_ENV} で受ける
- * （追跡されるコードに特定のミラーを書かない — ADR 0122「影響ファイル」の TS のテスト）。未設定なら ①〜③ は
- * 明示 SKIP（opt-in）。④ は差し替え先に依らず構築だけで済むので、配布形があれば既定のレーンで回す。
+ * The replacement is a local distribution the user chooses (a local experimental mirror), whose
+ * directory comes in through the environment variable {@link SWAP_ENV} (tracked code does not name
+ * a particular mirror — the TS test of ADR 0122 "affected files"). When it is unset, ①–③ SKIP
+ * explicitly (opt-in). ④ does not depend on the replacement and needs only construction, so it runs
+ * in the default lanes whenever the distribution is present.
  *
- * ## 観測（門ではない）
+ * ## Observation (not a check)
  *
- * 出力の sha256 は門にしない（差し替え先は利用者が選ぶので、環境ごとの行を持てない）。sha256・構築と段の
- * 所要・差し替え先から読んだバイト数を `outputs/verify/<環境キー>/<日付>_wan-swap/` に残し、同じ要求を元の
- * umT5 で回した行（`fixtures/references/wan.json` の {@link ORIGINAL_CASE_ID}）との一致 / 不一致も記録する
- * （行は引くだけで、書かない・突き合わせの決着にもしない）。
+ * The output sha256 is not a check (the user chooses the replacement, so there can be no row per
+ * environment). The sha256, the construction and stage times and the number of bytes read from the
+ * replacement go to `outputs/verify/<environment key>/<date>_wan-swap/`, and the match / mismatch
+ * with the row of the same request run with the original umT5 ({@link ORIGINAL_CASE_ID} of
+ * `fixtures/references/wan.json`) is recorded too (the row is only looked up — not written, and not
+ * used as the outcome of a comparison).
  *
- * 配布形が無い環境は明示 SKIP（全 SKIP を FAIL にするのは門番 `distribution_gate_test.ts`）。
+ * Environments without the distribution SKIP explicitly (the all-skip guard
+ * `distribution_gate_test.ts` turns an all-SKIP into a FAIL).
  */
 
 import {
@@ -77,36 +92,44 @@ import { fakeDevice, fakeGpuContext } from "../../runtime/tests/helpers/fake-gpu
 import { openReferences, sha256Hex } from "../../runtime/tests/helpers/reference.ts";
 import { openResults, runRecordedCase } from "../../runtime/tests/helpers/results.ts";
 
-/** 差し替え先（手元の配布形 — `karume.json` を持つディレクトリ）を受ける環境変数（opt-in）。 */
+/**
+ * Environment variable that receives the replacement (a local distribution — a directory with
+ * `karume.json`) (opt-in).
+ */
 const SWAP_ENV = "KARUME_WAN_SWAP_TEXT_ENCODER";
 const SWAP_RAW = process.env[SWAP_ENV];
-/** 差し替え先のディレクトリ（未設定・空文字なら undefined = ①〜③ を SKIP）。 */
+/** Directory of the replacement (unset or empty string → undefined = ①–③ SKIP). */
 const SWAP_DIRECTORY = SWAP_RAW === undefined || SWAP_RAW === "" ? undefined : SWAP_RAW;
 
-/** 配布形ミラー（`dist.py --pipeline wan` の既定の出力先）。 */
+/** The distribution mirror (the default output directory of `dist.py --pipeline wan`). */
 const DIST_ROOT = new URL("../../../models/karume-wan2.1/", import.meta.url);
-/** manifest の部品名（`src/wan/pipeline.ts` の `TEXT_ENCODER`）。 */
+/** Component name in the manifest (`TEXT_ENCODER` of `src/wan/pipeline.ts`). */
 const TEXT_ENCODER = "text_encoder";
 /**
- * 席（明示 — 省略すると manifest の `defaultQuant` へ黙って移る。`e2e_wan_pipeline_test.ts` の GPU 経路と同じ
- * `f16` 席にして、元の umT5 の行と同じ要求にする）。
+ * Preset (explicit — when omitted it silently moves to the manifest's `defaultQuant`. It is the
+ * `f16` preset, as on the GPU path of `e2e_wan_pipeline_test.ts`, so the request equals that of the
+ * original umT5's row).
  */
 const F16_QUANT = "f16";
 const STEPS = 2;
-/** `frames` / 寸法を省いたときの既定（`src/wan/pipeline.ts`）— 形の検査にだけ使う。 */
+/**
+ * Defaults when `frames` / dimensions are omitted (`src/wan/pipeline.ts`) — used only for the shape
+ * check.
+ */
 const DEFAULT_FRAMES = 33;
 const DEFAULT_WIDTH = 832;
 const DEFAULT_HEIGHT = 480;
 
 /**
- * 差し替えの生成 1 本。要求は `e2e_wan_pipeline_test.ts` の `GPU_TEXT_CASES` の 1 本目と同じ（固定プロンプトの
- * 原文・seed 42・2 ステップ・既定の negative / 寸法 / フレーム数）— 違うのは text encoder の重みだけ。
+ * The one replacement generation. The request is the same as the first of `GPU_TEXT_CASES` in
+ * `e2e_wan_pipeline_test.ts` (the original text of the fixed prompt, seed 42, 2 steps, default
+ * negative / dimensions / frame count) — only the text encoder's weights differ.
  *
- * MUST: 文面・seed・step 数を変えたら ID も変え、{@link ORIGINAL_CASE_ID} との比較もやめる（別の条件の sha を
- * 比べることになる）。
+ * MUST: when the text, seed or step count changes, change the ID too and stop the comparison with
+ * {@link ORIGINAL_CASE_ID} (it would compare the sha of different conditions).
  */
 const SWAP_CASE = { id: "swap-text-2step-boxing-cats-seed42", prompt: "boxing-cats", seed: 42 };
-/** 同じ要求を元の umT5 で回した sha 行（比べるだけ — 観測）。 */
+/** sha row of the same request run with the original umT5 (only compared — an observation). */
 const ORIGINAL_CASE_ID = "gpu-text-2step-boxing-cats-seed42";
 
 const fileExists = (url: URL): boolean => {
@@ -121,14 +144,14 @@ const fileExists = (url: URL): boolean => {
 const DIST_PRESENT = fileExists(new URL("karume.json", DIST_ROOT));
 if (!DIST_PRESENT) {
   console.warn(
-    `[karume] 配布形ミラー ${DIST_ROOT.pathname} が無いため Wan の text_encoder の差し替えの e2e を SKIP する。` +
-      `組み立て: ${WAN_ASSEMBLE_COMMAND}（全 SKIP は門番 distribution_gate_test.ts が FAIL にする）`,
+    `[karume] The distribution mirror ${DIST_ROOT.pathname} is missing, so the Wan text_encoder replacement e2e is SKIPPED. ` +
+      `Assemble: ${WAN_ASSEMBLE_COMMAND} (the all-skip guard distribution_gate_test.ts turns an all-SKIP into a FAIL)`,
   );
 }
 if (SWAP_DIRECTORY === undefined) {
   console.warn(
-    `[karume] Wan の text_encoder の差し替えの生成（実 GPU）は opt-in のため SKIP する` +
-      `（${SWAP_ENV}=<差し替え先の手元の配布形のディレクトリ> で回す）`,
+    `[karume] The Wan text_encoder replacement generation (real GPU) is opt-in, so it is SKIPPED` +
+      ` (run it with ${SWAP_ENV}=<directory of the local replacement distribution>)`,
   );
 }
 
@@ -137,36 +160,43 @@ const references = openReferences(
 );
 const results = openResults("wan-swap");
 
-/** 実体を持つ part（長さ 0 の part は取得の対象外 — hub も取らない）。 */
+/** Parts that hold data (zero-length parts are not fetched — hub does not fetch them either). */
 const nonEmpty = (parts: readonly FileRef[]): readonly FileRef[] =>
   parts.filter((part) => part.size > 0);
 
-/** manifest の `text_encoder` の part 列（席は `quant`・model は既定）。 */
+/** The part list of the manifest's `text_encoder` (preset `quant`, default model). */
 const textEncoderParts = async (root: URL, quant?: string): Promise<readonly FileRef[]> => {
   const manifest = parseManifest(await readTextFile(new URL("karume.json", root)));
   const container = resolveSelection(manifest, {
     ...(quant === undefined ? {} : { quant }),
     weights: [TEXT_ENCODER],
   }).containers[TEXT_ENCODER];
-  assert(container !== undefined, `${root.pathname} の manifest に '${TEXT_ENCODER}' の容器が無い`);
+  assert(
+    container !== undefined,
+    `${root.pathname}: the manifest has no '${TEXT_ENCODER}' container`,
+  );
   return container.parts;
 };
 
 /**
- * Wan の配布形の `text_encoder` の part 列。前提（越境参照であること）もここで見る — 自リポの容器だと「mapping
- * 無しで通る」が自明になり、① と ④ が何も確かめない。
+ * The part list of the Wan distribution's `text_encoder`. The precondition (that it is a
+ * cross-repository reference) is checked here too — with a container in the same repository,
+ * "passes without a mapping" would be trivial and ① and ④ would confirm nothing.
  */
 const wanTextEncoderParts = async (): Promise<readonly FileRef[]> => {
   const parts = await textEncoderParts(DIST_ROOT, F16_QUANT);
   assert(
     parts.length > 0 && parts.every((part) => part.repo !== undefined),
-    `配布形 ${DIST_ROOT.pathname} の '${TEXT_ENCODER}' が umT5 の配布リポへの越境参照でない` +
-      `（この e2e の前提 — 組み直し: ${WAN_ASSEMBLE_COMMAND}）`,
+    `the distribution ${DIST_ROOT.pathname}: '${TEXT_ENCODER}' is not a cross-repository reference to the umT5 distribution repository` +
+      ` (a precondition of this e2e — reassemble: ${WAN_ASSEMBLE_COMMAND})`,
   );
   return parts;
 };
 
-/** グラフが束縛する block 1 本の所在（容器の part 番号 = manifest の part 列の添字と、part 内の区間）。 */
+/**
+ * Location of one block the graph binds (the container's part number = index into the manifest's
+ * part list, and the range inside the part).
+ */
 type BoundBlock = {
   readonly id: string;
   readonly part: number;
@@ -175,16 +205,21 @@ type BoundBlock = {
 };
 
 /**
- * 差し替え先の `text_encoder` の容器を区間読みで開き（読むのは part 0 の 2 文書だけ — 重みは読まない）、
- * グラフが束縛する block（実体・scale・zero point）を全部返す。選択は {@link textEncoderParts} の差し替え先の
- * 呼び方と同じ（model / quant は既定）。グラフ名 = manifest の weights キー（書き手の規約 — container-v1 §2.1）。
+ * Opens the replacement's `text_encoder` container through range reads (only the 2 documents of
+ * part 0 are read — no weights) and returns every block the graph binds (data, scale, zero point).
+ * The selection is the same as how {@link textEncoderParts} is called for the replacement (default
+ * model / quant). Graph name = the manifest's weights key (the writer's convention — container-v1
+ * §2.1).
  */
 const textEncoderBlocks = async (root: URL): Promise<readonly BoundBlock[]> => {
   const loaded = await loadManifest(nodeDirectory(root.pathname));
   const container = resolveSelection(loaded.manifest, { weights: [TEXT_ENCODER] }).containers[
     TEXT_ENCODER
   ];
-  assert(container !== undefined, `${root.pathname} の manifest に '${TEXT_ENCODER}' の容器が無い`);
+  assert(
+    container !== undefined,
+    `${root.pathname}: the manifest has no '${TEXT_ENCODER}' container`,
+  );
   const opened = await openContainer(
     { kind: "source", source: openContainerSource(loaded, container) },
     container.descriptor,
@@ -192,7 +227,7 @@ const textEncoderBlocks = async (root: URL): Promise<readonly BoundBlock[]> => {
   const graph = opened.graphs[TEXT_ENCODER];
   assert(
     graph !== undefined,
-    `${root.pathname} の '${TEXT_ENCODER}' の容器にグラフ '${TEXT_ENCODER}' が無い`,
+    `${root.pathname}: the '${TEXT_ENCODER}' container has no graph '${TEXT_ENCODER}'`,
   );
   return [...graph.supplies.values()].flatMap((supply) => [
     ...supply.blocks,
@@ -201,10 +236,12 @@ const textEncoderBlocks = async (root: URL): Promise<readonly BoundBlock[]> => {
   ]);
 };
 
-/** 読みが起きた区間（構築中 / text 段の中 / text 段の後）。 */
+/** When a read happened (during construction / inside the text stage / after the text stage). */
 type Phase = "construction" | "text_encoder" | "after_text_encoder";
 
-/** 取得元の読み口が受けた読み 1 回（全量読みは offset 0・長さ = 返したバイト数）。 */
+/**
+ * One read the source's reader received (a whole-file read is offset 0, length = bytes returned).
+ */
 type Read = {
   readonly path: string;
   readonly offset: number;
@@ -212,7 +249,10 @@ type Read = {
   readonly phase: Phase;
 };
 
-/** `reads`（同じ path の読み — 順不同・重なりを許す）が `[offset, offset + length)` を隙間なく覆うか。 */
+/**
+ * Whether `reads` (reads of the same path — any order, overlaps allowed) cover
+ * `[offset, offset + length)` without gaps.
+ */
 const covers = (reads: readonly Read[], offset: number, length: number): boolean => {
   const end = offset + length;
   let reached = offset;
@@ -225,16 +265,21 @@ const covers = (reads: readonly Read[], offset: number, length: number): boolean
 };
 
 /**
- * 手元のディレクトリを取得元にし、読んだ path と区間を `reads` に積む。読み口は `@karume/hub/node` の
- * `nodeDirectory` と同じ 2 本（全量読み + 位置読み）— 位置読みを落とすと Session の構築が区間読み（seek）から
- * part の全量読み（scan）へ倒れ、利用者の経路と別の読み方を観測することになる。
+ * Uses a local directory as the source and pushes the paths and ranges read onto `reads`. The
+ * reader has the same 2 methods as `nodeDirectory` of `@karume/hub/node` (whole-file read +
+ * positional read) — without the positional read, Session construction falls back from range reads
+ * (seek) to whole-part reads (scan), and a different way of reading from the user's path would be
+ * observed.
  *
- * WHY 取得元ハンドル（`DistributionSource`）ではなく読み口（`DirectoryAdapter`）を包む: ハンドルは公開メンバを
- * 持たない不透明な値で（hub の `src/source.ts` の MUST）、外から委譲の包みを組めない。読み口を包んで
- * `localDirectory` に渡すのが、hub の公開面で組める唯一の委譲（`nodeDirectory` 自身も同じ形）。
- * NOTE: 読み口の中身は `nodeDirectory` の 2 本の写しで、読めないときの包みの文言・`readFile` の中断の扱い・
- * label は写していない（取得元の意味論 — 区間読み・size の境界・越境の解決 — は本物の `localDirectory` を
- * 通る）。hub が取得元ハンドルの委譲口を公開したら、ハンドルを包む形へ戻す。
+ * WHY wrap the reader (`DirectoryAdapter`) rather than the source handle (`DistributionSource`):
+ * the handle is an opaque value without public members (the MUST of hub's `src/source.ts`), so no
+ * delegating wrapper can be built around it from outside. Wrapping the reader and passing it to
+ * `localDirectory` is the only delegation that hub's public surface allows (`nodeDirectory` itself
+ * has the same shape). NOTE: the reader's body is a copy of the 2 methods of `nodeDirectory`; the
+ * wording of the wrapper for unreadable files, the abort handling of `readFile` and the label are
+ * not copied (the source semantics — range reads, size bounds, cross-repository resolution — go
+ * through the real `localDirectory`). Once hub exposes a delegation point for source handles, go
+ * back to wrapping the handle.
  */
 const recordingDirectory = (
   root: URL,
@@ -250,7 +295,8 @@ const recordingDirectory = (
         reads.push({ path, offset: 0, length: bytes.byteLength, phase: phase() });
         return bytes;
       },
-      // MUST: `length` ちょうどを buffer 全体を占める view で返す（`DirectoryAdapter.readFileRange` の契約）。
+      // MUST: return exactly `length` bytes as a view spanning the whole buffer (the contract of
+      // `DirectoryAdapter.readFileRange`).
       readFileRange: async (path, offset, length, { signal }) => {
         signal?.throwIfAborted();
         reads.push({ path, offset, length, phase: phase() });
@@ -261,20 +307,26 @@ const recordingDirectory = (
     { label },
   );
 
-/** 環境変数のパス → ディレクトリの `file:` URL（末尾 `/` つき — 無いと `new URL(path, root)` が兄弟を指す）。 */
+/**
+ * Path from the environment variable → `file:` URL of the directory (with a trailing `/` — without
+ * it `new URL(path, root)` points at a sibling).
+ */
 const directoryUrl = (path: string): URL => {
   let resolved: string;
   try {
     resolved = realPathSync(path);
   } catch (cause) {
-    throw new Error(`${SWAP_ENV}='${path}' のディレクトリを解決できない`, { cause });
+    throw new Error(`${SWAP_ENV}='${path}': cannot resolve the directory`, { cause });
   }
   const url = new URL("file:///");
   url.pathname = `${resolved}/`;
   return url;
 };
 
-/** 出力フレームの uint8 の RGB を全フレーム連結したバイト列（sha256 の実物 — `frameToRgba` の規則）。 */
+/**
+ * The uint8 RGB of all output frames concatenated (the sha256 artifact — the rule of
+ * `frameToRgba`).
+ */
 const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
   const plane = video.width * video.height;
   const out = new Uint8Array(video.frames * plane * 3);
@@ -289,13 +341,13 @@ const rgbBytes = (video: GeneratedVideo): Uint8Array<ArrayBuffer> => {
 
 const textOf = (pipeline: Pipeline, name: string): string => {
   const entry = pipeline.prompts.find((candidate) => candidate.name === name);
-  assert(entry !== undefined, `埋め込み資産に '${name}' が無い`);
+  assert(entry !== undefined, `the embedded assets have no '${name}'`);
   return entry.prompt;
 };
 
 test.skipIf(!DIST_PRESENT)(
-  "Wan の text_encoder の差し替えの対照（GPU 不要・模擬 GPU）: 差さず umT5 の越境先の mapping も無ければ、" +
-    "umT5 の part 0 の事前取得で「越境先が無い」の案内を cause に持って落ち、Wan の取得元から umT5 の part を読まない",
+  "Wan text_encoder replacement control (no GPU, fake GPU): without a replacement and without a mapping for umT5's cross-repository target, " +
+    "the prefetch of umT5's part 0 fails with the 'no cross-repository target' guidance as its cause, and the Wan source does not read umT5's parts",
   async () => {
     const wanParts = await wanTextEncoderParts();
     const [part0] = wanParts;
@@ -304,57 +356,63 @@ test.skipIf(!DIST_PRESENT)(
       () =>
         Pipeline.fromPretrained(
           recordingDirectory(DIST_ROOT, "wan-swap-control", reads, () => "construction"),
-          // 落ちるのは descriptor の事前取得（admission の前）— GPU に触る段まで進まない。
+          // The failure is in the descriptor prefetch (before admission) — it never reaches the
+          // stage that touches the GPU.
           { gpu: fakeGpuContext(fakeDevice()), textEncoder: "gpu", quant: F16_QUANT },
         ),
       Error,
       `${part0.path}: prefetch failed (repo ${part0.repo} @ ${part0.revision})`,
     );
-    // 取得層は取得元の案内を cause に残す（hub の local.ts — 隣のディレクトリを推測しない）。
+    // The fetch layer keeps the source's guidance as the cause (hub's local.ts — it does not guess
+    // a neighbouring directory).
     assertInstanceOf(error.cause, Error);
     assertStringIncludes(error.cause.message, `no cross-repo target for repo '${part0.repo}'`);
     assertStringIncludes(error.cause.message, "crossRepo");
-    // NOTE: 保険（独立の検出力はほぼ無い）— 越境の解決は読みより先に投げるので、上の失敗文言の検査が通る限り
-    // 読みは起きない。独立に赤になるのは、hub が Wan の配布形のディレクトリに越境先を推測しに行く退行だけ。
+    // NOTE: a safety net (almost no independent detection power) — cross-repository resolution
+    // throws before any read, so as long as the failure-message check above passes, no read
+    // happens. It turns red independently only on a regression where hub goes looking for the
+    // cross-repository target in the Wan distribution's directory.
     const textEncoderPaths = new Set(wanParts.map((part) => part.path));
     assertEquals(
       reads.filter((read) => textEncoderPaths.has(read.path)).map((read) => read.path),
       [],
-      "umT5 の part を Wan の取得元から読もうとした",
+      "tried to read umT5's parts from the Wan source",
     );
   },
 );
 
 test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
-  `Wan の text_encoder の差し替え（実 GPU・opt-in ${SWAP_ENV}）: umT5 の越境先の mapping 無しで構築が通り、` +
-    "差し替え先の束縛された block が全部 text 段で差し替え先から読み切られ（ほかに text encoder のバイト列の出所が無い）、" +
-    "2 ステップの生成が非有限 0・宣言どおりの形",
+  `Wan text_encoder replacement (real GPU, opt-in ${SWAP_ENV}): construction passes without a mapping for umT5's cross-repository target, ` +
+    "every bound block of the replacement is read in full from the replacement in the text stage (no other origin of the text encoder's bytes), " +
+    "and the 2-step generation has 0 non-finite values and the declared shape",
   async () => {
     assert(SWAP_DIRECTORY !== undefined);
     const swapRoot = directoryUrl(SWAP_DIRECTORY);
     assert(
       fileExists(new URL("karume.json", swapRoot)),
-      `${SWAP_ENV} のディレクトリ ${swapRoot.pathname} に karume.json が無い（手元の配布形を指すこと）`,
+      `${SWAP_ENV} directory ${swapRoot.pathname} has no karume.json (it must point at a local distribution)`,
     );
     const wanParts = await wanTextEncoderParts();
-    // 差し替えは `{ source }` だけ（model / quant は差し替え先の既定）— 同じ選択で part 列を引く。
+    // The replacement is `{ source }` only (model / quant are the replacement's defaults) — the
+    // part list is taken with the same selection.
     const swapParts = await textEncoderParts(swapRoot);
     assert(
       swapParts.every((part) => part.repo === undefined),
-      `差し替え先 ${swapRoot.pathname} の '${TEXT_ENCODER}' が越境参照を持つ（この e2e は差し替え先のディレクトリが` +
-        "実体を持つ形だけを見る）",
+      `the replacement ${swapRoot.pathname}: '${TEXT_ENCODER}' has a cross-repository reference (this e2e only covers a replacement directory` +
+        " that holds the data)",
     );
     const swapWeightParts = nonEmpty(swapParts.slice(1));
-    assert(swapWeightParts.length > 0, `差し替え先の '${TEXT_ENCODER}' に重みの part が無い`);
-    // 前提（GPU に触る前に見る）: 重みの part は全部グラフの束縛する block を持つ。これが崩れると、下の
-    // block の被覆は「その part を読まなかった」を見逃す（資産だけの part は Session の構築で読まれない）。
+    assert(swapWeightParts.length > 0, `the replacement's '${TEXT_ENCODER}' has no weight part`);
+    // Precondition (checked before touching the GPU): every weight part holds blocks the graph
+    // binds. If this breaks, the block coverage below misses "that part was never read" (asset-only
+    // parts are not read by Session construction).
     const swapBlocks = await textEncoderBlocks(swapRoot);
     const boundPaths = new Set(swapBlocks.map((block) => swapParts[block.part].path));
     assertEquals(
       swapWeightParts.map((part) => part.path).filter((path) => !boundPaths.has(path)),
       [],
-      `差し替え先の '${TEXT_ENCODER}' に、グラフの束縛する block を持たない重みの part がある` +
-        "（資産だけの part を持つ差し替え先はこの e2e の対象外）",
+      `the replacement's '${TEXT_ENCODER}' has a weight part without any block the graph binds` +
+        " (a replacement with asset-only parts is out of scope for this e2e)",
     );
 
     let deviceLost: string | undefined;
@@ -373,7 +431,8 @@ test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
         const swapReads: Read[] = [];
         const diagnostics = new Map<RunComponent, SessionDiagnostics>();
 
-        // ① Wan の取得元に crossRepo を 1 本も渡さない（umT5 の越境先はどこからも開けない）。
+        // ① Give the Wan source not a single crossRepo (umT5's cross-repository target cannot be
+        // opened from anywhere).
         const constructionStarted = performance.now();
         await using pipeline = await Pipeline.fromPretrained(
           recordingDirectory(DIST_ROOT, "wan-swap", wanReads, currentPhase),
@@ -410,17 +469,17 @@ test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
           onEvent,
         });
         const generateMs = performance.now() - generateStarted;
-        assertEquals(phase, "after_text_encoder", "text 段の start / end が届いていない");
-        assert(diagnostics.has(TEXT_ENCODER), "umT5 の run の診断が届いていない");
+        assertEquals(phase, "after_text_encoder", "the text stage's start / end did not arrive");
+        assert(diagnostics.has(TEXT_ENCODER), "the diagnostics of the umT5 run did not arrive");
 
-        // ② 差し替え先から読んだもの。
+        // ② What was read from the replacement.
         const swapPathSet = new Set(swapParts.map((part) => part.path));
         assertEquals(
           [...new Set(swapReads.map((read) => read.path))].filter(
             (path) => path !== "karume.json" && !swapPathSet.has(path),
           ),
           [],
-          "差し替え先から text_encoder の part と manifest 以外を読んだ",
+          "read something other than the text_encoder parts and the manifest from the replacement",
         );
         assertEquals(
           [
@@ -429,10 +488,11 @@ test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
             ),
           ].filter((path) => path !== "karume.json" && path !== swapParts[0].path),
           [],
-          "構築中に差し替え先の part 0（descriptor）より先を読んだ（重みは Session の構築で読む契約）",
+          "read beyond part 0 (descriptor) of the replacement during construction (by contract the weights are read in Session construction)",
         );
-        // バイトの被覆: 束縛された block の区間が全部、text 段の差し替え先からの読みで覆われる（上の前提と
-        // 合わせて、重みの part は全部 text 段で読まれる）。
+        // Byte coverage: every range of the bound blocks is covered by reads from the replacement
+        // in the text stage (together with the precondition above, every weight part is read in the
+        // text stage).
         const textStageReads = new Map<string, Read[]>();
         for (const read of swapReads.filter((candidate) => candidate.phase === "text_encoder")) {
           textStageReads.set(read.path, [...(textStageReads.get(read.path) ?? []), read]);
@@ -449,38 +509,46 @@ test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
             )
             .map((block) => `${block.id}（part ${block.part}）`),
           [],
-          "差し替え先の block のうち、text 段で差し替え先から読み切られなかったもの",
+          "replacement blocks not read in full from the replacement in the text stage",
         );
         assertEquals(
           swapReads.filter((read) => read.phase === "after_text_encoder").map((read) => read.path),
           [],
-          "text 段の後に差し替え先を読んだ",
+          "read the replacement after the text stage",
         );
-        // Wan の取得元は text encoder の part の path（元の越境先の宣言・差し替え先の宣言のどちらの綴りでも）を
-        // 1 度も読んでいない — 差し替え先のほかに text encoder のバイト列を供給したものが無い。
-        // NOTE: 保険（独立の検出力はほぼ無い）— 元の席が開かれる退行は、mapping が無いので越境の解決で ① の
-        // 構築が先に落とす。独立に赤になるのは、hub が Wan の配布形のディレクトリに越境先を推測しに行く退行だけ。
+        // The Wan source never read the path of a text-encoder part (in either spelling — the
+        // original cross-repository declaration or the replacement's declaration) — nothing but the
+        // replacement supplied the text encoder's bytes. NOTE: a safety net (almost no independent
+        // detection power) — a regression that opens the original preset is stopped earlier by ①'s
+        // construction in cross-repository resolution, since there is no mapping. It turns red
+        // independently only on a regression where hub goes looking for the cross-repository target
+        // in the Wan distribution's directory.
         const textEncoderPaths = new Set([...wanParts, ...swapParts].map((part) => part.path));
         assertEquals(
           wanReads.filter((read) => textEncoderPaths.has(read.path)).map((read) => read.path),
           [],
-          "Wan の取得元から text encoder の part を読んだ",
+          "read a text-encoder part from the Wan source",
         );
 
-        // ③ 生成の形と有限性。
+        // ③ Shape and finiteness of the generation.
         assertEquals(
           [video.frames, video.height, video.width],
           [DEFAULT_FRAMES, DEFAULT_HEIGHT, DEFAULT_WIDTH],
         );
-        assertEquals(video.data.length, 3 * video.frames * video.height * video.width, "要素数");
+        assertEquals(
+          video.data.length,
+          3 * video.frames * video.height * video.width,
+          "element count",
+        );
         const nonFinite = video.data.reduce(
           (count, value) => count + (Number.isFinite(value) ? 0 : 1),
           0,
         );
-        assertEquals(nonFinite, 0, `${SWAP_CASE.id}: 非有限`);
+        assertEquals(nonFinite, 0, `${SWAP_CASE.id}: non-finite`);
         assertEquals(deviceLost, undefined, "device lost");
 
-        // 観測: sha256（門にしない）・元の umT5 の行との一致・所要・差し替え先から読んだ量。
+        // Observation: sha256 (not a check), match with the original umT5's row, times, amount read
+        // from the replacement.
         const bytes = rgbBytes(video);
         const sha256 = await sha256Hex(bytes);
         const artifact = `${SWAP_CASE.id}.rgb`;
@@ -490,24 +558,25 @@ test.skipIf(SWAP_DIRECTORY === undefined || !DIST_PRESENT || !GPU_AVAILABLE)(
         const weightBytes = swapWeightParts.reduce((total, part) => total + part.size, 0);
         const gib = (value: number) => `${(value / 2 ** 30).toFixed(3)} GiB`;
         const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
-        const verdict = original === sha256 ? "一致" : "不一致";
+        const verdict = original === sha256 ? "matches" : "does not match";
         const stages = Object.entries(stageMs).map(([stage, ms]) => `${stage} ${seconds(ms)}`);
         const notes = [
-          `差し替え先: ${swapRoot.pathname}`,
-          `重みの part ${swapWeightParts.length} 本・${gib(weightBytes)}`,
-          `差し替え先から読んだ量 ${gib(swapBytes)}（${swapReads.length} 回）`,
+          `replacement: ${swapRoot.pathname}`,
+          `${swapWeightParts.length} weight parts, ${gib(weightBytes)}`,
+          `read from the replacement ${gib(swapBytes)} (${swapReads.length} reads)`,
           original === undefined
-            ? `元の umT5 の行 ${ORIGINAL_CASE_ID} はこの環境に無い`
-            : `元の umT5 の行 ${ORIGINAL_CASE_ID} と${verdict}（${original}）`,
-          `構築 ${seconds(constructionMs)}・生成 ${seconds(generateMs)}・段 ${stages.join("・")}`,
-          `非有限 ${nonFinite}`,
-          `sha256 ${sha256}（観測 — 門にしない）`,
+            ? `the original umT5's row ${ORIGINAL_CASE_ID} is not in this environment`
+            : `the original umT5's row ${ORIGINAL_CASE_ID}: ${verdict} (${original})`,
+          `construction ${seconds(constructionMs)}, generation ${seconds(generateMs)}, stages ${stages.join(", ")}`,
+          `non-finite ${nonFinite}`,
+          `sha256 ${sha256} (an observation — not a check)`,
         ];
         console.log(`[wan-swap] ${SWAP_CASE.id}:\n  ${notes.join("\n  ")}`);
         return { status: "pass", actual: sha256, artifact, note: notes.join(" / ") };
       });
     } finally {
-      // MUST: device を捨てる前に解放を待つ（B570 の destroy の遅れ — 後続のテストの予算を残す）。
+      // MUST: wait for the releases before dropping the device (the B570's destroy lag — leaves
+      // budget for later tests).
       await settleReleases(gpu);
       gpu.destroy();
     }

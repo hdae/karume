@@ -1,5 +1,6 @@
 /**
- * Wan2.2 TI2V-5B の VAE **encoder の chunk 0**（I2V の条件画像 1 枚）の参照照合（実 GPU — ADR 0121 段 9a の検収）。
+ * Reference comparison of Wan2.2 TI2V-5B's VAE **encoder chunk 0** (one I2V conditioning image) (real GPU — the
+ * acceptance of ADR 0121 stage 9a).
  *
  * The encoder's three graphs of the distribution mirror `models/karume-wan2.2/` (f16 — written by the recipe
  * `tools/export-recipes/wan/export_vae_encoder.py`; opened through the manifest — ADR 0139 decision 1; the goldens are
@@ -7,74 +8,84 @@
  * golden's RGB8; the output mu goes through the TS normalization (`normalizeWanLatents`) and is compared with the
  * normalized mu of upstream's untiled encode (diffusers, CPU f32, weights rounded to f16).
  *
- * - pre `[12,1,8h,8w]` → `[640,1,h,w]`（記号 h, w）/ attn `[640,S]` → `[640,S]`（記号 S = h·w）/ post `[640,1,h,w]` →
- *   mu `[48,1,h,w]`。h, w は潜在の高さ・幅。IR の次元式は記号 1 つの一次式なので、h·w を 1 軸に作る mid の
- *   attention の前後でグラフを分けてある（ADR 0121 決定 11）。
- * - golden の encoder の入力（上流の `patchify`）と TS の前処理の出力がビット一致することも見る（GPU に渡すのは
- *   TS の前処理の出力 — 製品の経路と同じ入力）。
+ * - pre `[12,1,8h,8w]` → `[640,1,h,w]` (symbols h, w) / attn `[640,S]` → `[640,S]` (symbol S = h·w) / post
+ *   `[640,1,h,w]` → mu `[48,1,h,w]`. h, w are the latent height and width. A dimension expression of the IR is linear
+ *   in one symbol, so the graphs are split around the mid attention, which makes h·w one axis (ADR 0121 decision 11).
+ * - It also checks that the golden's encoder input (upstream's `patchify`) and the output of the TS preprocessing are
+ *   bit-identical (what goes to the GPU is the output of the TS preprocessing — the same input as the product path).
  *
- * ## 受け渡し（常駐テンソル・ホストを経由しない）
+ * ## Hand-off (resident tensors, without a host round trip)
  *
- * 3 本の Session は同じ GpuContext に張り、1 本の batch の中で pre → attn → post を `enqueue` する。pre / attn の
- * 出口は `copyOutputs` で常駐テンソルへ写し、次のグラフの入力にその常駐をそのまま束ねる。`[640,1,h,w]` と
- * `[640,S]` は同じバイト列の読み替えなので写し直しは要らない（常駐は大きさしか持たない — 検査は宣言 shape ぶんの
- * バイト数の一致だけ）。常駐の入力は記号の束縛源にならないので、attn には `S`、post には `h` / `w` を `bindings`
- * で渡す。mu も常駐へ写し、`finishAndRead` で 1 度だけ読む（フェンスは batch の決着 1 本）。
+ * The three Sessions sit on the same GpuContext, and pre → attn → post are `enqueue`d in one batch. The outputs of pre
+ * / attn are copied to resident tensors with `copyOutputs`, and the next graph's input is bound to that resident as is.
+ * `[640,1,h,w]` and `[640,S]` are reinterpretations of the same bytes, so no re-copy is needed (a resident carries only
+ * its size — the only check is that the byte count matches the declared shape). A resident input is not a source of
+ * symbol bindings, so attn gets `S` and post gets `h` / `w` through `bindings`. mu is copied to a resident too and
+ * read once with `finishAndRead` (one fence: the batch's settlement).
  *
- * ## ケースと帯
+ * ## Cases and band
  *
- * - golden はテスト画像 3 枚 × 3 寸法（1280×704・704×1280〈横長の画像を明示した縦長〉・256×160〈受理集合の外の
- *   縮小の経路〉）。帯の決定用は boxing-cats / cat-dog-baking、受入れは ferret（recipe の `BAND_IMAGES` /
- *   `ACCEPT_IMAGES` — golden のメタ `role` と突き合わせる）。
- * - **9 本とも既定のレーンで回す**（2026-10-09 の実測で全 9 本の照合は約 3 s — 1280×704 の 2 本だけより約 1 s
- *   多いだけ）。同じ Session を 1280×704 → 704×1280（S は同じで h と w が入れ替わる）→ 256×160 の順に回し、
- *   束縛ごとに golden と突き合わせるので、**資産が寸法に依らないこと**（同じ容器・同じ Session・束縛だけが違う）と、
- *   束縛が変わったときに計画が前の束縛の形を持ち越さないこと（pre の reshape〈記号の割り算の space-to-depth〉・
- *   slice / cat・sum の縮約を含む全ノード・f16 の重み）を既定のレーンで見る。縦長の I2V で I2V に固有な encoder の
- *   寸法は、ここが覆う。
- * - 帯は決定用の全 6 本（2 枚 × 3 寸法）の正規化後の maxAbs の最悪 × 5 を有効数字 2 桁へ切り上げた絶対値
- *   （`rtol = 0` — decoder の chunk 列の e2e と同じ導き方）。受入れは帯の内であることを門にする。`undefined` =
- *   未導出: 各ケースは maxAbs を記録して赤で止まり、最後の step が候補を出す。
+ * - The goldens are 3 test images × 3 sizes (1280×704, 704×1280 (a portrait size given explicitly for a landscape
+ *   image), 256×160 (the downscale path outside the accepted set)). The band-setting images are boxing-cats /
+ *   cat-dog-baking, the acceptance image is ferret (the recipe's `BAND_IMAGES` / `ACCEPT_IMAGES` — matched against
+ *   the golden metadata `role`).
+ * - **All 9 run in the default lane** (measured on 2026-10-09: comparing all 9 takes about 3 s — only about 1 s more
+ *   than the two 1280×704 ones). The same Session runs 1280×704 → 704×1280 (same S, h and w swapped) → 256×160 and is
+ *   compared with a golden per binding, so the default lane checks that **the assets do not depend on the size** (same
+ *   container, same Session, only the bindings differ) and that a plan does not carry the previous binding's shapes
+ *   over when the bindings change (every node, including pre's reshape (space-to-depth by a symbolic division),
+ *   slice / cat and the sum reduction, and the f16 weights). The encoder sizes specific to I2V in portrait are
+ *   covered here.
+ * - The band is an absolute value: the worst normalized maxAbs over all 6 band-setting cases (2 images × 3 sizes) × 5,
+ *   rounded up to 2 significant digits (`rtol = 0` — derived the same way as the e2e of the decoder's chunk
+ *   sequence). The acceptance check is that the acceptance cases fall inside the band. `undefined` = not derived yet:
+ *   each case records its maxAbs and stops red, and the last step prints a candidate.
  *
- * ## 故障注入（受入れの 1280×704 で帯の外に出ることを門にする）
+ * ## Fault injection (the check is that the acceptance 1280×704 falls outside the band)
  *
- * - patchify の高さと幅の副添字の取り違え（ホスト — 4 チャネルの組の 1 番と 2 番を入れ替えた入力）。
- * - std と 1/std の取り違え（ホスト — 統計の std を逆数にして同じ正規化を通す = mu · std）。
- * - post の束縛の h と w の入れ替え（受け渡し — 常駐のバイト数は同じなので大きさの検査を素通りし、post は
- *   `[640,1,h,w]` のバイト列を `[640,1,w,h]` と読む）。
- * - mu の代わりに logvar の 48 ch（post の出口の slice を後半へ — 宣言の差し替え）。
- * - AvgDown3D の偶奇の取り違え（時間倍率 2 の 2 ブロックで、ショートカットの平均を奇数番でなく偶数番のチャネルに
- *   足す — pre の宣言の slice 2 本と cat の入力の順の差し替え）。
+ * - Swapping the height and width sub-indices of patchify (host — an input with the 1st and 2nd of each group of 4
+ *   channels swapped).
+ * - Mixing up std and 1/std (host — the statistics' std inverted and passed through the same normalization = mu ·
+ *   std).
+ * - Swapping h and w in post's bindings (hand-off — the resident's byte count is the same, so it passes the size check,
+ *   and post reads the bytes of `[640,1,h,w]` as `[640,1,w,h]`).
+ * - The 48 logvar channels instead of mu (post's output slice moved to the second half — a replaced declaration).
+ * - Mixing up the parity of AvgDown3D (in the two blocks with temporal factor 2, the shortcut's mean is added to the
+ *   even channels instead of the odd ones — replacing the two slices of pre's declaration and the order of the cat
+ *   inputs).
  *
- * NOTE: std と 1/std の取り違えは GPU を回さない（照合の step で読んだ mu をホストで正規化し直すだけ）。言えるのは
- * 「帯が正規化の誤りより狭い」ことだけで、GPU の門の検出力の証明にはならない（式そのものはホストテスト
- * `wan_ti2v_i2v_preprocess_test.ts` が縛る）。GPU の受け渡しの経路を狙うのは束縛の入れ替え。
+ * NOTE: the std / 1/std mix-up does not run the GPU (it only renormalizes on the host the mu read in the comparison
+ * step). All it shows is "the band is narrower than a normalization error"; it does not prove the detection power of
+ * the GPU check (the host test `wan_ti2v_i2v_preprocess_test.ts` pins the formula itself). The binding swap is the one
+ * aimed at the GPU hand-off path.
  *
- * 後の 2 つはグラフの中のノードなので、グラフの入出力からは注入できない（ショートカットは重みを持たず、mu の
- * 切り出しはグラフの出口そのもの）。資産は書き換えず、開いた容器の**宣言だけ**をメモリ上で差し替えた容器から
- * Session を張る（重みの block は元の容器から読む — {@link withRewrittenNodes}）。注入の Session は使い終わったら
- * その場で畳む（pre の 2 本目は重みと 1280×704 の計画の backing で約 0.9 GiB を持つ）。
+ * The last two are nodes inside a graph, so they cannot be injected from the graph's inputs and outputs (the shortcut
+ * has no weights, and the mu slice is the graph's output itself). The assets are not rewritten: the Session is built
+ * from a container whose **declaration alone** is replaced in memory (the weight blocks are read from the original
+ * container — {@link withRewrittenNodes}). An injection Session is disposed right after use (the second pre holds
+ * about 0.9 GiB in weights and the backing of the 1280×704 plan).
  *
- * ## mid の attention（D = 640・S = h·w）
+ * ## The mid attention (D = 640, S = h·w)
  *
- * 各ケースの直後に、attn の直近 run の計画が融合 attention の 3 段（`attention_qk` / `attention_stats` /
- * `attention_pv`）を 1 本以上積むことを門にする（decoder の D = 1024 と同じ門 — 値の正しさは帯が見るが、融合の
- * 経路を通ったかは帯からは分からない）。行統計の変種は S で変わる（キーの `rc` — S = 3,520 で 14・S = 160 で 1）
- * ので、寸法ごとに見る。
+ * Right after each case, the check is that the most recent run's plan of attn holds one or more of each of the three
+ * stages of fused attention (`attention_qk` / `attention_stats` / `attention_pv`) (the same check as the decoder's D
+ * = 1024 — the band checks the values, but it cannot tell whether the fused path ran). The row-statistics variant
+ * changes with S (the key's `rc` — 14 at S = 3,520, 1 at S = 160), so it is checked per size.
  *
- * ## 記録（門ではない — ADR 0121 段 9a の追記へ写す）
+ * ## Records (not checks — copied into the addendum of ADR 0121 stage 9a)
  *
- * Session 3 本の構築時間・ケースごとの encode の壁時間（寸法ごとの 1 本目は計画の導出とパイプラインの生成を
- * 含む）・Session の VRAM の内訳（重み・計画の backing）・常駐の大きさ・mu の差・attention の pipeline キー。
+ * The build time of the three Sessions, the encode wall time per case (the first case of each size includes deriving
+ * the plan and creating the pipelines), the Sessions' VRAM breakdown (weights, plan backing), the resident size, the
+ * mu difference, and the attention pipeline keys.
  *
- * NOTE: 寸法を変えたときに保持される backing の本数は、ADR 0095 決定 1 の予算つき LRU（`planBackingBudgetBytes` —
- * 既定 256 MiB）で決まる。入力が常駐かホストのテンソルかには依らない。2026-10-09 の実測: pre は 1280×704 の
- * 1 本（801.5 MiB）だけで予算を超えるので、256×160 で置き換わる（1 本）。attn（81.7 + 2.4 MiB）と post（17.2 MiB
- * × 2 + 0.8 MiB）は予算の内なので、寸法の数だけ残る（2 本 / 3 本）。Session あたりの保持は
- * `max(予算, 最大の 1 本)` を超えない。
+ * NOTE: the number of backings kept when the size changes is decided by the budgeted LRU of ADR 0095 decision 1
+ * (`planBackingBudgetBytes` — 256 MiB by default). It does not depend on whether the input is a resident or a host
+ * tensor. Measured on 2026-10-09: pre's single 1280×704 backing (801.5 MiB) exceeds the budget alone, so it is
+ * replaced at 256×160 (1 kept). attn (81.7 + 2.4 MiB) and post (17.2 MiB × 2 + 0.8 MiB) fit in the budget, so one is
+ * kept per size (2 / 3). What a Session keeps never exceeds `max(budget, the largest single backing)`.
  *
- * 資産（3 容器と golden 9 本）が 1 つも無い環境と GPU 無し環境は明示 SKIP。一部だけある環境は FAIL（GPU 不要の
- * 1 本目のテスト）。
+ * Environments without any of the assets (3 containers and 9 goldens) and environments without a GPU SKIP explicitly.
+ * An environment with only some of them FAILs (the first test, which needs no GPU).
  */
 
 import { afterAll, beforeAll, describe, it, test } from "vite-plus/test";
@@ -124,12 +135,16 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
- * 正規化後の潜在の帯（絶対値）。値・導出・故障注入の記録は {@link WAN_I2V_ENCODER_BAND}（I2V の通しの e2e が条件の潜在の
- * 門に同じ値を使うので helper に 1 か所で置く）。`undefined` = 未導出（モジュール doc「ケースと帯」— 導き直す回は
- * ここを `undefined` にする）。
+ * The band (absolute) of the normalized latent. The value, its derivation and the fault-injection record are in
+ * {@link WAN_I2V_ENCODER_BAND} (the end-to-end I2V e2e uses the same value for its conditioning-latent check, so it
+ * lives in one place in the helper). `undefined` = not derived yet (module doc "Cases and band" — a run that
+ * re-derives it sets this to `undefined`).
  */
 const BAND: number | undefined = WAN_I2V_ENCODER_BAND;
-/** 判定と記録の帯（未導出の回は無限の帯として記録し、判定は赤にする）。 */
+/**
+ * The band for the verdict and the record (a run without a derived band records an infinite band and fails the
+ * verdict).
+ */
 const TOLERANCE: Tolerance = { atol: BAND ?? Number.POSITIVE_INFINITY, rtol: 0 };
 
 /** Component names: the manifest's weights keys, which are also the containers' graph names (container-v1 §2.1). */
@@ -138,27 +153,27 @@ const ATTENTION = "vae_encoder_attn";
 const POST = "vae_encoder_post";
 const PARTS = [PRE, ATTENTION, POST] as const;
 
-/** グラフ入力の綴り（recipe の各モジュールの forward の引数名）。 */
+/** The graph input spellings (the forward argument names of the recipe's modules). */
 const INPUT = { pre: "image", attn: "tokens", post: "hidden" } as const;
 
-/** mid block のチャネル数（`base_dim 160 × dim_mult[-1] 4`）。 */
+/** The mid block's channel count (`base_dim 160 × dim_mult[-1] 4`). */
 const HIDDEN_CHANNELS = 640;
-/** 潜在のチャネル数（上流 config の `z_dim` — mu の本数）。 */
+/** The latent channel count (upstream config's `z_dim` — the number of mu channels). */
 const LATENT_CHANNELS = 48;
-/** patchify の倍率と、潜在 1 に対する画像の辺（encoder の down 3 段 8 × patchify 2）。 */
+/** The patchify factor, and the image edge per latent element (the encoder's 3 down stages 8 × patchify 2). */
 const PATCH = WAN22_TI2V_GENERATION.vaePatchSize;
 const SPATIAL_COMPRESSION = 8 * PATCH;
-/** 要素あたりのバイト数（意味論 dtype は全て 4 バイト — ADR 0009）。 */
+/** Bytes per element (every semantic dtype is 4 bytes — ADR 0009). */
 const BYTES_PER_ELEMENT = 4;
 
-/** 帯の決定用の画像（recipe の `BAND_IMAGES`・golden のメタ `role` と突き合わせる）。 */
+/** The band-setting images (the recipe's `BAND_IMAGES`; matched against the golden metadata `role`). */
 const BAND_IMAGES: readonly string[] = ["boxing-cats", "cat-dog-baking"];
 
-/** 故障注入の入力（受入れの 1280×704）。 */
+/** The fault-injection input (the acceptance 1280×704). */
 const FAULT_SIZE = { width: 1280, height: 704 } as const;
 const FAULT_IMAGE = "ferret";
 
-/** 記録する融合 attention の 3 段（ADR 0023 — ①QK・②行統計・③PV のパイプラインキーの接頭辞）。 */
+/** The three recorded stages of fused attention (ADR 0023 — pipeline-key prefixes of ①QK, ② row statistics, ③PV). */
 const ATTENTION_KERNELS = ["attention_qk", "attention_stats", "attention_pv"] as const;
 
 type Role = "band" | "accept";
@@ -168,8 +183,8 @@ type EncoderCase = WanI2vGoldenCase & {
 };
 
 /**
- * encoder の golden（fit = crop の 9 本 — golden の表の並び = 寸法ごとに画像 3 枚。回す順もこの並び = 束縛は
- * 1280×704 → 704×1280 → 256×160）。
+ * The encoder goldens (the 9 with fit = crop — in the golden table's order = 3 images per size. They also run in this
+ * order = bindings 1280×704 → 704×1280 → 256×160).
  */
 const CASES: readonly EncoderCase[] = WAN_I2V_GOLDEN_CASES.filter(({ fit }) => fit === "crop").map(
   (testCase) => ({
@@ -225,11 +240,14 @@ type EncoderGolden = {
 
 const metadataOf = (file: SafetensorsFile, key: string, where: string): string => {
   const value = file.metadata.get(key);
-  if (value === undefined) throw new Error(`${where}: __metadata__.${key} が無い`);
+  if (value === undefined) throw new Error(`${where}: __metadata__.${key} is missing`);
   return value;
 };
 
-/** テンソルを dtype と形の検査つきで写す（U8 が前に並ぶと F32 の開始が 4 バイト境界に載る保証が無い）。 */
+/**
+ * Copies a tensor, checking its dtype and shape (with U8 placed before it, the F32 start is not guaranteed to fall on a
+ * 4-byte boundary).
+ */
 const tensorBytes = (
   file: SafetensorsFile,
   key: string,
@@ -238,8 +256,8 @@ const tensorBytes = (
   where: string,
 ): ArrayBuffer => {
   const view = viewOf(file, key, where);
-  assertEquals(view.dtype, dtype, `${where}: ${key} の dtype`);
-  assertEquals([...view.shape], [...shape], `${where}: ${key} の形`);
+  assertEquals(view.dtype, dtype, `${where}: ${key} dtype`);
+  assertEquals([...view.shape], [...shape], `${where}: ${key} shape`);
   return file.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 };
 
@@ -248,23 +266,19 @@ const readGolden = async (testCase: EncoderCase): Promise<EncoderGolden> => {
   const file = parseSafetensors(await readBuffer(wanI2vGoldenUrl(testCase)));
   const meta = WAN_I2V_GOLDEN_METADATA;
   const { width, height } = testCase;
-  assertEquals(metadataOf(file, meta.image, where), testCase.image, `${where}: 画像`);
+  assertEquals(metadataOf(file, meta.image, where), testCase.image, `${where}: image`);
   assertEquals(
     metadataOf(file, meta.imageSha256, where),
     WAN_I2V_IMAGE_SHA256[testCase.image],
-    `${where}: 画像の sha256 が表と違う`,
+    `${where}: image sha256 differs from the table`,
   );
   assertEquals(metadataOf(file, meta.fit, where), "crop", `${where}: fit`);
   assertEquals(
     [metadataOf(file, meta.width, where), metadataOf(file, meta.height, where)],
     [String(width), String(height)],
-    `${where}: 出力寸法`,
+    `${where}: output size`,
   );
-  assertEquals(
-    metadataOf(file, meta.role, where),
-    testCase.role,
-    `${where}: 役割（band / accept）`,
-  );
+  assertEquals(metadataOf(file, meta.role, where), testCase.role, `${where}: role (band / accept)`);
   const latentShape = [
     LATENT_CHANNELS,
     1,
@@ -288,7 +302,7 @@ const readGolden = async (testCase: EncoderCase): Promise<EncoderGolden> => {
   };
 };
 
-/** TS の前処理（golden の RGB8 → `[-1, 1]` → patchify）。 */
+/** The TS preprocessing (the golden's RGB8 → `[-1, 1]` → patchify). */
 const encoderInputOf = (testCase: EncoderCase, rgb8: Uint8Array<ArrayBuffer>) =>
   patchifyWanImage(
     wanI2vPixels({ data: rgb8, width: testCase.width, height: testCase.height }),
@@ -296,7 +310,7 @@ const encoderInputOf = (testCase: EncoderCase, rgb8: Uint8Array<ArrayBuffer>) =>
     PATCH,
   );
 
-// ---- 容器と宣言の差し替え -------------------------------------------------------------------
+// ---- containers and replaced declarations ----------------------------------------------------
 
 type EncoderParts<T> = { readonly pre: T; readonly attn: T; readonly post: T };
 
@@ -313,17 +327,18 @@ const prepareParts = (opened: EncoderParts<BoundContainer>): EncoderParts<Prepar
   post: prepareContainer(opened.post, POST),
 });
 
-/** グラフの出口の名前（宣言から読む — 綴りは export の都合で決まる）。 */
+/** The name of the graph's output (read from the declaration — the export decides the spelling). */
 const outputOf = (model: PreparedModel, part: string): string => {
   const [output, ...rest] = model.graph.outputs;
   if (output === undefined || rest.length > 0) {
-    throw new Error(`${part}: 出力が 1 本でない（${model.graph.outputs.join(" / ")}）`);
+    throw new Error(`${part}: not exactly one output (${model.graph.outputs.join(" / ")})`);
   }
   return output;
 };
 
 /**
- * 宣言のノードだけを差し替えた容器（故障注入用）。重みの block と供給計画は元の容器のまま — 資産は書き換えない。
+ * A container with only the declaration's nodes replaced (for fault injection). The weight blocks and the supply plan
+ * stay those of the original container — the assets are not rewritten.
  */
 const withRewrittenNodes = (
   opened: BoundContainer,
@@ -331,7 +346,7 @@ const withRewrittenNodes = (
   rewrite: (nodes: readonly IrNode[]) => readonly IrNode[],
 ): BoundContainer => {
   const bound = opened.graphs[graphName];
-  if (bound === undefined) throw new Error(`容器にグラフ '${graphName}' が無い`);
+  if (bound === undefined) throw new Error(`the container has no graph '${graphName}'`);
   return {
     graphs: {
       [graphName]: {
@@ -343,18 +358,18 @@ const withRewrittenNodes = (
   };
 };
 
-/** 値名 → それを出すノードの添字。 */
+/** Value name → the index of the node that produces it. */
 const producers = (nodes: readonly IrNode[]): ReadonlyMap<string, number> =>
   new Map(nodes.flatMap((node, index) => node.outs.map((name) => [name, index] as const)));
 
 const sliceRange = (node: IrNode | undefined): string =>
   node === undefined || node.op !== "slice"
-    ? `${node?.op ?? "無し"}`
+    ? `${node?.op ?? "none"}`
     : `slice dim ${node.attrs["dim"]} [${node.attrs["start"]}, ${node.attrs["end"]})`;
 
 /**
- * 故障: post の出口の切り出しを quant_conv の出力の後半（logvar 側の 48 ch）へ。出口の slice（dim 0・[0, 48)）が
- * 宣言に無ければ投げる（注入が空振りしない）。
+ * Fault: moves post's output slice to the second half of quant_conv's output (the 48 logvar channels). Throws when the
+ * output slice (dim 0, [0, 48)) is missing from the declaration (so the injection is never vacuous).
  */
 const takeLogvarHalf =
   (output: string) =>
@@ -368,7 +383,7 @@ const takeLogvarHalf =
       node.attrs["start"] !== 0 ||
       node.attrs["end"] !== LATENT_CHANNELS
     ) {
-      throw new Error(`post の出口 '${output}' が mu の切り出しでない（${sliceRange(node)}）`);
+      throw new Error(`post's output '${output}' is not the mu slice (${sliceRange(node)})`);
     }
     const logvar = {
       ...node,
@@ -378,12 +393,13 @@ const takeLogvarHalf =
   };
 
 /**
- * 故障: AvgDown3D の時間倍率 2 のブロック（2 本 — down_blocks.1 / .2）で、ショートカットの空間 2×2 の平均を
- * 奇数番（`2c+1`）でなく偶数番（`2c`）のチャネルに足す。
+ * Fault: in the blocks of AvgDown3D with temporal factor 2 (two — down_blocks.1 / .2), adds the shortcut's spatial
+ * 2×2 mean to the even channels (`2c`) instead of the odd ones (`2c+1`).
  *
- * recipe の閉じた形は `pairs = residual.reshape(C, 2, h, w)` → `cat([pairs[:, 0:1], pairs[:, 1:2] + mean], 1)`。
- * 2 本の slice の範囲を入れ替え（0:1 ↔ 1:2）、cat の入力の順を入れ替えると `[pairs[:, 0:1] + mean, pairs[:, 1:2]]`
- * になる。形が想定と違えば投げる（注入が空振りしない）。
+ * The recipe's closed form is `pairs = residual.reshape(C, 2, h, w)` → `cat([pairs[:, 0:1], pairs[:, 1:2] + mean], 1)`.
+ * Swapping the ranges of the two slices (0:1 ↔ 1:2) and the order of the cat inputs gives
+ * `[pairs[:, 0:1] + mean, pairs[:, 1:2]]`. Throws when the shape is not the expected one (so the injection is never
+ * vacuous).
  */
 const swapShortcutParity = (nodes: readonly IrNode[]): readonly IrNode[] => {
   const producedBy = producers(nodes);
@@ -398,7 +414,7 @@ const swapShortcutParity = (nodes: readonly IrNode[]): readonly IrNode[] => {
     node.attrs["end"] === end;
   const replaced = new Map<number, IrNode>();
   const cats = nodes.flatMap((node, index) => (node.op === "cat" ? [index] : []));
-  assertEquals(cats.length, 2, "pre の cat が時間倍率 2 のショートカットの 2 本でない");
+  assertEquals(cats.length, 2, "pre's cats are not the two shortcuts with temporal factor 2");
   for (const catIndex of cats) {
     const cat = nodes[catIndex];
     const [zeroName, sumName] = cat.ins;
@@ -412,7 +428,7 @@ const swapShortcutParity = (nodes: readonly IrNode[]): readonly IrNode[] => {
       !isSlice(zero.node, 0, 1) ||
       sum.node.op !== "add"
     ) {
-      throw new Error(`cat '${cat.outs[0]}' がショートカットの閉じた形でない`);
+      throw new Error(`cat '${cat.outs[0]}' is not the shortcut's closed form`);
     }
     const data = sum.node.ins
       .map(nodeOf)
@@ -422,7 +438,7 @@ const swapShortcutParity = (nodes: readonly IrNode[]): readonly IrNode[] => {
           isSlice(entry.node, 1, 2) &&
           entry.node.ins[0] === zero.node.ins[0],
       );
-    if (data === undefined) throw new Error(`cat '${cat.outs[0]}' の奇数番の slice が無い`);
+    if (data === undefined) throw new Error(`cat '${cat.outs[0]}' has no odd-channel slice`);
     replaced.set(zero.index, { ...zero.node, attrs: { ...zero.node.attrs, start: 1, end: 2 } });
     replaced.set(data.index, { ...data.node, attrs: { ...data.node.attrs, start: 0, end: 1 } });
     replaced.set(catIndex, { ...cat, ins: [sumName, zeroName] });
@@ -430,7 +446,7 @@ const swapShortcutParity = (nodes: readonly IrNode[]): readonly IrNode[] => {
   return nodes.map((node, index) => replaced.get(index) ?? node);
 };
 
-/** patchify の高さと幅の副添字の取り違え（4 チャネルの組 `c·4 + dx·2 + dy` の 1 番と 2 番を入れ替える）。 */
+/** Swaps patchify's height and width sub-indices (the 1st and 2nd of each group of 4 channels `c·4 + dx·2 + dy`). */
 const swapSubIndices = (input: Float32Array, plane: number): Float32Array<ArrayBuffer> => {
   const out = new Float32Array(input);
   for (let group = 0; group < input.length / (4 * plane); group += 1) {
@@ -442,9 +458,12 @@ const swapSubIndices = (input: Float32Array, plane: number): Float32Array<ArrayB
   return out;
 };
 
-// ---- encode（pre → attn → post を 1 本の batch で） ------------------------------------------
+// ---- encode (pre → attn → post in one batch) --------------------------------------------------
 
-/** 寸法ごとの常駐（pre の出口 / attn の出口 / mu）。大きさで引き当てる（1280×704 と 704×1280 は同じ大きさ）。 */
+/**
+ * The residents per size (pre's output / attn's output / mu). Looked up by size (1280×704 and 704×1280 have the same
+ * size).
+ */
 class EncoderResidents {
   readonly #gpu: GpuContext;
   readonly #byArea = new Map<number, EncoderParts<ResidentTensor>>();
@@ -476,7 +495,7 @@ class EncoderResidents {
     );
   }
 
-  /** MUST: Session を畳んだ後に呼ぶ（焼き込みの参照が残る間は破棄を拒まれる）。 */
+  /** MUST: called after the Sessions are disposed (disposal is refused while a baked-in reference remains). */
   dispose(): void {
     for (const { pre, attn, post } of this.#byArea.values()) {
       pre.dispose();
@@ -488,9 +507,9 @@ class EncoderResidents {
 }
 
 /**
- * 3 グラフを 1 本の batch で回して mu を読む（モジュール doc「受け渡し」）。
+ * Runs the three graphs in one batch and reads mu (module doc "Hand-off").
  *
- * MUST: 同じ device の別の batch・run を並行に発行しない（batch は device の区間ロックを持つ）。
+ * MUST: do not issue another batch or run on the same device concurrently (a batch holds the device's section lock).
  */
 const encodeOnGpu = async (
   gpu: GpuContext,
@@ -499,7 +518,7 @@ const encodeOnGpu = async (
   residents: EncoderResidents,
   input: Float32Array<ArrayBuffer>,
   size: { readonly width: number; readonly height: number },
-  /** post の束縛の差し替え（故障注入だけが渡す — 既定は size から導いた h, w）。 */
+  /** Replaced bindings for post (only fault injection passes them — by default h, w are derived from size). */
   postBindings?: { readonly h: number; readonly w: number },
 ): Promise<Float32Array<ArrayBuffer>> => {
   const h = size.height / SPATIAL_COMPRESSION;
@@ -520,7 +539,7 @@ const encodeOnGpu = async (
       { batch, bindings: postBindings ?? { h, w }, copyOutputs: { [outputs.post]: resident.post } },
     );
   } catch (cause) {
-    // MUST: 区間を閉じてロックを返す（閉じないと同じ device の次の batch / run が永久に待つ）。
+    // MUST: close the section and return the lock (otherwise the next batch / run on the same device waits forever).
     await batch.finish().catch(() => undefined);
     throw cause;
   }
@@ -528,22 +547,24 @@ const encodeOnGpu = async (
   return new Float32Array(read["mu"]);
 };
 
-// ---- 記録 -------------------------------------------------------------------------------------
+// ---- records -----------------------------------------------------------------------------------
 
-/** 有効数字 2 桁への切り上げ（decoder の chunk 列の e2e の帯の候補と同じ規則）。 */
+/** Rounding up to 2 significant digits (the same rule as the band candidate of the decoder chunk-sequence e2e). */
 const roundUpTwoDigits = (value: number): number => {
   const unit = 10 ** (Math.floor(Math.log10(value)) - 1);
   return Number((Math.ceil(value / unit) * unit).toPrecision(2));
 };
 
 /**
- * 融合 attention の 3 段の dispatch 本数と、`attention` で始まるパイプラインキーの一覧（直近 run の計画から）。
+ * The dispatch counts of the three stages of fused attention and the list of pipeline keys starting with `attention`
+ * (from the plan of the most recent run).
  *
- * MUST: census の無い run を 0 本として数えない（融合の門が黙って空振りする）— 無ければ投げる。
+ * MUST: a run without a census is not counted as 0 (the fusion check would silently become vacuous) — it throws
+ * instead.
  */
 const attentionPipelines = (diagnostics: SessionDiagnostics) => {
   const pipelines = diagnostics.lastRunPipelines;
-  if (pipelines === undefined) throw new Error("attn: 直近 run の pipeline の census が無い");
+  if (pipelines === undefined) throw new Error("attn: no pipeline census for the most recent run");
   const dispatches = (kernel: (typeof ATTENTION_KERNELS)[number]): number =>
     pipelines
       .filter(({ key }) => key.split(":")[0] === kernel)
@@ -555,17 +576,18 @@ const attentionPipelines = (diagnostics: SessionDiagnostics) => {
 };
 
 /**
- * Session ごとの VRAM の内訳（重み・計画の backing — enqueue の経路の中間は backing に載る）と常駐の大きさ。
+ * Each Session's VRAM breakdown (weights, plan backing — the intermediates of the enqueue path live in the backing) and
+ * the resident size.
  */
 const vramNote = (sessions: EncoderParts<Session>, residents: EncoderResidents): string => {
   const mib = (bytes: number): string => `${(bytes / 2 ** 20).toFixed(1)} MiB`;
   const parts = Object.entries(sessions).map(([part, session]) => {
     const stats = session.diagnostics();
-    return `${part} 重み ${mib(stats.weights.allocatedBytes)}・backing ${mib(
+    return `${part} weights ${mib(stats.weights.allocatedBytes)}, backing ${mib(
       stats.planBacking.residentBytes + stats.planBacking.inputBytes,
-    )}（${stats.planBacking.retainedCount} 本）`;
+    )} (${stats.planBacking.retainedCount} kept)`;
   });
-  return [...parts, `常駐 ${mib(residents.bytes)}`].join(" / ");
+  return [...parts, `residents ${mib(residents.bytes)}`].join(" / ");
 };
 
 const maxAbsOf = (values: Float32Array): number =>
@@ -595,7 +617,10 @@ const encoderLifecycle = (): {
 } => {
   let gpu: GpuContext | undefined;
   let residents: EncoderResidents | undefined;
-  /** 製品の Session 3 本（後始末で畳む — 故障注入の Session は {@link encodeWithRewritten} がその場で畳む）。 */
+  /**
+   * The three product Sessions (disposed in the teardown — the fault-injection Sessions are disposed on the spot by
+   * {@link encodeWithRewritten}).
+   */
   const created: Session[] = [];
   return {
     open: async () => {
@@ -623,7 +648,7 @@ const encoderLifecycle = (): {
         post: await createSession(models.post),
       };
       console.log(
-        `[wan-ti2v-vae-encoder] Session 3 本の構築 ${(performance.now() - building).toFixed(0)} ms`,
+        `[wan-ti2v-vae-encoder] building the three Sessions ${(performance.now() - building).toFixed(0)} ms`,
       );
       return { gpu: device, opened, models, live, outputs, residents: owned };
     },
@@ -631,9 +656,9 @@ const encoderLifecycle = (): {
       const device = gpu;
       if (device === undefined) return;
       const owned = residents;
-      // MUST: Session → 常駐 → device の順で畳む（常駐は Session の焼き込みから参照されるので Session を先に畳む。
-      // 1 段が落ちても残りの段を必ず通す）。A teardown failure is reported by Vitest next to the
-      // failures of the its, so it does not hide them.
+      // MUST: dispose in the order Session → residents → device (the residents are referenced by what the Sessions
+      // baked in, so the Sessions go first; when one step fails, the remaining steps still run). A teardown failure is
+      // reported by Vitest next to the failures of the its, so it does not hide them.
       await disposeSteps([
         ...created.map((session) => () => session.dispose()),
         () => owned?.dispose(),
@@ -660,7 +685,11 @@ const encodeCase = async (run: EncoderRun, testCase: EncoderCase): Promise<Encod
   const golden = await readGolden(testCase);
   const input = encoderInputOf(testCase, golden.rgb8);
   const mismatch = firstBitMismatch(input, golden.encoderInput);
-  assertEquals(mismatch, -1, `${testCase.name}: TS の前処理が golden の encoder 入力と割れる`);
+  assertEquals(
+    mismatch,
+    -1,
+    `${testCase.name}: the TS preprocessing differs from the golden's encoder input`,
+  );
   const started = performance.now();
   const mu = await encodeOnGpu(run.gpu, run.live, run.outputs, run.residents, input, testCase);
   const encodeMs = performance.now() - started;
@@ -675,7 +704,7 @@ const encodeCase = async (run: EncoderRun, testCase: EncoderCase): Promise<Encod
 const nonFiniteCountOf = (values: Float32Array): number =>
   values.reduce((count, value) => (Number.isFinite(value) ? count : count + 1), 0);
 
-// ---- テスト -----------------------------------------------------------------------------------
+// ---- tests -------------------------------------------------------------------------------------
 
 test.skipIf(!ANY_ASSETS && !FETCHED)(
   "Wan2.2 TI2V VAE encoder: the 9 goldens are present (some or a complete fetch → FAIL, none → SKIP)",
@@ -691,8 +720,8 @@ test.skipIf(!ANY_ASSETS && !FETCHED)(
 // It owns the per-case results.json ids; the band comparison with the diffusers mu is the opt-in
 // case below.
 describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE)(
-  "Wan2.2 TI2V VAE encoder: pre → attn → post（常駐の受け渡し）の取り決め・TS の前処理のビット一致・" +
-    "mu の有限性・融合 attention の 3 段（実 GPU）",
+  "Wan2.2 TI2V VAE encoder: pre → attn → post (resident hand-off) contract, bit-identical TS preprocessing, " +
+    "finite mu, the three stages of fused attention (real GPU)",
   () => {
     const lifecycle = encoderLifecycle();
     // Assigned in beforeAll; the its below run sequentially against these Sessions.
@@ -702,7 +731,7 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE)(
     });
     afterAll(() => lifecycle.close());
 
-    it("取り決め: 入出力の名前と形・記号（pre [h,w]・attn [S]・post [h,w]）", () => {
+    it("contract: input / output names and shapes, symbols (pre [h,w], attn [S], post [h,w])", () => {
       const { models } = run;
       const io = (model: PreparedModel, part: string) => ({
         symbols: [...model.graph.symbols],
@@ -726,12 +755,12 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE)(
       });
     });
 
-    /** 寸法ごとの 1 本目か（壁時間に計画の導出とパイプラインの生成が入る）。 */
+    /** Whether a case is the first of its size (its wall time includes deriving the plan and building pipelines). */
     const seenSizes = new Set<string>();
     for (const testCase of CASES) {
       it(
-        `${testCase.name}（${testCase.role}）: TS の前処理が golden の encoder 入力とビット一致し、` +
-          "mu が有限で融合 attention の 3 段を通る",
+        `${testCase.name} (${testCase.role}): the TS preprocessing is bit-identical to the golden's encoder input, ` +
+          "mu is finite and goes through the three stages of fused attention",
         async () => {
           const { live, residents } = run;
           await runRecordedCase(results, { id: testCase.name }, async () => {
@@ -742,20 +771,20 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE)(
             const nonFinite = nonFiniteCountOf(latent);
             const attention = attentionPipelines(live.attn.diagnostics());
             const line = `${testCase.name}: nonFinite=${nonFinite} encodeMs=${encodeMs.toFixed(0)}${
-              cold ? "（寸法の 1 本目）" : ""
+              cold ? " (first of its size)" : ""
             } / ${vramNote(live, residents)} / attention ${JSON.stringify(
               attention.dispatches,
             )} ${attention.keys.join(" ")}`;
             console.log(`[wan-ti2v-vae-encoder] ${line}`);
-            assertEquals(nonFinite, 0, `${testCase.name}: 非有限`);
-            // mid の attention（D = 640・S = h·w）が融合 attention の 3 段を通る（モジュール doc）。行統計の
-            // 変種は S で変わるので寸法ごとに見る。
+            assertEquals(nonFinite, 0, `${testCase.name}: non-finite values`);
+            // The mid attention (D = 640, S = h·w) goes through the three stages of fused attention (module doc). The
+            // row-statistics variant changes with S, so it is checked per size.
             for (const kernel of ATTENTION_KERNELS) {
               assert(
                 attention.dispatches[kernel] > 0,
-                `${testCase.name}: ${kernel} の dispatch が 0 本（${JSON.stringify(
+                `${testCase.name}: 0 dispatches of ${kernel} (${JSON.stringify(
                   attention.dispatches,
-                )}）`,
+                )})`,
               );
             }
             return { status: "pass", note: line };
@@ -771,29 +800,32 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE)(
 // the band-candidate step. It writes the fault/* and band-candidate results.json ids; the per-case
 // ids belong to the default case above, and writing them here would duplicate its settlements.
 describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  "Wan2.2 TI2V VAE encoder: pre → attn → post（常駐の受け渡し）の mu の正規化が上流の非タイル encode と" +
-    `帯の中で一致し、故障注入は帯の外（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
+  "Wan2.2 TI2V VAE encoder: the normalized mu of pre → attn → post (resident hand-off) matches upstream's untiled " +
+    `encode within the band, and fault injection falls outside it (real GPU)${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const lifecycle = encoderLifecycle();
     // Assigned in beforeAll; the its below run sequentially against these Sessions.
     let run: EncoderRun;
     let faultCase: EncoderCase;
     beforeAll(async () => {
-      assert(FAULT_CASE !== undefined, "故障注入のケースが表に無い");
+      assert(FAULT_CASE !== undefined, "the fault-injection case is not in the table");
       faultCase = FAULT_CASE;
       run = await lifecycle.open();
     });
     afterAll(() => lifecycle.close());
 
-    /** ケースごとの maxAbs（帯の候補の材料 — 判定の前に積むので帯の外の回も残る）。 */
+    /**
+     * maxAbs per case (the material for the band candidate — stored before the verdict, so a run outside the band is
+     * kept too).
+     */
     const observed = new Map<string, number>();
-    /** 受入れ（故障注入の入力）の正しい mu（std と 1/std の取り違えの注入に使う）。 */
+    /** The correct mu of the acceptance case (the fault-injection input; used by the std / 1/std injection). */
     let faultMu: Float32Array<ArrayBuffer> | undefined;
 
     for (const testCase of CASES) {
       it(
-        `${testCase.name}（${testCase.role}）: TS の前処理が golden の encoder 入力とビット一致し、` +
-          "正規化した mu が帯の中",
+        `${testCase.name} (${testCase.role}): the TS preprocessing is bit-identical to the golden's encoder input, ` +
+          "and the normalized mu is inside the band",
         async () => {
           const { golden, mu, latent } = await encodeCase(run, testCase);
           const report = allclose(latent, golden.latent, TOLERANCE);
@@ -804,27 +836,30 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
             golden.mu,
           )} nonFinite=${report.nonFiniteCount}`;
           console.log(`[wan-ti2v-vae-encoder] ${line}`);
-          assertEquals(report.nonFiniteCount, 0, `${testCase.name}: 非有限`);
+          assertEquals(report.nonFiniteCount, 0, `${testCase.name}: non-finite values`);
           observed.set(testCase.name, report.maxAbsError);
           if (testCase === FAULT_CASE) faultMu = mu;
           if (BAND === undefined) {
             throw new Error(
-              `${testCase.name}: 帯が未導出（maxAbs ${report.maxAbsError}）— 決定用の最悪 × 5 を帯の定数へ` +
-                "書く（帯の候補は最後の step が出す）",
+              `${testCase.name}: band not derived yet (maxAbs ${report.maxAbsError}) — write the worst band-setting ` +
+                "case × 5 into the band constant (the last step prints the band candidate)",
             );
           }
-          assert(report.pass, `${testCase.name}: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
+          assert(
+            report.pass,
+            `${testCase.name}: maxAbs ${report.maxAbsError} is outside the band ${BAND}`,
+          );
         },
       );
     }
 
-    /** 故障の入力で encode して、受入れの golden に対して帯の外であることを見る。 */
+    /** Encodes the faulty input and checks that it falls outside the band against the acceptance golden. */
     const faultIt = (
       id: string,
       label: string,
       latentOf: (golden: EncoderGolden, faultCase: EncoderCase) => Promise<Float32Array>,
     ): void => {
-      it(`故障注入: ${label} → ${FAULT_CASE?.name ?? FAULT_IMAGE} が帯の外`, async () => {
+      it(`fault injection: ${label} → ${FAULT_CASE?.name ?? FAULT_IMAGE} is outside the band`, async () => {
         await runRecordedCase(results, { id: `fault/${id}` }, async ({ measurements }) => {
           const golden = await readGolden(faultCase);
           const latent = await latentOf(golden, faultCase);
@@ -841,28 +876,37 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
           }`;
           console.log(`[wan-ti2v-vae-encoder] ${line}`);
           if (BAND === undefined) {
-            throw new Error(`${label}: 帯が未導出（故障注入の maxAbs ${report.maxAbsError}）`);
+            throw new Error(
+              `${label}: the band is not derived yet (fault-injection maxAbs ${report.maxAbsError})`,
+            );
           }
-          assert(!report.pass, `${label}: 帯 ${BAND} の中に収まった（帯が広すぎる兆候）`);
+          assert(
+            !report.pass,
+            `${label}: fell inside the band ${BAND} (a sign that the band is too wide)`,
+          );
           return { status: "pass", note: line };
         });
       });
     };
 
-    faultIt("patchify-swap", "patchify の高さと幅の副添字の取り違え", async (golden, faultCase) => {
-      const { gpu, live, outputs, residents } = run;
-      const plane = (faultCase.height / PATCH) * (faultCase.width / PATCH);
-      const input = swapSubIndices(encoderInputOf(faultCase, golden.rgb8), plane);
-      const mu = await encodeOnGpu(gpu, live, outputs, residents, input, faultCase);
-      return normalizeWanLatents(mu, WAN22_TI2V_GENERATION.latents);
-    });
+    faultIt(
+      "patchify-swap",
+      "patchify height and width sub-indices swapped",
+      async (golden, faultCase) => {
+        const { gpu, live, outputs, residents } = run;
+        const plane = (faultCase.height / PATCH) * (faultCase.width / PATCH);
+        const input = swapSubIndices(encoderInputOf(faultCase, golden.rgb8), plane);
+        const mu = await encodeOnGpu(gpu, live, outputs, residents, input, faultCase);
+        return normalizeWanLatents(mu, WAN22_TI2V_GENERATION.latents);
+      },
+    );
 
     faultIt(
       "std-inverse",
-      "std と 1/std の取り違え（mu · std — ホストの正規化だけ・GPU は回さない）",
+      "std and 1/std mixed up (mu · std — host normalization only, the GPU is not run)",
       () => {
         if (faultMu === undefined) {
-          throw new Error(`${faultCase.name} の mu が無い（照合の step が落ちた）`);
+          throw new Error(`no mu for ${faultCase.name} (the comparison step failed)`);
         }
         const { mean, std } = WAN22_TI2V_GENERATION.latents;
         return Promise.resolve(
@@ -873,12 +917,12 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 
     faultIt(
       "post-bindings-swap",
-      "post の束縛の h と w の入れ替え（常駐のバイト数は同じ — 受け渡しの検査を素通りする）",
+      "h and w swapped in post's bindings (the resident byte count is the same — it passes the hand-off check)",
       async (golden, faultCase) => {
         const { gpu, live, outputs, residents } = run;
         const h = faultCase.height / SPATIAL_COMPRESSION;
         const w = faultCase.width / SPATIAL_COMPRESSION;
-        assert(h !== w, `${faultCase.name}: h = w では入れ替えが空振りする`);
+        assert(h !== w, `${faultCase.name}: with h = w the swap is vacuous`);
         const mu = await encodeOnGpu(
           gpu,
           live,
@@ -893,11 +937,12 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
     );
 
     /**
-     * 宣言を差し替えた 1 部品の Session で encode する（他の 2 部品は製品の Session）。
+     * Encodes with a Session of one part whose declaration is replaced (the other two parts use the product Sessions).
      *
-     * 注入の Session は使い終わったらその場で畳み、解放を待つ（pre の 2 本目は重みと 1280×704 の計画の backing で
-     * 約 0.9 GiB — 残りの step と後始末まで持ち越すと、VRAM の小さい機で注入の step だけが OOM になりうる）。畳む
-     * 失敗で本体の失敗を上書きしない。
+     * The injection Session is disposed right after use and its release is awaited (the second pre holds about 0.9 GiB
+     * in weights and the backing of the 1280×704 plan — carried over to the remaining steps and the teardown, the
+     * injection step alone could OOM on a machine with little VRAM). A disposal failure does not overwrite the main
+     * failure.
      */
     const encodeWithRewritten = async (
       part: "pre" | "post",
@@ -939,33 +984,33 @@ describe.skipIf(!ALL_ASSETS || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 
     faultIt(
       "logvar",
-      "mu の代わりに logvar の 48 ch（post の出口の slice を後半へ）",
+      "the 48 logvar channels instead of mu (post's output slice moved to the second half)",
       (golden, faultCase) =>
         encodeWithRewritten("post", takeLogvarHalf(run.outputs.post), golden, faultCase),
     );
 
     faultIt(
       "avgdown-parity",
-      "AvgDown3D の偶奇の取り違え（平均を偶数番のチャネルに足す — 時間倍率 2 の 2 ブロック）",
+      "AvgDown3D parity mixed up (the mean added to the even channels — the two blocks with temporal factor 2)",
       (golden, faultCase) => encodeWithRewritten("pre", swapShortcutParity, golden, faultCase),
     );
 
     if (BAND === undefined) {
-      it("帯の候補（未導出）", async () => {
+      it("band candidate (not derived yet)", async () => {
         const bandCases = CASES.filter(({ role }) => role === "band");
         const missing = bandCases.filter(({ name }) => !observed.has(name)).map(({ name }) => name);
         const worst = Math.max(...bandCases.map(({ name }) => observed.get(name) ?? 0));
         const candidate =
           missing.length > 0
-            ? `決定用 ${missing.join(" / ")} が maxAbs を出す前に落ちた — 候補にしない`
+            ? `band-setting ${missing.join(" / ")} failed before reporting a maxAbs — no candidate`
             : worst > 0
-              ? `決定用の最悪 ${worst.toExponential(3)} × 5 = ${(worst * 5).toExponential(3)}` +
-                `（有効数字 2 桁へ切り上げ ${roundUpTwoDigits(worst * 5)}）`
-              : "決定用の maxAbs が 0 — × 5 で帯を導けない（照合の経路を先に調べる）";
+              ? `worst band-setting case ${worst.toExponential(3)} × 5 = ${(worst * 5).toExponential(3)}` +
+                ` (rounded up to 2 significant digits: ${roundUpTwoDigits(worst * 5)})`
+              : "the band-setting maxAbs is 0 — × 5 cannot derive a band (investigate the comparison path first)";
         const accepted = CASES.filter(({ role }) => role === "accept").map(
           ({ name }) => `${name} ${observed.get(name)?.toExponential(3) ?? "—"}`,
         );
-        const message = `帯が未導出 — ${candidate}。受入れの maxAbs（帯の決定に使わない）: ${accepted.join(
+        const message = `the band is not derived yet — ${candidate}. Acceptance maxAbs (not used to set the band): ${accepted.join(
           " / ",
         )}`;
         await runRecordedCase(results, { id: "band-candidate", failureNote: () => message }, () => {

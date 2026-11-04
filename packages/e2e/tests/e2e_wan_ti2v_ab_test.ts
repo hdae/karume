@@ -1,72 +1,87 @@
 /**
- * Wan2.2 TI2V-5B の**自機 A/B 門**（実 GPU・ADR 0121 段 7 — 規則は ADR 0110 決定 4〜7 と ADR 0120 決定 4 の形のまま）。実用席
- * `f16+dit8-a8-attn8-s16`（既定席 — `session` に linear a8 / attention a8 / S の f16 格納を束ねた席）を、**同じ機・同じ i8 重み**
- * で `session` が空の参照席（manifest から導く — `referencePartnerOf`。今の配布形では `f16+dit8`）と比べる。比較相手は同機の
- * 参照層で、torch golden は使わない（ADR 0110 決定 5 ②）。実用席は s16 と online（`f16+dit8-a8-attn8-online` — ADR 0132）の
- * 2 つを同じ帯で見る（T2V のケースごとに 2 席分の describe・故障注入と I2V は s16 だけ）。
+ * Wan2.2 TI2V-5B **self A/B check** (real GPU; ADR 0121 step 7 — the rules keep the shape of ADR 0110 decisions 4–7 and
+ * ADR 0120 decision 4). It compares the practical preset `f16+dit8-a8-attn8-s16` (the default preset — a preset whose
+ * `session` bundles linear a8 / attention a8 / f16 storage of S), **on the same machine with the same i8 weights**,
+ * against the reference partner whose `session` is empty (derived from the manifest — `referencePartnerOf`; `f16+dit8`
+ * in the current distribution). The comparison partner is the same machine's reference path; no torch golden is used
+ * (ADR 0110 decision 5 ②). Two practical presets, s16 and online (`f16+dit8-a8-attn8-online` — ADR 0132), are checked
+ * under the same band (a describe for each of the 2 presets per T2V case; the fault injections and I2V run for s16
+ * only).
  *
- * 手順・判定・故障注入は 2.1（`e2e_wan_ab_test.ts`）と共有の 1 本（`helpers/wan-ab-gate.ts` の {@link registerWanAbCase}）:
- * 参照席で step 1 の潜在（2 ステップの通しの 1 step 目）を採って打ち切る → 実用席で同じことを独立に 2 回 → 決定性（2 回が
- * ビット一致）・census（実用席の DiT の各パスで linear 310 本ちょうどが i8a8・参照経路の linear 0 本 — 束の census 表の
- * `wan-ti2v` の行。attention の 2 ノブは 1 本以上）・帯（`judgeAb`）。
+ * The steps, the verdict and the fault injections are the one implementation shared with 2.1 (`e2e_wan_ab_test.ts`)
+ * ({@link registerWanAbCase} of `helpers/wan-ab-gate.ts`): capture the step-1 latent (step 1 of a 2-step run) with the
+ * reference partner and abort → do the same twice independently with the practical preset → determinism (the 2 runs
+ * are bit-identical), census (in every pass of the practical preset's DiT exactly 310 linears are i8a8 and 0 linears
+ * are on the reference path — the `wan-ti2v` row of the bundle's census table; at least 1 for each of the 2 attention
+ * knobs), band (`judgeAb`).
  *
- * 入力は `boxing-cats`・seed 42・2 ステップ（step 1 = CFG の 2 パス）・1280×704・guidance 5・shift 5・事前計算の埋め込み
- * （`"precomputed"`）— 通しの e2e の seed 経路の sha 行（`e2e_wan_ti2v_pipeline_test.ts` の `TWO_STEP`）と同じ要求。寸法と
- * guidance / shift は明示する（世代の既定に黙って乗せない — manifest の既定が動いても帯の前提〈step 1 の σ と CFG のパス数〉が
- * 動かないように）。
+ * The input is `boxing-cats`, seed 42, 2 steps (step 1 = the 2 CFG passes), 1280×704, guidance 5, shift 5, precomputed
+ * embeddings (`"precomputed"`) — the same request as the sha row of the seed path of the end-to-end e2e (`TWO_STEP` of
+ * `e2e_wan_ti2v_pipeline_test.ts`). Dimensions and guidance / shift are explicit (not silently left to the generation
+ * defaults — so that the band's premises (the σ of step 1 and the number of CFG passes) do not move when the
+ * manifest defaults move).
  *
- * ## ケース（利用者の裁定 2026-10-09）
+ * ## Cases (the user's ruling, 2026-10-09)
  *
- * ADR 0120 決定 4 の形（既定の長さと最長の 2 点で持つ — attention a8 の誤差は行の長さで増えるので、短い方の帯を長い方へ
- * 外挿しない）で、2.2 の 2 点は:
+ * In the shape of ADR 0120 decision 4 (two points, the default length and the longest — the attention a8 error grows
+ * with the row length, so the band of the shorter one is not extrapolated to the longer one), the 2 points of 2.2 are:
  *
- * - **33 フレーム**（既定のフレーム数・S = 7,920 — 既定のレーン）。故障注入 5 件もこのケースで回す（門の空振りを示すのに長さは
- *   要らない）。
- * - **121 フレーム**（受理の上限・S = 27,280 — env の opt-in `KARUME_WAN_TI2V_121F=1` のときだけ。通しの e2e の 121 フレームの
- *   ケースと同じ変数）。既定のレーンに入れないのはフル verify の所要を延ばさないため（対策は別に考える）。
+ * - **33 frames** (the default frame count, S = 7,920 — default lanes). The 5 fault injections also run in this case
+ *   (showing a check that misses needs no length).
+ * - **121 frames** (the accepted maximum, S = 27,280 — only with the env opt-in `KARUME_WAN_TI2V_121F=1`; the same
+ *   variable as the 121-frame case of the end-to-end e2e). It stays out of the default lanes so as not to lengthen the
+ *   full verify (a countermeasure is to be considered separately).
  *
- * 121 フレームを回すコマンド（`--filter` で**単独のプロセス**にする — 下の「device の使い方」）:
+ * Command that runs the 121 frames (as a **process of its own** through `--filter` — "Device use" below):
  *
  * ```
  * KARUME_WAN_TI2V_121F=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_ab_test.ts --filter "121f"
  * ```
  *
- * ## I2V のケース（ADR 0121 段 9d・利用者の裁定 2026-10-09〜10）
+ * ## The I2V case (ADR 0121 step 9d; the user's rulings, 2026-10-09 to 10)
  *
- * 条件画像からの生成（I2V）の実用席の数値の門。要求は 33 フレームのケースに条件画像と fit を足したもの（1280×704・33 フレーム・
- * guidance 5・shift 5・seed 42・`boxing-cats`・事前計算の埋め込み）。条件画像は I2V の通しの e2e（`e2e_wan_ti2v_i2v_pipeline_test.ts`）
- * の既定のケースと同じ `boxing-cats` の元画像で、CPU の参照（`pipeline_steps_i2v.band-boxing-cats.safetensors`）に埋め込まれた
- * RGB8（`source` 832×480 — PNG の decode にも別の資産にも頼らない）を同じ参照から読む。fit は明示の `"crop"`（製品の既定に
- * 黙って乗せない — 既定が動いても帯の前提が動かないように）。寸法は明示するので画像の縦横比での選択に預けない。参照が無い
- * 環境は理由と生成のコマンドを出して**明示 SKIP** する。
+ * The numeric check of the practical preset for generation from a condition image (I2V). The request is the 33-frame
+ * case plus a condition image and a fit (1280×704, 33 frames, guidance 5, shift 5, seed 42, `boxing-cats`, precomputed
+ * embeddings). The condition image is the `boxing-cats` source image of the default case of the I2V end-to-end e2e
+ * (`e2e_wan_ti2v_i2v_pipeline_test.ts`): the RGB8 (`source` 832×480 — relying neither on PNG decoding nor on another
+ * asset) embedded in the CPU reference (`pipeline_steps_i2v.band-boxing-cats.safetensors`) is read from that same
+ * reference. The fit is an explicit `"crop"` (not silently left to the product default — so that the band's premises do
+ * not move when the default moves). The dimensions are explicit, so the choice is not left to the image's aspect ratio.
+ * Environments without the reference **SKIP explicitly** with the reason and the generation command.
  *
- * env の opt-in `KARUME_WAN_TI2V_I2V_FULL=1`（I2V の通しの e2e の opt-in と同じ変数）のときだけ回す（既定のレーンに入れない —
- * 利用者の裁定）。故障注入は回さない（門の空振りは T2V の 33 フレームが示す — 手順は同じ 1 本）。census と決定性は
- * {@link registerWanAbCase} のまま。加えて {@link registerWanAbCase} は条件画像を渡したケースの各観測で encoder の 3 グラフの run が
- * 届いたことを見る（画像が要求から落ちて両席とも T2V で回ると、relRMS は T2V の値で帯の内に収まり census も DiT しか
- * 見ないので、帯と census では掴めない）。回すコマンド:
+ * It runs only with the env opt-in `KARUME_WAN_TI2V_I2V_FULL=1` (the same variable as the opt-in of the I2V end-to-end
+ * e2e) (kept out of the default lanes — the user's ruling). No fault injections run (the T2V 33 frames show that the
+ * check is not blind — the steps are the same implementation). Census and determinism are those of
+ * {@link registerWanAbCase}. In addition, {@link registerWanAbCase} checks in every observation of a case given a
+ * condition image that the runs of the encoder's 3 graphs arrived (if the image fell out of the request and both
+ * presets ran as T2V, relRMS would take the T2V value and stay inside the band, and the census looks only at the DiT,
+ * so neither the band nor the census would catch it). Command that runs it:
  *
  * ```
  * KARUME_WAN_TI2V_I2V_FULL=1 deno test -A --v8-flags=--expose-gc packages/models/tests/e2e_wan_ti2v_ab_test.ts --filter "i2v"
  * ```
  *
- * ノブ単位の記録（2.1 の `knobRungs`）は持たない — 段 7 の検収条件に無く、既定のレーンの所要を増やさない。最終出力（フレーム）は
- * ここでは作らない — sha 行（`e2e_wan_ti2v_pipeline_test.ts` / `e2e_wan_ti2v_i2v_pipeline_test.ts`）が持ち、帯にしない（ADR 0110
- * 決定 5-4）。結果の席は既定のレーンの 33 フレームが `wan-ti2v-ab`・opt-in の 121 フレームが `wan-ti2v-ab-121f`・opt-in の I2V が
- * `wan-ti2v-ab-i2v`（`results.json` は走行ごとに丸ごと書き直されるので、別のプロセスで回す opt-in のケースが同じ日の
- * 33 フレームの記録を消さないように分ける — 通しの e2e の 121 フレームと同じ扱い）。
+ * There is no per-knob record (2.1's `knobRungs`) — it is not in the acceptance conditions of step 7, and it would
+ * lengthen the default lanes. The final output (frames) is not produced here — the sha rows
+ * (`e2e_wan_ti2v_pipeline_test.ts` / `e2e_wan_ti2v_i2v_pipeline_test.ts`) own it, and it gets no band (ADR 0110
+ * decision 5-4). The results directories are `wan-ti2v-ab` for the 33 frames of the default lanes, `wan-ti2v-ab-121f`
+ * for the opt-in 121 frames and `wan-ti2v-ab-i2v` for the opt-in I2V (`results.json` is rewritten whole on every run,
+ * so they are separated to keep an opt-in case run in another process from erasing the same day's 33-frame record —
+ * the same treatment as the 121 frames of the end-to-end e2e).
  *
- * ## device の使い方
+ * ## Device use
  *
- * device は describe 1 本で 1 つ取り、観測の間に `settleReleases` で解放を待つ（2.1 と同じ）。opt-in の env を付けて `--filter`
- * なしで回すと 1 プロセスで device を順に取る（121 → 33 → I2V）。`destroy()` が VRAM をすぐ返さない機（B570 — ADR 0120 リスク 6）
- * では前のケースの確保の残りが次のケースの確保に重なりうるので、opt-in のケースは上のコマンドで単独に回す（通しの e2e の
- * opt-in と同じ規律）。並びを 121 フレームが先にしているのは、`--filter` なしで回したときでも大きい確保を device の残りを
- * 背負わずに張るため。
+ * One device is acquired per describe, and the releases are awaited with `settleReleases` between observations (as in
+ * 2.1). Run with the opt-in env and without `--filter`, one process acquires devices in turn (121 → 33 → I2V). On a
+ * machine where `destroy()` does not return VRAM at once (B570 — ADR 0120 risk 6), what is left of the previous case's
+ * allocations can overlap the next case's, so the opt-in cases are run alone with the commands above (the same
+ * discipline as the opt-ins of the end-to-end e2e). The 121 frames come first so that, even when run without
+ * `--filter`, the large allocations are made without carrying what other cases left on the device.
  *
- * MUST: 資産は `models/karume-wan2.2/`（untracked・実 GPU 機のローカル資産）。無い環境と GPU 無し環境は理由（組み立ての
- * コマンド）を出して**明示 SKIP** する（ADR 0005）。故障注入の席は同じ配布形を symlink で借りた一時 manifest で張り、元の
- * 配布形は 1 バイトも書き換えない。
+ * MUST: the assets are `models/karume-wan2.2/` (untracked; local assets of a real-GPU machine). Environments without
+ * them or without a GPU **SKIP explicitly** with the reason (the assembly command) (ADR 0005). The fault-injection
+ * presets are built from a temporary manifest that borrows the same distribution through symlinks; the original
+ * distribution is not changed by a single byte.
  */
 
 import { readFile } from "@karume/test-support/fs";
@@ -101,85 +116,101 @@ import {
   WAN_TI2V_PRACTICAL_QUANT,
 } from "../../models/tests/helpers/wan-ti2v-pipeline.ts";
 
-/** 実測と決着の置き場（`outputs/verify/<環境キー>/<日付>_wan-ti2v-ab/` — 消して安全）。 */
+/** Where measurements and outcomes go (`outputs/verify/<environment key>/<date>_wan-ti2v-ab/` — safe to delete). */
 const results = openResults("wan-ti2v-ab");
-/** opt-in の 121 フレームの置き場（`<日付>_wan-ti2v-ab-121f/` — 既定のレーンと分ける理由はモジュール doc）。 */
+/**
+ * Where the opt-in 121 frames go (`<date>_wan-ti2v-ab-121f/` — why it is separate from the default lanes: module doc).
+ */
 const longClipResults = openResults("wan-ti2v-ab-121f");
-/** opt-in の I2V の置き場（`<日付>_wan-ti2v-ab-i2v/` — 既定のレーンと分ける理由はモジュール doc）。 */
+/** Where the opt-in I2V goes (`<date>_wan-ti2v-ab-i2v/` — why it is separate from the default lanes: module doc). */
 const i2vResults = openResults("wan-ti2v-ab-i2v");
 
 /**
- * 要求の固定値（受理集合の横長・guidance / shift は通しの e2e の `TWO_STEP` と同じ値 — 今の manifest の既定とも同じ値を明示する）。
+ * Fixed request values (the landscape shape of the accepted set; guidance / shift are the same values as `TWO_STEP` of
+ * the end-to-end e2e — the values equal to the current manifest defaults are also given explicitly).
  */
 const REQUEST = { width: 1280, height: 704, guidance: 5, shift: 5 } as const;
 
-/** 121 フレームのケースの opt-in（`e2e_wan_ti2v_pipeline_test.ts` の 121 フレームのケースと同じ変数）。 */
+/** Opt-in for the 121-frame case (the same variable as the 121-frame case of `e2e_wan_ti2v_pipeline_test.ts`). */
 const LONG_CLIP = process.env.KARUME_WAN_TI2V_121F === "1";
 
-/** I2V のケースの opt-in（`e2e_wan_ti2v_i2v_pipeline_test.ts` の opt-in と同じ変数）。 */
+/** Opt-in for the I2V case (the same variable as the opt-in of `e2e_wan_ti2v_i2v_pipeline_test.ts`). */
 const I2V_FULL = process.env.KARUME_WAN_TI2V_I2V_FULL === "1";
 
-/** I2V のケースの条件画像の名前（プロンプトと同じ名前 — I2V の通しの e2e の既定のケースの元画像）。 */
+/**
+ * Name of the I2V case's condition image (the same name as the prompt — the source image of the default case of the I2V
+ * end-to-end e2e).
+ */
 const I2V_IMAGE = "boxing-cats";
 
 /**
- * I2V の条件画像を埋め込んだ CPU の参照（I2V の通しの e2e の既定のケース `band-boxing-cats` — 置き場・生成のコマンド・
- * 元画像の形はその e2e と共有の `helpers/wan-i2v-fixture.ts`）。
+ * The CPU reference that embeds the I2V condition image (the default case `band-boxing-cats` of the I2V end-to-end e2e
+ * — the location, the generation command and the source-image shape are in `helpers/wan-i2v-fixture.ts`, shared with
+ * that e2e).
  */
 const I2V_FIXTURE_URL = wanI2vStepsFixtureUrl(`band-${I2V_IMAGE}`);
 
 /**
- * I2V のケースの帯（{@link CASES} と同じ規則で独立に導く — 条件のトークンが加わるので 33 フレームの T2V の帯を流用しない。
- * 実測と導出は {@link CASES} の表の `i2v-33f` の行）。
+ * The band of the I2V case (derived independently under the same rule as {@link CASES} — condition tokens are added, so
+ * the 33-frame T2V band is not reused; the measurement and the derivation are the `i2v-33f` row of the table of
+ * {@link CASES}).
  *
- * MUST: 導出前は `undefined`（{@link CASES} の MUST と同じ）。
+ * MUST: `undefined` before derivation (the same as the MUST of {@link CASES}).
  */
 const I2V_BAND: AbBand | undefined = { floor: 0, ceiling: 9.3e-2 };
 
-/** I2V のケースのフレーム数（33 フレームのケースと同じ要求に条件画像と fit を足す）。 */
+/** Frame count of the I2V case (the request of the 33-frame case plus a condition image and a fit). */
 const I2V_FRAMES = 33;
 
 /**
- * ケース（フレーム数）と帯。並びは確保の大きい 121 フレームが先（モジュール doc）。
+ * Cases (frame counts) and bands. The 121 frames, which allocate the most, come first (module doc).
  *
- * 帯は**宣言**で、環境キー別の行にしない・`KARUME_REFERENCE` で書き換えない（ADR 0110 決定 4）。導出規則（決定 5）:
- * 上限 = 観測点の実測 relRMS × 2 程度（有効数字 2 桁へ切り上げ）をケースごとに独立に導く（33 フレームの値を 121 フレームへ
- * 外挿しない — attention a8 の誤差は行の長さ S で増える・ADR 0120 決定 4）。床 = 1 bit 以上違う（MUST — `judgeAb` が帯と無関係に
- * 常に見る）で、`floor` を 0 より上に置くのはノブ 1 つを外した実測が全部入りより明確に小さいと示せたときだけ。2.1 の帯
- * （33 フレーム 2.2e-1 / 81 フレーム 4.2e-1）は 2.2 の根拠にならない（モデル・行の長さ・潜在の形が違う）。
+ * The bands are **declarations**: they are not rows per environment key and are not rewritten by `KARUME_REFERENCE`
+ * (ADR 0110 decision 4). Derivation rule (decision 5): ceiling = about 2 × the measured relRMS at the observation point
+ * (rounded up to 2 significant digits), derived independently per case (the 33-frame value is not extrapolated to 121
+ * frames — the attention a8 error grows with the row length S; ADR 0120 decision 4). Floor = at least 1 bit different
+ * (MUST — `judgeAb` always checks it, regardless of the band); `floor` is set above 0 only when the measurement with
+ * one knob removed is shown to be clearly smaller than with all of them. The 2.1 bands (33 frames 2.2e-1 / 81 frames
+ * 4.2e-1) are no basis for 2.2 (the model, the row length and the latent shape differ).
  *
- * MUST: 導出前は `undefined` にする — `judgeAb` が実測を出して赤で止まる（ADR 0120 決定 4）。通る値を仮置きして検出力の無い門を
- * 増やさない（`ab-gate.ts` の MUST）。帯が `undefined` の間は故障注入 ⑤（別 seed の潜在が上限で赤）も「帯が未導出」で赤になる
- * （帯の宣言の後に有効 — 2.1 の導出前と同じ振る舞い）。
+ * MUST: keep it `undefined` before derivation — `judgeAb` prints the measurement and stops red (ADR 0120 decision 4).
+ * Do not add a check without detection power by putting in a value that passes (the MUST of `ab-gate.ts`). While the
+ * band is `undefined`, fault injection ⑤ (another seed's latent is red at the ceiling) is also red with "band not yet
+ * derived" (it becomes effective once the band is declared — the same behaviour as 2.1 before derivation).
  *
- * | ケース  | S      | 実測 relRMS | 実測 maxAbs | floor | ceiling            | 採った日・機                    |
- * | ------- | ------ | ----------- | ----------- | ----- | ------------------ | ------------------------------- |
- * | 121f    | 27,280 | 4.9151e-2   | 2.1226e-1   | 0     | 9.9e-2（× 2 切上） | 2026-10-09・RTX 3080 Ti（Deno） |
- * | 33f     | 7,920  | 4.3881e-2   | 1.9291e-1   | 0     | 8.8e-2（× 2 切上） | 2026-10-09・RTX 3080 Ti（Deno） |
- * | i2v-33f | 7,920  | 4.6146e-2   | 4.9261e-1   | 0     | 9.3e-2（× 2 切上） | 2026-10-10・RTX 3080 Ti（Deno） |
+ * | Case    | S      | relRMS    | maxAbs    | floor | ceiling              | Measured on                    |
+ * | ------- | ------ | --------- | --------- | ----- | -------------------- | ------------------------------ |
+ * | 121f    | 27,280 | 4.9151e-2 | 2.1226e-1 | 0     | 9.9e-2 (× 2, ceiled) | 2026-10-09, RTX 3080 Ti (Deno) |
+ * | 33f     | 7,920  | 4.3881e-2 | 1.9291e-1 | 0     | 8.8e-2 (× 2, ceiled) | 2026-10-09, RTX 3080 Ti (Deno) |
+ * | i2v-33f | 7,920  | 4.6146e-2 | 4.9261e-1 | 0     | 9.3e-2 (× 2, ceiled) | 2026-10-10, RTX 3080 Ti (Deno) |
  *
- * `i2v-33f` は I2V のケース（{@link I2V_BAND} — 33 フレームに条件画像 `boxing-cats` と fit `"crop"` を足した要求・opt-in）。
- * T2V の 33 フレームに比べ relRMS は 1.05 倍でほぼ同じ、maxAbs は 2.6 倍。maxAbs は潜在フレーム 0（観測点は条件で置き換える
- * 前の状態なので、出力に届かないフレーム）にある: フレーム 0 は relRMS 6.6217e-2・maxAbs 4.9261e-1、フレーム 1〜8 をまとめると
- * relRMS 4.1754e-2・フレームごとの maxAbs は 2.7906e-1 以下（2026-10-10・同じ機・一度だけの診断の計測 — テストには残していない）。
- * 帯は relRMS の宣言なので T2V と同じ桁の上限になる。
+ * `i2v-33f` is the I2V case ({@link I2V_BAND} — the 33-frame request plus the condition image `boxing-cats` and the fit
+ * `"crop"`; opt-in). Compared with the T2V 33 frames, relRMS is 1.05× (nearly the same) and maxAbs 2.6×. The maxAbs
+ * sits in latent frame 0 (the observation point is the state before the condition replaces it, so a frame that never
+ * reaches the output): frame 0 has relRMS 6.6217e-2 and maxAbs 4.9261e-1; frames 1–8 together have relRMS 4.1754e-2
+ * and a per-frame maxAbs of at most 2.7906e-1 (2026-10-10, the same machine, a one-off diagnostic measurement — not
+ * kept in the test). The band is a declaration on relRMS, so its ceiling is of the same order as T2V.
  *
- * 33 フレームの故障注入（記録）: ③（attention の a8 を外した席）は relRMS 4.0983e-2 で全部入りの 9 割強 — 2.2 の 33 フレームでは
- * attention の a8 の寄与は小さい（残りは linear の a8 と S の f16 格納 — 内訳は測っていない。2.1 は逆に attention の a8 が大半 —
- * 33 フレームで linear の a8 だけ 2.9991e-2 → 全部入り 1.0676e-1）。
- * ③ は帯の内に留まるので、census が要ることの実証になる。⑤（別 seed）は 1.3782e+0（崩壊の代理）。
+ * 33-frame fault injections (recorded): ③ (the preset without attention a8) has relRMS 4.0983e-2, just over 90% of all
+ * knobs — at 2.2's 33 frames the contribution of attention a8 is small (the rest is linear a8 and the f16 storage of S
+ * — the breakdown was not measured; in 2.1, conversely, attention a8 is most of it — at 33 frames linear a8 alone is
+ * 2.9991e-2 → all knobs 1.0676e-1).
+ * ③ stays inside the band, which demonstrates that the census is needed. ⑤ (another seed) is 1.3782e+0 (a stand-in for
+ * collapse).
  */
 const CASES: readonly {
   readonly frames: number;
   readonly band: AbBand | undefined;
-  /** env の opt-in（`KARUME_WAN_TI2V_121F=1`）のときだけ回すケースか。 */
+  /** Whether the case runs only with the env opt-in (`KARUME_WAN_TI2V_121F=1`). */
   readonly optIn: boolean;
 }[] = [
   { frames: 121, band: { floor: 0, ceiling: 9.9e-2 }, optIn: true },
   { frames: 33, band: { floor: 0, ceiling: 8.8e-2 }, optIn: false },
 ];
 
-/** 故障注入を回すフレーム数（既定のレーンの 33 — 門の空振りを示すのに長さは要らない）。 */
+/**
+ * Frame count the fault injections run at (the 33 of the default lanes — showing a check that misses needs no length).
+ */
 const FAULT_FRAMES = 33;
 
 /**
@@ -202,17 +233,19 @@ const FAULT_PRESET = WAN_TI2V_PRACTICAL_QUANT;
 const manifestText = await readWanTi2vDistributionManifestText();
 if (manifestText === undefined) {
   console.warn(
-    `[karume] ${WAN_TI2V_DIST_ROOT.pathname} に karume.json が無いため Wan2.2 の自機 A/B 門を SKIP する` +
-      `（組み立て: ${WAN_TI2V_ASSEMBLE_COMMAND}）`,
+    `[karume] ${WAN_TI2V_DIST_ROOT.pathname} has no karume.json, so the Wan2.2 self A/B check is SKIPPED` +
+      ` (assemble: ${WAN_TI2V_ASSEMBLE_COMMAND})`,
   );
 }
 const RUNNABLE = GPU_AVAILABLE && manifestText !== undefined;
 
 /**
- * 2.2 の門の対象（共有の段 {@link registerWanAbCase} へ渡す）。`caseResults` はケースの結果の席（opt-in のケースは
- * 既定のレーンと分ける — モジュール doc）、`request` は要求の固定値（I2V のケースは条件画像と fit を足す）。
+ * The subject of the 2.2 check (passed to the shared {@link registerWanAbCase}). `caseResults` is the case's results
+ * directory (the opt-in cases are kept apart from the default lanes — module doc), `request` the fixed request values
+ * (the I2V case adds a condition image and a fit).
  *
- * MUST: 呼ぶのは {@link RUNNABLE} のテストの中だけ（配布形が無いのにここへ来たら ignore の判定の破れなので落とす）。
+ * MUST: call it only inside the tests of {@link RUNNABLE} (reaching it without a distribution means the skip decision
+ * broke, so it fails).
  */
 const subjectOf = (
   practical: string,
@@ -221,7 +254,7 @@ const subjectOf = (
 ): WanAbSubject => {
   if (manifestText === undefined) {
     throw new Error(
-      `${WAN_TI2V_DIST_ROOT.pathname} に karume.json が無いのに A/B 門が走った（ignore の判定の破れ）`,
+      `${WAN_TI2V_DIST_ROOT.pathname} has no karume.json, yet the A/B check ran (the skip decision broke)`,
     );
   }
   return {
@@ -246,8 +279,9 @@ if (RUNNABLE && I2V_FULL && !I2V_FIXTURE_PRESENT) {
 }
 
 /**
- * I2V の条件画像（参照に埋め込まれた元画像の RGB8・HWC — I2V の通しの e2e の `sourceImageOf` と同じ値）。来歴（画像の名前・
- * PNG の sha256・RGB8 の sha256）を参照のメタと突き合わせてから渡す（別の画像で帯を測らないように）。
+ * The I2V condition image (RGB8 HWC of the source image embedded in the reference — the same value as `sourceImageOf`
+ * of the I2V end-to-end e2e). Its provenance (image name, PNG sha256, RGB8 sha256) is compared with the reference's
+ * metadata before it is passed on (so that the band is never measured on another image).
  */
 const readI2vImage = async (): Promise<Rgb8Image> => {
   const bytes = await readFile(I2V_FIXTURE_URL);
@@ -256,18 +290,18 @@ const readI2vImage = async (): Promise<Rgb8Image> => {
   );
   const where = I2V_FIXTURE_URL.pathname;
   const meta = (key: string): string | undefined => file.metadata.get(key);
-  assertEquals(meta("image"), I2V_IMAGE, `${where}: 画像の名前`);
-  assertEquals(meta("image_sha256"), WAN_I2V_IMAGE_SHA256[I2V_IMAGE], `${where}: 画像の sha256`);
+  assertEquals(meta("image"), I2V_IMAGE, `${where}: image name`);
+  assertEquals(meta("image_sha256"), WAN_I2V_IMAGE_SHA256[I2V_IMAGE], `${where}: image sha256`);
   const source = file.tensors.get("source");
   if (source === undefined || source.dtype !== "U8") {
-    throw new Error(`${where}: 'source' が U8 で無い`);
+    throw new Error(`${where}: 'source' is not U8`);
   }
-  assertEquals(source.shape, WAN_I2V_SOURCE_SHAPE, `${where}: 元画像の形`);
+  assertEquals(source.shape, WAN_I2V_SOURCE_SHAPE, `${where}: source image shape`);
   const data = new Uint8Array(file.buffer, source.byteOffset, source.byteLength);
   assertEquals(
     await sha256Hex(data),
     meta("source_rgb8_sha256"),
-    `${where}: 元画像の RGB8 の sha256`,
+    `${where}: source image RGB8 sha256`,
   );
   return { width: WAN_I2V_SOURCE_SHAPE[1], height: WAN_I2V_SOURCE_SHAPE[0], data };
 };
@@ -277,8 +311,8 @@ for (const { frames, band, optIn } of CASES) {
     const id = `${practical}-${frames}f`;
     const faults = frames === FAULT_FRAMES && practical === FAULT_PRESET;
     describe.skipIf(!RUNNABLE || (optIn && !LONG_CLIP))(
-      `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う（自機 A/B）` +
-        (faults ? "・故障注入 5 件は赤" : "") +
+      `e2e (real GPU): Wan2.2 ${id} step-1 latent agrees with the reference partner in determinism, census and band (self A/B)` +
+        (faults ? ", 5 fault injections are red" : "") +
         (optIn ? "（opt-in KARUME_WAN_TI2V_121F=1）" : ""),
       () => {
         // One device per case, shared by the case's its (acquired before, released after them all).
@@ -309,8 +343,8 @@ for (const { frames, band, optIn } of CASES) {
 {
   const id = `${WAN_TI2V_PRACTICAL_QUANT}-i2v-crop-${I2V_FRAMES}f`;
   describe.skipIf(!RUNNABLE || !I2V_FULL || !I2V_FIXTURE_PRESENT)(
-    `e2e(実GPU): Wan2.2 ${id} の step 1 の潜在が参照席と決定性・census・帯で釣り合う` +
-      "（自機 A/B・条件画像 boxing-cats・opt-in KARUME_WAN_TI2V_I2V_FULL=1）",
+    `e2e (real GPU): Wan2.2 ${id} step-1 latent agrees with the reference partner in determinism, census and band` +
+      " (self A/B, condition image boxing-cats, opt-in KARUME_WAN_TI2V_I2V_FULL=1)",
     () => {
       let gpu: GpuContext | undefined;
       let subject: WanAbSubject | undefined;

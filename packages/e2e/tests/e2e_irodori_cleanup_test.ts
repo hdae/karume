@@ -1,11 +1,13 @@
-// 常駐ループの本体・batch 終了・複数 cleanup が失敗しても、全資源の解放を試みる門。
-// 本物の解放の後に故障を注入するので、試験自体は VRAM や参照を残さない。
-// prototype の差し替えはこのテスト内だけで、必ず戻す。他ファイルは Deno の別 worker。
+// A check that every resource release is attempted even when the resident loop's body, the batch
+// finish and several cleanups fail. Faults are injected after the real release, so the test
+// itself leaves no VRAM or references behind. The prototype patches stay inside this test and are
+// always restored. Other files run in separate Deno workers.
 //
-// 段 6'（条件側 K/V 射影 `dit_context` — ADR 0114）は前段の batch で回り切ってから Session を
-// 畳み、その後で `dit` / combine / euler を開く（VRAM ピークの MUST — `dit-loop.ts` の
-// `projectContextOnGpu`）。故障はループ本体（`dit` の最初の enqueue）に注入し、前段は素通しに
-// して、その順序と解放の本数を同じ 1 回の生成で見る。
+// Stage 6' (the condition-side K/V projection `dit_context` — ADR 0114) runs to completion in the
+// preceding batch and tears its Session down, and only then are `dit` / combine / euler opened
+// (the VRAM-peak MUST — `projectContextOnGpu` in `dit-loop.ts`). The fault is injected into the
+// loop body (`dit`'s first enqueue), the preceding stage passes through, and the order and the
+// release counts are checked in the same single generation.
 import { test } from "vite-plus/test";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { Pipeline } from "../../models/irodori.ts";
@@ -21,10 +23,12 @@ import { Session } from "../../runtime/src/runtime/executor.ts";
 import { BatchScope, ResidentTensor } from "../../runtime/src/gpu/device.ts";
 
 if (!hasQuantSeat("i8")) {
-  console.warn(`[karume] Irodori cleanup テストの i8 資産が無いため SKIP。生成: ${DIST_COMMAND}`);
+  console.warn(
+    `[karume] the i8 assets for the Irodori cleanup test are absent, so it SKIPs. Generate: ${DIST_COMMAND}`,
+  );
 }
 test.skipIf(!GPU_AVAILABLE || !hasQuantSeat("i8"))(
-  "Irodori 常駐ループ: 本体と多重 cleanup の失敗を保ち、全 Session と resident を解放する（実 GPU）",
+  "Irodori resident loop: keeps the failures of the body and of multiple cleanups and releases every Session and resident (real GPU)",
   async () => {
     const manifest = readManifest();
     const assets = await loadLocalAssets(manifest, "i8");
@@ -54,7 +58,8 @@ test.skipIf(!GPU_AVAILABLE || !hasQuantSeat("i8"))(
       new Error("probe: dispose session 2"),
     ];
     const residentFault = new Error("probe: dispose resident 1");
-    // 段の進み: 前段（`dit_context` の enqueue を見た後）→ ループ（`dit` の enqueue で故障）。
+    // Stage progression: the preceding stage (after seeing `dit_context`'s enqueue) → the loop
+    // (the fault on `dit`'s enqueue).
     let phase: "before" | "context" | "loop" = "before";
     let sessions = 0;
     let loopSessions = 0;
@@ -62,13 +67,15 @@ test.skipIf(!GPU_AVAILABLE || !hasQuantSeat("i8"))(
     let finishes = 0;
     const order: string[] = [];
     try {
-      // Session の構築は全て `Session.build` を通る（容器の部品もホストの小グラフも）。
+      // Every Session build goes through `Session.build` (container components and the host's
+      // small graphs alike).
       Session.build = function (...args: Parameters<typeof build>) {
         order.push("open");
         return build.apply(this, args);
       };
       Session.prototype.enqueue = function (inputs, options): Promise<void> {
-        // `dit` だけが `x_t` を、前段の `dit_context` だけが `speaker_state` を受ける（小グラフは別名）。
+        // Only `dit` takes `x_t`, and only the preceding `dit_context` takes `speaker_state` (the
+        // small graphs use other names).
         if (Object.hasOwn(inputs, "x_t")) {
           phase = "loop";
           order.push("enqueue:dit");
@@ -115,13 +122,13 @@ test.skipIf(!GPU_AVAILABLE || !hasQuantSeat("i8"))(
       const failures = flatten(error);
       assertEquals(failures, [bodyFault, finishFault, ...sessionFaults, residentFault]);
       assertEquals(finishes, 1);
-      // dit_context（前段で解放済み）+ dit + combine + euler。
+      // dit_context (released in the preceding stage) + dit + combine + euler.
       assertEquals(sessions, 4);
-      // 4 作業用テンソル + 条件側 K / V 24 本（12 ブロック × K / V）。
+      // 4 working tensors + 24 condition-side K / V (12 blocks × K / V).
       assertEquals(residents, 28);
-      // 前段の Session は `dit` を開く**前**に畳まれている（VRAM ピークの MUST）。
+      // The preceding stage's Session is torn down **before** `dit` is opened (the VRAM-peak MUST).
       const start = order.lastIndexOf("open", order.indexOf("enqueue:dit_context"));
-      assert(start >= 0, `dit_context の Session 構築が観測されない（${order.join(" / ")}）`);
+      assert(start >= 0, `no Session build of dit_context was observed (${order.join(" / ")})`);
       assertEquals(order.slice(start, start + 12), [
         "open",
         "enqueue:dit_context",

@@ -1,19 +1,22 @@
 /**
- * PLE の **GPU 常駐席**（ADR 0085 追記〈GPU 常駐席〉）の実資産検収 — 段 H-28。
+ * Real-asset acceptance of the PLE's **GPU-resident path** (ADR 0085 addendum "GPU-resident
+ * seat") — step H-28.
  *
- * 門は 3 本:
+ * Three checks:
  *
- * ① **golden とのビット一致**: GPU 内 gather の出力が、台本が torch の 35 表経路で採った
- *    `ple.probe.safetensors`（= PLE をグラフに残していたら `embedding` + 直後の `mul` が
- *    出していた値そのもの）と **u32 完全一致**する。tolerance は持たない。
- * ② **ホスト経路との交差 parity**: 同じ token に対するホスト `ple.gather` の出力と **u32 完全
- *    一致**する。①が割れたときに「GPU 経路が悪いのか golden が古いのか」を切り分ける線で、
- *    ホスト経路は ADR 0085 決定 4 の正本である。
- * ③ **生成 parity**: `pleResidency: "gpu"` で読んだパイプラインの 16 token greedy 生成 id 列が
- *    `"host"` と完全一致する。prefill も decode も GPU gather を通るので、片方だけの席では
- *    ないことがここで出る。
+ * ① **Bit identity with the golden**: the output of the in-GPU gather is **u32-identical** to
+ *    `ple.probe.safetensors`, which the script took through torch's 35-table path (= exactly the
+ *    values `embedding` + the `mul` right after it would have produced had the PLE stayed in the
+ *    graph). No tolerance.
+ * ② **Cross parity with the host path**: it is **u32-identical** to the output of the host
+ *    `ple.gather` for the same tokens. This is the line that tells "the GPU path is wrong" from
+ *    "the golden is stale" when ① splits; the host path is the source of truth of ADR 0085
+ *    decision 4.
+ * ③ **Generation parity**: the 16-token greedy id sequence of a pipeline loaded with
+ *    `pleResidency: "gpu"` is identical to `"host"`. Both prefill and decode go through the GPU
+ *    gather, so this shows the path does not cover only one of them.
  *
- * ## 資産
+ * ## Assets
  *
  * ①② read the PLE of the mobile QAT mirror's e2b `model` container
  * (`models/karume-gemma4-qat-mobile/` — the container is byte-identical to the mobile line's
@@ -22,7 +25,8 @@
  * probe from the test-asset root (`goldens/gemma4-qat-e2b-product/ple.probe.safetensors` —
  * ADR 0139 decisions 1 and 2); ③ reads the mirrors `models/karume-gemma4-qat-mobile/` and
  * `models/karume-gemma4-qat/` (the q4_0 line — the regular gemma pipeline's int4 seats since the
- * regular line ships `bf16` alone, 2026-11-04). 無い環境では**明示 SKIP** する（ADR 0005）。
+ * regular line ships `bf16` alone, 2026-11-04). Where they are missing the cases **SKIP
+ * explicitly** (ADR 0005).
  * The probe follows ADR 0139's fetched rule: absent from a complete fetch of the pinned test-asset dataset it FAILs ①② (the
  * dataset at the pin lacks it); without a complete fetch ①② SKIP with the reason in the title.
  *
@@ -70,11 +74,15 @@ const PLE_PROBE_FILE = "ple.probe.safetensors";
 const PROBE_TOKENS_KEY = "tokens";
 const PROBE_INPUTS_KEY = "per_layer_inputs";
 const VOCAB = 262144;
-/** 生成 parity の刻み（`e2e_gemma4_product_test.ts` の交差 parity と同じ K）。 */
+/**
+ * The step count of the generation parity (the same K as the cross parity of
+ * `e2e_gemma4_product_test.ts`).
+ */
 const GREEDY_STEPS = 16;
 /**
- * 早く EOS を引かない開放的な入力（parity が 1〜2 token で閉じると decode 側が空振りする）。
- * 前置きの長い問いにしてあるのは、prefill をバケット 1 本ではなく複数行で踏ませるためである。
+ * An open-ended input that does not hit EOS early (if the parity closes after 1–2 tokens, the
+ * decode side checks nothing). The question has a long lead-in so that prefill runs over several
+ * rows rather than one bucket.
  */
 const PROMPT =
   "List three things that make the ocean important to the planet, with one " +
@@ -95,8 +103,8 @@ const PROBE = new URL(PLE_PROBE_FILE, PRODUCT_ROOT);
 const PROBE_RELATIVE = PROBE.href.slice(TEST_ASSETS_ROOT.href.length);
 /** ADR 0139's fetched rule: an absent probe SKIPs only without a complete fetch of the pin. */
 const PROBE_SKIP = !isFile(PROBE) && !testAssetsFetched();
-// PLE は容器の資産なので、索引の有無は容器の有無と同じ（欠けていれば `openGemma4Ple` が
-// 資産の突合で fail loudly する）。
+// The PLE is an asset of the container, so the index is present exactly when the container is
+// (if it is missing, `openGemma4Ple` fails loudly when it cross-checks the assets).
 const PRODUCT_PRESENT = QAT_PRESENT && !PROBE_SKIP;
 /** The title suffix of ①② that names the probe SKIP (empty otherwise). */
 const PROBE_SKIP_REASON = PROBE_SKIP
@@ -119,9 +127,9 @@ if (!GEMMA_PRESENT) {
   );
 }
 
-/** u32 のビット列で突き合わせる（f32 の `===` は NaN と ±0 を取り逃がす）。 */
+/** Compares as u32 bit patterns (f32 `===` misses NaN and ±0). */
 const assertBitsEqual = (actual: Float32Array, expected: Float32Array, where: string): void => {
-  assertEquals(actual.length, expected.length, `${where}: 要素数`);
+  assertEquals(actual.length, expected.length, `${where}: element count`);
   const left = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
   const right = new Uint32Array(expected.buffer, expected.byteOffset, expected.length);
   let mismatches = 0;
@@ -134,13 +142,13 @@ const assertBitsEqual = (actual: Float32Array, expected: Float32Array, where: st
   assertEquals(
     mismatches,
     0,
-    `${where}: ${mismatches} 要素が不一致（最初は [${first}] ` +
+    `${where}: ${mismatches} elements differ（first at [${first}] ` +
       `${first < 0 ? "" : `${expected[first]} ≠ ${actual[first]}`}）`,
   );
 };
 
 test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
-  `PLE GPU 常駐: gather が golden ともホスト経路とも u32 完全一致（実GPU）${PROBE_SKIP_REASON}`,
+  `PLE GPU-resident: the gather is u32-identical to both the golden and the host path (real GPU)${PROBE_SKIP_REASON}`,
   async () => {
     assert(
       isFile(PROBE),
@@ -153,10 +161,14 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
     const probe = parseSafetensors((await readFile(PROBE)).buffer);
     const tokenView = probe.tensors.get(PROBE_TOKENS_KEY);
     const inputView = probe.tensors.get(PROBE_INPUTS_KEY);
-    assert(tokenView !== undefined && inputView !== undefined, "probe のテンソル 2 本");
+    assert(tokenView !== undefined && inputView !== undefined, "the probe's two tensors");
     const tokens = new Int32Array(probe.buffer, tokenView.byteOffset, tokenView.byteLength / 4);
     const golden = new Float32Array(probe.buffer, inputView.byteOffset, inputView.byteLength / 4);
-    assertEquals(golden.length, tokens.length * index.layers * index.dim, "golden の要素数");
+    assertEquals(
+      golden.length,
+      tokens.length * index.layers * index.dim,
+      "the golden's element count",
+    );
 
     const gpu = await acquireGpu();
     const host = createGemma4Ple({ index, openBlock, vocabSize: VOCAB, maxResidentBytes: 0 });
@@ -164,8 +176,8 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
       const bytes = gemma4PleGpuBytes(index);
       assert(
         gpu.limits.maxStorageBufferBindingSize >= bytes.values,
-        `この device の maxStorageBufferBindingSize ${gpu.limits.maxStorageBufferBindingSize} が` +
-          ` QAT E2B の PLE ${bytes.values} バイトに足りない`,
+        `this device's maxStorageBufferBindingSize ${gpu.limits.maxStorageBufferBindingSize} is` +
+          ` too small for the QAT E2B PLE's ${bytes.values} bytes`,
       );
       const resident = await createGemma4PleResident({
         gpu,
@@ -178,7 +190,7 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
         entry: "gemma4QatMobile.Pipeline",
       });
       try {
-        assertEquals(resident.residentBytes, bytes.total, "常駐した量子化バイト列");
+        assertEquals(resident.residentBytes, bytes.total, "the resident quantized bytes");
         const batch = await gpu.beginBatch();
         let output;
         try {
@@ -187,11 +199,11 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
           await batch.finish();
         }
         const actual = new Float32Array(await output.read());
-        // ① torch の 35 表経路との厳密一致。
-        assertBitsEqual(actual, golden, "GPU 内 gather と golden");
-        // ② ホスト経路（ADR 0085 決定 4 の正本）との交差 parity。
+        // ① Exact match with torch's 35-table path.
+        assertBitsEqual(actual, golden, "in-GPU gather vs golden");
+        // ② Cross parity with the host path (the source of truth of ADR 0085 decision 4).
         const reference = (await host.gather([...tokens])) as Tensor & { data: Float32Array };
-        assertBitsEqual(actual, reference.data, "GPU 内 gather とホスト gather");
+        assertBitsEqual(actual, reference.data, "in-GPU gather vs host gather");
       } finally {
         await resident.dispose();
       }
@@ -202,7 +214,9 @@ test.skipIf(!PRODUCT_PRESENT || !GPU_AVAILABLE)(
   },
 );
 
-/** 1 ターンの greedy 生成 id 列（停止 token も含めて観測席で拾う）。 */
+/**
+ * The greedy id sequence of one turn (collected through the observation hook, stop token included).
+ */
 const generateIds = async (
   open: () => Promise<{ chat: Pipeline["chat"]; dispose: () => Promise<void> }>,
 ): Promise<number[]> => {
@@ -221,11 +235,11 @@ const generateIds = async (
   }
 };
 
-// E2B は i4（group scale）・E4B は i2（行 scale）で、格納形ごとに `embedding` の変種が変わる —
-// 両方を回さないと片方の scale の引き方が黙って間違っていても緑になる。
+// E2B is i4 (group scale) and E4B is i2 (row scale), and the `embedding` variant changes with the
+// storage — without running both, one of them could look up its scale wrongly and still go green.
 for (const model of ["e2b", "e4b"] as const) {
   test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
-    `PLE GPU 常駐: QAT ${model} の greedy 生成 id 列が host と完全一致（実GPU）`,
+    `PLE GPU-resident: QAT ${model}'s greedy id sequence is identical to host (real GPU)`,
     async () => {
       const source = nodeDirectory(QAT_ROOT);
       const expected = await generateIds(() =>
@@ -234,12 +248,12 @@ for (const model of ["e2b", "e4b"] as const) {
       assertEquals(
         expected.length,
         GREEDY_STEPS,
-        "host 経路が刻みぶん生成していない（parity が空振りする）",
+        "the host path did not generate the full step count (the parity would check nothing)",
       );
       const actual = await generateIds(() =>
         gemma4QatMobile.Pipeline.fromPretrained(source, { model, pleResidency: "gpu" }),
       );
-      assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
+      assertEquals(actual, expected, "the GPU-resident path's generated id sequence");
     },
   );
 }
@@ -248,7 +262,8 @@ test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
   "PLE GPU-resident: the gemma pipeline's q4_0 E2B matches the host where it fits and names the shortfall elsewhere (real GPU)",
   async () => {
     const source = nodeDirectory(GEMMA_ROOT);
-    // 索引は配布形ミラーの `model` 容器の資産（ADR 0109 決定 4）— 開くのは part 0 と索引だけ。
+    // The index is an asset of the distribution mirror's `model` container (ADR 0109 decision 4)
+    // — only part 0 and the index are opened.
     const { index } = await openGemma4Ple(GEMMA_ROOT, INT4_SEAT);
     const bytes = gemma4PleGpuBytes(index);
     const gpu = await acquireGpu();
@@ -257,7 +272,8 @@ test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
       gpu.limits.maxBufferSize >= bytes.values;
     gpu.destroy();
     if (!fits) {
-      // MUST: 黙ってホスト経路へ退避しない（席を要求した利用者に不足を返す）。
+      // MUST: no silent fallback to the host path (the caller who asked for the GPU-resident
+      // path gets the shortfall back).
       await assertRejects(
         () => Pipeline.fromPretrained(source, { ...INT4_SEAT, pleResidency: "gpu" }),
         Error,
@@ -269,20 +285,21 @@ test.skipIf(!GEMMA_PRESENT || !GPU_AVAILABLE)(
     assertEquals(
       expected.length,
       GREEDY_STEPS,
-      "host 経路が刻みぶん生成していない（parity が空振りする）",
+      "the host path did not generate the full step count (the parity would check nothing)",
     );
     const actual = await generateIds(() =>
       Pipeline.fromPretrained(source, { ...INT4_SEAT, pleResidency: "gpu" }),
     );
-    assertEquals(actual, expected, "GPU 常駐席の生成 id 列");
+    assertEquals(actual, expected, "the GPU-resident path's generated id sequence");
   },
 );
 
-// 温度 > 0 の decode は greedy 経路を通らず通常 run（= `enqueueRead`）で走る。gather と target を
-// 同じ batch に積むので、GPU 常駐席が余分に払うフェンスは prefill の chunk ぶんだけになる
-// （ADR 0054 追記〈グラフ出力の一括読み戻し〉— 席の残件 ①）。
+// Decode at temperature > 0 does not take the greedy path; it runs as a normal run
+// (= `enqueueRead`). The gather and the target go into the same batch, so the only extra fences
+// the GPU-resident path pays are those of the prefill chunks (ADR 0054 addendum "batched readback
+// of graph outputs" — the path's open item ①).
 test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
-  "PLE GPU 常駐: 既定サンプラー経路の decode も host と同じ id 列で、余分なフェンスは prefill ぶんだけ（実GPU）",
+  "PLE GPU-resident: decode on the default sampler path also gives the host's id sequence, with extra fences only for prefill (real GPU)",
   async () => {
     const source = nodeDirectory(QAT_ROOT);
     const generate = async (
@@ -314,12 +331,20 @@ test.skipIf(!QAT_PRESENT || !GPU_AVAILABLE)(
       }
     };
     const host = await generate("host");
-    assertEquals(host.ids.length, GREEDY_STEPS, "host 経路が刻みぶん生成していない");
+    assertEquals(
+      host.ids.length,
+      GREEDY_STEPS,
+      "the host path did not generate the full step count",
+    );
     const resident = await generate("gpu");
-    assertEquals(resident.ids, host.ids, "GPU 常駐席の生成 id 列（サンプラー経路）");
-    // GPU 常駐席が host 経路より余分に払う queue 待ちは prefill chunk 1 本ぶんの gather batch
-    // だけで、decode の 16 token は 1 本も払わない（同じ batch の終端 map で読み戻す）。
-    // 席の残件 ① の前は decode ごとに 1 本増えていた（= 16 + 1）。
+    assertEquals(
+      resident.ids,
+      host.ids,
+      "the GPU-resident path's generated id sequence (sampler path)",
+    );
+    // The only extra queue wait the GPU-resident path pays over the host path is the gather batch
+    // of one prefill chunk; the 16 decode tokens pay none (they are read back by the map at the
+    // end of the same batch). Before the path's open item ① each decode added one (= 16 + 1).
     // The host path also pays one wait: its decode run builds a slot backing, and a run that builds
     // one first waits for released memory (ADR 0095 addendum of 2026-10-24). The resident path
     // builds its backings through enqueue, which never waits, so the two counts now match.

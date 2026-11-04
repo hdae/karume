@@ -582,7 +582,7 @@ describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
                 assertThrows(
                   () => judgeAb(result, testCase.bands[point], `${key} fault ① ${point}`),
                   Error,
-                  "床の失敗",
+                  "floor failure",
                 );
               }
             });
@@ -599,13 +599,13 @@ describe.skipIf(!GPU_AVAILABLE || !MIRROR_PRESENT || !EMBEDS_RUNNABLE)(
                   assertThrows(
                     () => assertBitIdentical(one.points[point], shifted.points[point], "fault ②"),
                     Error,
-                    "ビット一致しない",
+                    "not bit-identical",
                   );
                   const result = record(point, shifted);
                   assertThrows(
                     () => judgeAb(result, testCase.bands[point], `${key} fault ⑤ ${point}`),
                     Error,
-                    "上限の失敗",
+                    "ceiling failure",
                   );
                 }
               },

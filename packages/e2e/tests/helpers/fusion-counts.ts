@@ -1,13 +1,14 @@
 /**
- * **実配布グラフに対する融合ヒット数の門**（GPU 不要）。
+ * **The fusion hit-count check on the real distribution graphs** (no GPU needed).
  *
- * 融合はエクスポータのノード発行順が 1 つ変わるだけで黙って外れる。値は正しいまま
- * （掴めなければ素の列に落ちるので）性能だけが戻り、例外も警告も出ない — ADR 0040 §3 が
- * `lastRunFusions` を常設した理由がここで、**その数字に突合相手を与える**のが本ファイル。
+ * A fusion silently stops matching when the exporter changes the emission order of a single node.
+ * The values stay correct (an unmatched pattern falls back to the plain op sequence) and only the
+ * performance regresses, with no exception and no warning — that is why ADR 0040 §3 made
+ * `lastRunFusions` permanent, and this file **gives that number something to be compared against**.
  *
- * `planFusions` は純関数なので、実資産から IR を読んで計画するだけで判定できる（1 dispatch も
- * 出さない）。読むのは容器の **part 0**（ヘッダ + 2 文書 — container-v1 §3）だけで、重みの
- * block へは進まない（実体は合計 7GB 級）。
+ * `planFusions` is a pure function, so reading the IR from the real assets and planning is enough
+ * to decide (not a single dispatch is issued). Only the container's **part 0** (header + 2 documents
+ * — container-v1 §3) is read; the weight blocks are never reached (about 7GB in total).
  *
  * Shared by the per-family gates `packages/e2e/tests/e2e_<family>_fusion_counts_test.ts`: each
  * family lane owns its own counts, and this module holds only the planning and reading side they
@@ -33,16 +34,16 @@ import {
 } from "../../../runtime/tests/helpers/container-graph.ts";
 import { seriesGraph } from "../../../models/tests/helpers/series-graphs.ts";
 
-/** 系列出力の容器の読み口（part 0 の path と、その容器が名乗るグラフ名）。 */
+/** Where to read a series output's container (the part 0 path and the graph name the container declares). */
 export type SeriesSource = { readonly part0: URL; readonly graph: string };
 
 /**
- * 系列出力の容器の **part 0**（グラフ記述と束縛表はここに載る — container-v1 §3）と
- * グラフ名。分割されていない容器では代表 path そのものが part 0 になるので、どちらの形でも
- * 同じ 1 行で足りる。
+ * The **part 0** of a series output's container (the graph description and the binding table live
+ * there — container-v1 §3) and the graph name. In an unsplit container the representative path is
+ * itself part 0, so the same single line covers both forms.
  *
- * MUST: グラフ名は綴らず `packages/models/tests/helpers/series-graphs.ts` の表から引く（門番 `e2e_assets_gate_test.ts`
- * と同じ 1 本）。読み手ごとに綴ると、片方だけ書き換えても誰も落ちない。
+ * MUST: the graph name is not spelled out here but looked up in the table of `packages/models/tests/helpers/series-graphs.ts` (the same
+ * single source as the guard `e2e_assets_gate_test.ts`). If each reader spelled it, rewriting only one would fail nothing.
  */
 export const seriesSource = (series: string): SeriesSource => ({
   part0: resolveParts(
@@ -52,10 +53,11 @@ export const seriesSource = (series: string): SeriesSource => ({
 });
 
 /**
- * 資産の有無。
+ * Whether an asset is present.
  *
- * MUST: NotFound 以外は伝播させる — 全 I/O エラーを「未生成」に丸めると、資産ルートの
- * マウント異常（EIO 等）が SKIP に化けて、実行されていない検証が静かに緑になる。
+ * MUST: anything other than NotFound propagates — folding every I/O error into "not generated"
+ * would turn a broken mount of the asset root (EIO and the like) into a SKIP, and a check that never
+ * ran would quietly go green.
  */
 export const exists = async (url: URL): Promise<boolean> => {
   try {
@@ -68,10 +70,10 @@ export const exists = async (url: URL): Promise<boolean> => {
 };
 
 /**
- * 配布形 1 つ（`root` 直下の manifest）の部品の容器の **part 0**（ヘッダ + 2 文書 —
- * ADR 0109 決定 3）からグラフを読む。重みの block は読まない（融合の計画に要るのはグラフ宣言
- * だけ）。越境参照の part 0 は `mirrors`（越境参照の repo → ローカルミラー — ADR 0038 §7）から
- * 読む。
+ * Reads the graph from the **part 0** (header + 2 documents — ADR 0109 decision 3) of a
+ * component's container in one distribution (the manifest directly under `root`). The weight
+ * blocks are not read (fusion planning needs only the graph declaration). The part 0 of a
+ * cross-repository reference is read from `mirrors` (referenced repo → local mirror — ADR 0038 §7).
  */
 export const readDistributionGraph = (
   root: URL,
@@ -88,8 +90,8 @@ export const readDistributionGraph = (
   const mirror = mirrors.get(head.repo);
   if (mirror === undefined) {
     throw new Error(
-      `${component}/${dtype} の越境先 '${head.repo}' に対応するローカルミラーが無い` +
-        `（既知: ${[...mirrors.keys()].join(" / ")}）`,
+      `${component}/${dtype}: no local mirror for the cross-repository target '${head.repo}'` +
+        ` (known: ${[...mirrors.keys()].join(" / ")})`,
     );
   }
   return readContainerGraph(new URL(head.path, mirror), component);
@@ -128,7 +130,8 @@ export const fusionCounts = (
     ...(attentionDevice === undefined ? {} : { attentionDevice }),
     weightLayouts: new Map(
       [...planWeightResidency(graph)].flatMap(([name, weight]): [string, FusionWeightLayout][] => {
-        // group 長は席が持つ（合流後の宣言からは常駐プランナが導く — 同じ値を 2 度導かない）。
+        // The group size comes with the preset (the residency planner derives it from the merged
+        // declaration — the same value is not derived twice).
         if (weight.seat === "i4") return [[name, { storage: "i4", groupSize: weight.groupSize }]];
         return weight.seat === "i2" || weight.seat === "i8" || weight.seat === "f16"
           ? [[name, { storage: weight.seat }]]
@@ -136,8 +139,9 @@ export const fusionCounts = (
       }),
     ),
     outputNames: new Set(graph.outputs),
-    // WebGPU core 既定（128MiB）を判定に使う。行ブロック枚数はヒット数に効かないが、
-    // **上限の値を機の実測から取らない**ことでこの門が機に依らない固定であり続ける。
+    // Decide against the WebGPU core default (128MiB). The row-block count does not affect the hit
+    // counts, but **not taking the limit from the machine's measured value** keeps this check fixed
+    // and independent of the machine.
     limits: {
       maxStorageBufferBindingSize: 128 * 1024 * 1024,
       maxComputeWorkgroupsPerDimension: 65535,
@@ -145,11 +149,11 @@ export const fusionCounts = (
   }).counts;
 
 /**
- * states 形 decode グラフの融合ヒット数（物理 chunk 行数 M を振って計画する）。
+ * Fusion hit counts of a decode graph with states (planned for a given physical chunk row count M).
  *
- * スロットの容量記号は 640 で解く — 融合はノード列と**値**の shape で決まり、スロット容量の
- * 値には依存しない（e2e の検収値と同じ 640 を使うのは読み合わせやすさだけ）。入力は全て
- * `[1, M]`。
+ * The slot capacity symbol is resolved to 640 — fusion is decided by the node sequence and the
+ * shapes of the **values**, not by the slot capacity (using the same 640 as the e2e acceptance value
+ * only makes the two easier to read side by side). Every input is `[1, M]`.
  */
 export const decodeFusionCounts = (
   graph: IrGraph,

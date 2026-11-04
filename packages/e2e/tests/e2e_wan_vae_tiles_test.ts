@@ -1,5 +1,5 @@
 /**
- * Wan2.1 の動画 VAE の**タイル decode**の参照照合（実 GPU — ADR 0118 段 5 の検収）。
+ * The reference comparison of Wan2.1's video VAE **tiled decode** (real GPU — the acceptance of ADR 0118 step 5).
  *
  * The two chunk graphs (stage 4) of the local distribution mirror `models/karume-wan2.1/` (opened through its manifest —
  * ADR 0139 decision 1; the fixtures are in the test-asset root `goldens/wan2.1-t2v-1.3b-f16-dyn/` — decision 2) are
@@ -8,19 +8,19 @@
  * (`tools/export-recipes/wan/vae_tiling.py` — the same geometry, upstream's blend verbatim, CPU f32, weights rounded
  * to f16 — ADR 0006) **before the clamp**.
  *
- * ## 門
+ * ## Checks
  *
- * - **計画**: TS の計画（資産の入力形から導く）がフィクスチャのメタ（Python の計画）と一致する。
- * - **縮退門**: 潜在 32×32（タイル 1 枚 — 段 4 のフィクスチャの潜在）では、タイル経路
- *   （`decodeWanVaeTiled`）が非タイルの chunk 列（`decodeWanVaeTile`）と **Uint32 一致**
- *   （ADR 0033 決定 4 — 切り出しと貼り付けの恒等性を構造で固定する）。
- * - **帯**: `band`（832×480・33 フレーム・12 枚）の `atol = rtol = 0` の素の突合の実測最悪から
- *   帯を決め（{@link BAND}）、受け入れは**別の潜在・別の chunk 境界・縦長**の `accept`
- *   （480×832・9 フレーム）で判定する（ADR 0118 追記 2026-10-02）。
- * - **毒値**: フレームの常駐を NaN で埋めてから回し、非有限が 0 であること（写し忘れのフレームは
- *   NaN のまま残る）。
- * - **故障注入**（ホスト側 — `accept` の decode 済みタイルを故障ありで貼り合わせる）: 行と列の
- *   取り違え・開始位置の 1 潜在ずれ が帯の外に出る（出なければ帯が広すぎる兆候）。
+ * - **Plan**: the TS plan (derived from the assets' input shapes) matches the fixtures' metadata (the Python plan).
+ * - **Degenerate check**: for a 32×32 latent (a single tile — the latent of the step-4 fixture) the tiled path
+ *   (`decodeWanVaeTiled`) is **Uint32-identical** to the untiled chunk sequence (`decodeWanVaeTile`)
+ *   (ADR 0033 decision 4 — pins the identity of cropping and pasting structurally).
+ * - **Band**: the band is set from the measured worst case of a plain comparison with `atol = rtol = 0` on
+ *   `band` (832×480, 33 frames, 12 tiles) ({@link BAND}), and acceptance is judged on `accept` with **a different
+ *   latent, different chunk boundaries and portrait orientation** (480×832, 9 frames) (ADR 0118 addendum 2026-10-02).
+ * - **Poison values**: the resident frames are filled with NaN before the run, and the non-finite count must be 0 (a
+ *   frame that was not copied stays NaN).
+ * - **Fault injection** (host side — the decoded tiles of `accept` are assembled with a fault): swapping rows and
+ *   columns and shifting a start position by one latent must land outside the band (if not, the band is too wide).
  *
  * Upstream parity is opt-in (`KARUME_UPSTREAM_PARITY=1` — helpers/upstream-parity.ts): the `band` /
  * `accept` frames against the recipe's tiled reference under {@link BAND}, and in the chunk section
@@ -28,7 +28,7 @@
  * band is live. The plan, the degenerate gate, the NaN poison and the seam fault injections (the
  * host-side assembly against the tiled reference) run by default.
  *
- * 資産が 1 つも無い環境は明示 SKIP、一部だけある環境は FAIL（段 4 の e2e と同じ規律）。
+ * An environment with no assets at all SKIPs explicitly; one with only some is a FAIL (the same rule as the step-4 e2e).
  *
  * This file also holds the step-4 check (single-tile chunk sequence vs the untiled upstream
  * `_decode`, with its own band, cache fault injections and the 81-frame `long` case) — see the
@@ -85,20 +85,21 @@ import { openResults, runRecordedCase } from "../../runtime/tests/helpers/result
 import { UPSTREAM_PARITY, UPSTREAM_PARITY_OPT_IN } from "./helpers/upstream-parity.ts";
 
 /**
- * タイル decode の帯（絶対値 — 出力は値域 ±1.5 程度のクランプ前のフレーム）。
+ * The band of the tiled decode (absolute — the output is the pre-clamp frames, in a range of about ±1.5).
  *
- * 実測（B570・Deno 2.9.6・`atol = rtol = 0` の素の突合・2026-10-02）:
+ * Measured (B570, Deno 2.9.6, plain comparison with `atol = rtol = 0`, 2026-10-02):
  *
- * | ケース | 役割   | 潜在              | タイル × chunk | maxAbs  | 参照の max | 比（maxAbs ÷ 参照の max） |
- * | ------ | ------ | ----------------- | -------------- | ------- | ---------- | ------------------------- |
- * | band   | 帯     | `[16,9,60,104]`   | 12 × 9         | 3.87e-6 | 1.462      | 2.65e-6                   |
- * | accept | 受入れ | `[16,3,104,60]`   | 12 × 3         | 4.16e-6 | 1.319      | 3.15e-6                   |
+ * | Case   | Role       | Latent            | Tiles × chunks | maxAbs  | Reference max | Ratio (maxAbs ÷ reference max) |
+ * | ------ | ---------- | ----------------- | -------------- | ------- | ------------- | ------------------------------ |
+ * | band   | band       | `[16,9,60,104]`   | 12 × 9         | 3.87e-6 | 1.462         | 2.65e-6                        |
+ * | accept | acceptance | `[16,3,104,60]`   | 12 × 3         | 4.16e-6 | 1.319         | 3.15e-6                        |
  *
- * 帯 2e-5 は `band` の実測最悪の約 5.2 倍（段 4 の chunk 列の帯 2.5e-5 と同じ桁 — ブレンドは凸結合
- * なので GPU の誤差を広げない）。比は事前の目安（1e-4 — 決定 8）の 1/32 以下。受入れが帯の実測
- * 最悪を少し上回る（4.16e-6 > 3.87e-6）のは潜在の違い — 帯の内側で、帯は動かさない（MUST: 受入れの
- * 結果を見て帯を決め直さない — 追記 2026-10-02）。故障注入（行と列の取り違え 2.08・開始位置の
- * 1 潜在ずれ 1.96）は帯の 5 桁外。
+ * The band 2e-5 is about 5.2 × the measured worst of `band` (the same order as the step-4 chunk-sequence band 2.5e-5 —
+ * the blend is a convex combination, so it does not amplify the GPU error). The ratio is at most 1/32 of the prior
+ * guideline (1e-4 — decision 8). The acceptance case slightly exceeding the band case's measured worst (4.16e-6 >
+ * 3.87e-6) is due to the different latent — it is inside the band, and the band does not move (MUST: the band is not
+ * re-derived from the acceptance result — addendum 2026-10-02). The fault injections (rows and columns swapped 2.08, a
+ * start position off by one latent 1.96) are 5 orders of magnitude outside the band.
  */
 const BAND = 2e-5;
 const TOLERANCE: Tolerance = { atol: BAND, rtol: 0 };
@@ -111,7 +112,7 @@ const NEXT_COMPONENT = "vae_decoder_next";
 const CASES = ["band", "accept"] as const;
 type CaseName = (typeof CASES)[number];
 
-/** 縮退門の潜在（段 4 の chunk 列のフィクスチャ — 潜在 `[16,9,32,32]`・タイル 1 枚ちょうど）。 */
+/** The latent of the degenerate check (the step-4 chunk-sequence fixture — latent `[16,9,32,32]`, exactly one tile). */
 const DEGENERATE_FIXTURE = "vae_chunks.band.safetensors";
 
 /** The command that fetches the fixtures into the local test-asset root (ADR 0139 decision 3). */
@@ -155,8 +156,8 @@ if (!ANY_PRESENT) {
   );
 }
 
-// 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL (so is any missing one in a complete fetch of the
-// pinned dataset; the mirror's completeness is the distribution gate's).
+// An environment with none "has not generated them", so it SKIPs. With any one present a missing one is a FAIL (so is any
+// missing one in a complete fetch of the pinned dataset; the mirror's completeness is the distribution gate's).
 test.skipIf(!ANY_PRESENT && !FETCHED)(
   "Wan VAE tile fixtures: the three fixtures are present",
   () => {
@@ -171,7 +172,7 @@ test.skipIf(!ANY_PRESENT && !FETCHED)(
   },
 );
 
-/** 1 本の safetensors（F32 のテンソルとメタ）。 */
+/** One safetensors file (F32 tensors and metadata). */
 type Fixture = {
   readonly tensor: (key: string) => {
     readonly data: Float32Array<ArrayBuffer>;
@@ -191,7 +192,7 @@ const readFixture = async (url: URL): Promise<Fixture> => {
       const tensor = file.tensors.get(key);
       assert(
         tensor !== undefined && tensor.dtype === "F32",
-        `${url.pathname}: '${key}' が F32 で無い`,
+        `${url.pathname}: '${key}' is not F32`,
       );
       return {
         data: new Float32Array(file.buffer, tensor.byteOffset, tensor.byteLength / 4),
@@ -201,18 +202,18 @@ const readFixture = async (url: URL): Promise<Fixture> => {
     has: (key) => file.tensors.has(key),
     meta: (key) => {
       const value = file.metadata.get(key);
-      assert(value !== undefined, `${url.pathname}: メタ '${key}' が無い`);
+      assert(value !== undefined, `${url.pathname}: no metadata '${key}'`);
       return value;
     },
   };
 };
 
 /**
- * 計画の幾何をフィクスチャのメタ（`vae_tiling.TilePlan.meta`）と同じ綴りへ落とす（TS ↔ Python の
- * 突き合わせ — 数列は `"0,14,28"` の形）。
+ * Renders the plan's geometry in the same spelling as the fixtures' metadata (`vae_tiling.TilePlan.meta`) (the TS ↔
+ * Python comparison — sequences in the form `"0,14,28"`).
  */
 const planMeta = (plan: WanVaeTilePlan): Record<string, string> => {
-  assertEquals(plan.rows.tile, plan.cols.tile, "タイルは正方");
+  assertEquals(plan.rows.tile, plan.cols.tile, "tiles are square");
   const blends = (axis: WanVaeTilePlan["rows"]) =>
     axis.starts.slice(1).map((_, index) => wanVaeBlendExtentAt(axis, plan.scale, index + 1));
   return {
@@ -228,15 +229,15 @@ const planMeta = (plan: WanVaeTilePlan): Record<string, string> => {
 const absMax = (values: Float32Array): number =>
   values.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
 
-/** 差の要約（比 = 最大絶対差 ÷ 参照の最大絶対値 — 決定 8 の指標）。 */
+/** A summary of the difference (ratio = max absolute difference ÷ the reference's max absolute value — the metric of decision 8). */
 const compare = (got: Float32Array, want: Float32Array, tolerance: Tolerance) => {
-  assertEquals(got.length, want.length, "要素数");
+  assertEquals(got.length, want.length, "element count");
   const report = allclose(got, want, tolerance);
   const referenceMax = absMax(want);
   return { report, referenceMax, ratio: report.maxAbsError / referenceMax };
 };
 
-/** フレームの常駐を NaN で埋める（写し忘れのフレームは NaN のまま残る — 毒値）。 */
+/** Fills the resident frames with NaN (a frame that was not copied stays NaN — a poison value). */
 const poisonFrames = async (caches: WanVaeChunkCaches, chunks: number): Promise<void> => {
   for (const resident of await caches.frames(chunks)) {
     resident.write(new Float32Array(resident.byteLength / 4).fill(Number.NaN));
@@ -286,15 +287,15 @@ const registerVaeSessions = (): (() => VaeRun) => {
   });
   afterAll(async () => {
     const device = gpu;
-    // MUST: Session → 常駐 → device の順で畳む（常駐は Session の焼き込みから参照されうるので、
-    // Session を先に畳んでから返す）。1 段が落ちても残りの段（device まで）を必ず通す（製品の
-    // `Pipeline` の VAE の段と同じ形）。Vitest reports an afterAll failure apart from the its, so a
+    // MUST: tear down in the order Session → resident tensors → device (the resident tensors may be referenced by what
+    // the Session baked in, so the Session is torn down before they are released). Even when one step fails, the
+    // remaining steps (up to the device) always run (the same shape as the VAE stage of the product `Pipeline`). Vitest reports an afterAll failure apart from the its, so a
     // teardown failure cannot overwrite a test failure.
     await disposeSteps([
       () => first?.dispose(),
       () => next?.dispose(),
       () => caches?.dispose(),
-      // device を捨てる前に解放を待つ（後続のテストの予算を残す — {@link settleReleases}）。
+      // Wait for the releases before discarding the device (leaves budget for the following tests — {@link settleReleases}).
       () => (device === undefined ? undefined : settleReleases(device)),
       () => device?.destroy(),
     ]);
@@ -308,11 +309,12 @@ const registerVaeSessions = (): (() => VaeRun) => {
 const results = openResults("wan-vae-tiles");
 
 /**
- * 潜在 `[C,F,H,W]` のフィクスチャから計画を立てる（タイル辺と縮尺は資産の宣言から・重なりは本番と
- * 同じ導出 — `planWanGenerationTiles` を通すので、フィクスチャのメタとの突き合わせが本番の計画を縛る）。
+ * Plans from a fixture with latent `[C,F,H,W]` (the tile side and scale from the assets' declaration, the overlap by
+ * the same derivation as production — it goes through `planWanGenerationTiles`, so the comparison with the fixtures'
+ * metadata pins the production plan).
  */
 const planFor = (layout: WanVaeChunkLayout, latentShape: readonly number[]): WanVaeTilePlan => {
-  assertEquals(latentShape.length, 4, `潜在の形 [${latentShape}]`);
+  assertEquals(latentShape.length, 4, `latent shape [${latentShape}]`);
   return planWanGenerationTiles(layout, latentShape[2], latentShape[3], WAN21_GENERATION);
 };
 
@@ -338,7 +340,7 @@ const registerTileFixtures = (): (() => TileFixtures) => {
 // multi-tile decodes and the seam fault injections. The band comparisons of the band / accept
 // frames with the recipe's tiled reference (and their results.json ids) are the opt-in suite below.
 describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
-  "Wan VAE タイル decode: 計画・縮退門・毒値・貼り合わせの故障注入（実 GPU）",
+  "Wan VAE tiled decode: plan, degenerate check, poison values, assembly fault injection (real GPU)",
   () => {
     const tileFixtures = registerTileFixtures();
     let degenerate: ReturnType<Fixture["tensor"]> | undefined;
@@ -347,14 +349,14 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
     });
     const vaeRun = registerVaeSessions();
 
-    it("計画: TS の計画（資産の入力形から）がフィクスチャのメタ（Python）と一致", () => {
+    it("plan: the TS plan (from the assets' input shapes) matches the fixtures' metadata (Python)", () => {
       const fixtures = tileFixtures();
       const { layout } = vaeRun();
       for (const name of CASES) {
         const fixture = fixtures[name];
         const ours = planMeta(planFor(layout, fixture.tensor("latents").shape));
         const theirs = Object.fromEntries(Object.keys(ours).map((key) => [key, fixture.meta(key)]));
-        assertEquals(ours, theirs, `${name} の幾何`);
+        assertEquals(ours, theirs, `${name} geometry`);
       }
       const band = planFor(layout, fixtures.band.tensor("latents").shape);
       assertEquals(wanVaeTileCount(band), 12);
@@ -362,9 +364,9 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
       assertEquals([...band.cols.starts], [0, 24, 48, 72]);
     });
 
-    it("縮退門: 潜在 32×32（1 枚）ではタイル経路 ≡ 非タイルの chunk 列（Uint32）", async () => {
+    it("degenerate check: for a 32×32 latent (one tile) the tiled path ≡ the untiled chunk sequence (Uint32)", async () => {
       const { gpu, layout, sessions, caches } = vaeRun();
-      assert(degenerate !== undefined, "縮退門の潜在が読まれていない");
+      assert(degenerate !== undefined, "the degenerate check's latent was not read");
       const plan = planFor(layout, degenerate.shape);
       assertEquals(wanVaeTileCount(plan), 1);
       const chunks = wanVaeChunkCount(layout, degenerate.data);
@@ -372,11 +374,11 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
       const tiled = await decodeWanVaeTiled(gpu, sessions, caches, plan, degenerate.data);
       const direct = await decodeWanVaeTile(gpu, sessions, caches, degenerate.data);
       assertEquals(tiled.length, 3 * wanVaeFrameCount(chunks) * 256 * 256);
-      assert(tiled.every(Number.isFinite), "非有限（写されなかったフレーム）");
-      assert(bitsEqual(tiled, direct), "タイル経路が chunk 列とビット一致しない");
+      assert(tiled.every(Number.isFinite), "non-finite (frames that were not copied)");
+      assert(bitsEqual(tiled, direct), "the tiled path is not bit-identical to the chunk sequence");
     });
 
-    it("band: 832×480・33 フレームのタイル decode がフレームを全て書く（フレームは毒値で始める）", async () => {
+    it("band: the tiled decode of 832×480, 33 frames writes every frame (the frames start as poison values)", async () => {
       const { gpu, layout, sessions, caches } = vaeRun();
       const fixture = tileFixtures().band;
       const latents = fixture.tensor("latents");
@@ -387,14 +389,14 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
       assertEquals(want.shape, [3, wanVaeFrameCount(chunks), 480, 832]);
       await poisonFrames(caches, chunks);
       const got = await decodeWanVaeTiled(gpu, sessions, caches, plan, latents.data);
-      assertEquals(got.length, want.data.length, "要素数");
-      assertEquals(nonFiniteCount(got), 0, "band: 非有限（写されなかったフレーム）");
+      assertEquals(got.length, want.data.length, "element count");
+      assertEquals(nonFiniteCount(got), 0, "band: non-finite (frames that were not copied)");
     });
 
-    // 受入れ: decode 済みのタイルを残し、故障注入（ホスト側の貼り合わせ）にも使い回す。
+    // Acceptance: keep the decoded tiles and reuse them for the fault injections (host-side assembly).
     let acceptTiles: Float32Array<ArrayBuffer>[] = [];
 
-    it("accept: 480×832・9 フレーム（別の潜在・chunk 境界・縦長）のタイルを貼り合わせたフレームが有限", async () => {
+    it("accept: the frames assembled from the tiles of 480×832, 9 frames (different latent, chunk boundaries, portrait) are finite", async () => {
       const { gpu, layout, sessions, caches } = vaeRun();
       const accept = tileFixtures().accept;
       const acceptLatents = accept.tensor("latents");
@@ -402,8 +404,8 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
       const acceptPlan = planFor(layout, acceptLatents.shape);
       acceptTiles = await decodeWanVaeTiles(gpu, sessions, caches, acceptPlan, acceptLatents.data);
       const got = assembleWanVaeTiles(acceptTiles, acceptPlan);
-      assertEquals(got.length, acceptWant.length, "要素数");
-      assertEquals(nonFiniteCount(got), 0, "accept: 非有限");
+      assertEquals(got.length, acceptWant.length, "element count");
+      assertEquals(nonFiniteCount(got), 0, "accept: non-finite");
     });
 
     const faults: readonly {
@@ -411,13 +413,15 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
       readonly plan: (acceptPlan: WanVaeTilePlan) => WanVaeTilePlan;
     }[] = [
       {
-        // 縦長でだけ値に出る（正方では対合）。枚数は 4×3 = 3×4 で揃うので形の検査を抜ける。
-        label: "行と列の取り違え",
+        // Shows in the values only for portrait frames (an involution for square ones). The tile counts agree as
+        // 4×3 = 3×4, so it slips past the shape checks.
+        label: "rows and columns swapped",
         plan: (acceptPlan) => ({ ...acceptPlan, rows: acceptPlan.cols, cols: acceptPlan.rows }),
       },
       {
-        // TS と Python の丸めが割れたときの形（decode した位置と貼る位置が 1 潜在ずれる）。
-        label: "開始位置の 1 潜在ずれ",
+        // What a rounding disagreement between TS and Python looks like (the decoded position and the pasted position
+        // differ by one latent).
+        label: "start position off by one latent",
         plan: (acceptPlan) => ({
           ...acceptPlan,
           rows: {
@@ -428,8 +432,8 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
       },
     ];
     for (const { label, plan } of faults) {
-      it(`故障注入: ${label} → accept が帯の外`, () => {
-        assert(acceptTiles.length > 0, "accept のタイルが decode されていない");
+      it(`fault injection: ${label} → accept is outside the band`, () => {
+        assert(acceptTiles.length > 0, "the accept tiles were not decoded");
         const { layout } = vaeRun();
         const accept = tileFixtures().accept;
         const acceptWant = accept.tensor("frames").data;
@@ -437,7 +441,7 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
         const got = assembleWanVaeTiles(acceptTiles, plan(acceptPlan));
         const { report, ratio } = compare(got, acceptWant, TOLERANCE);
         console.log(`[wan-vae-tiles] fault ${label}: maxAbs=${report.maxAbsError} ratio=${ratio}`);
-        assert(!report.pass, `${label}: 帯の中に収まった（帯が広すぎる兆候）`);
+        assert(!report.pass, `${label}: stayed inside the band (a sign the band is too wide)`);
         assert(report.maxAbsError > 1e3 * BAND, `${label}: maxAbs ${report.maxAbsError}`);
       });
     }
@@ -448,12 +452,12 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE)(
 // blend, CPU f32) under the absolute band, so it is opt-in. It owns the band / accept results.json
 // ids and their measurements.
 describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  `Wan VAE タイル decode: 832×480・33 フレームが上流の参照と帯の中で一致（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
+  `Wan VAE tiled decode: 832×480, 33 frames match the upstream reference within the band (real GPU)${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const tileFixtures = registerTileFixtures();
     const vaeRun = registerVaeSessions();
 
-    it("band: 832×480・33 フレームが参照と帯の中で一致（フレームは毒値で始める）", async () => {
+    it("band: 832×480, 33 frames match the reference within the band (the frames start as poison values)", async () => {
       const { gpu, layout, sessions, caches } = vaeRun();
       await runRecordedCase(results, { id: "band" }, async ({ measurements }) => {
         const fixture = tileFixtures().band;
@@ -478,13 +482,13 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
             `maxAbs=${report.maxAbsError} refMax=${referenceMax} ratio=${ratio} ` +
             `nonFinite=${report.nonFiniteCount}`,
         );
-        assertEquals(report.nonFiniteCount, 0, "band: 非有限（写されなかったフレーム）");
-        assert(report.pass, `band: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
+        assertEquals(report.nonFiniteCount, 0, "band: non-finite (frames that were not copied)");
+        assert(report.pass, `band: maxAbs ${report.maxAbsError} is outside the band ${BAND}`);
         return undefined;
       });
     });
 
-    it("accept: 480×832・9 フレーム（別の潜在・chunk 境界・縦長）が帯の中", async () => {
+    it("accept: 480×832, 9 frames (different latent, chunk boundaries, portrait) are inside the band", async () => {
       const { gpu, layout, sessions, caches } = vaeRun();
       await runRecordedCase(results, { id: "accept" }, async ({ measurements }) => {
         const accept = tileFixtures().accept;
@@ -511,8 +515,8 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
           `[wan-vae-tiles] accept: maxAbs=${report.maxAbsError} refMax=${referenceMax} ` +
             `ratio=${ratio} nonFinite=${report.nonFiniteCount}`,
         );
-        assertEquals(report.nonFiniteCount, 0, "accept: 非有限");
-        assert(report.pass, `accept: maxAbs ${report.maxAbsError} が帯 ${BAND} の外`);
+        assertEquals(report.nonFiniteCount, 0, "accept: non-finite");
+        assert(report.pass, `accept: maxAbs ${report.maxAbsError} is outside the band ${BAND}`);
         return undefined;
       });
     });
@@ -522,47 +526,51 @@ describe.skipIf(!TILES_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 // ---- Chunk sequence (ADR 0118 step 4) --------------------------------------------------------
 
 /*
- * Wan2.1 の動画 VAE の **chunk 列の参照照合**（実 GPU — ADR 0118 段 4 の検収）。
+ * The **reference comparison of the chunk sequence** of Wan2.1's video VAE (real GPU — the acceptance of ADR 0118 step 4).
  *
  * The mirror's two chunk graphs (`vae_decoder_first` / `vae_decoder_next` — f16) run first → next × (F−1) with
  * resident causal caches (`decodeWanVaeTile` — one tile = one batch, only the frames read back), and the output is
  * compared with upstream's untiled `_decode` chunk loop (diffusers, CPU f32, weights rounded to f16 — ADR 0006)
  * **before the clamp**.
- * 参照とフィクスチャは `tools/export-recipes/wan/export_vae.py` が書く (read from the test-asset root — fetch with
+ * The reference and the fixtures are written by `tools/export-recipes/wan/export_vae.py` (read from the test-asset root — fetch with
  * `node tools/test-assets/fetch.ts`).
  *
- * ## 帯の決め方（決定 8 と追記 2026-10-02）
+ * ## How the band is set (decision 8 and addendum 2026-10-02)
  *
- * - 帯は `band` ケース（潜在 9 chunk = 33 フレーム・タイル 32）の `atol = rtol = 0` の素の突合の
- *   実測最悪から決める（{@link CHUNK_BAND}）。
- * - 受け入れは**別の潜在・別の chunk 境界**の `accept` ケース（5 chunk = 17 フレーム）で判定する。
- * - `long` ケース（21 chunk = 81 フレーム — ADR 0118 段 8）も受入れで、同じ帯の内であることを門にする。
- *   81 フレームの chunk 数そのもので、cache の持ち越しで誤差が積もらないことを見る（band / accept の
- *   9 / 5 chunk の外挿に頼らない）。帯は `band` から導いた値のまま（long の結果を見て変えない）。
- * - 故障注入（cache 更新忘れ・cache の 2 フレームの逆順・タイルの頭のゼロ化の省略・chunk 2 以降に
- *   first）が `accept` で帯の外に出ることを門にする（出なければ帯が広すぎる兆候）。故障注入は
- *   製品の経路と同じ部品で組んだこのテストのループで行い、そのループが故障なしなら製品の経路と
- *   Uint32 で一致することも門にする（注入の結果が製品の経路を代表している担保）。
+ * - The band is set from the measured worst case of a plain comparison with `atol = rtol = 0` on the `band` case
+ *   (a latent of 9 chunks = 33 frames, tile 32) ({@link CHUNK_BAND}).
+ * - Acceptance is judged on the `accept` case with **a different latent and different chunk boundaries** (5 chunks =
+ *   17 frames).
+ * - The `long` case (21 chunks = 81 frames — ADR 0118 step 8) is an acceptance case too, checked to be inside the same
+ *   band. With the actual chunk count of 81 frames it shows that the error does not accumulate through the carried-over
+ *   caches (without relying on extrapolating from the 9 / 5 chunks of band / accept). The band stays the value derived
+ *   from `band` (it is not changed after seeing the long result).
+ * - The fault injections (a cache not updated, the 2 frames of a cache reversed, the zeroing at the tile head skipped,
+ *   first used for chunk 2 onwards) are checked to land outside the band on `accept` (if not, the band is too wide).
+ *   The fault injections run in this test's loop, built from the same parts as the product path, and that loop without
+ *   a fault is also checked to be Uint32-identical to the product path (ensuring the injected results represent the
+ *   product path).
  *
- * 資産が 1 つも無い環境は明示 SKIP、一部だけある環境は FAIL（dacvae の e2e と同じ規律）。
+ * An environment with no assets at all SKIPs explicitly; one with only some is a FAIL (the same rule as the dacvae e2e).
  */
 
 /**
- * chunk 列の帯（絶対値 — 出力は値域 ±1.3 程度のクランプ前のフレーム）。
+ * The band of the chunk sequence (absolute — the output is the pre-clamp frames, in a range of about ±1.3).
  *
- * 実測（B570・Deno 2.9.6・`atol = rtol = 0` の素の突合・band / accept は 2026-10-02・long は 2026-10-03 —
- * 帯を決めた後に初めて回した）:
+ * Measured (B570, Deno 2.9.6, plain comparison with `atol = rtol = 0`; band / accept on 2026-10-02, long on 2026-10-03
+ * — first run after the band was set):
  *
- * | ケース | 役割   | chunk | フレーム | maxAbs  | 参照の max | 比（maxAbs ÷ 参照の max） |
- * | ------ | ------ | ----- | -------- | ------- | ---------- | ------------------------- |
- * | band   | 帯     | 9     | 33       | 4.65e-6 | 1.297      | 3.58e-6                   |
- * | accept | 受入れ | 5     | 17       | 3.55e-6 | 1.282      | 2.77e-6                   |
- * | long   | 受入れ | 21    | 81       | 4.12e-6 | 1.380      | 2.98e-6                   |
+ * | Case   | Role       | Chunks | Frames | maxAbs  | Reference max | Ratio (maxAbs ÷ reference max) |
+ * | ------ | ---------- | ------ | ------ | ------- | ------------- | ------------------------------ |
+ * | band   | band       | 9      | 33     | 4.65e-6 | 1.297         | 3.58e-6                        |
+ * | accept | acceptance | 5      | 17     | 3.55e-6 | 1.282         | 2.77e-6                        |
+ * | long   | acceptance | 21     | 81     | 4.12e-6 | 1.380         | 2.98e-6                        |
  *
- * 帯 2.5e-5 は `band` の実測最悪の約 5.4 倍。比は事前の目安（1e-4 — 決定 8）の 1/28 で、eager の
- * 書き直しの差（CPU で 2.79e-6 — recipe の `--verify`）と同じ桁 — GPU の縮約順の差はそれに
- * 埋もれる程度。chunk を 9 本・21 本重ねても 5 本と同じ桁（cache の持ち越しで誤差が積もっていない）。
- * 故障注入（cache 更新忘れ 0.545・2 フレームの逆順 1.12・ゼロ化の省略 0.918）は帯の 4 桁以上外。
+ * The band 2.5e-5 is about 5.4 × the measured worst of `band`. The ratio is 1/28 of the prior guideline (1e-4 —
+ * decision 8), the same order as the difference of the eager rewrite (2.79e-6 on the CPU — the recipe's `--verify`) —
+ * the GPU's reduction-order differences are buried in it. Stacking 9 or 21 chunks stays at the same order as 5 (the
+ * error does not accumulate through the carried-over caches). The fault injections (cache not updated 0.545, 2 frames
+ * reversed 1.12, zeroing skipped 0.918) are at least 4 orders of magnitude outside the band.
  */
 const CHUNK_BAND = 2.5e-5;
 const CHUNK_TOLERANCE: Tolerance = { atol: CHUNK_BAND, rtol: 0 };
@@ -570,10 +578,10 @@ const CHUNK_TOLERANCE: Tolerance = { atol: CHUNK_BAND, rtol: 0 };
 const CHUNK_CASES = ["band", "accept", "long"] as const;
 type ChunkCaseName = (typeof CHUNK_CASES)[number];
 
-/** `long` の chunk 数（81 フレーム = 1 + 4·20 — 受理集合の上限のフレーム数の chunk 列）。 */
+/** The chunk count of `long` (81 frames = 1 + 4·20 — the chunk sequence of the largest accepted frame count). */
 const LONG_CHUNKS = 21;
 
-/** 故障注入で外す cache（head の conv — 1 層だけを通る最も効きの小さい席）。 */
+/** The cache the fault injection drops (the head's conv — the least influential one, passing through a single layer). */
 const DROPPED_CACHE = "cache_31";
 
 const chunkFixtureUrl = (name: ChunkCaseName): URL =>
@@ -590,8 +598,8 @@ if (!CHUNK_ANY_PRESENT) {
   );
 }
 
-// 1 つも無い環境は「生成していない」なので SKIP。1 つでもあるなら欠けは FAIL (so is any missing one in a complete fetch of the
-// pinned dataset; the mirror's completeness is the distribution gate's).
+// An environment with none "has not generated them", so it SKIPs. With any one present a missing one is a FAIL (so is any
+// missing one in a complete fetch of the pinned dataset; the mirror's completeness is the distribution gate's).
 test.skipIf(!CHUNK_ANY_PRESENT && !FETCHED)(
   "Wan VAE chunk fixtures: the three fixtures are present",
   () => {
@@ -632,12 +640,12 @@ const registerChunkFixtures = (): (() => ChunkFixtures) => {
 // first-for-all enqueue. The band comparisons with the untiled upstream `_decode`, the fault
 // injections that prove that band is live and their results.json ids are the opt-in suite below.
 describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE)(
-  "Wan VAE chunk 列: 取り決め・毒値・故障注入のループの Uint32 一致・first の使い回しの拒否（実 GPU）",
+  "Wan VAE chunk sequence: layout, poison values, Uint32 identity of the fault-injection loop, rejection of reusing first (real GPU)",
   () => {
     const chunkFixtures = registerChunkFixtures();
     const vaeRun = registerVaeSessions();
 
-    it("取り決め: タイル辺と cache は資産の宣言から（first 30 本・next 32 本）", () => {
+    it("layout: the tile side and the caches come from the assets' declaration (first 30, next 32)", () => {
       const { layout } = vaeRun();
       assertEquals(layout.tile, 32);
       assertEquals(layout.sampleTile, 256);
@@ -663,35 +671,35 @@ describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE)(
     });
 
     for (const name of CHUNK_CASES) {
-      it(`${name}: chunk 列がフレームを全て書く（フレームは毒値で始める）`, async () => {
+      it(`${name}: the chunk sequence writes every frame (the frames start as poison values)`, async () => {
         const { gpu, layout, sessions, caches } = vaeRun();
         const fixture = chunkFixtures()[name];
         const chunks = wanVaeChunkCount(layout, fixture.latents);
         assertEquals(fixture.frameShape, [3, wanVaeFrameCount(chunks), 256, 256]);
-        if (name === "long") assertEquals(chunks, LONG_CHUNKS, "long の chunk 数");
-        // 毒値: フレームの常駐を NaN で埋めてから回す（写し忘れのフレームは NaN のまま残る）。
+        if (name === "long") assertEquals(chunks, LONG_CHUNKS, "chunk count of long");
+        // Poison values: fill the resident frames with NaN before the run (a frame that was not copied stays NaN).
         await poisonFrames(caches, chunks);
         const got = await decodeWanVaeTile(gpu, sessions, caches, fixture.latents);
-        assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
-        assertEquals(nonFiniteCount(got), 0, `${name}: 非有限（写されなかったフレーム）`);
+        assertEquals(got.length, fixture.frames.length, `${name}: element count`);
+        assertEquals(nonFiniteCount(got), 0, `${name}: non-finite (frames that were not copied)`);
       });
     }
 
-    it("故障注入のループは故障なしなら製品の経路と Uint32 で一致", async () => {
+    it("the fault-injection loop without a fault is Uint32-identical to the product path", async () => {
       const { gpu, sessions, caches } = vaeRun();
       const fixture = chunkFixtures().accept;
       const product = await decodeWanVaeTile(gpu, sessions, caches, fixture.latents);
       const looped = await decodeWithFault(gpu, sessions, caches, fixture.latents, {
         kind: "none",
       });
-      assert(bitsEqual(product, looped), "テストのループが製品の経路と違う");
+      assert(bitsEqual(product, looped), "the test's loop differs from the product path");
     });
 
-    it("故障注入: chunk 2 以降も first を使う → copyOutputs の大きさで enqueue が拒まれる", async () => {
+    it("fault injection: using first for chunk 2 onwards → the enqueue is rejected by the size of copyOutputs", async () => {
       const { gpu, sessions, caches } = vaeRun();
       const fixtures = chunkFixtures();
-      // first の出力フレームは [3,1,…] で、next 用のフレームの常駐（[3,4,…]）へは写せない —
-      // runtime の `copyOutputs` の大きさの検査が dispatch を積む前に落とす（値を比べる前の赤）。
+      // first's output frames are [3,1,…] and cannot be copied into the resident frames for next ([3,4,…]) — the
+      // runtime's size check of `copyOutputs` fails before any dispatch is queued (red before any value is compared).
       await assertRejects(
         () =>
           decodeWithFault(gpu, sessions, caches, fixtures.accept.latents, {
@@ -708,28 +716,28 @@ describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE)(
 // band, with the cache fault injections that only prove that band is live, so it is opt-in. It owns
 // the band / accept / long results.json ids and their measurements.
 describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
-  `Wan VAE chunk 列: 常駐 cache の first → next が上流の _decode と帯の中で一致（実 GPU）${UPSTREAM_PARITY_OPT_IN}`,
+  `Wan VAE chunk sequence: first → next with resident caches matches the upstream _decode within the band (real GPU)${UPSTREAM_PARITY_OPT_IN}`,
   () => {
     const chunkFixtures = registerChunkFixtures();
     const vaeRun = registerVaeSessions();
 
     const compareChunks = (name: ChunkCaseName, got: Float32Array) => {
       const fixture = chunkFixtures()[name];
-      assertEquals(got.length, fixture.frames.length, `${name}: 要素数`);
+      assertEquals(got.length, fixture.frames.length, `${name}: element count`);
       const report = allclose(got, fixture.frames, CHUNK_TOLERANCE);
       const referenceMax = fixture.frames.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
       return { report, referenceMax, ratio: report.maxAbsError / referenceMax };
     };
 
     for (const name of CHUNK_CASES) {
-      it(`${name}: chunk 列が上流と帯の中で一致（フレームは毒値で始める）`, async () => {
+      it(`${name}: the chunk sequence matches upstream within the band (the frames start as poison values)`, async () => {
         const { gpu, layout, sessions, caches } = vaeRun();
         await runRecordedCase(chunkResults, { id: name }, async ({ measurements }) => {
           const fixture = chunkFixtures()[name];
           const chunks = wanVaeChunkCount(layout, fixture.latents);
           assertEquals(fixture.frameShape, [3, wanVaeFrameCount(chunks), 256, 256]);
-          if (name === "long") assertEquals(chunks, LONG_CHUNKS, "long の chunk 数");
-          // 毒値: フレームの常駐を NaN で埋めてから回す（写し忘れのフレームは NaN のまま残る）。
+          if (name === "long") assertEquals(chunks, LONG_CHUNKS, "chunk count of long");
+          // Poison values: fill the resident frames with NaN before the run (a frame that was not copied stays NaN).
           await poisonFrames(caches, chunks);
           const got = await decodeWanVaeTile(gpu, sessions, caches, fixture.latents);
           const { report, referenceMax, ratio } = compareChunks(name, got);
@@ -744,8 +752,15 @@ describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
             `[wan-vae] ${name}: chunks=${chunks} maxAbs=${report.maxAbsError} ` +
               `refMax=${referenceMax} ratio=${ratio} nonFinite=${report.nonFiniteCount}`,
           );
-          assertEquals(report.nonFiniteCount, 0, `${name}: 非有限（写されなかったフレーム）`);
-          assert(report.pass, `${name}: maxAbs ${report.maxAbsError} が帯 ${CHUNK_BAND} の外`);
+          assertEquals(
+            report.nonFiniteCount,
+            0,
+            `${name}: non-finite (frames that were not copied)`,
+          );
+          assert(
+            report.pass,
+            `${name}: maxAbs ${report.maxAbsError} is outside the band ${CHUNK_BAND}`,
+          );
           return undefined;
         });
       });
@@ -753,24 +768,24 @@ describe.skipIf(!CHUNK_RUNNABLE || !GPU_AVAILABLE || !UPSTREAM_PARITY)(
 
     const faults: readonly { readonly label: string; readonly fault: Fault }[] = [
       {
-        label: "cache 更新忘れ（copyOutputs から 1 本外す）",
+        label: "a cache not updated (one dropped from copyOutputs)",
         fault: { kind: "drop-cache", cache: DROPPED_CACHE },
       },
-      { label: "cache の 2 フレームの順を逆にする", fault: { kind: "swap-cache-frames" } },
-      { label: "タイルの頭で cache をゼロに戻さない", fault: { kind: "skip-zero" } },
+      { label: "the 2 frames of a cache reversed", fault: { kind: "swap-cache-frames" } },
+      { label: "the caches not zeroed at the tile head", fault: { kind: "skip-zero" } },
     ];
     for (const { label, fault } of faults) {
-      it(`故障注入: ${label} → accept が帯の外`, async () => {
+      it(`fault injection: ${label} → accept is outside the band`, async () => {
         const { gpu, sessions, caches } = vaeRun();
         const fixtures = chunkFixtures();
         if (fault.kind === "skip-zero") {
-          // 前のタイル（band）の cache を残したまま accept を回す。
+          // Run accept with the previous tile's (band's) caches left in place.
           await decodeWanVaeTile(gpu, sessions, caches, fixtures.band.latents);
         }
         const got = await decodeWithFault(gpu, sessions, caches, fixtures.accept.latents, fault);
         const { report, ratio } = compareChunks("accept", got);
         console.log(`[wan-vae] fault ${fault.kind}: maxAbs=${report.maxAbsError} ratio=${ratio}`);
-        assert(!report.pass, `${label}: 帯の中に収まった（帯が広すぎる兆候）`);
+        assert(!report.pass, `${label}: stayed inside the band (a sign the band is too wide)`);
         assert(report.maxAbsError > 1e3 * CHUNK_BAND, `${label}: maxAbs ${report.maxAbsError}`);
       });
     }

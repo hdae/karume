@@ -1,23 +1,28 @@
 /**
- * Wan の**自機 A/B 門**（ADR 0110 決定 5 / ADR 0120 決定 4）の 1 ケースぶんの段 — 2.1（`e2e_wan_ab_test.ts`）と 2.2
- * （`e2e_wan_ti2v_ab_test.ts`）が共有する。2 世代の違い（pipeline の class・census 表の系列・モデル・席・配布形の置き場・
- * 要求の固定値・ログの接頭）は {@link WanAbSubject} で受け、手順・判定の順・故障注入の形・結果の席への記録は 1 本にする（世代で
- * 門の主張が割れないように）。「何を赤にするか」の判定そのものは `ab-gate.ts` の純関数。
+ * One case of Wan's **self A/B check** (ADR 0110 decision 5 / ADR 0120 decision 4) — shared by 2.1 (`e2e_wan_ab_test.ts`)
+ * and 2.2 (`e2e_wan_ti2v_ab_test.ts`). The differences between the two generations (the pipeline class, the census table's
+ * series, the model, the preset, where the distribution lives, the fixed request values, the log prefix) come in through
+ * {@link WanAbSubject}; the procedure, the order of the verdicts, the shape of the fault injections and the recording into the
+ * results are one implementation (so the check's claim does not diverge between generations). The verdict of "what turns red"
+ * itself is the pure functions of `ab-gate.ts`.
  *
- * 1 ケース（= フレーム数 1 つ）の手順（{@link registerWanAbCase}）:
+ * The procedure of one case (= one frame count) ({@link registerWanAbCase}):
  *
- * 1. 参照席（manifest から導く — `referencePartnerOf`）の pipeline で **step 1 の潜在**（2 ステップの通しの 1 step 目 — 席が
- *    最初に効いた直後・決定 5-4）を採り、購読側の throw で生成を打ち切る（`captureThenAbort`）。dispose して解放を待つ。
- * 2. 実用席で同じことを **2 回**（独立の 2 pipeline）。
- * 3. 門を 3 つ掛ける: 決定性（実用席の 2 回がビット一致 — 決定 6 の MUST）・census（実用席の DiT の各パスを束の census 表の行と
- *    ちょうどの本数で突き合わせ、attention の 2 ノブは 1 本以上 — 決定 5-1）・帯（`judgeAb` — 決定 5-2 / 5-3）。
- * 4. 求められたケースだけ故障注入 5 件（どれも「門が赤になる」ことを assert する — 決定 5-5）。
+ * 1. With the pipeline of the reference partner (derived from the manifest — `referencePartnerOf`), capture the **step 1
+ *    latent** (step 1 of a 2-step run — right after the preset first takes effect, decision 5-4) and abort generation with a
+ *    throw in the subscriber (`captureThenAbort`). Dispose and wait for the release.
+ * 2. Do the same **twice** with the practical preset (two independent pipelines).
+ * 3. Apply three checks: determinism (the practical preset's two runs are bit-identical — the MUST of decision 6), census
+ *    (each DiT pass of the practical preset is compared with the bundle's census table row at the exact count, and the two
+ *    attention knobs need at least one dispatch — decision 5-1), and the band (`judgeAb` — decisions 5-2 / 5-3).
+ * 4. Only in the cases that ask for it, 5 fault injections (each asserts that "the check turns red" — decision 5-5).
  *
- * VRAM: pipeline は 1 本ずつ順に張る（同時に張らない — 構築では Session を張らず、DiT の Session は step 1 の打ち切りで
- * 畳まれる）。観測 1 回ごとに `settleReleases` で解放を待つ（B570 の `destroy()` の解放の遅れ — ADR 0120 リスク 6）。
+ * VRAM: pipelines are built one at a time in sequence (never at the same time — construction builds no Session, and the DiT
+ * Session is torn down by the abort at step 1). After every observation `settleReleases` waits for the release (the delayed
+ * release of `destroy()` on the B570 — ADR 0120 risk 6).
  *
- * MUST: 故障注入の席は同じ配布形を symlink で借りた一時 manifest（`withManifestOverride`）で張り、元の配布形は 1 バイトも
- * 書き換えない。
+ * MUST: the fault-injection presets are built from a temporary manifest that borrows the same distribution through symlinks
+ * (`withManifestOverride`); not one byte of the original distribution is rewritten.
  */
 
 import { beforeAll, it } from "vite-plus/test";
@@ -59,58 +64,61 @@ import {
 import { withManifestOverride } from "../../../models/tests/helpers/manifest-override.ts";
 import { settleReleases } from "../../../models/tests/helpers/settle-releases.ts";
 
-/** 観測点の名前（`comparisons[].output`）。 */
+/** The name of the observation point (`comparisons[].output`). */
 export const WAN_AB_OBSERVATION = "step1-latent";
 
 /**
- * 入力（各世代の seed 経路の sha 行と同じプロンプトと seed・寸法 / guidance / shift と I2V の条件画像は {@link WanAbSubject}
- * の `request` — 省いた世代は manifest の既定）。step 1 の σ は steps と shift で決まるので、steps は 2 に固定する（2 ステップの通しの
- * 1 step 目）。
+ * The inputs (the same prompt and seed as the sha rows of each generation's seed path; the size / guidance / shift and the I2V
+ * conditioning image are the `request` of {@link WanAbSubject} — a generation that omits it uses the manifest's defaults). The σ
+ * of step 1 is determined by steps and shift, so steps is fixed at 2 (step 1 of a 2-step run).
  */
 const PROMPT = "boxing-cats";
 const SEED = 42;
 const STEPS = 2;
 /**
- * step 1 までの DiT のパス数（CFG は 1 step に uncond → cond の 2 パス — guidance > 1 が前提。前提が崩れたら
- * {@link observeStep1} のパス数の検査が落とす）。
+ * The number of DiT passes up to step 1 (CFG runs 2 passes per step, uncond → cond — this assumes guidance > 1. If the
+ * assumption breaks, the pass-count check in {@link observeStep1} fails).
  */
 const PASSES_TO_STEP1 = 2;
 
 /**
- * A/B に要る pipeline の面（`Pipeline` と `Ti2vPipeline` が構造的に満たす）。要求は広い方の型（2.2 の I2V の欄を
- * 含む `Ti2vGenerateRequest`）で受ける — 2.1 の `generate` は狭い型を受けるが、引数は反変なので面を満たす。
+ * The pipeline surface the A/B needs (`Pipeline` and `Ti2vPipeline` satisfy it structurally). The request is taken as the
+ * wider type (`Ti2vGenerateRequest`, with 2.2's I2V fields) — 2.1's `generate` takes the narrower type, but parameters are
+ * contravariant, so it satisfies the surface.
  */
 export type WanAbPipeline = AsyncDisposable & {
   readonly prompts: readonly Prompt[];
   generate(request: Ti2vGenerateRequest): Promise<GeneratedVideo>;
 };
 
-/** 世代ごとの違い（門の手順と判定は {@link registerWanAbCase} の 1 本）。 */
+/** What differs per generation (the check's procedure and verdicts are the single {@link registerWanAbCase}). */
 export type WanAbSubject = {
-  /** ログの接頭（`[e2e] <label> A/B …`）。 */
+  /** The log prefix (`[e2e] <label> A/B …`). */
   readonly label: string;
-  /** census 表と受理表の系列（manifest の pipeline 名）。 */
+  /** The family of the census table and the acceptance table (the manifest's pipeline name). */
   readonly family: "wan" | "wan-ti2v";
-  /** 対象のモデル（帯はモデル × 席 × フレーム数ごとの宣言なので明示する）。 */
+  /** The model under test (explicit, because a band is declared per model × preset × frame count). */
   readonly model: string;
-  /** 対象の実用席。 */
+  /** The practical preset under test. */
   readonly practical: string;
-  /** 配布形の置き場（`karume.json` と容器）。 */
+  /** Where the distribution lives (`karume.json` and the containers). */
   readonly assetsRoot: URL;
-  /** 配布形の `karume.json` の生のテキスト（席の宣言と一時 manifest の差し替えの元）。 */
+  /** The raw text of the distribution's `karume.json` (the preset declarations and the base of the temporary manifest overrides). */
   readonly manifestText: string;
-  /** 実測と決着の席。 */
+  /** Where the measurements and outcomes are recorded. */
   readonly results: Results;
-  /** 世代の pipeline の構築口（`Pipeline.fromPretrained` / `Ti2vPipeline.fromPretrained`）。 */
+  /** The generation's pipeline constructor (`Pipeline.fromPretrained` / `Ti2vPipeline.fromPretrained`). */
   readonly fromPretrained: (
     source: DistributionSource,
     options: FromPretrainedOptions,
   ) => Promise<WanAbPipeline>;
   /**
-   * 要求の固定値（寸法と、step 1 の潜在を決める guidance / shift — I2V なら条件画像も）。省けば世代の既定（manifest の
-   * `pipelineConfig` と既定の寸法）に乗る — 2.1 は sha 行と同じく既定に乗る。明示する世代は全部を明示する（寸法だけ明示して
-   * σ と CFG のパス数を既定に残すと、既定が動いたときに帯の前提が黙って動く）。I2V の step 1 の潜在は `copyLatents` の
-   * スケジューラの状態（先頭の潜在フレームを条件で置き換える前 — `GenerateEvent` の doc）。
+   * The fixed request values (the size, and the guidance / shift that determine the step 1 latent — plus the conditioning
+   * image for I2V). Omitted, the generation's defaults apply (the manifest's `pipelineConfig` and the default size) — 2.1 uses
+   * the defaults, like its sha rows. A generation that sets them sets all of them (setting only the size and leaving σ and the
+   * CFG pass count at the defaults would silently move the band's assumptions when a default moves). The I2V step 1 latent is
+   * the scheduler state of `copyLatents` (before the first latent frame is replaced by the condition — the doc of
+   * `GenerateEvent`).
    */
   readonly request?: {
     readonly width: number;
@@ -118,21 +126,22 @@ export type WanAbSubject = {
     readonly guidance: number;
     readonly shift: number;
     /**
-     * I2V の条件画像（Wan2.2 だけ — 省けば T2V）。寸法は上の `width` / `height` で明示する（画像の縦横比での選択に
-     * 預けない — 帯の前提の寸法が画像で黙って動かないように）。2.1 の pipeline に渡すと `generate` が
-     * `ModelInputError` で拒む（fail loudly — 型は 2 世代で共有の 1 本）。渡すと各観測で encoder の 3 グラフの run が
-     * 届いたことを見る（画像が黙って落ちて T2V で回る退行を、帯と census の外で掴む）。
+     * The I2V conditioning image (Wan2.2 only — omitted means T2V). The size is set explicitly by `width` / `height` above
+     * (not left to the selection by the image's aspect ratio — so the size the band assumes does not silently move with the
+     * image). Passed to a 2.1 pipeline, `generate` rejects it with `ModelInputError` (fail loudly — one type shared by both
+     * generations). When passed, each observation checks that runs of the encoder's 3 graphs arrived (catching, outside the band
+     * and the census, a regression where the image is silently dropped and the run goes T2V).
      */
     readonly image?: Ti2vGenerateRequest["image"];
-    /** 条件画像の寸法の合わせ方（`image` を渡したときだけ — 省けば公式の `"crop"`）。 */
+    /** How the conditioning image is fitted to the size (only with `image` — omitted means the official `"crop"`). */
     readonly fit?: Ti2vGenerateRequest["fit"];
   };
 };
 
-/** 1 run ぶんの観測（step 1 の潜在と、そこまでの DiT の各パスの census）。 */
+/** The observation of one run (the step 1 latent and the census of each DiT pass up to it). */
 export type WanStep1Observation = {
   readonly latent: Float32Array<ArrayBuffer>;
-  /** DiT の 1 パス = 1 要素（{@link PASSES_TO_STEP1} 本）。 */
+  /** One element per DiT pass ({@link PASSES_TO_STEP1} of them). */
   readonly passes: readonly SessionDiagnostics["lastRunPipelines"][];
 };
 
@@ -140,8 +149,9 @@ export const errorText = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
 /**
- * `quant` の pipeline を `gpu` の上に組み、step 1 の潜在を採って打ち切る（dispose して解放を待つまで）。census は
- * DiT の run だけ（quant の `session` が効くのは DiT の Session だけ — `wan/tile-decode.ts` の VAE の段は `{}`）。
+ * Builds the pipeline of `quant` on `gpu`, captures the step 1 latent and aborts (up to disposing and waiting for the
+ * release). The census covers only the DiT runs (the quant's `session` affects only the DiT Session — the VAE stage of
+ * `wan/tile-decode.ts` gets `{}`).
  */
 const observeStep1 = async (
   gpu: GpuContext,
@@ -151,17 +161,17 @@ const observeStep1 = async (
   frames: number,
   seed: number,
 ): Promise<WanStep1Observation> => {
-  const where = `${quant} / ${frames} フレーム / seed ${seed}`;
+  const where = `${quant} / ${frames} frames / seed ${seed}`;
   const passes: SessionDiagnostics["lastRunPipelines"][] = [];
-  /** 診断が届いた run の component（I2V の条件画像が encoder の段まで届いたことの検査）。 */
+  /** The components whose run diagnostics arrived (checks that the I2V conditioning image reached the encoder stage). */
   const ran = new Set<string>();
   try {
     await using pipeline = await subject.fromPretrained(source, {
       gpu,
       model: subject.model,
       quant,
-      // A/B の対象は DiT の席 — 事前計算の埋め込みを明示する（既定の "gpu" は umT5 の段が乗り、プロンプトの
-      // 文脈も別の値になる — 帯を採った前提が崩れる）。
+      // The A/B is about the DiT preset — request the precomputed embeddings explicitly (the default "gpu" adds the umT5
+      // stage and gives the prompt context different values — breaking the assumptions the band was measured under).
       textEncoder: "precomputed",
       onRunDiagnostics: (component, diagnostics) => {
         ran.add(component);
@@ -169,7 +179,7 @@ const observeStep1 = async (
       },
     });
     const prompt = pipeline.prompts.find(({ name }) => name === PROMPT)?.prompt;
-    if (prompt === undefined) throw new Error(`${where}: 埋め込み資産に '${PROMPT}' が無い`);
+    if (prompt === undefined) throw new Error(`${where}: the embedding assets have no '${PROMPT}'`);
     const latent = await captureThenAbort<Float32Array<ArrayBuffer>>(where, (capture) =>
       pipeline.generate({
         prompt,
@@ -184,36 +194,38 @@ const observeStep1 = async (
         },
       }),
     );
-    assertEquals(passes.length, PASSES_TO_STEP1, `${where}: step 1 までの DiT のパス数`);
+    assertEquals(passes.length, PASSES_TO_STEP1, `${where}: DiT passes up to step 1`);
     if (subject.request?.image !== undefined) {
-      // 条件画像が要求から落ちて T2V の経路で回る退行では、両席とも T2V の潜在になって帯（relRMS）は T2V の値で緑のまま
-      // 通り、census も DiT しか見ないので掴めない。encoder の 3 グラフの run が届いたことで、I2V の経路を通ったことを縛る。
+      // In a regression where the conditioning image drops out of the request and the run takes the T2V path, both presets
+      // produce T2V latents, the band (relRMS) stays green with T2V values, and the census sees only the DiT, so neither catches
+      // it. Requiring runs of the encoder's 3 graphs pins that the I2V path was taken.
       for (const component of ["vae_encoder_pre", "vae_encoder_attn", "vae_encoder_post"]) {
         assert(
           ran.has(component),
-          `${where}: 条件画像を渡したのに ${component} の run が届いていない`,
+          `${where}: a conditioning image was passed but no ${component} run arrived`,
         );
       }
     }
     return { latent, passes };
   } finally {
-    // 次の観測の pipeline の確保の前に、この観測の確保の解放を待つ（B570 — settleReleases）。
+    // Wait for this observation's allocations to be released before the next observation's pipeline allocates (B570 —
+    // settleReleases).
     await settleReleases(gpu);
   }
 };
 
-/** 配布形の実用席の宣言（manifest の `session` の字面 — 一時 manifest の差し替えの元）。 */
+/** The distribution's declaration of the practical preset (the manifest's literal `session` — the base of the temporary manifest overrides). */
 export const declaredSessionOf = (subject: WanAbSubject): SessionSpec =>
   quantOf(parseManifest(subject.manifestText), subject.model, subject.practical).session;
 
-/** 宣言を家族の合成（受理表 — `WAN_SESSION_POLICY`）に通した実効設定（census 表の鍵・census の期待）。 */
+/** The effective options after passing the declaration through the family's composition (acceptance table — `WAN_SESSION_POLICY`) (the census table's key and the census expectations). */
 export const effectiveSessionOf = (
   subject: WanAbSubject,
   session: SessionSpec,
   where: string,
 ): SessionOptions => effectiveSessionOptions(subject.family, session, {}, where);
 
-/** 実用席の束の census 表の行（無ければ fail loudly — この門は実用席そのものの門なので、行の欠落は表の欠落）。 */
+/** The census table row of the practical preset's bundle (fails loudly when absent — this check is about the practical preset itself, so a missing row is a gap in the table). */
 const practicalRowOf = (
   subject: WanAbSubject,
   effective: SessionOptions,
@@ -221,16 +233,17 @@ const practicalRowOf = (
 ): BundleCensusRow => {
   const row = censusRowOf(subject.family, subject.model, effective);
   if (row === undefined) {
-    throw new Error(`${where}: 束の census 表（helpers/census-table.ts）に行が無い`);
+    throw new Error(`${where}: no row in the bundle census table (helpers/census-table.ts)`);
   }
   return row;
 };
 
 /**
- * 実用席の census（決定 5-1）: 各パスを表の行とちょうどの本数で突き合わせ（linear）、束の各ノブの変種が 1 本以上
- * 走ったことを見る（attention — 表に書かない規約: 行ブロックの枚数が device の束縛上限で変わる）。attention は
- * さらに a8 / s16 が全 dispatch で効いたこと（完全適格 — 比で見るので device に依らない）を見る。census は DiT の
- * Session の run だけ（{@link observeStep1}）なので、別の Session の f32 の attention は混ざらない。
+ * The practical preset's census (decision 5-1): each pass is compared with the table row at the exact count (linear), and
+ * each bundle knob's variant must have run at least once (attention — by convention not in the table: the row-block count
+ * changes with the device's binding limit). For attention it further checks that a8 / s16 took effect on every dispatch
+ * (fully eligible — a ratio, so independent of the device). The census covers only the DiT Session's runs
+ * ({@link observeStep1}), so f32 attention of another Session does not mix in.
  */
 const assertPracticalCensus = (
   row: BundleCensusRow,
@@ -244,24 +257,30 @@ const assertPracticalCensus = (
     () => "transformer",
     where,
   );
-  assertEquals(checked, observation.passes.length, `${where}: 表の期待と突き合わせたパスの数`);
+  assertEquals(
+    checked,
+    observation.passes.length,
+    `${where}: passes compared with the table's expectations`,
+  );
   const census = mergeCensus(observation.passes, where);
   assertSeatsApplied(census, effective, where);
   assertAttentionSeatsComplete(census, effective, where);
 };
 
 /**
- * census 表の行の linear の期待本数を `delta` だけずらした写し（故障注入 ④ — 「ちょうど」の検査が実物の census で
- * 1 本の過不足を掴むこと）。
+ * A copy of a census table row with the expected linear count shifted by `delta` (fault injection ④ — the "exact" check
+ * catches one dispatch too many or too few on the real census).
  */
 const shiftedLinearRow = (row: BundleCensusRow, delta: number): BundleCensusRow => {
   if (row.family !== "wan" && row.family !== "wan-ti2v") {
-    throw new Error(`census 表の行が wan の系列でない（${row.family}）`);
+    throw new Error(`the census table row is not of a wan family (${row.family})`);
   }
   const pass = row.census.transformer?.pass;
   const linear = pass?.linearCompute;
   if (pass === undefined || linear === undefined) {
-    throw new Error(`census 表の ${row.family} の行に transformer/pass の linearCompute が無い`);
+    throw new Error(
+      `the ${row.family} row of the census table has no linearCompute for transformer/pass`,
+    );
   }
   return {
     ...row,
@@ -274,8 +293,8 @@ const shiftedLinearRow = (row: BundleCensusRow, delta: number): BundleCensusRow 
 };
 
 /**
- * `session` だけを差し替えた実用席を一時 manifest で張って step 1 を採る（故障注入とノブ単位の席 — 重みと他の席は
- * 触らない）。
+ * Builds the practical preset with only its `session` replaced, through a temporary manifest, and captures step 1 (fault
+ * injection and per-knob presets — the weights and the other presets are untouched).
  */
 export const observeOverridden = (
   gpu: GpuContext,
@@ -294,23 +313,23 @@ export const observeOverridden = (
     (source) => observeStep1(gpu, subject, source, subject.practical, frames, SEED),
   );
 
-/** {@link registerWanAbCase} が呼び手へ返す観測（2.1 のノブ単位の記録が A/B の観測を使い回す）。 */
+/** The observations {@link registerWanAbCase} returns to the caller (2.1's per-knob records reuse the A/B observations). */
 export type WanAbRun = {
-  /** 参照席の名前（manifest から導いた値）。 */
+  /** The reference partner's name (derived from the manifest). */
   readonly reference: string;
   readonly referenceRun: WanStep1Observation;
-  /** 実用席の 1 回目。 */
+  /** The practical preset's first run. */
   readonly first: WanStep1Observation;
 };
 
-/** 1 ケースの指定。 */
+/** The specification of one case. */
 export type WanAbCase = {
-  /** 結果の席の `cases[].id`（テストの名前と同じ値を呼び手が組む）。 */
+  /** The `cases[].id` in the results (the caller builds the same value as the test's name). */
   readonly id: string;
   readonly frames: number;
-  /** 宣言の帯（導出前は `undefined` — `judgeAb` が実測を出して赤で止まる）。 */
+  /** The declared band (`undefined` before it is derived — `judgeAb` prints the measurement and stops red). */
   readonly band: AbBand | undefined;
-  /** 故障注入 5 件を回すか（門の空振りを示すのに長さは要らないので短いケースだけ）。 */
+  /** Whether to run the 5 fault injections (showing that a check is not vacuous needs no length, so only the short cases). */
   readonly faults: boolean;
 };
 
@@ -333,7 +352,7 @@ export const assigned = <T>(value: T | undefined, what: string): T => {
 type WanAbCaseState = WanAbRun & {
   readonly effective: SessionOptions;
   readonly row: BundleCensusRow;
-  /** 実用席の 2 回目。 */
+  /** The practical preset's second run. */
   readonly second: WanStep1Observation;
 };
 
@@ -371,7 +390,7 @@ export const registerWanAbCase = (
   });
   const current = (): WanAbCaseState => assigned(state, `${id}: the observations`);
 
-  it(`${id}: 決定性・census・帯`, async () => {
+  it(`${id}: determinism, census, band`, async () => {
     const { label, practical, results } = scope.subject();
     const { reference, referenceRun, first, second, effective, row } = current();
     await runRecordedCase(results, { id, failureNote: errorText }, (recorded) => {
@@ -385,8 +404,8 @@ export const registerWanAbCase = (
           measured,
         )} / census ${census}`,
       );
-      assertBitIdentical(first.latent, second.latent, `${id}: 実用席の 2 回`);
-      assertPracticalCensus(row, first, effective, `${id}: 実用席の transformer`);
+      assertBitIdentical(first.latent, second.latent, `${id}: the practical preset's two runs`);
+      assertPracticalCensus(row, first, effective, `${id}: the practical preset's transformer`);
       judgeAb(measured, band, id);
       return Promise.resolve({ status: "pass", note: `census ${census}` });
     });
@@ -394,11 +413,11 @@ export const registerWanAbCase = (
 
   if (!faults) return current;
 
-  // --- 故障注入（各門が空振りでないことの実証 — ADR 0110 決定 5-5）-----------------------
-  // どれも「門が赤になること」を assert する（緑 = 門が故障を見逃した）。①〜③ は ADR 0120 決定 4 の 3 件、
-  // ④⑤ は census の「ちょうど」と上限が実物の値で効くことの裏取り。
+  // --- Fault injection (showing that each check is not vacuous — ADR 0110 decision 5-5) -----------
+  // Each asserts that "the check turns red" (green = the check missed the fault). ①–③ are the 3 of ADR 0120 decision 4;
+  // ④⑤ confirm that the census's "exact" and the ceiling work on real values.
 
-  it("故障注入 ① 実用席の session を空にした manifest（= 参照席そのもの）は床で赤", async () => {
+  it("fault injection ① a manifest with the practical preset's session emptied (= the reference partner itself) is red at the floor", async () => {
     const gpu = scope.gpu();
     const subject = scope.subject();
     const { label, practical, results } = subject;
@@ -409,19 +428,20 @@ export const registerWanAbCase = (
       const measured = measureAb(faulty.latent, referenceRun.latent);
       recorded.comparisons.push(
         comparisonOf(
-          { output: WAN_AB_OBSERVATION, reference, practical: `${practical}（session 空）` },
+          { output: WAN_AB_OBSERVATION, reference, practical: `${practical} (empty session)` },
           measured,
           band,
         ),
       );
-      console.log(`[e2e] ${label} 故障注入 ① ${describeAb(measured)}`);
-      assertThrows(() => judgeAb(measured, band, faultId), Error, "床の失敗");
+      console.log(`[e2e] ${label} fault injection ① ${describeAb(measured)}`);
+      assertThrows(() => judgeAb(measured, band, faultId), Error, "floor failure");
     });
   });
 
-  // NOTE: ⑤ は帯の上限で赤になることを見るので、帯が未導出（`undefined`）の間は `judgeAb` が「帯が未導出」で投げて
-  // この step も赤になる（帯の宣言の後に有効 — 2.1 の段 3 / 4 と同じ扱い。② はその間も効く）。
-  it("故障注入 ② / ⑤ 実用席を別 seed で回す — 1 回目との決定性・参照席に対する上限が赤", async () => {
+  // NOTE: ⑤ checks that the band's ceiling turns red, so while the band is not derived yet (`undefined`) `judgeAb` throws
+  // "band not derived yet" and this step is red too (it becomes effective once the band is declared — the same as 2.1's steps
+  // 3 / 4; ② works in the meantime).
+  it("fault injection ② / ⑤ running the practical preset with another seed — determinism against the first run and the ceiling against the reference partner are red", async () => {
     const gpu = scope.gpu();
     const subject = scope.subject();
     const { label, practical, results } = subject;
@@ -436,13 +456,15 @@ export const registerWanAbCase = (
         frames,
         SEED + 1,
       );
-      // ② 決定性: 同じ席の 2 回目だけ入力が違う形（ビット一致の門が実物の潜在で差を掴む）。
+      // ② determinism: only the second run of the same preset has a different input (the bit-identity check catches the
+      // difference on real latents).
       assertThrows(
-        () => assertBitIdentical(first.latent, shifted.latent, "故障注入 ②"),
+        () => assertBitIdentical(first.latent, shifted.latent, "fault injection ②"),
         Error,
-        "ビット一致しない",
+        "are not bit-identical",
       );
-      // ⑤ 上限: 観測点が参照と無関係な潜在になった形（崩壊の代理 — 別の初期ノイズの step 1）。
+      // ⑤ ceiling: the observation point became a latent unrelated to the reference (a stand-in for collapse — step 1 from
+      // different initial noise).
       const measured = measureAb(shifted.latent, referenceRun.latent);
       recorded.comparisons.push(
         comparisonOf(
@@ -455,14 +477,15 @@ export const registerWanAbCase = (
           band,
         ),
       );
-      console.log(`[e2e] ${label} 故障注入 ⑤ ${describeAb(measured)}`);
-      assertThrows(() => judgeAb(measured, band, faultId), Error, "上限の失敗");
+      console.log(`[e2e] ${label} fault injection ⑤ ${describeAb(measured)}`);
+      assertThrows(() => judgeAb(measured, band, faultId), Error, "ceiling failure");
     });
   });
 
-  // ③ 帯の判定は記録だけ（ADR 0030 決定 5 の再演 — 積み重ねた席の後段の失効は数値で掴みにくい。帯が緑の
-  // ままなら census が要ることの実証、赤なら床の係数を 0 より上に置く材料）。
-  it("故障注入 ③ attentionCompute だけ外した席は census で赤（帯は記録）", async () => {
+  // ③ the band verdict is only recorded (a repeat of ADR 0030 decision 5 — a later knob of a stacked preset dropping out is
+  // hard to catch numerically. If the band stays green, that shows the census is needed; if red, it is material for setting
+  // the floor's coefficient above 0).
+  it("fault injection ③ a preset without attentionCompute is red in the census (the band is recorded)", async () => {
     const gpu = scope.gpu();
     const subject = scope.subject();
     const { label, practical, results } = subject;
@@ -477,29 +500,29 @@ export const registerWanAbCase = (
           {
             output: WAN_AB_OBSERVATION,
             reference,
-            practical: `${practical}（attentionCompute 外し）`,
+            practical: `${practical} (without attentionCompute)`,
           },
           measured,
           band,
         ),
       );
-      let bandVerdict = "緑";
+      let bandVerdict = "green";
       try {
         judgeAb(measured, band, faultId);
       } catch (cause) {
-        bandVerdict = `赤（${errorText(cause)}）`;
+        bandVerdict = `red (${errorText(cause)})`;
       }
-      console.log(`[e2e] ${label} 故障注入 ③ ${describeAb(measured)} / 帯 ${bandVerdict}`);
+      console.log(`[e2e] ${label} fault injection ③ ${describeAb(measured)} / band ${bandVerdict}`);
       assertThrows(
         () => assertPracticalCensus(row, faulty, effective, faultId),
         Error,
         "attentionCompute",
       );
-      return { status: "pass", note: `帯 ${bandVerdict}` };
+      return { status: "pass", note: `band ${bandVerdict}` };
     });
   });
 
-  it("故障注入 ④ census 表の linear の本数を 1 ずらすと実物の census で赤（GPU の追加なし）", () => {
+  it("fault injection ④ shifting the census table's linear count by 1 is red on the real census (no extra GPU work)", () => {
     const { first, effective, row } = current();
     for (const delta of [-1, 1]) {
       assertThrows(
@@ -508,10 +531,10 @@ export const registerWanAbCase = (
             shiftedLinearRow(row, delta),
             first,
             effective,
-            `故障注入 ④（${delta > 0 ? "+" : ""}${delta}）`,
+            `fault injection ④ (${delta > 0 ? "+" : ""}${delta})`,
           ),
         Error,
-        "linearCompute=a8 の変種",
+        "variant of linearCompute=a8",
       );
     }
   });
