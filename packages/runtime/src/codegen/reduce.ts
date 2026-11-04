@@ -36,7 +36,7 @@ import type { IrDtype } from "../format/ir.ts";
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL, NAN_MIN_WGSL } from "./numerics-wgsl.ts";
 import { outputDtypeOf, REDUCE_OPS, type ReduceOpName, resolveOpContract } from "../ops.ts";
 import { CodegenError } from "./errors.ts";
-import { assertU32Params } from "./params.ts";
+import { assertRowLoopBound, assertU32Params } from "./params.ts";
 
 const REDUCE_WORKGROUP_SIZE = 256;
 
@@ -188,6 +188,8 @@ export const reduceWgsl = (spec: ReduceSpec): string => {
  */
 export const reduceParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("reduce params", { rows, dim });
+  // MUST: the in-row loop steps by the workgroup size.
+  assertRowLoopBound("reduce params", { dim }, REDUCE_WORKGROUP_SIZE);
   const params = new Uint32Array(4);
   params[0] = rows;
   params[1] = dim;
@@ -396,6 +398,8 @@ export const axisReduceParams = (
     axis_len: axisLen,
     inner,
   });
+  // MUST: each leaf walks the reduced axis in workgroup-size steps.
+  assertRowLoopBound("axis reduce params", { axis_len: axisLen }, AXIS_REDUCE_WORKGROUP_SIZE);
   const params = new Uint32Array(4);
   params[0] = outCount;
   params[1] = axisLen;

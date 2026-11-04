@@ -29,3 +29,32 @@ export const assertU32Params = (where: string, values: Readonly<Record<string, n
     }
   }
 };
+
+/**
+ * Checks that an in-row loop `i = start; while (i < bound) { …; i = i + step; }` cannot wrap.
+ *
+ * MUST: `bound + step ≤ 2^32`. The last index below `bound` is at most `bound − 1`, so the final
+ * addition reaches at most `bound − 1 + step`; past 2^32 − 1 it wraps to a small value that is
+ * still below `bound`, and the loop never ends (the GPU hangs or the device is lost). The loop is
+ * inside one row, so the dispatch-count check (`gridStrideWorkgroups` in src/codegen/dispatch.ts)
+ * never sees it — each row kernel's params call this with its widest in-row step.
+ *
+ * @param where the head of the failure message (e.g. `"softmax params"`).
+ * @param bound the loop bound's name and value (the uniform field or the derivation that bounds the
+ *   loop, e.g. `{ dim }`). Each value is u32-checked first.
+ * @param step the loop's constant step (the workgroup size or the lane count).
+ */
+export const assertRowLoopBound = (
+  where: string,
+  bound: Readonly<Record<string, number>>,
+  step: number,
+): void => {
+  assertU32Params(where, bound);
+  for (const [name, value] of Object.entries(bound)) {
+    if (value + step > 2 ** 32) {
+      throw new CodegenError(
+        `${where}: ${name} ${value} + in-row step ${step} exceeds 2^32 (the u32 loop index wraps around on the final addition and the loop never ends)`,
+      );
+    }
+  }
+};

@@ -45,7 +45,7 @@
 
 import { F32_RANK_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 
 export const ARGMAX_WORKGROUP_SIZE = 256;
 
@@ -133,6 +133,8 @@ export const ARGMAX_WGSL: string = [
  */
 export const argmaxParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("argmax params", { rows, dim });
+  // MUST: the in-row loop steps by the workgroup size.
+  assertRowLoopBound("argmax params", { dim }, ARGMAX_WORKGROUP_SIZE);
   if (dim < 1) {
     throw new CodegenError(`argmax params: dim must be a positive integer (${dim})`);
   }
@@ -354,6 +356,9 @@ export const argmaxSplitParams = (
   groups: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("argmax split params", { rows, dim, groups });
+  // MUST: a span's loop runs to `min(start + span, dim)` (`start ≤ dim − 1`) in workgroup-size
+  // steps, so `dim + span` bounds both that sum and the loop index.
+  assertRowLoopBound("argmax split params", { dim }, ARGMAX_SPLIT_SPAN);
   if (dim < 1 || groups < 1 || groups !== argmaxSplitGroups(dim)) {
     throw new CodegenError(
       `argmax split params: dim ${dim} / groups ${groups} does not match the split shape` +

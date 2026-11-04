@@ -28,7 +28,7 @@
  * `r` is `r` (token-major input).
  */
 
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { RMS_NORM_WORKGROUP_SIZE, rmsNormInvWgsl, rmsNormValueWgsl } from "./rms-norm.ts";
 import { ROPE_SUM_WGSL, ropePairRotationWgsl, ropeProductsWgsl } from "./rope.ts";
@@ -101,6 +101,8 @@ export const rmsNormRopeParams = (
   headDim: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("rms_norm_rope params", { rows, dim, head_dim: headDim, size: rows * dim });
+  // MUST: the sum-of-squares loop and the RoPE chunk loop step by the workgroup size.
+  assertRowLoopBound("rms_norm_rope params", { dim }, RMS_NORM_WORKGROUP_SIZE);
   if (headDim < 2 || headDim % 2 !== 0 || dim % headDim !== 0) {
     throw new CodegenError(
       `rms_norm_rope params: head_dim (${headDim}) must be even and divide dim (${dim})`,

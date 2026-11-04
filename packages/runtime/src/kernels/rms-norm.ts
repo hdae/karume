@@ -47,7 +47,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { f32EpsDefect } from "../codegen/f32-eps.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 
 export const RMS_NORM_WORKGROUP_SIZE = 256;
 
@@ -321,6 +321,8 @@ const assertRmsNormAddOrder = (order: RmsNormAddOrder): void => {
  */
 export const rmsNormParams = (rows: number, dim: number, eps: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("rms_norm params", { rows, dim });
+  // MUST: the in-row loops step by the workgroup size (256 is the widest form sharing these params).
+  assertRowLoopBound("rms_norm params", { dim }, RMS_NORM_WORKGROUP_SIZE);
   if (dim < 1) {
     throw new CodegenError(`rms_norm params: dim must be a positive integer (${dim})`);
   }

@@ -64,7 +64,7 @@
 
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 
 export const SOFTMAX_WORKGROUP_SIZE = 256;
 
@@ -196,6 +196,8 @@ export const softmaxParams = (
   safe = false,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("softmax params", { rows, dim });
+  // MUST: the in-row loops step by the workgroup size.
+  assertRowLoopBound("softmax params", { dim }, SOFTMAX_WORKGROUP_SIZE);
   if (dim < 1) {
     throw new CodegenError(`softmax params: dim must be a positive integer (${dim})`);
   }

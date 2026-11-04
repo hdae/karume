@@ -63,7 +63,7 @@ import { gridStrideWorkgroups } from "../codegen/dispatch.ts";
 import { type PrologueUnaryOp, prologueUnaryWgsl } from "../codegen/elementwise.ts";
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 
 /** Width of the workgroup that folds one row (256, as in row reduce / softmax). */
 export const QUANTIZE_ROWS_WORKGROUP_SIZE = 256;
@@ -172,6 +172,9 @@ fn main(
  */
 export const quantizeRowsParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("quantize_rows params", { rows, dim });
+  // MUST: the in-row loops step by at most the workgroup size (the row form, the lanes of the
+  // grouped forms and the channel-major form share these params).
+  assertRowLoopBound("quantize_rows params", { dim }, QUANTIZE_ROWS_WORKGROUP_SIZE);
   if (dim < 1) {
     throw new CodegenError(`quantize_rows params: dim must be a positive integer (${dim})`);
   }
@@ -592,6 +595,8 @@ export const quantizeRowsPaddedWgsl = (geometry: QuantizeRowsGeometry): string =
 /** Uniform Params of the padded form: `rows`, `dim` = the row length (not a multiple of 4). */
 export const quantizeRowsPaddedParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("quantize_rows padded params", { rows, dim });
+  // MUST: the in-row loops step by at most the workgroup size.
+  assertRowLoopBound("quantize_rows padded params", { dim }, QUANTIZE_ROWS_WORKGROUP_SIZE);
   assertPaddedDim("quantize_rows padded params", dim);
   const params = new Uint32Array(4);
   params[0] = rows;

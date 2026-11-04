@@ -305,7 +305,7 @@
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
 import { gridStrideWorkgroups, tiledWorkgroups } from "../codegen/dispatch.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 import {
   gemmGeometryForRows,
   gemmGeometryTileKeyPart,
@@ -1639,6 +1639,9 @@ const assertStateGeometry = (where: string, geometry: StateAttentionGeometry): v
         ` (${rowsBlock} / ${chunkRows} / ${depth} / ${capacity} / ${colCap})`,
     );
   }
+  // MUST: ③ scans a row's live columns (at most col_cap — the live limits below) in steps of up to
+  // `STATE_PV_UNROLL · STATE_PV_KV_LANES` ({@link statePvScanWgsl}).
+  assertRowLoopBound(where, { col_cap: colCap }, STATE_PV_UNROLL * STATE_PV_KV_LANES);
   if (kvRepeat < 1) {
     throw new CodegenError(`${where}: kv_repeat must be a positive integer (${kvRepeat})`);
   }
@@ -1778,6 +1781,12 @@ export const stateStatsParams = (
         ` (${batchHeads} / ${rowsBlock} / ${colCap})`,
     );
   }
+  // MUST: the row loops walk the live columns (at most col_cap) in workgroup-size steps.
+  assertRowLoopBound(
+    "attention_state_stats params",
+    { col_cap: colCap },
+    STATE_STATS_WORKGROUP_SIZE,
+  );
   if (stateSliding(window) && colCap < window) {
     throw new CodegenError(
       `attention_state_stats params: col_cap ${colCap} is below the sliding live limit ${window}` +

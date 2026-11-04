@@ -67,7 +67,7 @@
 
 import { F32_RANK_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 
 /**
  * Number of lanes that fold one row.
@@ -248,6 +248,8 @@ fn main(
  */
 export const topkParams = (rows: number, dim: number): Uint32Array<ArrayBuffer> => {
   assertU32Params("topk params", { rows, dim });
+  // MUST: the in-row loop steps by the workgroup size.
+  assertRowLoopBound("topk params", { dim }, TOPK_WORKGROUP_SIZE);
   if (dim < 1) {
     throw new CodegenError(`topk params: dim must be a positive integer (${dim})`);
   }

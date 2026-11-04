@@ -56,7 +56,7 @@
 
 import { IS_NAN_BITS_WGSL, NAN_MAX_WGSL } from "../codegen/numerics-wgsl.ts";
 import { CodegenError } from "../codegen/errors.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 import { SAFE_SOFTMAX_NEG_INF_BITS } from "./softmax.ts";
 import {
   assertGemmRowWindow,
@@ -488,6 +488,8 @@ export const attentionStatsParams = (
   regCache?: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("attention_stats params", { rows, dim });
+  // MUST: the two-read loops step by the workgroup size.
+  assertRowLoopBound("attention_stats params", { dim }, ATTENTION_STATS_WORKGROUP_SIZE);
   if (dim < 1) {
     throw new CodegenError(`attention_stats params: dim must be a positive integer (${dim})`);
   }

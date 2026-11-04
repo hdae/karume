@@ -33,7 +33,7 @@
 
 import { CodegenError } from "../codegen/errors.ts";
 import { f32EpsDefect } from "../codegen/f32-eps.ts";
-import { assertU32Params } from "../codegen/params.ts";
+import { assertRowLoopBound, assertU32Params } from "../codegen/params.ts";
 
 export const LAYER_NORM_WORKGROUP_SIZE = 256;
 
@@ -161,6 +161,8 @@ export const layerNormParams = (
   eps: number,
 ): Uint32Array<ArrayBuffer> => {
   assertU32Params("layer_norm params", { rows, dim });
+  // MUST: the in-row loops (shared with the adaLN fusion) step by the workgroup size.
+  assertRowLoopBound("layer_norm params", { dim }, LAYER_NORM_WORKGROUP_SIZE);
   if (dim < 1) {
     throw new CodegenError(`layer_norm params: dim must be a positive integer (${dim})`);
   }
