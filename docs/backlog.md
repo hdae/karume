@@ -11,8 +11,9 @@
 
 0.15.1 is out (JSR `@karume/runtime` / `@karume/hub` / `@karume/models` 0.15.1 — Gemma 4 QAT decode speed (perf-ledger
 K-97, K-48 step 1b, K-99), the ops `gated_delta_scan` and `group_norm`, `@karume/models/moss`; HF first publications of
-`hdae/karume-moss-image` and `hdae/karume-gemma4-qat`, the other repositories unchanged; published-smoke green on Node
-and Deno). The next release is the Gemma 4 expansion (*later*); what remains of the QAT decode-speed item stays below.
+`hdae/karume-moss-image` and `hdae/karume-gemma4-qat` (the mobile QAT line, `karume-gemma4-qat-mobile` since
+2026-11-04; the name `karume-gemma4-qat` now designates the q4_0 QAT line — ADR 0097 addendum 10), the other
+repositories unchanged; published-smoke green on Node and Deno). The next release is the Gemma 4 expansion (*later*); what remains of the QAT decode-speed item stays below.
 
 ## later
 
@@ -20,26 +21,43 @@ and Deno). The next release is the Gemma 4 expansion (*later*); what remains of 
   browser. The attribution of 2026-09-19 ([research](research/2026-09-19-qat-speed-recon.md) §6) names four kernel gaps
   (standalone SRQ dispatches, the occupancy of the INT2 GEMVs, the f32 `per_layer_model_projection`, the sequential INT2
   `lm_head`) and perf-ledger K-45 (integer dot product) as the root fix. Re-measure first and check which GEMV changes
-  since then reach the QAT shapes; QAT E4B's parallel-GEMV rows are unmeasured copies (K-59). `karume-gemma4-qat` is published on HF
-  since 2026-11-01 (`gemma4Qat.SOURCES["gemma4-qat"]` — ADR 0097 addendum 9).
+  since then reach the QAT shapes; QAT E4B's parallel-GEMV rows are unmeasured copies (K-59). The mobile QAT distribution,
+  published on HF as `hdae/karume-gemma4-qat` on 2026-11-01, is `karume-gemma4-qat-mobile` since 2026-11-04
+  (`@karume/models/gemma4-qat-mobile`; no `SOURCES` until it is published under the new name — ADR 0097 addendum 10).
 - **Gemma 4 expansion — the release after 0.15.1 (maintainer 2026-11-01)**: in this order, (1) the MTP drafter for E4B
   (`google/gemma-4-E4B-it-assistant`; size M — the target series already has the verify exit, the export script and
-  the tests are E2B-bound; first decide E4B's default preset, still the provisional `i4`), (2) Gemma 4 12B
+  the tests are E2B-bound; E4B's default is decided — `bf16`, the original weights, like E2B's: ADR 0128 addendum
+  2026-11-04), (2) Gemma 4 12B
   (model type `gemma4_unified`: no PLE, no KV sharing, 48 layers, sliding window 1024) — **implemented and in the local
-  mirror (2026-11-03), not published**: weights from the q4_0 QAT checkpoint with its grid imported (ADR 0128 addendum
+  mirror of the q4_0 QAT line `karume-gemma4-qat` with its QAT drafter (2026-11-04; the regular `karume-gemma4` no longer
+  ships it), not published**: weights from the q4_0 QAT checkpoint with its grid imported (ADR 0128 addendum
   2026-11-03 — round-to-nearest i4 on `gemma-4-12B-it` ruins it), one preset `i4` (6.9 GiB; e2e greedy goldens equal on
   the RTX 3080 Ti, peak VRAM 8.6 GiB). Left: the test-asset dataset's 12B goldens are still the first export's
   (int8 embedding) — re-upload the int4-embedding series' goldens and move the test-asset pin (maintainer), the human
   quality review, the GEMV rows of the 12B shapes before
-  `i4-gemvpar` / `i4-fast`, publication and the `gemma.SOURCES` pin (maintainer), (3) its drafter (size S–M) — it
-  must be the QAT one (`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant`: Google's card requires a QAT drafter
-  for a QAT target).
+  `i4-gemvpar` / `i4-fast`, publication and the `gemma.SOURCES["gemma4-qat"]` entry (maintainer). Its QAT drafter ships in
+  the same mirror (`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` — Google's card requires a QAT drafter for a QAT
+  target).
 - **Measure the regular Gemma 4 E2B / E4B `i4` (maintainer 2026-11-03)**: it rounds the regular checkpoints to the
   nearest i4 and was never measured for quality. Compare it, with the KL metric of ADR 0128's addendum of 2026-11-03,
   against the grid import of `google/gemma-4-E{2,4}B-it-qat-q4_0-unquantized`; if the regular `i4` loses much, stop
-  publishing it, or the regular model. Then settle which Gemma 4 lines are published (regular / mobile QAT
-  `karume-gemma4-qat` / q4_0 QAT) and where 12B lives. Needs the E2B / E4B checkpoints fetched again. Scoping memos of 2026-11-01: `.claude/reviews/2026-11-02_gemma4-expansion/`
+  publishing it, or the regular model. The lines were settled on 2026-11-04 (maintainer): regular `karume-gemma4`
+  (E2B / E4B), q4_0 QAT `karume-gemma4-qat` (E2B / E4B / 12B with their QAT drafters), mobile QAT
+  `karume-gemma4-qat-mobile`. Needs the E2B / E4B checkpoints fetched again. Scoping memos of 2026-11-01: `.claude/reviews/2026-11-02_gemma4-expansion/`
   (`e4b-drafter.md`, `12b.md`; local, untracked).
+- **Follow-ups of the Gemma 4 lines (filed 2026-11-04)**:
+  - 12B and `decodeAhead`: the run-ahead (ADR [0142](decisions/0142-decode-run-ahead.md)) refuses 12B on two counts — it
+    feeds its tokens through the GPU-resident PLE's resident-id path, and 12B has no PLE; and it selects each step's token
+    on the GPU from the raw logits, while 12B's distribution suppresses tokens (`resolveGemma4DecodeAhead` in
+    `packages/models/src/gemma/pipeline.ts`). Using it there needs a run-ahead path without PLE and a GPU selection that
+    masks the suppressed ids.
+  - `tools/llm-baseline` reads PLE index schema 3 only (`ContainerPle` in `weights.py`), and its `gemma4-e2b` profile
+    follows `karume-gemma4`'s `defaultQuant`, now `bf16` (schema 5): `--weights stored` fails there and would measure
+    the unrounded weights anyway. The regular `i4` measurement above needs the tool to read schemas 4 / 5 and to take the
+    preset explicitly.
+  - The mobile QAT line (`karume-gemma4-qat-mobile`) still ships the tokenizer of its checkpoints, Google's `tokenizer.json`
+    from before the glitch-token fixes of 2026-11-03 (SHA-256 `cc8d3a0c…`), while the regular and q4_0 QAT lines moved to
+    the fixed E2B / E4B files. Whether the mobile line follows is the maintainer's decision.
 - **One wording for "unofficial converted / quantized model" on every card (maintainer 2026-11-01)**: today only anima
   (its licence §3(d)) and MOSS-Image (the FLUX marks clause of Black Forest Labs' cards) carry a non-endorsement
   sentence, each in its own words. Settle one house phrasing in the generic card renderer and decide where it is
@@ -100,10 +118,6 @@ and Deno). The next release is the Gemma 4 expansion (*later*); what remains of 
   - Gate C2 counts `convCompute` (ADR [0128](decisions/0128-default-preset-original-weights.md) open point 5): `defaultPresetViolations` in
     `packages/runtime/tests/distribution_gate_test.ts` counts only `linearCompute` / `attentionCompute`; add `convCompute: "a8"` (ADR 0133)
     with fault-injection cases. No GPU; every current mirror already passes.
-  - Borrowed bf16 weights fail the residency check (ADR [0131](decisions/0131-bf16-weight-execution.md) open point 3): `expectedSharedSeat`
-    (`packages/runtime/src/runtime/weight-residency.ts`) classes bf16 as `raw`, so borrowing a bf16 initializer always throws (loudly). Treat
-    bf16 like f16 there and add a bf16 borrow case to `gpu_borrowed_context_test.ts` (GPU). No shipped family borrows bf16; if it misses
-    0.15.0, record the limit in [limitations](limitations.md).
   - Geometry sweep identity check for a bf16-stored linear (ADR 0131 open point 2, low priority), after the pending derivation.
   - A check that `version` and `exports` agree between each published package's `package.json` and `deno.json` (ADR
     [0127](decisions/0127-node-dawn-toolchain.md)): JSR publishes from `deno.json`, `published-smoke` reads `packages/models/package.json`.

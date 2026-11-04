@@ -170,7 +170,8 @@ follow-ups and is not part of this addendum.
    weight therefore always fails the residency-class check with an `ExecutionError` (`:394-405`):
    a loud failure, never a wrong value. No shipped family borrows bf16 weights (the borrowers are
    the Wan tile decode and Gemma 4, neither of which ships bf16). This sentence goes when open
-   point 3 is fixed.
+   point 3 is fixed. (amended 2026-11-04: fixed, and the gemma4 E2B drafter now borrows a bf16
+   weight — see the addendum of 2026-11-04)
 4. **Decision 2: a non-exact eligible weight fails the export.** The text "otherwise it stays f32"
    is replaced by: an eligible weight whose round trip `f32 → bf16 → f32` is not exact fails the
    export with an `EmitError` (the rounding was not applied before the golden was taken), the same
@@ -194,7 +195,8 @@ follow-ups and is not part of this addendum.
 
 1. **gemma4 original-weights preset** (needs the PLE tables in bf16) — kept deferred, not
    release-blocking: it is additive and changes no default. It is tracked by the gemma4 e2b row of
-   ADR 0128 decision 4's table.
+   ADR 0128 decision 4's table. (amended 2026-11-04: closed — the preset ships for E2B and E4B and
+   is their default; see the addendum of 2026-11-04)
 2. **Geometry sweep coverage of `:wbf16`** — reworded: the premise "bf16 falls back to the default
    geometry" was wrong (amendment 5). The question is now whether the sweep's identity check (and
    its timing) should include a bf16-stored linear case. Kept open, low priority, after the pending
@@ -203,13 +205,41 @@ follow-ups and is not part of this addendum.
    like f16 in `expectedSharedSeat` (`bf16` when resident, otherwise `expanded`) with a borrow case
    in the GPU borrow tests. Not release-blocking (no shipped family borrows bf16 weights; the
    failure is loud). If the fix misses 0.15.0, `docs/limitations.md` records "bf16 weights cannot
-   be borrowed across Sessions (fails loudly)" for the release.
+   be borrowed across Sessions (fails loudly)" for the release. (amended 2026-11-04: closed — see
+   the addendum of 2026-11-04)
 
 ### Follow-ups (not done by this addendum)
 
 - Fix `expectedSharedSeat` for bf16 and add a bf16 borrow case to the GPU borrow tests
   (`packages/runtime/tests/gpu_borrowed_context_test.ts`), once the geometry derivation lifts the
   freeze on `packages/runtime` and the GPU is free; otherwise record the limitation for 0.15.0.
+  (done 2026-11-04 — the addendum of that date; the borrow case is its own file)
 - Add a bf16-stored linear case to the geometry sweep's identity check (low priority, after the
   geometry derivation).
 - ADR 0018 still calls this ADR proposed (its bf16 sentence); sync it.
+
+## Addendum (2026-11-04) — open points 1 and 3: the gemma4 original weights, and borrowed bf16 weights
+
+**Open point 1 (after acceptance) is closed.** Its PLE half is decided in ADR
+[0085](0085-ple-host-gather.md) addendum 2026-11-04: PLE index schema 5, a bf16 `values` table with
+no `scales`. The regular gemma4 bf16 series (`gemma4.export_product --storage bf16`) stores every
+weight, the PLE table included, as the checkpoint's bf16 bits. The host gather widens a value with
+`bits << 16`; the GPU-resident gather binds the table with this ADR's `bf16` codec and reuses the
+`embedding` kernel's bf16 path (no new WGSL). The distribution step is done too: the local mirror of
+`karume-gemma4` ships the preset `bf16` for E2B and E4B beside the int4 presets
+(`tools/export-recipes/gemma4/distribution.py`, the `model_bf16` series role). The open point's
+premise "it is additive and changes no default" no longer holds: `bf16` is the default of both models
+by the maintainer's ruling of 2026-11-04 (ADR [0128](0128-default-preset-original-weights.md)
+addendum 2026-11-04, which also records the measured cost).
+
+**Open point 3 (after acceptance) is closed.** `expectedSharedSeat`
+(`packages/runtime/src/runtime/weight-residency.ts`) now treats a bf16 lender like an f16 one: only
+the `f32` and `i32` layouts expect the `raw` seat, and a bf16 borrower's expected class follows the
+lender's plan (the `bf16` seat when the consumption is eligible, otherwise `expanded`). The regression
+test is `packages/runtime/tests/gpu_bf16_shared_weight_test.ts` (real GPU): a linear borrows a
+bf16-stored weight whose row length and element count are odd (the f16 traps of two elements per u32
+word), and the borrower's output equals the lender's. Amendment 3's sentence "no shipped family
+borrows bf16 weights" no longer holds: the E2B MTP drafter of `karume-gemma4` borrows
+`model.lm_head.weight` from whichever target is loaded, and under the default `bf16` that target's
+table is bf16. Before the fix, building the drafter beside the `bf16` target failed with the
+residency-class error (borrower class `raw`, lender class `bf16`) — loudly, never with a wrong value.

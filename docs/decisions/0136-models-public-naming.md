@@ -123,3 +123,11 @@ Facts measured before the ruling (2026-10-28, on a copy of the package):
   family) is filed in the backlog; the fix is the `"sideEffects": false` point of ADR 0037 §4 or
   `/* @__PURE__ */` on the retained expressions.
 - ADRs and research notes written before 2026-10-28 keep the names of their time.
+
+## Addendum (2026-11-04) — `gemma4Qat` is `gemma4QatMobile`
+
+The subpath `./gemma4-qat` is `./gemma4-qat-mobile` and its namespace `gemma4QatMobile` (decision 3's rule — the
+subpath key in camelCase), after the mobile QAT distribution was renamed `karume-gemma4-qat-mobile`
+(ADR [0097](0097-gemma4-qat-integration.md) addendum 10). Its diagnostics read `gemma4QatMobile.Pipeline: …`
+(decision 5). The subpath no longer exports `SOURCES` until the renamed repository is published, so decision 1's
+"every family's source table is `SOURCES`" holds for the families that have one.

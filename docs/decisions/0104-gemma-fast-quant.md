@@ -3,8 +3,9 @@
 - Status: accepted (2026-09-15, the maintainer's instruction to continue making it the default); partly
   superseded by [0109](0109-manifest-v5-container.md) (manifest format, 2026-09-22), by the addendum of
   2026-09-26 and [0111](0111-session-options-composition.md) (fields accepted from `quant.session`,
-  2026-09-26), and by [0128](0128-default-preset-original-weights.md) decision 1 (regular E4B default,
-  2026-10-17). Automated acceptance: [integration acceptance](../research/2026-09-15-gemma-fast-quant.md);
+  2026-09-26), by [0128](0128-default-preset-original-weights.md) decision 1 (regular E4B default,
+  2026-10-17), and by the 0128 addendum of 2026-11-04 (regular E2B / E4B default `bf16`; this ADR's
+  presets stay, chosen by name). Automated acceptance: [integration acceptance](../research/2026-09-15-gemma-fast-quant.md);
   broad quality, long texts and E4B were not accepted at the time.
 - Related: [0038](0038-manifest-v1.md), [0058](0058-numerics-opt-in-contract.md),
   [0098](0098-linear-gemv-parallel.md), [0099](0099-rms-norm-add-fusion.md),
@@ -103,7 +104,8 @@ composition alone.
   addition order of `parallel` ([ADR 0102](0102-state-attention-stats-pv-fusion.md)).
 - Regular E4B has the same presets and declarations, default `i4`, and a description that says speed is
   not measured; bundle and default were to follow an E4B benchmark. (Superseded by ADR 0128 decision 1
-  on 2026-10-17: decided by the per-model procedure when a regular E4B distribution ships.)
+  on 2026-10-17: decided by the per-model procedure when a regular E4B distribution ships. Decided on
+  2026-11-04: regular E2B and E4B both default to `bf16` — ADR 0128 addendum 2026-11-04.)
 - `fromAssets` runs `sequential` without an explicit option (formerly `parallel`). Distributions built
   before this change (including the published pins) run every preset `sequential` until rebuilt; an
   explicit `stateAttentionReduce` restores the old behaviour.

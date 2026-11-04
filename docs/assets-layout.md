@@ -108,7 +108,14 @@ uv run python dist.py --pipeline sbv2 \
 uv run python dist.py --pipeline sbv2-fn \
     --model FN1 --model FN2 --model FN3 --model FN4 --model FN5 --model FN6 \
     --model FN7 --model FN8 --model FN9 --model FN10 --out ../../models/karume-sbv2-fn
-uv run python dist.py --pipeline gemma4              # → models/karume-gemma4/ (about 4.0GiB)
+uv run python dist.py --pipeline gemma4 \
+    --model e2b --model e4b \
+    --out ../../models/karume-gemma4                 # the regular line, E2B / E4B (about 32 GiB with the bf16 containers)
+uv run python dist.py --pipeline gemma4-qat \
+    --model e2b --model e4b --model 12b              # → models/karume-gemma4-qat/ (the q4_0 QAT line; about 15 GiB)
+uv run python dist.py --pipeline gemma4-qat-mobile \
+    --model e2b --model e4b \
+    --out ../../models/karume-gemma4-qat-mobile      # the mobile QAT line (about 4.8 GiB)
 uv run python dist.py --pipeline siglip2 \
     --model base --model so400m \
     --out ../../models/karume-siglip2                # one repository, two models (default base — ADR 0092 decision 8)
@@ -132,14 +139,20 @@ uv run python dist.py --pipeline vowel-detector      # → models/karume-vowel-d
   Apache-2.0), `LICENSE.md` / `NOTICE.md` are bundled at the repository root (decision 7 — a standing rule that applies
   regardless of publication state).
 
-- `karume-gemma4` folds **three series** (the product container of `gemma4-e2b-product` (the PLE is an asset of the container),
-  the MTP drafter container of `gemma4-e2b-drafter`, and the compiled assets of `gemma4-e2b-tokenizer`) into
-  one repository. Only the tokenizer goes into the manifest's `assets` (details in
+- `karume-gemma4` (the regular line, E2B / E4B) folds per model **two product series** — `gemma4-<model>-product` (int4
+  linears, int8 embeddings, i8 PLE) and `gemma4-<model>-product-bf16` (the original weights, PLE index schema 5) — plus E2B's
+  MTP drafter `gemma4-e2b-drafter` and each model's own compiled tokenizer `gemma4-<model>-tokenizer` into one repository
+  (the PLE is an asset of each product container). Only the tokenizer goes into the manifest's `assets` (details in
   `tools/export-recipes/gemma4/README.md`). The upstream is Apache 2.0, so
   `LICENSE.md` / `NOTICE.md` go at the repository root (the legal-text slot of `karume.dist`). The repository name is
-  `karume-gemma4` by the one-repository-per-family rule (a repository that E4B / 12B share — ADR
-  [0092](decisions/0092-distribution-repos-and-sources.md) decision 1)
-  (renamed from `karume-gemma4-e2b` in 0.9.0 — HF redirects the old name). **The recipe's
+  `karume-gemma4` by the one-repository-per-family rule (a repository that E2B / E4B share — ADR
+  [0092](decisions/0092-distribution-repos-and-sources.md) decision 1; 12B is not in it since 2026-11-04 — that ADR's addendum)
+  (renamed from `karume-gemma4-e2b` in 0.9.0 — HF redirects the old name).
+- `karume-gemma4-qat` (the q4_0 QAT line, E2B / E4B / 12B, the same `gemma4/1` contract) folds `gemma4-e2b-qat-product`,
+  `gemma4-e4b-qat-product` and `gemma4-12b-product` (Google's q4_0 QAT checkpoints on their own grid; E2B / E4B with PLE
+  index schema 4), each model's `gemma4-<model>-qat-drafter` and the tokenizer series. `karume-gemma4-qat-mobile` (the
+  mobile QAT line, contract `gemma4-qat/1`) folds `gemma4-qat-<model>-product` (`tools/export-recipes/gemma4_qat/README.md`);
+  until 2026-11-04 it was named `karume-gemma4-qat` (ADR [0097](decisions/0097-gemma4-qat-integration.md) addendum 10). **The recipe's
   `repo_name` = the output directory name of the command above = the repo name in the card's Usage** (the latter two are
   derived from the former), so a rename takes one constant in the recipe. Where the published revision lives: the models table
   `gemma.SOURCES["gemma4"]` (the same ADR, decision 3 — not copied into docs).

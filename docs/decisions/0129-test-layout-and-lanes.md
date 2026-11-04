@@ -491,3 +491,12 @@ assets (`outputs/test-assets/`). Decision 3's assets gate (`e2e_assets_gate_test
 fetch of the pinned revision is present (its opt-out `KARUME_ALLOW_NO_ASSETS` is unchanged), and the distribution gate
 checks every declared model × quant × graph. Tests of graphs no distribution ships run only with `KARUME_SERIES=1` — a
 flag in the family lane, like upstream parity (addendum 2026-10-29), not a separate lane.
+
+## Addendum 2026-11-04 — the mobile QAT lane is `models:gemma4-qat-mobile`
+
+The mobile QAT distribution was renamed `karume-gemma4-qat-mobile` (ADR [0097](0097-gemma4-qat-integration.md)
+addendum 10), so its lane is `models:gemma4-qat-mobile`, claiming the files that carry the token `gemma4_qat_mobile`
+(and `e2e_gemma4_ple_gpu_test.ts`), and `models:gemma4` excludes that token instead of `gemma4_qat`. The tests of the
+q4_0 QAT line (`karume-gemma4-qat` — `e2e_gemma4_qat_mirror_test.ts`, `e2e_gemma4_qat_reference_test.ts`,
+`e2e_gemma4_qat_product_test.ts`) are `gemma4/1` tests and run in `models:gemma4`. The lane rows above are a record of
+the 2026-10 layout.

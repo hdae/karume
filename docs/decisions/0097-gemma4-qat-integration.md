@@ -290,3 +290,37 @@ publication. The subpath `@karume/models/gemma4-qat` gains `SOURCES` (key `"gemm
 because both families share that directory), and the omitted-ref diagnostic of
 `gemma4Qat.Pipeline.fromPretrained` names `gemma4Qat.SOURCES["gemma4-qat"]` — spelled
 `SOURCES["gemma4-qat"] (@karume/models/gemma4-qat)`. MTP, vision and audio stay unsupported.
+
+## Addendum 10 (2026-11-04) — the distribution is renamed `karume-gemma4-qat-mobile`
+
+The maintainer's ruling of 2026-11-04: the name `karume-gemma4-qat` (HF `hdae/karume-gemma4-qat`) goes to the q4_0
+QAT line — Google's q4_0 quantization-aware-trained E2B / E4B / 12B checkpoints on their own 4-bit grid, each with its
+QAT MTP drafter, a distribution of the regular `gemma4/1` contract that `@karume/models/gemma` reads
+(`tools/export-recipes/gemma4/distribution.py`, `QAT_Q4_0_PIPELINE`). This family's distribution becomes
+`karume-gemma4-qat-mobile`. It was published recently and has no users, so the rename is breaking, with no alias and no
+compatibility shim:
+
+- The subpath `@karume/models/gemma4-qat` becomes `@karume/models/gemma4-qat-mobile`, the barrel namespace `gemma4Qat`
+  becomes `gemma4QatMobile` (ADR 0136 decision 3), the diagnostics name `gemma4QatMobile.Pipeline` (ADR 0136
+  decision 5), and the test lane `models:gemma4-qat` becomes `models:gemma4-qat-mobile` (its files carry the token
+  `gemma4_qat_mobile` — ADR 0129).
+- The recipe keeps its directory (`tools/export-recipes/gemma4_qat/`) and its series (`gemma4-qat-<model>-product`);
+  `dist.py --pipeline gemma4-qat-mobile` builds `models/karume-gemma4-qat-mobile/` (card title "Gemma 4 Mobile QAT
+  Text Decoder"), and `--pipeline gemma4-qat` now builds the q4_0 QAT line.
+- The manifest's pipeline contract stays `gemma4-qat/1`: it names the reader's contract, not the repository, and the
+  model files and `karume.json` of the renamed mirror stay byte-identical (only `README.md`'s title changed).
+- Addendum 9's source table is withdrawn: `hdae/karume-gemma4-qat-mobile` has no published revision yet, and a family
+  without a public repository has no table (ADR 0073 decision 1; release-runbook "First publication of a family"), so
+  the subpath exports no `SOURCES`, `KARUME_SOURCES` has no mobile entry, and an omitted ref gets no hint. The next
+  release publishes the renamed repository and restores the table under the key `"gemma4-qat-mobile"`.
+- The HF repository `hdae/karume-gemma4-qat` itself is not new: until the q4_0 QAT line is uploaded there, its
+  history holds this family's mobile content, including the revision that 0.15.1's `gemma4Qat.SOURCES["gemma4-qat"]`
+  pins. A user of 0.15.1 keeps reading that revision; the upload of the q4_0 line replaces `main`'s files and its
+  card.
+- The family reader (`gemma4-qat/1`) and the internal family name `gemma4-qat` (`packages/models/src/gemma/qat*.ts`,
+  the recipe directory `gemma4_qat/`) stay; only the distribution, the subpath, the namespace and the lane are
+  renamed.
+- ADR [0092](0092-distribution-repos-and-sources.md) decision 1 (one repository per family) and the split: the ruling
+  did not cite it. Its addendum of 2026-11-04 records the layout — the q4_0 QAT checkpoints are other upstream
+  checkpoints (quantization-aware fine-tunes of the `-it` models), which decision 1's derived-model rule gives a
+  repository of their own, although `@karume/models/gemma` reads both `karume-gemma4` and `karume-gemma4-qat`.

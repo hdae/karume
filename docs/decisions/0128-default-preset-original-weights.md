@@ -49,19 +49,20 @@ Local distribution mirrors on 2026-10-17 (`models/*/karume.json`), with the stor
 upstream checkpoint read from its safetensors header (weight tensors only; amended 2026-10-29, see
 the addendum):
 
-| Distribution (models)                      | Presets                                                                                                       | `defaultQuant`          | Upstream storage                                                                    | Preset holding the original values                                                                                                  |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| anima, anima-extra (7)                     | `f16` `f16+dit8` `f16+dit8-a8` `f16+dit8-a8-attn8` `f16+dit8-a8-attn8-s16` `f16-c16` `bf16`                                              | `f16+dit8-a8-attn8-s16` | BF16 in all four components                                                         | `bf16` (ADR 0131; all seven models since 2026-10-17)                                                                                |
-| sbv2-jvnv (4)                              | `f16+bert8` `i8` `i8-a8` `i8+bert4` `i4`                                                                      | `i8+bert4`              | F32                                                                                 | none; an f32 preset was not shipped ("1.32 GB impractical", `sbv2/distribution.py:11`) and `f16+bert8` keeps the text encoder in i8 |
-| irodori v4 / v4.1-small                    | `f32` `f16` `i8` `i8-a8` `i8+dit4`                                                                            | `i8-a8`                 | F32                                                                                 | `f32`                                                                                                                               |
-| wan2.1 t2v-1.3b                            | `f16` `f16+dit8` `f16+dit8-a8-attn8-s16`                                                                      | `f16+dit8-a8-attn8-s16` | DiT F32                                                                             | none; `f16` is the widest (its text encoder is the cross-referenced umT5 i8)                                                        |
-| wan2.2 ti2v-5b                             | `f16+dit8` `f16+dit8-a8-attn8-s16`                                                                            | `f16+dit8-a8-attn8-s16` | DiT F32                                                                             | none; ADR 0121 decision 2 ships no f16 preset (the f16 DiT is 9.31 GiB)                                                             |
-| umt5-xxl                                   | `i8`                                                                                                          | `i8`                    | F32 (about 22.7 GB, `wan/text_embeds.py`)                                           | none                                                                                                                                |
-| gemma4 e2b                                 | `i4` `i4-gemvpar` `i4-fast`                                                                                   | `i4-fast`               | BF16                                                                                | none                                                                                                                                |
-| gemma4-qat e2b / e4b                       | `i4` `i4-gemvpar` `i4-fast`                                                                                   | `i4-fast`               | mixed F32 / BF16 / I8 / U8 (the upstream is itself a quantization-aware checkpoint) | `i4`: the upstream's own fixed integer weights, carried without re-quantization (ADR 0097)                                          |
-| birefnet-hr 1024 / 2048                    | `f16`                                                                                                         | `f16`                   | F16                                                                                 | `f16`                                                                                                                               |
-| lucida 1024 / 2048                         | `f32` `f16`                                                                                                   | `f32`                   | F32                                                                                 | `f32`                                                                                                                               |
-| depth-anything-v2, siglip2, vowel-detector | `f32`                                                                                                         | `f32`                   | F32                                                                                 | `f32`                                                                                                                               |
+| Distribution (models)                                      | Presets                                                                                     | `defaultQuant`          | Upstream storage                                                                    | Preset holding the original values                                                                                                           |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| anima, anima-extra (7)                                     | `f16` `f16+dit8` `f16+dit8-a8` `f16+dit8-a8-attn8` `f16+dit8-a8-attn8-s16` `f16-c16` `bf16` | `f16+dit8-a8-attn8-s16` | BF16 in all four components                                                         | `bf16` (ADR 0131; all seven models since 2026-10-17)                                                                                         |
+| sbv2-jvnv (4)                                              | `f16+bert8` `i8` `i8-a8` `i8+bert4` `i4`                                                    | `i8+bert4`              | F32                                                                                 | none; an f32 preset was not shipped ("1.32 GB impractical", `sbv2/distribution.py:11`) and `f16+bert8` keeps the text encoder in i8          |
+| irodori v4 / v4.1-small                                    | `f32` `f16` `i8` `i8-a8` `i8+dit4`                                                          | `i8-a8`                 | F32                                                                                 | `f32`                                                                                                                                        |
+| wan2.1 t2v-1.3b                                            | `f16` `f16+dit8` `f16+dit8-a8-attn8-s16`                                                    | `f16+dit8-a8-attn8-s16` | DiT F32                                                                             | none; `f16` is the widest (its text encoder is the cross-referenced umT5 i8)                                                                 |
+| wan2.2 ti2v-5b                                             | `f16+dit8` `f16+dit8-a8-attn8-s16`                                                          | `f16+dit8-a8-attn8-s16` | DiT F32                                                                             | none; ADR 0121 decision 2 ships no f16 preset (the f16 DiT is 9.31 GiB)                                                                      |
+| umt5-xxl                                                   | `i8`                                                                                        | `i8`                    | F32 (about 22.7 GB, `wan/text_embeds.py`)                                           | none                                                                                                                                         |
+| gemma4 e2b / e4b (`karume-gemma4`)                         | `i4` `i4-gemvpar` `i4-fast` `bf16`                                                          | `bf16`                  | BF16                                                                                | `bf16` (since 2026-11-04 — before it the presets were the three `i4` ones, default e2b `i4-fast` / e4b `i4`; see the addendum of 2026-11-04) |
+| gemma4 q4_0 QAT e2b / e4b / 12b (`karume-gemma4-qat`)      | `i4`                                                                                        | `i4`                    | BF16 on the checkpoints' own 4-bit grid (quantization-aware)                        | none: `i4` stores the grid the BF16 values round from (addenda of 2026-11-03 and 2026-11-04)                                                 |
+| gemma4-qat (mobile — `karume-gemma4-qat-mobile`) e2b / e4b | `i4` `i4-gemvpar` `i4-fast`                                                                 | `i4-fast`               | mixed F32 / BF16 / I8 / U8 (the upstream is itself a quantization-aware checkpoint) | `i4`: the upstream's own fixed integer weights, carried without re-quantization (ADR 0097)                                                   |
+| birefnet-hr 1024 / 2048                                    | `f16`                                                                                       | `f16`                   | F16                                                                                 | `f16`                                                                                                                                        |
+| lucida 1024 / 2048                                         | `f32` `f16`                                                                                 | `f32`                   | F32                                                                                 | `f32`                                                                                                                                        |
+| depth-anything-v2, siglip2, vowel-detector                 | `f32`                                                                                       | `f32`                   | F32                                                                                 | `f32`                                                                                                                                        |
 
 Eleven models (anima ×7, irodori ×2, wan2.1, wan2.2) default to a preset that quantizes
 activations (`linearCompute: "a8"`, `attentionCompute: "a8"`); every one of those presets has a
@@ -171,11 +172,12 @@ The maintainer withdrew the draft on 2026-10-17 on these grounds:
    | irodori v4 / v4.1-small                            | `f32`                   | shipped                                                                |
    | birefnet-hr                                        | `f16`                   | shipped (upstream f16)                                                 |
    | lucida, depth-anything-v2, siglip2, vowel-detector | `f32`                   | shipped                                                                |
-   | gemma4-qat                                         | `i4`                    | shipped (upstream fixed integers, not re-quantized)                    |
+   | gemma4-qat (mobile — `karume-gemma4-qat-mobile`)   | `i4`                    | shipped (upstream fixed integers, not re-quantized)                    |
    | sbv2-jvnv                                          | —                       | skipped (f32 1.32 GB, 2026-08); may be added, no cap decides it        |
    | wan2.1 / wan2.2                                    | —                       | skipped (DiT f32 about 5.6 / 20 GB; the text encoder is umT5 i8)       |
    | umt5-xxl                                           | —                       | skipped (f32 about 22.7 GB)                                            |
-   | gemma4 e2b                                         | —                       | pending (bf16 upstream; needs the PLE in bf16 — ADR 0131 open point)   |
+   | gemma4 e2b / e4b (`karume-gemma4`)                 | `bf16`                  | shipped in the local mirror 2026-11-04 (the PLE too — PLE index schema 5, ADR 0085 addendum 2026-11-04) and the default by the maintainer's ruling (addendum 2026-11-04) |
+   | gemma4 q4_0 QAT e2b / e4b / 12b (`karume-gemma4-qat`) | —                    | not shipped: the BF16 values are the BF16 rounding of the checkpoints' 4-bit grid, which `i4` stores (addendum 2026-11-03 item 3; addendum 2026-11-04) |
    | moss-image (DiT, VAE, Qwen3.5 text encoder)        | —                       | not shipped (2026-11-01, the local distribution `karume-moss-image`): the DiT is bf16 upstream and its bf16 export has not been attempted; the Qwen3.5 text encoder's bf16 export needs a fixed-BF16 entry in the writer first (its F32 set alone is 29.6 GiB — ADR [0137](0137-qwen3_5-text-encoder.md) decision 5); the VAE ships its upstream f32 values. The presets ship the i8 DiT and encoder (ADR [0138](0138-moss-image-dit-vae.md) addendum of 2026-11-01) |
 
 5. **A device without dp4a gets a warning, not a fallback.** When a Session is built with
@@ -349,7 +351,9 @@ by the note of amendment 2, and where a family records its choice by amendment 4
 
 Recorded unattended by the agent on the recommended option, then confirmed by the maintainer ("12B
 is QAT only", 2026-11-03). Model `12b` of the gemma4 distribution (Gemma 4 12B, text only) is local
-only; it is not published.
+only; it is not published. (Since 2026-11-04 12B ships only in the q4_0 QAT line `karume-gemma4-qat`,
+with its QAT drafter, not in `karume-gemma4` — see the addendum of 2026-11-04. Items 1 to 3 hold
+there unchanged.)
 
 1. **One preset, `i4`, which is therefore `defaultQuant`.** C1 holds (no `gpuFeatures`), C2 does
    not apply (no activation quantization), and C3 exempts a model with one preset. `i4-gemvpar` and
@@ -388,3 +392,61 @@ only; it is not published.
    nearest i4 and was never measured with the KL above. The maintainer's ruling (2026-11-03): measure
    it against the grid import of the matching q4_0 QAT checkpoint; if it loses much, stop
    publishing its `i4` preset, or the regular model (backlog).
+
+## Addendum (2026-11-04) — gemma4 regular E2B / E4B default to the original weights, `bf16`
+
+The maintainer's ruling of 2026-11-04 settles the Gemma 4 distributions and the default of the regular
+line. Where the body or an earlier addendum differs, this addendum wins for gemma4.
+
+1. **Three distributions.**
+
+   | Distribution               | Models                                         | Contract       | Presets (★ = `defaultQuant`)              | Weights                                                                                        |
+   | -------------------------- | ---------------------------------------------- | -------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
+   | `karume-gemma4`            | E2B (with its MTP drafter), E4B                | `gemma4/1`     | `bf16`★ / `i4` / `i4-gemvpar` / `i4-fast` | `bf16` = the original weights (the PLE table too); the `i4` presets = round-to-nearest int4    |
+   | `karume-gemma4-qat`        | E2B / E4B / 12B, each with its QAT MTP drafter | `gemma4/1`     | `i4`★                                     | Google's q4_0 QAT checkpoints on their own 4-bit grid (grid import — addendum 2026-11-03)      |
+   | `karume-gemma4-qat-mobile` | E2B / E4B                                      | `gemma4-qat/1` | `i4` / `i4-gemvpar` / `i4-fast`★          | the official mobile QAT checkpoints' fixed integers (ADR 0097; renamed — ADR 0097 addendum 10) |
+
+   12B left `karume-gemma4`; the 2026-11-03 addendum's items 1 to 3 hold for it in `karume-gemma4-qat`.
+   The recipe constants are `GEMMA4_DEFAULT_QUANT` and `GEMMA4_QAT_Q4_0_DEFAULT_QUANT`
+   (`tools/export-recipes/gemma4/distribution.py`); the mobile line's is unchanged.
+2. **The regular E2B / E4B default is `bf16`.** The preset is the checkpoints' own bf16 weights, the
+   PLE table included (PLE index schema 5 — ADR [0085](0085-ple-host-gather.md) addendum 2026-11-04),
+   with f32 compute and an empty `session` (the reference summation order). The int4 presets stay and
+   are chosen by name. Before this ruling the default was `i4-fast` for E2B (ADR 0104) and the
+   provisional, unmeasured `i4` for E4B (amendment 2 of the 2026-10-29 addendum).
+3. **How this relates to decision 4.** Decision 4 says an original-weights preset is "never the
+   default by rule (decision 1 decides the default)". That still holds: no rule made `bf16` the
+   default. The choice is an instance of decision 1, the maintainer's per-model pick among the shipped
+   presets. Decision 1 asks for the candidates, the measurements and the reason to be recorded. The
+   candidates are the four presets above, and the measurements are in item 4. The ruling records the
+   choice; this addendum adds no reason on the maintainer's behalf. ADR 0110 decision 8's human quality
+   review is the gate for a practical preset entering `defaultQuant`; `bf16` rounds nothing, and its
+   goldens are the upstream checkpoints' own continuations computed in f32 (ADR 0085 addendum
+   2026-11-04, acceptance). No human quality review of it is recorded. The gate's C1 to C3 apply to it
+   as to every preset: it declares no `gpuFeatures` (C1), no activation quantization (C2 does not
+   apply), and a label and a description (C3).
+4. **The measured cost.** RTX 3080 Ti, Node + Dawn, greedy, up to 128 new tokens, 8 measured turns
+   per case after one discarded warm-up turn, no speculative decoding, PLE gathered on the host with a
+   resident budget that holds the whole table (`maxResidentPleBytes` 8 GiB), 2026-11-04 (raw data:
+   `outputs/diag/gemma4-lines-2026-11-04/bf16/`, local, untracked; peak VRAM is the nvidia-smi reading during
+   the run minus the idle 33 MiB):
+
+   | Model | Preset    | `sky-en` ms/token (median / min) | `code-en` ms/token (median / min) | Peak VRAM | Download of the `model` weights |
+   | ----- | --------- | -------------------------------- | --------------------------------- | --------- | ------------------------------- |
+   | E2B   | `bf16`    | 24.13 / 23.93                    | 25.48 / 23.52                     | 4,576 MiB | 8.62 GiB                        |
+   | E2B   | `i4-fast` | 6.47 / 6.38                      | 6.51 / 6.36                       | 2,106 MiB | 3.69 GiB                        |
+   | E4B   | `bf16`    | 42.33 / 40.75                    | 44.05 / 43.32                     | 9,459 MiB | 13.90 GiB                       |
+   | E4B   | `i4-fast` | 13.04 / 10.73                    | 12.99 / 10.65                     | 3,985 MiB | 5.61 GiB                        |
+
+   The default is about 3.7 times (E2B) and 3.2 times (E4B) slower per token than `i4-fast` here, holds
+   2.2 to 2.4 times the VRAM, and downloads 2.3 to 2.5 times the bytes (the download column is the
+   sum of the container's parts in the local mirror's `karume.json`; the PLE is 4.70 GB of it for E2B
+   and 5.64 GB for E4B). Its PLE table cannot be GPU-resident on this machine (ADR 0085 addendum
+   2026-11-04, "GPU residency fits fewer devices"); the default `pleResidency: "host"` reads it.
+5. **Decision 4's table and the Context table** carry the new rows (gemma4 regular, the q4_0 QAT line,
+   the mobile line). The 2026-10-29 addendum's open point 1 after acceptance closes for gemma4; the
+   sbv2 `f32` half stays open. Its premise "both are additive presets that change no default" no
+   longer holds for gemma4.
+6. **Not changed:** the hub's resolution (`options.quant ?? entry.defaultQuant`), decisions 2, 3, 5
+   to 7, and every other family's default. The published `karume-gemma4` revision (`gemma.SOURCES`)
+   still serves the previous manifest until the next release re-uploads the repository.

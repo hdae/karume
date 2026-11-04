@@ -45,7 +45,7 @@ await pipeline.dispose();
 The barrel export (`@karume/models`) is for callers that use several families at once. It exports
 the helpers shared by every family (`encodePng`, `encodeWav`, `decodeWav`, `ModelInputError`,
 `KARUME_SOURCES`, …) and one namespace per family, named after the subpath in camelCase (`anima`,
-`depthAnything`, `gemma4Qat`, `sbv2`, …). A namespace is the subpath module itself, so its members are
+`depthAnything`, `gemma4QatMobile`, `sbv2`, …). A namespace is the subpath module itself, so its members are
 documented on the subpath's page:
 
 ```ts
@@ -63,20 +63,20 @@ minified) until the package declares `"sideEffects": false`
 
 ## Families
 
-| Subpath                         | Task                                                     |
-| ------------------------------- | -------------------------------------------------------- |
-| `@karume/models/gemma`          | text generation and chat (Gemma 4)                       |
-| `@karume/models/gemma4-qat`     | the same API on fixed mobile QAT weights                 |
-| `@karume/models/anima`          | text to image                                            |
-| `@karume/models/moss`           | text to image (MOSS-Image)                               |
-| `@karume/models/sbv2`           | text to speech                                           |
-| `@karume/models/irodori`        | text to speech                                           |
-| `@karume/models/birefnet`       | image to alpha matte (background removal)                |
-| `@karume/models/depth-anything` | image to relative depth map                              |
-| `@karume/models/siglip2`        | image to embedding                                       |
-| `@karume/models/umt5`           | text to encoder hidden states (umT5-XXL)                 |
-| `@karume/models/vowel-detector` | Japanese speech to lip-sync labels                       |
-| `@karume/models/wan`            | text to video (Wan2.1 / Wan2.2), image to video (Wan2.2) |
+| Subpath                            | Task                                                      |
+| ---------------------------------- | --------------------------------------------------------- |
+| `@karume/models/gemma`             | text generation and chat (Gemma 4, its q4_0 QAT line too) |
+| `@karume/models/gemma4-qat-mobile` | the same API on fixed mobile QAT weights                  |
+| `@karume/models/anima`             | text to image                                             |
+| `@karume/models/moss`              | text to image (MOSS-Image)                                |
+| `@karume/models/sbv2`              | text to speech                                            |
+| `@karume/models/irodori`           | text to speech                                            |
+| `@karume/models/birefnet`          | image to alpha matte (background removal)                 |
+| `@karume/models/depth-anything`    | image to relative depth map                               |
+| `@karume/models/siglip2`           | image to embedding                                        |
+| `@karume/models/umt5`              | text to encoder hidden states (umT5-XXL)                  |
+| `@karume/models/vowel-detector`    | Japanese speech to lip-sync labels                        |
+| `@karume/models/wan`               | text to video (Wan2.1 / Wan2.2), image to video (Wan2.2)  |
 
 ## Requirements
 

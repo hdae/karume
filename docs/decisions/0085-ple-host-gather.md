@@ -284,7 +284,8 @@ became **assets of the model container**.
 - A block that needs range reads is **one block per part** (container-v1 §4.2). gemma4 E2B has about
   72 `values` blocks plus a few `scales` blocks as parts (within the limit of 1024 parts).
 - Only the migration CLI (`karume migrate --manifest`) reads the old sidecar (schema 1 / 2
-  safetensors); the loader reads schema 3 only.
+  safetensors); the loader reads schema 3 only. (amended 2026-11-04: it reads schemas 3, 4 and 5 —
+  see the addenda of 2026-11-04)
 
 ## Addendum (2026-09-24) — GPU-resident load mechanism and host RAM peak
 
@@ -350,3 +351,109 @@ warm chats of up to 128 new tokens — the wide prompt's generations stop at 95 
 6.8 ms/token and warm TTFT 502–923 → 56–85 ms (PLE re-reads per warm chat 144 → 0); with a short
 prompt of fewer than 32 distinct ids no block becomes resident and nothing changes (6.7–6.8 ms/token
 in both arms). The generated text is identical in both arms.
+
+## Addendum (2026-11-04) — index schema 4: one scale per group of values
+
+The q4_0 QAT line (`karume-gemma4-qat`, ADR [0097](0097-gemma4-qat-integration.md) addendum 10) stores
+Google's q4_0 QAT E2B / E4B PLE tables on the checkpoints' own 4-bit grid: one step per 32 values of
+a (token, layer) row. Within one row the eight groups do not share a step (the spread of the steps in
+a row has a median of 45%, measured 2026-11-03 — `tools/export-recipes/gemma4/export_product_qat.py`),
+so schema 3's one scale per row cannot hold those values exactly.
+
+- **Index schema 4** (asset `ple_index`, role `ple-index`, canonical JSON):
+  `{ schema: 4, storage: "i8" | "i4" | "i2", tokens, layers, dim, embedScale, groupSize, values, scales }`.
+  It is schema 3 plus one **required** key, `groupSize`: a positive integer that divides `dim`, so a
+  group never crosses a (token, layer) row. `values` is as in schema 3. A `scales` row holds
+  `layers × dim / groupSize` f32 in (layer, group) order, so `scales.rowBytes` is
+  `layers × (dim / groupSize) × 4`; the scale of value `column` of `layer` is element
+  `layer × (dim / groupSize) + ⌊column / groupSize⌋`. The block rules are schema 3's.
+- **The two forms do not mix.** `groupSize` is an unknown key of schema 3, so a schema 3 document that
+  spells it is refused: a schema 3 reader would apply one group's scale to the whole row. A schema 4
+  document without `groupSize` is refused too; it is never read with one group per row. `bf16` is not
+  a schema 4 storage (a bf16 table has no scales — the schema 5 addendum below).
+- **Readers.** The accepted form carries `groupSize` for both schemas (schema 3 reads as
+  `groupSize = dim`), so the host gather and the GPU-resident gather decode both through one formula
+  (`scalesPerLayer` in `packages/models/src/gemma/ple-index.ts`). The host gather multiplies each value
+  by its group's scale. Under `pleResidency: "gpu"` an i4 table binds with the i4 group codec at
+  `groupSize`: the scale rows are already the group-scale matrix `[tokens × layers, dim / groupSize]`,
+  which the `embedding` kernel reads per element (no new WGSL). A grouped i8 or i2 index fails
+  `pleResidency: "gpu"` loudly before any block is read, because those codecs have one scale per row;
+  the default `"host"` reads it. No distribution ships a grouped i8 or i2 table.
+- **Writer.** `karume.ple` writes schema 4 when `ple_assets` is given `group_size`
+  (`PLE_GROUPED_INDEX_SCHEMA`); without it the writer emits schema 3. A schema 3 document does not
+  change by a byte (`tools/exporter/tests/test_ple.py` pins a small synthetic index of each form).
+- **Sizes** (the indexes in the local `models/karume-gemma4-qat` mirror, read 2026-11-04; int4 values,
+  `groupSize` 32, `dim` 256):
+
+  | Model | layers | values row | values total    | values blocks | scales row | scales total  | scales blocks |
+  | ----- | ------ | ---------- | --------------- | ------------- | ---------- | ------------- | ------------- |
+  | E2B   | 35     | 4,480 B    | 1,174,405,120 B | 36            | 1,120 B    | 293,601,280 B | 9             |
+  | E4B   | 42     | 5,376 B    | 1,409,286,144 B | 43            | 1,344 B    | 352,321,536 B | 11            |
+
+  The scales are 8 times schema 3's for the same table (one f32 per 32 values instead of per 256). The
+  row cache's bound (2026-10-27 addendum) is 256 × (values row + scales row): 1,433,600 B for E2B and
+  1,720,320 B for E4B. Each table is one binding under the single-binding rule (2026-09-19 addendum),
+  and both fit the RTX 3080 Ti's 2,147,483,644 B.
+
+Acceptance (RTX 3080 Ti, Node + Dawn, 2026-11-04): the q4_0 QAT product series
+`outputs/series/gemma4-{e2b,e4b}-qat-product` match their torch greedy goldens token for token, with
+the PLE gathered on the host and on the GPU (`packages/e2e/tests/e2e_gemma4_qat_product_test.ts`,
+opt-in with `KARUME_SERIES=1`). `packages/models/tests/gemma4_ple_grouped_test.ts` covers the parse
+rules, the host decode, the GPU binding's scale matrix and the refusal of a grouped i8 / i2 table
+without a GPU, and the GPU-resident gather against the host gather bit for bit on a real GPU.
+
+## Addendum (2026-11-04) — index schema 5: a bf16 table with no scales
+
+The regular gemma4 line's default preset becomes the original weights (`bf16` — the maintainer's
+decision of 2026-11-04 — ADR [0128](0128-default-preset-original-weights.md) addendum
+2026-11-04; ADR [0131](0131-bf16-weight-execution.md) open point 1). Every graph weight
+was already stored as the checkpoint's bf16 bits, but the PLE table was still rounded to i8 with one
+scale per row, because the index had no float form. Both upstream tables are BF16
+(`embed_tokens_per_layer`, E2B `[262144, 8960]`, E4B `[262144, 10752]`). Read on 2026-11-04, neither
+holds a subnormal, a zero or a non-finite value.
+
+- **Index schema 5** (asset `ple_index`, role `ple-index`, canonical JSON):
+  `{ schema: 5, storage: "bf16", tokens, layers, dim, embedScale, values: { rowBytes, blocks } }`.
+  A `values` row is `layers × dim` little-endian bf16 values (the writer's int16 view — ADR 0131
+  decision 2), token-major, so `rowBytes` is `layers × dim × 2`. The blocks follow the schema 3 rules:
+  whole rows, at or below the block limit, one block per part. There is **no** `scales` table:
+  neither the field nor `ple.scales.<k>` assets. `scales` and `groupSize` are unknown keys, so the
+  reader refuses them. A stray `ple-scales` asset fails the admission cross-check as an asset the
+  index does not point at.
+- **A new schema, not a new storage value of schema 3.** Schema 3 and 4 always carry a scale table;
+  dropping it changes the document's shape. A reader that does not know the form then stops at the
+  version check, not at a storage or key check further in. `storage` is still spelled and MUST be
+  `bf16`: the schema says "a float table", the storage says which float. Schema 3 and 4 do not
+  accept `bf16`. Schema 3 and 4 documents do not change by a byte: the writer's tests pin a small
+  synthetic index of each form (not a published distribution's bytes), and the E2B i4 product series
+  re-exported after this change was byte-identical, 85 files out of 85 (a one-off check).
+- **Readers.** The host gather widens each value exactly (`bits << 16` read as f32, the definition
+  in the runtime's `format/bf16.ts`) and multiplies by `embedScale`. It reads one table, so a row
+  read is one range read per id. The GPU-resident gather binds `values` with the runtime's `bf16`
+  codec and no scale. The `embedding` kernel's bf16 path (ADR 0131 decision 1) widens with
+  `bitcast<f32>`, and the separate `mul embed_scale` follows. No new WGSL is needed. Host and GPU
+  agree bit for bit with a reference decode: `packages/models/tests/gemma4_ple_bf16_test.ts`, run on
+  a real GPU.
+- **Sizes.**
+
+  | Model | values row | values total    | blocks | the i8 table it replaces (values + scales) |
+  | ----- | ---------- | --------------- | ------ | ------------------------------------------ |
+  | E2B   | 17,920 B   | 4,697,620,480 B | 141    | 2,385,510,400 B (71 + 2 blocks)            |
+  | E4B   | 21,504 B   | 5,637,144,576 B | 169    | 2,862,612,480 B (85 + 2 blocks)            |
+
+  The row cache's bound (2026-10-27 addendum) becomes 256 × one row: 4,587,520 B for E2B. The
+  default resident budget is still two of the largest blocks, which for this index is two values
+  blocks.
+- **GPU residency fits fewer devices.** The single-binding rule (2026-09-19 addendum, ruling A) is
+  unchanged. A device whose `maxStorageBufferBindingSize` or `maxBufferSize` is below the values
+  total fails `pleResidency: "gpu"` loudly, with the shortfall. It never falls back to the host. On
+  the RTX 3080 Ti (Node + Dawn, 2026-11-04) the granted limit is 2,147,483,644 B, so both E2B and E4B
+  are refused there. The default `pleResidency: "host"` reads them. Splitting the binding would lift
+  this, but it is not part of this addendum.
+
+Acceptance (RTX 3080 Ti, Node + Dawn, 2026-11-04): the bf16 product series
+`outputs/series/gemma4-{e2b,e4b}-product-bf16` (recipe `gemma4.export_product --storage bf16`)
+matches its torch greedy goldens token for token with the PLE gathered on the host. The test is
+`packages/e2e/tests/e2e_gemma4_bf16_product_test.ts`, opt-in with `KARUME_SERIES=1`. With nothing
+rounded, the goldens are the upstream checkpoint's own continuations computed in f32. They are also
+token-identical to the previous i8-PLE series' goldens (16 steps for E2B, 10 for E4B, every case).

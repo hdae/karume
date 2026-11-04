@@ -16,7 +16,7 @@ A left sidebar switches between the pages, grouped by kind:
 | Vision | SigLIP 2 | `/siglip2` | done |
 | Audio | Irodori-TTS (v4 / v4.1 small) | `/irodori` | done |
 | Audio | Style-Bert-VITS2 (JVNV) | `/sbv2` | done |
-| Text | Gemma 4 chat (`gemma4` and the `gemma4-qat` distribution) | `/gemma4` | done |
+| Text | Gemma 4 chat (`gemma4`, the q4_0 QAT line `gemma4-qat` and the mobile QAT `gemma4-qat-mobile`) | `/gemma4` | done |
 | Benchmarks | Attention route bench — the two a8 attention routes per kernel at Wan2.2's shapes | `/attention-bench` | done |
 | Benchmarks | Geometry sweep — the GEMM tile geometries case by case, one merged record for `deriveGeometryProfile` | `/geometry-sweep` | done |
 | Benchmarks | Kernel checks — the subgroup32 GEMV / RMS reductions, the K-55 / K-91 states-attention rewrites and the integer GEMV, word for word on the browser's backend | `/kernel-check` | done |
@@ -79,7 +79,8 @@ root. The HF-compatible repo is the public name from the family's `SOURCES` tabl
 | `irodori-v4.1` | `models/karume-irodori-v4.1-small` | `hdae/karume-irodori-v4.1-small` | Irodori-TTS |
 | `sbv2` | `models/karume-sbv2-jvnv` | `hdae/karume-sbv2-jvnv` | Style-Bert-VITS2 |
 | `gemma4` | `models/karume-gemma4` | `hdae/karume-gemma4` | Gemma 4 chat |
-| `gemma4-qat` | `models/karume-gemma4-qat` | `hdae/karume-gemma4-qat` | Gemma 4 chat |
+| `gemma4-qat` | `models/karume-gemma4-qat` | — (direct route only: no published revision yet) | Gemma 4 chat |
+| `gemma4-qat-mobile` | `models/karume-gemma4-qat-mobile` | — (direct route only: no published revision yet) | Gemma 4 chat |
 | `moss-image` | `models/karume-moss-image` | `hdae/karume-moss-image` | MOSS-Image |
 
 A missing directory does not stop the server: it logs a warning, `/models/<name>/` answers 404, and
@@ -902,8 +903,9 @@ and **Copy record** copies the JSON.
 
 ## The Gemma 4 chat page
 
-A multi-turn chat with regular Gemma 4 (`gemma.Pipeline`, mount `gemma4`) or a mobile QAT model
-(`gemma4Qat.Pipeline`, mount `gemma4-qat`: E2B / E4B, experimental). The page
+A multi-turn chat with regular Gemma 4 (`gemma.Pipeline`, mount `gemma4`), its q4_0 QAT line
+(`gemma.Pipeline`, mount `gemma4-qat`: E2B / E4B / 12B with their QAT MTP drafters) or a mobile QAT
+model (`gemma4QatMobile.Pipeline`, mount `gemma4-qat-mobile`: E2B / E4B, experimental). The page
 acquires the GPU once (`acquireGpu({ subgroups: "available" })`). **Load** builds the pipeline:
 `fromPretrained` reads every weight and builds the Session (gigabytes), so nothing is read until
 Load is pressed. The conversation is one `gemma.ChatSession`. It carries the KV between turns that
@@ -912,10 +914,10 @@ One turn runs at a time.
 
 | Control | What it does |
 | --- | --- |
-| Model | Every model of both manifests (`Gemma 4 — e2b`, `Gemma 4 QAT — e2b` / `e4b`), each manifest's `defaultModel` marked "(default)". Applies on the next Load. |
+| Model | Every model of the three manifests (`Gemma 4 — e2b` / `e4b`, `Gemma 4 QAT (q4_0) — e2b` / `e4b` / `12b`, `Gemma 4 mobile QAT — e2b` / `e4b`), each manifest's `defaultModel` marked "(default)". Applies on the next Load. |
 | Preset | The model's `quants`; `defaultQuant` is preselected and marked "(default)". Applies on the next Load. |
-| Source | **Cached** (the hub's cache over `/hf/`) or **Direct** (`/models/`), for either distribution. Applies on the next Load. |
-| MTP drafter | Regular Gemma 4 with drafter weights only: builds the drafter (`speculative: {}`). The session then speculates with the self-tuning gate. Off by default. Applies on the next Load. |
+| Source | **Cached** (the hub's cache over `/hf/`) or **Direct** (`/models/`) — Direct only for the two QAT mounts, which are not on `/hf/`. Applies on the next Load. |
+| MTP drafter | A model of the regular entry point with drafter weights only (regular E2B, every model of the q4_0 QAT line): builds the drafter (`speculative: {}`). The session then speculates with the self-tuning gate. Off by default. Applies on the next Load. |
 | Collect Session diagnostics | Passes `onRunDiagnostics` to `fromPretrained`. The record then gets per-run counts and the Session diagnostics. **It changes the decode path**: without it the pipeline picks greedy (temperature 0) tokens on the GPU (an 8-byte readback per token). With it every greedy token reads the whole logits row back and is picked on the CPU. Off by default; leave it off to measure decode rates. Applies on the next Load. |
 | Load / Load again | Builds the pipeline for the selection and starts a new chat. A note says when the selection differs from the loaded pipeline. |
 | Cancel load | Shown while loading, in place of Load. Aborts the download (the `signal` of `fromPretrained`). Building the Session after the download cannot be interrupted: a pipeline that finishes after Cancel is released at once. |
@@ -957,15 +959,15 @@ How the figures are measured (from `performance.now()` in the page):
     run that drew the stop token;
   - without: the end of the text stream.
 
-### The record (`format: "karume-playground-gemma4/2"`)
+### The record (`format: "karume-playground-gemma4/3"`)
 
 | Field | What |
 | --- | --- |
-| `format`, `page` | `karume-playground-gemma4/2`, `gemma4` (version 1 spelled `pipeline` with the 0.14 class names `Gemma4Pipeline` / `Gemma4QatPipeline`) |
+| `format`, `page` | `karume-playground-gemma4/3`, `gemma4` (version 2 recorded the mobile QAT line as mount `gemma4-qat` with pipeline `gemma4Qat.Pipeline` — since version 3 that mount is the q4_0 QAT line and the mobile line is `gemma4-qat-mobile` / `gemma4QatMobile.Pipeline`; version 1 spelled `pipeline` with the 0.14 class names `Gemma4Pipeline` / `Gemma4QatPipeline`) |
 | `recordedAt`, `userAgent`, `crossOriginIsolated`, `adapter`, `device` | `recordEnvironment` |
 | `distribution` | `mount`, `directory`, `manifestSha256` (sha256 of `karume.json`) |
 | `source` | `{ "kind": "direct" }` or `{ "kind": "cached", "repo", "revision", "hubUrl" }` |
-| `pipeline` | `gemma.Pipeline` or `gemma4Qat.Pipeline` |
+| `pipeline` | `gemma.Pipeline` or `gemma4QatMobile.Pipeline` |
 | `model`, `preset` | the model name; `{ quant, label, isDefault }` |
 | `speculative` | whether the MTP drafter was built |
 | `loadSeconds` | from Load to the pipeline being ready |
@@ -1000,7 +1002,7 @@ JSON.
   load button.
 - A failed release of the previous pipeline or session is shown as an error on the page and logged
   to the console.
-- The QAT entry point is experimental (ADR 0097): fixed int2/int4/int8 with SRQ, no MTP.
+- The mobile QAT entry point is experimental (ADR 0097): fixed int2/int4/int8 with SRQ, no MTP.
 - After a device loss, **Acquire the GPU again** rebuilds the pipeline for the same Load and starts
   an empty chat.
 
@@ -1048,12 +1050,14 @@ Absolute times compare only on one machine; across machines, compare the ratios.
 
 ## The Gemma 4 decode bench page
 
-A decode A/B of regular Gemma 4 (`gemma.Pipeline`, mount `gemma4`) and the mobile QAT distribution
-(`gemma4Qat.Pipeline`, mount `gemma4-qat`), kept as a page so each measurement wave reuses it
-(ADR 0127 decision 5). An **arm** is a model of either distribution at one preset, with the GPU tap
+A decode A/B of regular Gemma 4 and its q4_0 QAT line (`gemma.Pipeline`, mounts `gemma4` and
+`gemma4-qat`) and the mobile QAT distribution (`gemma4QatMobile.Pipeline`, mount
+`gemma4-qat-mobile`), kept as a page so each measurement wave reuses it
+(ADR 0127 decision 5). An **arm** is a model of any of the three distributions at one preset, with the GPU tap
 on or off. The page builds each arm's pipeline the way the chat page does (`buildGemmaPipeline`),
-always over the **direct route** (both distributions also have a cached route, which the bench does
-not offer): one route for every arm keeps the source out of the comparison.
+always over the **direct route** (the regular mount also has a cached route, which the bench does not
+offer; the two QAT mounts have none until they are published): one route for every arm keeps the
+source out of the comparison.
 
 **The GPU tap** (`src/models/gemma4-bench/tap.ts`). The page acquires its GPU through a wrapper of
 `navigator.gpu` (`acquireGpu({ subgroups: "available", gpu: tap.gpu })`). The wrapper requests
@@ -1083,25 +1087,25 @@ count in their kernel's family here. Every extra pass boundary costs GPU time of
 per dispatch on the RTX 3080 Ti under Dawn, research 2026-10-27 §3), which inflates small kernels
 most and the arm's absolute GPU ms/token, wall − GPU and decode rate as well: **read the per-family
 and per-key shares**, compare them across arms split alike, and take absolute times from an unsplit
-arm. The tap times up to 262,144 passes per chat (QAT E2B runs about 1,036 dispatches per decode
+arm. The tap times up to 262,144 passes per chat (mobile QAT E2B runs about 1,036 dispatches per decode
 token, so 128 new tokens plus the prefill fit); later passes are counted but untimed, and a window
 with an untimed pass reports no GPU time. Its timestamp buffers take about 8 MiB of GPU memory at
 most (4 MiB of packed results plus the read-back copy).
 
 **Integer GEMV** (per arm; the arm's label shows "(integer)") passes the Session option
-`integerGemv: true` to `fromPretrained` as an explicit option, so the decode linears of a QAT
-model at the integer GEMV's measured shapes (QAT E2B: the i2 gate / up and down, the i4 o and the
+`integerGemv: true` to `fromPretrained` as an explicit option, so the decode linears of a mobile QAT
+model at the integer GEMV's measured shapes (mobile QAT E2B: the i2 gate / up and down, the i4 o and the
 own-KV layers' down — ADR 0140) run on the integer GEMV (the runtime's
 `src/kernels/linear-gemv-integer.ts`) instead of the parallel GEMV. The option needs packed int8
 activations, which need the parallel GEMV: the arm also passes `packedStaticQuantize: true` and
-`linearGemvReduce: "parallel"` where its preset does not declare them (QAT `i4-fast` declares both,
+`linearGemvReduce: "parallel"` where its preset does not declare them (mobile QAT `i4-fast` declares both,
 so the arm passes `integerGemv` alone). Explicit options win over the preset's declaration. Regular
 Gemma 4 has no linear at those shapes, so there the switch changes only what the packed activations
 change.
 
 **Planes GEMV** (per arm; the arm's label shows "(planes)") passes the Session option
-`linearGemvPlanes: true` to `fromPretrained` as an explicit option, so the i2 linears of a QAT model
-at the byte-plane GEMV's measured shapes (QAT E2B: the lm_head, 262144 × 1536) run on the byte-plane
+`linearGemvPlanes: true` to `fromPretrained` as an explicit option, so the i2 linears of a mobile QAT model
+at the byte-plane GEMV's measured shapes (mobile QAT E2B: the lm_head, 262144 × 1536) run on the byte-plane
 GEMV (the runtime's `src/kernels/linear-gemv-planes.ts`) instead of the sequential GEMV. The option
 needs no other option, so the arm passes it alone, next to what the Integer GEMV switch passes when
 both are on. Its sums differ from the sequential GEMV's by the addition order only (contract class R
@@ -1111,9 +1115,10 @@ linear at that shape, so there the switch changes nothing.
 **PLE on GPU** (per arm; the arm's label shows "(PLE GPU)") passes the pipeline option
 `pleResidency: "gpu"` to `fromPretrained`: the per-layer embeddings are uploaded once at load and
 each run gathers its rows on the GPU instead of dequantizing them on the host (ADR 0085, GPU
-residency). The quantized table goes in one binding — QAT E2B 1.09 GiB (i4), QAT E4B 672 MiB (i2),
-regular Gemma 4 E2B 2.19 GiB (i8) — so the device must grant a `maxStorageBufferBindingSize` that
-large; the page acquires its GPU with the adapter's own limits (an Apple M2 offers 4 GiB), and a
+residency). The `values` table goes in one binding — regular Gemma 4 `bf16` (the default) E2B 4.38 GiB /
+E4B 5.25 GiB, its `i4` presets (i8 PLE) E2B 2.19 GiB / E4B 2.63 GiB, the q4_0 QAT line E2B 1.09 GiB /
+E4B 1.31 GiB (i4, plus a scale table of 280 / 336 MiB), mobile QAT E2B 1.09 GiB (i4) / E4B 672 MiB (i2)
+— so the device must grant a `maxStorageBufferBindingSize` that large; the page acquires its GPU with the adapter's own limits (an Apple M2 offers 4 GiB), and a
 device that cannot hold it fails the arm's load with the shortfall in bytes.
 
 **Decode ahead** (per arm: 1, 2, 4 or 8; the arm's label shows "(ahead N)" for 2 and more) passes
@@ -1128,7 +1133,7 @@ depth, the batches it ran — 0 when it did not take the run-ahead — and the s
 
 | Control | What it does |
 | --- | --- |
-| Arms | One row per arm: Model (every model of both manifests; a QAT model `gemma4Qat.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap, Split dispatches, Integer GEMV, Planes GEMV, PLE on GPU, Decode ahead. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
+| Arms | One row per arm: Model (every model of the three manifests; a mobile QAT model `gemma4QatMobile.Pipeline` does not accept is disabled), Preset (the model's `defaultQuant` preselected), GPU tap, Split dispatches, Integer GEMV, Planes GEMV, PLE on GPU, Decode ahead. Starts with each distribution's default model at its default preset. Arm 1 is the one the summary compares the others with. |
 | Prompts | Two fixed prompts, run in this order in every visit. The story request renders to 21 tokens (17 distinct ids); the GPU explainer to 60 tokens (48 distinct). A prompt with 32 or more distinct ids makes a PLE block whole-resident on the host: the condition under which the PLE row cache once stopped admitting rows (perf-ledger H-41). Every chat records the distinct count it measured, and the run table flags a prompt that falls on the wrong side. |
 | Chats | Chats per prompt per visit (default 3). Chat 0 is the first after the build: recorded, and left out of the summary. |
 | New tokens | `maxNewTokens` of every chat (default 128). |
@@ -1157,7 +1162,8 @@ the median total and its dispatches per token; `<pre id="split-summary">` holds 
 text.
 
 **Download record (JSON)** saves `gemma4-bench_<UTC timestamp>.json` (`format:
-"karume-playground-gemma4-bench/1"`): `recordEnvironment`, `environmentKey` (ADR 0106's
+"karume-playground-gemma4-bench/2"` — version 1 recorded the mobile QAT line as mount `gemma4-qat`, which
+since version 2 names the q4_0 QAT line; the mobile line is `gemma4-qat-mobile`): `recordEnvironment`, `environmentKey` (ADR 0106's
 `chrome-<adapter name>` rule; absent outside Chromium), `timestampQuery`, `complete` (false when the
 bench failed or was cancelled), `settings`, `arms` (mount, directory, manifest sha256, source,
 pipeline, model, preset, tap, the sampler passed), `visits` (round, arm, load seconds), `chats` (every

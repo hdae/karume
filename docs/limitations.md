@@ -2505,11 +2505,13 @@ hub's own received-byte check (the `fetch` wrapper) was removed. The checks on b
   A size mismatch is caught on receipt (an excess midway on every surface; a shortfall only on the full-read surface after full receipt — the warm-up surface's
   shortfall is the item above).
 
-## Gemma 4 QAT: a fixed mobile format at the experimental stage
+## Gemma 4 mobile QAT: a fixed mobile format at the experimental stage
 
-`gemma4-qat` is a separate family from regular `gemma4` and handles only the text generation of the official mobile Transformers format E2B / E4B.
-It keeps fixed INT2 / INT4 / INT8, SRQ and packed PLE. MTP, vision and audio are not supported. The distribution
-`karume-gemma4-qat` (E2B and E4B) is published on Hugging Face since 0.15.1 (`gemma4Qat.SOURCES["gemma4-qat"]` — ADR 0097 addendum 9).
+`gemma4-qat` (the manifest's pipeline `gemma4-qat/1`, the subpath `@karume/models/gemma4-qat-mobile`) is a separate family from regular `gemma4` and handles only the text generation of the official mobile Transformers format E2B / E4B.
+It keeps fixed INT2 / INT4 / INT8, SRQ and packed PLE. MTP, vision and audio are not supported. The distribution is
+`karume-gemma4-qat-mobile` (E2B and E4B): it was published on Hugging Face as `hdae/karume-gemma4-qat` with 0.15.1 (ADR 0097 addendum 9) and renamed
+on 2026-11-04 — that name now holds the q4_0 QAT line, which `@karume/models/gemma` reads — so it has no published revision and no `SOURCES` entry
+under its new name until the next release (ADR 0097 addendum 10).
 The local usage example is the QAT CLI (`examples/gemma4-qat/README.md` (removed in 0.15)), the numeric contract is [ADR 0097](decisions/0097-gemma4-qat-integration.md),
 the terms are in the [glossary](glossary.md), and the source of the measurements is the [measurement record of the QAT review](research/2026-09-19-qat-review.md).
 
@@ -2547,7 +2549,7 @@ It covers the measured quantized matrices and physical M=1..8, with f32 arithmet
 M>8 and shapes outside the targets use the former path, and the diagnostic keys show the range it applies to. It does not mean an across-the-board speed-up of E4B or other models.
 The table of target shapes is an allowlist, and shapes not on it silently fall back to sequential addition even when `parallel` is specified. The E4B rows (2026-09-26) are an unmeasured provisional copy of the lanes of the E2B rows of the same role, and QAT E4B's i2 lm_head is not on it ([ADR 0098 addendum 2026-09-26](decisions/0098-linear-gemv-parallel.md)).
 [The speed improvement and short-text output on the M2](research/2026-09-13-m2-gemv-adoption.md) are confirmed. A broad quality evaluation remains.
-The new distribution recipes of regular E2B and QAT E2B / E4B choose as the default quant `i4-fast`, which declares parallel and RMS→add fusion (QAT additionally linear→SRQ fusion and packed int8 activations) ([ADR 0104](decisions/0104-gemma-fast-quant.md)). The parallel-only `i4-gemvpar` is also kept.
+The mobile QAT E2B / E4B distribution (`karume-gemma4-qat-mobile`) chooses as the default quant `i4-fast`, which declares parallel GEMV and RMS→add fusion plus linear→SRQ fusion and packed int8 activations ([ADR 0104](decisions/0104-gemma-fast-quant.md)). Regular E2B / E4B (`karume-gemma4`) default to `bf16` since 2026-11-04 — the original weights with f32 compute in the reference order, so parallel GEMV is off by default there ([ADR 0128](decisions/0128-default-preset-original-weights.md) addendum 2026-11-04); their `i4-fast` (parallel GEMV and RMS→add fusion) is chosen by name. The q4_0 QAT line (`karume-gemma4-qat`) has one preset, `i4`, in the reference order. The parallel-only `i4-gemvpar` is also kept where `i4-fast` exists.
 The sequential default of the former `i4`, the runtime and fromAssets is kept. Existing distributions and public pins are not changed automatically.
 The shapes of gemma4 E2B's drafter (i8, `[256,3072]` / `[262144,256]` and so on) are not in the table, and even with `i4-fast` 66 of its 68 linears run sequentially (the bundle's census table pins 66 for the reference — perf-ledger K-59).
 
@@ -2610,15 +2612,26 @@ Acceptance of RTX/Chrome and of the kernel numbers was done; performance accepta
 
 ## gemma4: what the GPU-resident PLE option needs (2026-09-19, opt-in)
 
-`pleResidency: "gpu"` puts the quantized bytes of PLE (an asset of the `model` container) on the GPU as **a single storage binding**
+`pleResidency: "gpu"` puts the stored bytes of PLE (an asset of the `model` container — quantized, or bf16 for the regular `bf16` preset) on the GPU as **a single storage binding** per table
 ([ADR 0085 addendum](decisions/0085-ple-host-gather.md)). The default is `"host"`, and the former behaviour, numbers and
 token sequences do not change at all.
 
-The required binding limit is decided by the distribution. For E2B it is 1,174,405,120 B for QAT (i4) and 2,348,810,240 B for regular Gemma 4 (i8),
-and 704,643,072 B for E4B QAT (i2); on a device where **either** `maxStorageBufferBindingSize` or
-`maxBufferSize` is short, loading fails with the number of missing bytes.
+The required binding limit is decided by the distribution and the preset (the `values` table; a quantized index also binds its `scales`
+table, which is smaller):
+
+| Distribution — preset (PLE index)                                                                                    | E2B `values`    | E4B `values`    | On the RTX 3080 Ti (2,147,483,644 B) |
+| -------------------------------------------------------------------------------------------------------------------- | --------------- | --------------- | ------------------------------------ |
+| `karume-gemma4` — `bf16`, the default (schema 5, bf16, no scales)                                                    | 4,697,620,480 B | 5,637,144,576 B | refused, E2B and E4B                 |
+| `karume-gemma4` — `i4` / `i4-gemvpar` / `i4-fast` (schema 3, i8)                                                     | 2,348,810,240 B | 2,818,572,288 B | refused, E2B and E4B                 |
+| `karume-gemma4-qat` — `i4` (schema 4, i4 with one scale per 32 values; scales E2B 293,601,280 B / E4B 352,321,536 B) | 1,174,405,120 B | 1,409,286,144 B | fits                                 |
+| `karume-gemma4-qat-mobile` (schema 3; E2B i4, E4B i2)                                                                | 1,174,405,120 B | 704,643,072 B   | fits                                 |
+
+On a device where **either** `maxStorageBufferBindingSize` or `maxBufferSize` is short, loading fails with the number of missing bytes.
 It does not silently fall back to the host path. The reference machine's (RTX 3080 Ti / Vulkan) limit is 2,147,483,644 B, so
-**regular Gemma 4 E2B cannot use this option on this machine** (QAT E2B / E4B fit).
+**regular Gemma 4 E2B / E4B cannot use this option on this machine, with the default preset or any other** (the q4_0 QAT and
+mobile QAT lines fit). An Apple M2 offers 4 GiB, which is still below the `bf16` tables. A grouped PLE of storage i8 or i2
+(schema 4) is refused under `"gpu"` too — only i4 has a group codec; no distribution ships one
+([ADR 0085](decisions/0085-ple-host-gather.md) addenda 2026-11-04).
 
 There are 3 knobs that cannot be combined with it (all rejected at load time). `maxResidentPleBytes` is a budget that is never drawn on
 with GPU residency, speculative decoding (`speculative`) has the drafter's per-layer inputs outside the range of this option, and
@@ -2634,7 +2647,8 @@ so there is one fence, the same as greedy. **Only prefill issues the batch for t
 
 ## Gemma 4 12B: text only, one `i4` preset from the QAT checkpoint, and raw text without the chat template degenerates
 
-Model `12b` of the gemma4 distribution is the text decoder of Gemma 4 12B; the vision and audio embedders are not
+Model `12b` of the q4_0 QAT line's distribution (`karume-gemma4-qat`, read by `@karume/models/gemma`; the regular
+`karume-gemma4` ships E2B / E4B only — 2026-11-04) is the text decoder of Gemma 4 12B; the vision and audio embedders are not
 shipped, so it takes no images or audio. Its weights are Google's q4_0 quantization-aware-trained checkpoint with that
 checkpoint's own 4-bit grid stored, for the linear weights and the tied embedding alike (ADR [0128 addendum 2026-11-03](decisions/0128-default-preset-original-weights.md#addendum-2026-11-03--gemma4-12b-one-i4-preset-from-the-qat-grid)),
 so its outputs follow the QAT fine-tune, not `gemma-4-12B-it`'s BF16 weights exactly. There is one preset, `i4`

@@ -23,6 +23,8 @@
 | reference profile ◆ | 参照プロファイル | 見送り（同上）。opt-in の knob の値として予定していた「省略値の束（自動選択なし）」。今はその状態が runtime の既定そのもの = 参照経路（次の行） | 参照層・既定経路 | 同上 |
 | reference path ◆ | 参照経路 | runtime の省略値の経路（数値ノブを全て省略した Session）。sha 行の参照行・オラクル・上流一致の根。2-8 の裁定（2026-10-18・1-1）で「やめる言い方」から戻した | 参照層・既定経路・参照席 | ADR 0058 決定 2・ADR 0110 §1 |
 | original weights ◆ | オリジナルの重み（忠実な重み） | Karume 側で量子化していない重み。上流の格納のまま（f32 → f32・bf16 → bf16・上流が f16 なら f16・QAT はその整数）で演算は f32 | 忠実席・参照席・忠実な席 | ADR 0128 決定 4・0131 |
+| q4_0 QAT line △ | q4_0 QAT 系 | Gemma 4 の配布 `karume-gemma4-qat`。Google の q4_0 QAT チェックポイント（E2B / E4B / 12B）を、チェックポイント自身が持つ 4-bit の格子のまま丸め直さずに取り込み（格子の取り込み）、各モデルに QAT の MTP drafter が付く。契約は通常の `gemma4/1` | — | ADR 0097 追記 10 |
+| mobile QAT line △ | モバイル QAT 系 | Gemma 4 の配布 `karume-gemma4-qat-mobile`（旧 `karume-gemma4-qat`）。公式モバイル版の固定 INT2 / INT4 / INT8 と SRQ を保つ E2B / E4B。契約は `gemma4-qat/1` | 「QAT 版」だけで呼ぶ（2 系統あるので取り違える） | ADR 0097 追記 10 |
 | quantized weights ◆ | 量子化された重み | i8 / i4 / i2 の格納型。`quant` の明示指定で選ぶ | 実用席の重み | 同上 |
 | storage dtype | 格納型 | 容器に書いた重みの形（f32 / f16 / i8 / i4 / i2） | — | glossary.md |
 | activation quantization | 活性量子化（a8） | 活性を int8 に量子化して計算する実行形。品質に効くのでプリセットの中身（明示） | — | ADR 0025 / 0030 |
@@ -52,7 +54,7 @@
 | RTN (Round To Nearest) | RTN | 校正なしの最近接丸め | — | ADR 0019 / 0069 |
 | GPTQ | GPTQ | 校正データで丸めを補正する方式（出荷は格子が RTN と同じ版） | — | perf-ledger Q-6 |
 | fixed quantization (importing QAT) | 固定量子化 | 上流 checkpoint の整数と scale を再量子化せずに書く経路 | — | ADR 0097 追記 3 |
-| grid import (QAT) △ | 格子の取り込み | QAT のチェックポイントが持つ 4-bit の格子（32 要素ごとの整数 [-8, 7] と 1 つの step）を丸め直さずに取り込むこと。Gemma 4 12B で使う | 丸め直し | glossary.md・ADR 0128 追記 2026-11-03 |
+| grid import (QAT) △ | 格子の取り込み | QAT のチェックポイントが持つ 4-bit の格子（32 要素ごとの整数 [-8, 7] と 1 つの step）を丸め直さずに取り込むこと。q4_0 QAT 系（`karume-gemma4-qat`）の E2B / E4B / 12B の重み、E2B / E4B の PLE（索引 schema 4）、QAT の drafter で使う | 丸め直し | glossary.md・ADR 0128 追記 2026-11-03 |
 
 ## 配布と資産
 
@@ -103,7 +105,9 @@
 | manifest `karume/5` | manifest v5 / `karume/5` | コンテナ配布形の入口の manifest | — | ADR 0109 |
 | cross-repository reference | 越境参照 | manifest の FileRef が別の HF リポの commit を指して部品を読む形 | — | ADR 0038 §7 追記・ADR 0109 決定 3 |
 | component replacement (`components`) | 部品の差し替え（`components`） | 別の `karume/5` リポの同じ役割の部品で差し替えること | 部品差し替え席 | ADR 0108 決定 19・ADR 0109 決定 10 |
-| PLE index schema 3 | PLE 索引 schema 3 | コンテナの資産に入れた PLE の索引 | — | ADR 0085 追記 2026-09-22 |
+| PLE index schema 3 | PLE 索引 schema 3 | コンテナの資産に入れた PLE の索引。scale は行ごとに f32 が 1 つ | — | ADR 0085 追記 2026-09-22 |
+| PLE index schema 4 △ | PLE 索引 schema 4 | schema 3 に必須の `groupSize` を足し、`groupSize` 個の値ごとに f32 の scale を 1 つ持つ PLE の索引。q4_0 QAT 系の int4 の表（`groupSize` 32）の形 | — | ADR 0085 追記 2026-11-04（schema 4） |
+| PLE index schema 5 △ | PLE 索引 schema 5 | bf16 の表の PLE の索引。値はチェックポイントの bf16 のまま（1 値 2 バイト）で、scale の表を持たない。通常の gemma4 の `bf16` プリセットの形 | — | ADR 0085 追記 2026-11-04（schema 5） |
 
 ## 検証
 

@@ -20,8 +20,8 @@ From `tools/export-recipes`:
 uv sync --group gemma4-qat
 uv run python -m gemma4_qat.export --model e2b
 uv run python -m gemma4_qat.export --model e4b
-uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b \
-  --out ../../models/karume-gemma4-qat
+uv run python dist.py --pipeline gemma4-qat-mobile --model e2b --model e4b \
+  --out ../../models/karume-gemma4-qat-mobile
 ```
 
 Place original checkpoints in `inputs/gemma4-qat/<checkpoint-name>/`, or pass `--input`. Exports go
@@ -33,8 +33,11 @@ text-only conversion never read (KV cache scales, vision, audio). Distribution a
 those counts against the series itself. Exporting into an existing output replaces that complete
 series; use a new directory to retain previous measurements.
 
-The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. It is published on
-Hugging Face as `hdae/karume-gemma4-qat` (`SOURCES["gemma4-qat"]` of `@karume/models/gemma4-qat`). The `i4` quant is
+The distribution family is `gemma4-qat/1`, with models `e2b` and `e4b`. The distribution is
+`karume-gemma4-qat-mobile`, read by `@karume/models/gemma4-qat-mobile`: it was first published
+on Hugging Face as `hdae/karume-gemma4-qat` (0.15.1) and renamed on 2026-11-04, when that name
+went to the q4_0 QAT line (`gemma4/README.md`); it has no published revision under the new name
+yet, so the subpath has no `SOURCES` table. The `i4` quant is
 fixed mixed INT2/INT4/INT8 with SRQ and reference summation for GEMV and attention. Both models
 default to `i4-fast`, which uses the same weights and declares parallel GEMV, fused parallel
 attention (`parallel-fused`), RMS-add fusion, linear-to-SRQ fusion, the per-layer-input gate

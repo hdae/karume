@@ -10,16 +10,19 @@ Upstream provenance: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 Two checkpoints are supported, chosen with `--model e2b|e4b` (default `e2b`): `google/gemma-4-E2B-it`
 and `google/gemma-4-E4B-it`. Every shape the scripts check (layer count, head counts, KV sharing,
 PLE size) is derived from the checkpoint's own `config.json`; the model name only picks the default
-input and output directories. E4B ships **without an MTP drafter**, and it shares E2B's compiled
-tokenizer asset because the upstream `tokenizer.json` files are byte-identical (the assembly checks
-that by sha256). The license notes below were established for E2B; E4B's snapshot carries the same
-Apache 2.0 frontmatter.
+input and output directories. In the regular line E4B ships **without an MTP drafter** (the q4_0 QAT
+line below ships one for every model). It has a compiled tokenizer
+asset of its own: E4B shared E2B's until Google's glitch-token fixes of 2026-11-03 gave the two
+upstream `tokenizer.json` files different merges (E2B drops 267 and renames id 249788, E4B drops
+253; the vocabulary is the same). The license notes below were established for E2B; E4B's snapshot
+carries the same Apache 2.0 frontmatter.
 
 `google/gemma-4-12B-it` is a third model with its own script, `export_unified.py` (see "What
 `export_unified.py` emits" below): upstream ships it as another class (`gemma4_unified` — no
 per-layer embeddings, no KV sharing, K = V on the full layers), too large to load whole in F32
-here. It has its own tokenizer series (its `tokenizer.json` drops 239 of E2B's merges) and its own
-chat dialect, and ships without a drafter for now.
+here. It has its own tokenizer series (its own glitch-token fix of 2026-10-30 drops 239 merges) and
+its own chat dialect. It ships only in the q4_0 QAT line (`karume-gemma4-qat`), with its QAT MTP
+drafter (`export_drafter_qat.py`).
 
 12B is read from two repositories, each from the hub cache at the commit `sources.py` pins. **The
 weights and their `config.json`** come from Google's quantization-aware-trained checkpoint
@@ -29,11 +32,12 @@ pipeline, for custom downstream compilation"; its README front matter names
 imports that grid as is instead of rounding the weights again (see "What `export_unified.py`
 emits"). **The tokenizer, the chat template and the generation defaults** come from
 `google/gemma-4-12B-it`: the QAT repository's `tokenizer_config.json`, `generation_config.json`
-and `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is E2B's — a
-packaging slip, since the model is a QAT fine-tune of 12B-it. Both snapshots' README front matter
-says `license: apache-2.0`. When 12B gets a drafter, it must come from a QAT checkpoint too
-(Google's model card: "the assistant model must also be a QAT checkpoint with the same
-precision").
+and `chat_template.jinja` are byte-identical to 12B-it's, but its `tokenizer.json` is the one every
+Gemma 4 repository shipped before Google's glitch-token fixes (the QAT repositories have not
+received the fix). Both snapshots' README front matter
+says `license: apache-2.0`. Its drafter is a QAT checkpoint too,
+`google/gemma-4-12B-it-qat-q4_0-unquantized-assistant` (Google's model card: "the assistant model
+must also be a QAT checkpoint with the same precision").
 
 The E2B checkpoint is `google/gemma-4-E2B-it`, licensed **Apache 2.0** (the snapshot's own README
 frontmatter says `license: apache-2.0`, and its `license_link` page carries the plain Apache 2.0
@@ -472,12 +476,13 @@ on one sentence, which the drafter predicts easily; the two document cases conti
     outputs/series/gemma4-<model>-qat-drafter/drafter-golden.<case>.safetensors  expected drafts
     outputs/series/gemma4-<model>-qat-drafter/reference.json                     provenance
 
-No distribution reads these series yet: `distribution.py` still requires the drafter component to
-be int8.
+The q4_0 QAT line (`dist.py --pipeline gemma4-qat`) reads these series as its `drafter` role, which
+must hold int4 and may not hold int8 there; the regular line's drafter (`gemma4-e2b-drafter`) stays
+int8.
 
 ## What `tokenizer.py` emits
 
-The **compiled tokenizer asset**, `outputs/series/gemma4-e2b-tokenizer/tokenizer.json` (~9.6 MB):
+The **compiled tokenizer asset**, `outputs/series/gemma4-<model>-tokenizer/tokenizer.json` (~9.6 MB):
 the id-ordered vocabulary, the merge table as id pairs, the 256 byte-fallback ids stated
 explicitly, the added tokens and the special-id set — nothing else. The upstream `tokenizer.json`
 is 32.2 MB and is not distributed; anything outside the accepted shape (normalizer, pre-tokenizer,
@@ -537,8 +542,13 @@ uv run --with 'transformers==5.14.1' python -m gemma4.export_decode --model e4b
 uv run --with 'transformers==5.14.1' python -m gemma4.export_product --model e4b
 ```
 
-`export_drafter.py`, `tokenizer.py` and `chat.py` have no E4B form: E4B has no drafter here, and
-its tokenizer asset is E2B's.
+`export_drafter.py` and `chat.py` have no E4B form: E4B has no drafter here, and its chat parity
+cases give E2B's ids on E4B's tokenizer too (checked when the tokenizers split). Its tokenizer
+asset and parity fixture (`gemma4-e4b-parity.json`) come from:
+
+```sh
+uv run python -m gemma4.tokenizer --model e4b
+```
 
 12B (the two snapshots come from `hf download google/gemma-4-12B-it-qat-q4_0-unquantized
 --revision <weights pin of sources.py>` and `hf download google/gemma-4-12B-it --revision
@@ -566,41 +576,53 @@ rather than declared as a dependency group.
 
 ```sh
 cd tools/export-recipes
-uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/ (~4.0 GiB)
+uv run python dist.py --pipeline gemma4        # → models/karume-gemma4/, E2B alone (~12.4 GiB)
+# both models (~32 GiB: each model's int4 and bf16 containers, E2B's drafter, the tokenizers)
 uv run python dist.py --pipeline gemma4 --model e2b --model e4b --out ../../models/karume-gemma4
-uv run python dist.py --pipeline gemma4 --model e2b --model e4b --model 12b \
-    --out ../../models/karume-gemma4
+# the q4_0 QAT line (E2B / E4B / 12B with their QAT drafters) → models/karume-gemma4-qat/
+uv run python dist.py --pipeline gemma4-qat --model e2b --model e4b --model 12b
 ```
 
-A `12b` entry reads `gemma4-12b-product` and its own `gemma4-12b-tokenizer`, declares the `i4`
-quant alone and `pipelineConfig.chatDialect` `gemma4-unified`, and its container carries no PLE
-assets; the assembly checks both hub snapshots against their pins, that the container names the
-weights' revision, and that the tokenizer asset was compiled from the 12B-it snapshot's
-`tokenizer.json`. Its `pipelineConfig` reads the numbers the model decides from the QAT
-checkpoint's `config.json` and the sampler and suppressed ids from 12B-it's
-`generation_config.json`. The E2B / E4B entries are unchanged by its presence.
+The regular line (`karume-gemma4`) ships E2B and E4B; it refuses `--model 12b`. 12B ships in the
+q4_0 QAT line (`karume-gemma4-qat` — `distribution.py`, "The q4_0 QAT line"), its one line: its
+entry reads `gemma4-12b-product`, its own `gemma4-12b-tokenizer` and its QAT drafter
+`gemma4-12b-qat-drafter`, declares the `i4` quant alone and `pipelineConfig.chatDialect`
+`gemma4-unified`, and its container carries no PLE assets; the assembly checks both hub snapshots
+against their pins, that the containers name the weights' and the drafter's revisions, and that the
+tokenizer asset was compiled from the 12B-it snapshot's `tokenizer.json`. Its `pipelineConfig`
+reads the numbers the model decides from the QAT checkpoint's `config.json` and the sampler and
+suppressed ids from 12B-it's `generation_config.json`. The E2B / E4B entries are unchanged by its
+presence.
 
 `--model e4b` alone would also resolve to `models/karume-gemma4/` (the family has one repository),
 so an E4B-only build should name its own `--out`.
 
-The distribution folds **three series** into one HF repository. The product container
-(`gemma4-e2b-product`) holds the weights and the PLE assets in one `krm`, split into parts of the
-default 256 MiB length, with every PLE block in a part of its own. The MTP drafter container
+The regular distribution folds **four series** per E2B into one HF repository (three per E4B). The
+product container (`gemma4-e2b-product`) holds the int4 weights and the i8 PLE assets in one `krm`,
+split into parts of the default 256 MiB length, with every PLE block in a part of its own. The
+original-weights container (`gemma4-e2b-product-bf16`, the series role `model_bf16`) is the
+`model` role's second dtype, `bf16`, laid out the same way with the bf16 PLE (index schema 5); the
+default preset `bf16` loads it, the `i4` presets the int4 one. The MTP drafter container
 (`gemma4-e2b-drafter`) is the second `weights` role, fetched only when a pipeline asks for
-`speculative`. The third is the compiled tokenizer asset (`gemma4-e2b-tokenizer`). The
+`speculative`; every E2B preset names it. The last is the compiled tokenizer asset
+(`gemma4-e2b-tokenizer`). The
 acceptance-only files that live beside the containers (`ple.probe.safetensors`, `reference.json`,
 `drafter-golden.*.safetensors`) are not in the placement table and therefore never reach the output.
-An `e4b` entry reads `gemma4-e4b-product` and E2B's `gemma4-e2b-tokenizer`, and declares no
+An `e4b` entry reads `gemma4-e4b-product`, `gemma4-e4b-product-bf16` and its own `gemma4-e4b-tokenizer`, and declares no
 `drafter` weights: a load that asks for `speculative` fails when the weights are resolved, before
-any part is fetched. With both models in one build, the identical tokenizer file is folded into
-`shared/`.
+any part is fetched. Each model's tokenizer file sits under its own directory
+(`<model>/tokenizer/`); the assembly folds a file into `shared/` only when two models' bytes are
+the same.
 Layout inside the repository:
 
 | Manifest seat                  | Path                                      |
 | ------------------------------ | ----------------------------------------- |
 | `weights.model.i4.container`   | `e2b/model/model.i4-NNNNN-of-NNNNN.krm`   |
+| `weights.model.bf16.container` | `e2b/model/model.bf16-NNNNN-of-NNNNN.krm` |
 | `weights.drafter.i8.container` | `e2b/drafter/model.i8-NNNNN-of-NNNNN.krm` |
 | `assets.tokenizer`             | `e2b/tokenizer/tokenizer.json`            |
+
+The `e4b` entry has the same rows under `e4b/` but the drafter's.
 
 Each `container` seat carries `descriptor` (the expected length and sha256 of the two descriptors)
 and `parts` (every part, part 0 included — ADR
@@ -630,9 +652,12 @@ full-attention KV slots are the only thing that grows with capacity (12 KiB per 
 Gates that run **before a single byte is placed** (each one covers a mismatch that leaves shape,
 dtype and manifest all correct, and shows up only as wrong values):
 
-- the product container carries both `I4` (linear weights) and `I8` (embeddings) and no `F16`;
-  the drafter container carries `I8` only — an `I4` or `F16` tensor in it is refused (int4
-  group-32 linears cost 15–33 % of E[a], see above)
+- the product container carries both `I4` (linear weights) and `I8` (embeddings) and no `F16` or
+  `BF16`; the original-weights container carries `BF16` (and f32 where bf16 does not apply) and no
+  `F16`, `I8`, `I4` or `I2` — the two hold the same graph and PLE shape, so only the storage tells
+  an int4 series placed as `bf16` (or the reverse) apart; the drafter container carries `I8` only —
+  an `I4`, `BF16` or `F16` tensor in it is refused (int4 group-32 linears cost 15–33 % of E[a], see
+  above). The q4_0 QAT line holds both its roles to `I4` alone (no `I8`)
 - graph inputs are exactly `input_ids` / `rope_{sliding,full}_attention_{cos,sin}` /
   `per_layer_inputs` / `last_row`, in that order, the two exits are logits `[1, R, V]` and the
   post-norm hidden `[1, R, H]` (`H` checked against `hidden_size` — the only thing that tells the
@@ -646,9 +671,9 @@ dtype and manifest all correct, and shows up only as wrong values):
 - the PLE index is a gap-free ascending partition of `[0, tokens)`, `tokens` equals `V`, every
   block the index names is an asset of the `model` container with the same role and length, and no
   PLE asset is left that the index does not name
-- the compiled tokenizer names the compile format and has exactly `V` rows; when a model borrows
-  another model's tokenizer series (E4B), the asset's recorded source sha256 matches that model's
-  own upstream `tokenizer.json`
+- the compiled tokenizer names the compile format and has exactly `V` rows, and the asset's
+  recorded source sha256 matches the model's own upstream `tokenizer.json` (each model has its own
+  tokenizer series since Google's glitch-token fixes of 2026-11-03)
 - the checkpoint's recommended sampler is present and inside the range the TypeScript
   `pipelineConfig` parser accepts
 
@@ -667,12 +692,19 @@ distribution is spelled out by the caller, since `fromPretrained` has no default
 E2B distributions provide `i4` (reference summation for GEMV and attention),
 `i4-gemvpar` (parallel GEMV and parallel attention), and `i4-fast` (parallel GEMV,
 RMS-add fusion, and parallel attention with fused row statistics —
-`stateAttentionReduce: "parallel-fused"`). The default is `i4-fast`; all three
-reference the same model and drafter weight files. The attention form is a quant
-declaration like the others: `i4` declares none, so it runs the runtime's reference
-path. E4B entries carry the same three quants and the same declarations over the
-model weights alone; their default is `i4` for now, until the faster seats are
-measured on E4B.
+`stateAttentionReduce: "parallel-fused"`); all three reference the same int4 model and int8
+drafter weight files. The attention form is a quant declaration like the others: `i4` declares
+none, so it runs the runtime's reference path. E4B entries carry the same three quants and the
+same declarations over the model weights alone.
+
+The default of both models is `bf16`, the original-weights preset (the maintainer's ruling of
+2026-11-04): the `model` weights' second container, the bf16 series
+(`gemma4.export_product --storage bf16` — every weight and the PLE table as the checkpoint's bf16
+bits, PLE index schema 5), in the reference summation order. E2B's `bf16` names the same int8
+drafter, which borrows the bf16 target's `model.lm_head.weight`. The assembly reads both series of
+a model (`outputs/series/gemma4-<model>-product` and `…-product-bf16`), holds each to its storage
+(the int4 container may not hold bf16, the bf16 one no int8 / int4 / int2), and pairs the drafter
+with both.
 
 Explicit runtime options override each quant setting, including
 `fuseRmsNormAdd: false`. Reassembling into a new output directory updates the

@@ -45,7 +45,8 @@ uncensored derivatives the project does not want to carry the written basis for 
 
 ### 1. Granularity = one repository per family; derivatives, generations and versions separate
 
-- **Variants of one family share a repository** (Gemma 4 E2B / E4B / 12B in `karume-gemma4`), using
+- **Variants of one family share a repository** (Gemma 4 E2B / E4B / 12B in `karume-gemma4`; amended
+  2026-11-04, see the addendum — today Gemma 4 E2B / E4B in `karume-gemma4`), using
   ADR 0041's "several models per repository + `defaultModel`".
 - **A derived model gets its own repository** (Lucida, derived from BiRefNet, is `karume-lucida`).
 - **A family with many derivatives bundles them in `-extra`** (anima, ADR 0087's precedent as a rule).
@@ -192,3 +193,25 @@ reads `model` / `defaultModel`). 2048² became distributable through recipe patc
   no longer exist on the public surface.
 - With decision 5 the uv workspace (`tools/` as root, exporter and export-recipes as members) stays,
   and so does running `uv run pytest` on both sides.
+
+## Addendum (2026-11-04) — the Gemma 4 lines and decision 1
+
+The maintainer's ruling of 2026-11-04 (ADR [0097](0097-gemma4-qat-integration.md) addendum 10, ADR
+[0128](0128-default-preset-original-weights.md) addendum 2026-11-04) lays Gemma 4 out over three
+repositories:
+
+| Repository                 | Models                                     | Weights                                                | Contract / reader                                  |
+| -------------------------- | ------------------------------------------ | ------------------------------------------------------ | -------------------------------------------------- |
+| `karume-gemma4`            | E2B (drafter), E4B                         | `google/gemma-4-E{2,4}B-it`                            | `gemma4/1`, `@karume/models/gemma`                 |
+| `karume-gemma4-qat`        | E2B / E4B / 12B, each with its QAT drafter | `google/gemma-4-{E2B,E4B,12B}-it-qat-q4_0-unquantized` | `gemma4/1`, `@karume/models/gemma`                 |
+| `karume-gemma4-qat-mobile` | E2B / E4B                                  | `google/gemma-4-E{2,4}B-it-qat-mobile-transformers`    | `gemma4-qat/1`, `@karume/models/gemma4-qat-mobile` |
+
+Decision 1's example "Gemma 4 E2B / E4B / 12B in `karume-gemma4`" no longer describes the layout: 12B
+is only in `karume-gemma4-qat`. The ruling did not cite this ADR. Read against decision 1, the layout
+fits its derived-model rule: the q4_0 QAT checkpoints are other upstream checkpoints, quantization-aware
+fine-tunes whose model cards name the `-it` models as `base_model`, so they get a repository of their
+own even though the same reader (`gemma4/1`) loads both. The same reading applies to the mobile line,
+which also has a contract of its own. Decision 1's rule for variants still holds inside each
+repository (several models, one `defaultModel`). One family reader may therefore serve two
+repositories; decision 3's table (`gemma.SOURCES`) has one key per repository, and the q4_0 line gets
+its key when it is first published (release-runbook "First publication of a family").
